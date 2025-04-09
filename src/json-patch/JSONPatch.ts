@@ -12,12 +12,12 @@
  */
 
 import { Delta } from '@typewriter/document';
-import { bitmask } from '../json-patch/ops/bitmask.js';
 import { composePatch } from '../ot/composePatch.js';
 import { invertPatch } from '../ot/invertPatch.js';
 import { transformPatch } from '../ot/transformPatch.js';
 import type { ApplyJSONPatchOptions, JSONPatchOp, JSONPatchOpHandlerMap } from '../types.js';
 import { applyPatch } from './applyPatch.js';
+import { bitmask } from './ops/bitmask.js';
 
 export type PathLike = string | { toString(): string };
 export interface WriteOptions {

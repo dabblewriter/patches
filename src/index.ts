@@ -1,6 +1,5 @@
 export { applyPatch } from './json-patch/applyPatch.js';
 export { applyBitmask, bitmask, combineBitmasks } from './json-patch/ops/bitmask.js';
-export { textDocument } from './json-patch/ops/custom/text-document.js';
 export * as defaultOps from './json-patch/ops/index.js';
 export { composePatch } from './ot/composePatch.js';
 export { invertPatch } from './ot/invertPatch.js';
@@ -29,7 +28,7 @@ export * from './ot/utils.js';
 // JSON Patch Core
 export * from './json-patch/applyPatch.js';
 export * from './json-patch/createJSONPatch.js';
-export * from './json-patch/jsonPatch.js';
+export * from './json-patch/JSONPatch.js';
 export * from './json-patch/patchProxy.js';
 
 // Root Types (if any remain)

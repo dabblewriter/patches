@@ -1,10 +1,10 @@
 {
-  "name": "@typewriter/json-patch",
+  "name": "@dabble/patches",
   "version": "0.7.13",
   "description": "Immutable JSON Patch implementation based on RFC 6902 supporting operational transformation and last-writer-wins",
   "author": "Jacob Wright <jacwright@gmail.com>",
   "bugs": {
-    "url": "https://github.com/typewriter-editor/json-patch/issues"
+    "url": "https://github.com/dabblewriter/patches/issues"
   },
   "type": "module",
   "main": "./dist/index.js",
@@ -20,7 +20,7 @@
     "README.md",
     "dist"
   ],
-  "homepage": "https://github.com/typewriter-editor/json-patch/",
+  "homepage": "https://github.com/dabblewriter/patches/",
   "keywords": [
     "immutable",
     "json",
@@ -30,7 +30,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/typewriter-editor/json-patch.git"
+    "url": "https://github.com/dabblewriter/patches.git"
   },
   "scripts": {
     "dev": "vite",
@@ -45,8 +45,7 @@
     "easy-signal": "^4.1.6"
   },
   "peerDependencies": {
-    "@typewriter/delta": "^1.2.4",
-    "@typewriter/document": "^0.9.5"
+    "@dabble/delta": "^1.2.4"
   },
   "devDependencies": {
     "@sveltejs/package": "^2.3.10",

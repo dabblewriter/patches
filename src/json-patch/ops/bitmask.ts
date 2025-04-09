@@ -6,30 +6,6 @@ import { replace } from './replace.js';
  * Create and maintain up to 15 boolean values in a single positive number (a bitmask). This can reduce the size of your
  * JSON document. Limiting the bits to 15 allows us to keep the number smaller (max of 9 characters), positive, and
  * allows us to combine multiple operations into a single number.
- *
- * ```js
- * import { bitmask } from '@json-patch/custom-types/bitmask';
- *
- * const patch = new JSONPatch([], { '@bit': bitmask });
- * ```
- *
- * Or you can subclass JSONPatch:
- * ```js
- * import { bitmask, mask } from '@json-patch/custom-types/bitmask';
- *
- * class MyJSONPatch extends JSONPatch {
- *   constructor(ops: JSONPatchOp[]) {
- *     super(ops, { '@bit': bitmask });
- *   }
- *
- *   bitOn(path: string, index: number) {
- *     return this.op('@bit', path, mask(index, true));
- *   }
- *
- *   bitOff(path: string, index: number) {
- *     return this.op('@bit', path, mask(index, false));
- *   }
- * }
  */
 export const bit: JSONPatchOpHandler = {
   like: 'replace',

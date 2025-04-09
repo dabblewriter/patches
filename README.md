@@ -41,9 +41,9 @@ While originally including JSON Patch functionality, the focus is now on providi
 ## Installation
 
 ```bash
-npm install patches-ot # TODO: Update with actual package name
+npm install @dabble/patches
 # or
-yarn add patches-ot # TODO: Update with actual package name
+yarn add @dabble/patches
 ```
 
 ## Core Components
@@ -435,7 +435,7 @@ See [`BranchManager`](./docs/BranchManager.md).
 
 ### Custom OT Types
 
-See [`Operational Transformation > Operation Handlers`](./docs/operational-transformation.md#operation-handlers) and the [`@text` example](../src/ot/custom/text-document.ts).
+See [`Operational Transformation > Operation Handlers`](./docs/operational-transformation.md#operation-handlers).
 
 ## JSON Patch (Legacy)
 

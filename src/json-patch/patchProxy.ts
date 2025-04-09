@@ -1,4 +1,4 @@
-import { JSONPatch } from './jsonPatch';
+import { JSONPatch } from './JSONPatch';
 
 // We use a function as the target so that `push` and other array methods can be called without error.
 const proxyFodder = {} as any;

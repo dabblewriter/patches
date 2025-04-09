@@ -50,7 +50,7 @@ const initialOps: JSONPatchOp[] = [{ op: 'replace', path: '/name', value: 'Initi
 const patch2 = new JSONPatch(initialOps);
 
 // Create with custom operation handlers (see Operation Handlers section)
-// const patch3 = new JSONPatch([], { '/@myOp': myCustomHandler });
+// const patch3 = new JSONPatch([], { '@myOp': myCustomHandler });
 ```
 
 ### Standard Operations
@@ -126,11 +126,11 @@ These provide convenient methods for common custom operations included in the li
   // { op: '@bit', path: '/flags', value: 32768 } // 1 << (0 + 15)
   ```
 - **`text(path: PathLike, delta: Delta | Op[]): this`**
-  Adds an `@text` operation for applying rich text deltas (requires `@typewriter/document` or similar).
+  Adds an `@txt` operation for applying rich text deltas (requires `@dabble/delta`, `quill-delta`, or similar).
   ```typescript
-  // import { Delta } from '@typewriter/document';
+  // import { Delta } from '@dabble/delta';
   patch.text('/textContent', new Delta().insert('Hello'));
-  // { op: '@text', path: '/textContent', value: { ops: [{ insert: 'Hello'}] } }
+  // { op: '@txt', path: '/textContent', value: { ops: [{ insert: 'Hello'}] } }
   ```
 
 ### Utility Methods
@@ -271,7 +271,7 @@ if (errors.length > 0) {
 
 (`src/json-patch/ops/`)
 
-The library defines handlers for each standard JSON Patch operation and the included custom operations (`@inc`, `@bit`, `@text`). Each handler implements:
+The library defines handlers for each standard JSON Patch operation and the included custom operations (`@inc`, `@bit`, `@txt`). Each handler implements:
 
 - `apply(state, path, value, from?, createMissingObjects?)`: Logic to apply the operation.
 - `invert(state, op, valueBeforeOp, parentObject, isIndex)`: Logic to generate the inverse operation.
@@ -281,5 +281,3 @@ The library defines handlers for each standard JSON Patch operation and the incl
 You can provide your own custom handlers when creating `JSONPatch` instances or using `applyPatch`.
 
 See [`Operational Transformation > Operation Handlers`](./operational-transformation.md#operation-handlers) for more on their role in OT.
-
-Custom handlers like [`@text`](../src/ot/custom/text-document.ts) integrate external logic.

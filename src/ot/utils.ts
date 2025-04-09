@@ -1,5 +1,5 @@
 import { applyPatch } from '../json-patch/applyPatch.js';
-import { JSONPatch } from '../json-patch/jsonPatch.js';
+import { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { Change, DeletedChange } from './types.js';
 
 /**

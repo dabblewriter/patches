@@ -1,6 +1,6 @@
 import { inc } from 'alphacounter';
 import { applyPatch } from '../json-patch/applyPatch.js';
-import { JSONPatch } from '../json-patch/jsonPatch.js';
+import { JSONPatch } from '../json-patch/JSONPatch.js';
 import { applyBitmask, combineBitmasks } from '../json-patch/ops/bitmask.js';
 import { JSONPatchOp } from '../types.js';
 import { isArrayPath, toKeys } from '../utils/index.js';

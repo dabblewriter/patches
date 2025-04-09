@@ -201,7 +201,7 @@ The goal is to produce a new set of `otherOps` that can be applied _after_ `this
 
 ### Operation Handlers
 
-Each JSON Patch operation type (e.g., `add`, `remove`, `replace`, `@inc`, `@text`) has a corresponding handler object (see [`src/json-patch/ops/`](../src/json-patch/ops/) and [`src/ot/custom/`](../src/ot/custom/)). These handlers define:
+Each JSON Patch operation type (e.g., `add`, `remove`, `replace`, `@inc`, `@txt`) has a corresponding handler object (see [`src/json-patch/ops/`](../src/json-patch/ops/)). These handlers define:
 
 - `apply`: How the operation modifies the state.
 - `invert`: How to generate an operation that reverses the effect (for undo). See [`invertPatch`](../src/ot/invertPatch.ts).

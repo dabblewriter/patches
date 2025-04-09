@@ -1,4 +1,4 @@
-import { JSONPatch } from './jsonPatch';
+import { JSONPatch } from './JSONPatch';
 import { createPatchProxy } from './patchProxy';
 
 /**

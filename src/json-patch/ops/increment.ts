@@ -3,28 +3,7 @@ import { get, updateRemovedOps } from '../../utils/index.js';
 import { replace } from './replace.js';
 
 /**
- * Custom types should start with an @ symbol, so you can use this in this way:
- * ```js
- * import { increment } from '@json-patch/custom-types/increment';
- *
- * const patch = new JSONPatch([], { '@inc': increment });
- * ```
- *
- * Or you can subclass JSONPatch:
- * ```js
- * class MyJSONPatch extends JSONPatch {
- *   constructor(ops: JSONPatchOp[]) {
- *     super(ops, { '@inc': increment });
- *   }
- *
- *   increment(path: string, value: number) {
- *     return this.op('@inc', path, value);
- *   }
- *
- *   decrement(path: string, value: number) {
- *     return this.op('@inc', path, -value);
- *   }
- * }
+ * Increment or decrement a number (using `+` or `-`).
  */
 export const increment: JSONPatchOpHandler = {
   like: 'replace',

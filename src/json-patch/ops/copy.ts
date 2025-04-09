@@ -1,6 +1,6 @@
-import type { JSONPatchOpHandler } from '../types.js';
-import { getOpData } from '../utils/getOpData.js';
-import { isArrayPath, log, updateArrayIndexes, updateRemovedOps } from '../utils/index.js';
+import type { JSONPatchOpHandler } from '../../types.js';
+import { getOpData } from '../../utils/getOpData.js';
+import { isArrayPath, log, updateArrayIndexes, updateRemovedOps } from '../../utils/index.js';
 import { add } from './add.js';
 
 export const copy: JSONPatchOpHandler = {

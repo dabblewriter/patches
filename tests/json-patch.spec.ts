@@ -1,8 +1,6 @@
-import { Delta, Op } from '@typewriter/delta';
+import { Delta } from '@typewriter/delta';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { JSONPatch } from '../src/jsonPatch.js';
-import { textDelta } from '../src/ops/delta.js';
-import { JSONPatchOp } from '../src/types.js';
+import { JSONPatch } from '../src/json-patch/jsonPatch.js';
 
 class JSONLikeObject {
   constructor(
@@ -14,27 +12,13 @@ class JSONLikeObject {
   }
 }
 
-class MyJSONPatch extends JSONPatch {
-  constructor(ops?: JSONPatchOp[]) {
-    super(ops, { '@text': textDelta });
-  }
-
-  txt(path: string, value: Delta | Op[]) {
-    const delta = Array.isArray(value) ? new Delta(value) : (value as Delta);
-    if (!delta || !Array.isArray(delta.ops)) {
-      throw new Error('Invalid Delta');
-    }
-    return this.op('@text', path, value);
-  }
-}
-
 describe('JSONPatch', () => {
   let obj: any;
-  let patch: MyJSONPatch;
+  let patch: JSONPatch;
 
   beforeEach(() => {
     obj = { test: true };
-    patch = new MyJSONPatch();
+    patch = new JSONPatch();
   });
 
   it('can create a new object', () => {
@@ -173,41 +157,41 @@ describe('JSONPatch', () => {
   });
 
   it('can add a delta text value', () => {
-    patch.txt('/text', new Delta().insert('This is my text.'));
+    patch.text('/text', new Delta().insert('This is my text.'));
     obj = patch.apply(obj);
     expect(obj.text).toEqual({ ops: [{ insert: 'This is my text.\n' }] });
   });
 
   it('can add a delta text value from ops', () => {
-    patch.txt('/text', new Delta().insert('This is my text.').ops);
+    patch.text('/text', new Delta().insert('This is my text.').ops);
     obj = patch.apply(obj);
     expect(obj.text).toEqual({ ops: [{ insert: 'This is my text.\n' }] });
   });
 
   it('can update a delta text value', () => {
     obj.text = new Delta().insert('This is my text.\n');
-    patch.txt('/text', new Delta().retain(11).insert('amazing '));
+    patch.text('/text', new Delta().retain(11).insert('amazing '));
     obj = patch.apply(obj);
     expect(obj.text).toEqual({ ops: [{ insert: 'This is my amazing text.\n' }] });
   });
 
   it('can overwrite a value with a delta text value', () => {
     obj.text = new Date();
-    patch.txt('/text', new Delta().insert('This is my text.'));
+    patch.text('/text', new Delta().insert('This is my text.'));
     obj = patch.apply(obj);
     expect(obj.text).toEqual({ ops: [{ insert: 'This is my text.\n' }] });
   });
 
   it('can update an ops value with a delta text value', () => {
     obj.text = new Delta().insert('This is my text.\n').ops;
-    patch.txt('/text', new Delta().retain(11).insert('amazing '));
+    patch.text('/text', new Delta().retain(11).insert('amazing '));
     obj = patch.apply(obj);
     expect(obj.text).toEqual({ ops: [{ insert: 'This is my amazing text.\n' }] });
   });
 
   it('will overwrite an array value that does not look like delta ops', () => {
     obj.text = [{ test: true }];
-    patch.txt('/text', new Delta().insert('This is my text.'));
+    patch.text('/text', new Delta().insert('This is my text.'));
     obj = patch.apply(obj);
     expect(obj.text).toEqual({ ops: [{ insert: 'This is my text.\n' }] });
   });
@@ -227,13 +211,13 @@ describe('JSONPatch', () => {
 
   it('throws an error when asked and it cannot apply text in the patch', () => {
     obj.text = new Delta().insert('This is my text.');
-    patch.txt('/text', new Delta().retain(110).insert('amazing '));
+    patch.text('/text', new Delta().retain(110).insert('amazing '));
     const apply = () => (obj = patch.apply(obj, { strict: true }));
     expect(apply).toThrow();
   });
 
   it('throws an error when adding text that is invalid', () => {
-    const addText = () => patch.txt('/text', true as any);
+    const addText = () => patch.text('/text', true as any);
     expect(addText).toThrow();
   });
 
@@ -274,7 +258,7 @@ describe('JSONPatch', () => {
   });
 
   it('will reconstitue from JSON', () => {
-    patch = MyJSONPatch.fromJSON(patch.add('/name', 'test').remove('/test').toJSON());
+    patch = JSONPatch.fromJSON(patch.add('/name', 'test').remove('/test').toJSON());
     obj = patch.apply(obj);
     expect(obj).toEqual({ name: 'test' });
   });
@@ -318,7 +302,7 @@ describe('JSONPatch', () => {
       expect(obj).toEqual({ test: false });
 
       obj.newProp = true;
-      patch = new MyJSONPatch();
+      patch = new JSONPatch();
       patch.add('/newProp', true);
       obj = patch.invert(inverted).apply(obj);
       expect(obj).toEqual({ test: false });
@@ -358,14 +342,14 @@ describe('JSONPatch', () => {
       expect(obj).toEqual({ test: true, tags: ['test'] });
 
       obj.tags = ['foo', 'test'];
-      patch = new MyJSONPatch();
+      patch = new JSONPatch();
       patch.copy('/name', '/tags/0');
 
       obj = patch.invert(inverted).apply(obj);
       expect(obj).toEqual({ test: true, tags: ['test'] });
 
       obj.tags = ['foo', 'test'];
-      patch = new MyJSONPatch();
+      patch = new JSONPatch();
       patch.add('/tags/1', 'test');
 
       obj = patch.invert(inverted).apply(obj);

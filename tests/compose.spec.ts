@@ -1,21 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { composePatch as originalComposePatch } from '../src/composePatch.js';
-import { textDelta } from '../src/ops/delta.js';
-import { JSONPatchOp } from '../src/types.js';
-
-const matrix = [[], [], [], [], [], [], []];
-const arr = [{}, {}, {}, {}, {}, {}, {}];
-const obj = { x: arr };
+import { composePatch } from '../src/ot/composePatch.js';
 
 describe('composePatch', () => {
-  const types = {
-    '@txt': textDelta,
-  };
-
-  function composePatch(ops: JSONPatchOp[]) {
-    return originalComposePatch(ops, types);
-  }
-
   it('replace compose', () => {
     expect(
       composePatch([

@@ -1,22 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { textDelta } from '../src/ops/delta.js';
-import { transformPatch as originalTransformPatch } from '../src/transformPatch.js';
-import { JSONPatchOp } from '../src/types.js';
+import { transformPatch } from '../src/ot/transformPatch.js';
 
 const matrix = [[], [], [], [], [], [], []];
 const arr = [{}, {}, {}, {}, {}, {}, {}];
 const obj = { x: arr };
 
 describe('transformPatch', () => {
-  // verbose(true)
-  const types = {
-    '@txt': textDelta,
-  };
-
-  function transformPatch(obj: any, thisOps: JSONPatchOp[], otherOps: JSONPatchOp[]) {
-    return originalTransformPatch(obj, thisOps, otherOps, types);
-  }
-
   describe('soft writes', () => {
     it('does not overwrite empty objects used for lookups', () => {
       expect(

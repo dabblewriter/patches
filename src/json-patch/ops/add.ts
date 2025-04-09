@@ -1,6 +1,6 @@
-import type { JSONPatchOpHandler } from '../types.js';
-import { deepEqual } from '../utils/deepEqual.js';
-import { getOpData } from '../utils/getOpData.js';
+import type { JSONPatchOpHandler } from '../../types.js';
+import { deepEqual } from '../../utils/deepEqual.js';
+import { getOpData } from '../../utils/getOpData.js';
 import {
   isArrayPath,
   isEmptyObject,
@@ -8,9 +8,9 @@ import {
   updateArrayIndexes,
   updateRemovedOps,
   updateSoftWrites,
-} from '../utils/index.js';
-import { pluckWithShallowCopy } from '../utils/pluck.js';
-import { toArrayIndex } from '../utils/toArrayIndex.js';
+} from '../../utils/index.js';
+import { pluckWithShallowCopy } from '../../utils/pluck.js';
+import { toArrayIndex } from '../../utils/toArrayIndex.js';
 
 export const add: JSONPatchOpHandler = {
   like: 'add',

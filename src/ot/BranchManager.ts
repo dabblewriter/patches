@@ -1,6 +1,6 @@
 import { createId } from 'crypto-id';
-import type { PatchServer } from './PatchServer';
-import type { Branch, BranchingStoreBackend, Change, VersionMetadata } from './types';
+import type { PatchServer } from './PatchServer.js'; // Try adding extension
+import type { Branch, BranchingStoreBackend, Change, VersionMetadata } from './types'; // Correct path is likely local
 
 /**
  * Helps manage branches for a document. A branch is a document that is branched from another document. Its first
@@ -109,17 +109,28 @@ export class BranchManager {
     }
 
     // 3. Prepare the changes for submission to the source document.
-    const changesToSubmit: Change[] = branchChanges.map(change => ({
+    // NOTE: We might need to rebase these changes relative to the source document's current state
+    // if the source document has changed since the branch was created.
+    // This simplified version assumes the PatchServer handles potential conflicts during `receiveChanges`.
+    // A more robust implementation might involve getting the current revision of the source doc,
+    // getting changes on the source doc since `branchStartRevOnSource`, and explicitly rebasing
+    // `branchChanges` over those source changes before submission.
+    const changesToSubmit: Change[] = branchChanges.map((change: Change) => ({
       ...change,
-      baseRev: branchStartRevOnSource,
+      // The baseRev should ideally reflect the revision on the *source* doc
+      // that these changes are intended to apply to. If the source doc changed,
+      // this needs adjustment via rebasing. Assuming PatchServer handles this.
+      baseRev: branchStartRevOnSource, // This might need refinement
     }));
 
     // 4. Submit the batch of changes to the source document via PatchServer.
     let committedMergeChanges: Change[] = [];
     try {
+      // PatchServer's receiveChanges needs to handle the rebasing/conflict resolution
       committedMergeChanges = await this.patchServer.receiveChanges(sourceDocId, changesToSubmit);
     } catch (error) {
       console.error(`Failed to merge branch ${branchId} into ${sourceDocId}:`, error);
+      // Consider more specific error handling or re-throwing different error types
       throw new Error(`Merge failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 

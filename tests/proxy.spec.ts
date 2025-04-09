@@ -1,7 +1,7 @@
 import { Delta } from '@typewriter/document';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { JSONPatch } from '../src/jsonPatch';
-import { createPatchProxy } from '../src/patchProxy';
+import { JSONPatch } from '../src/json-patch/jsonPatch.js';
+import { createPatchProxy } from '../src/json-patch/patchProxy.js';
 
 interface TestType {
   foo: string;
@@ -215,7 +215,7 @@ describe('Patch Proxy Utilities', () => {
         patch.text(proxy.text, new Delta().retain(5).insert(' beautiful'));
         expect(patch.ops).toEqual([
           {
-            op: '@text',
+            op: '@txt',
             path: '/text',
             value: { ops: [{ retain: 5 }, { insert: ' beautiful' }] },
           },
@@ -226,7 +226,7 @@ describe('Patch Proxy Utilities', () => {
         patch.text(proxy.text, new Delta().retain(5).delete(1));
         expect(patch.ops).toEqual([
           {
-            op: '@text',
+            op: '@txt',
             path: '/text',
             value: { ops: [{ retain: 5 }, { delete: 1 }] },
           },
@@ -237,7 +237,7 @@ describe('Patch Proxy Utilities', () => {
         patch.text(proxy.text, [{ retain: 5 }, { insert: ' beautiful' }]);
         expect(patch.ops).toEqual([
           {
-            op: '@text',
+            op: '@txt',
             path: '/text',
             value: { ops: [{ retain: 5 }, { insert: ' beautiful' }] },
           },
@@ -358,7 +358,7 @@ describe('Patch Proxy Utilities', () => {
 
         expect(patch.ops).toEqual([
           {
-            op: '@text',
+            op: '@txt',
             path: '/text',
             value: { ops: [{ retain: 5 }, { insert: ' beautiful' }] },
           },

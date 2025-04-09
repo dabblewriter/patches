@@ -1,0 +1,285 @@
+<!-- Placeholder for JSON Patch documentation -->
+
+# JSON Patch Implementation
+
+This library includes a comprehensive implementation of JSON Patch (RFC 6902), along with utilities for creating, applying, and manipulating patches. While the library's primary focus is shifting towards Operational Transformation (OT), this JSON Patch functionality remains available.
+
+**Table of Contents**
+
+- [Overview](#overview)
+- [`JSONPatch` Class](#jsonpatch-class)
+  - [Initialization](#initialization)
+  - [Standard Operations](#standard-operations) (`add`, `remove`, `replace`, `move`, `copy`, `test`)
+  - [Custom Operations](#custom-operations) (`increment`, `decrement`, `bit`, `text`)
+  - [Utility Methods](#utility-methods) (`addUpdates`, `apply`, `transform`, `invert`, `compose`, `concat`, `toJSON`, `fromJSON`)
+- [`createJSONPatch()` Helper](#createjsonpatch-helper)
+- [`createPatchProxy()` Utility](#createpatchproxy-utility)
+  - [Path Generation Mode](#path-generation-mode)
+  - [Automatic Patch Generation Mode](#automatic-patch-generation-mode)
+- [`applyPatch()` Function](#applypatch-function)
+- [Operation Handlers](#operation-handlers)
+
+## Overview
+
+JSON Patch defines a format for describing changes to a JSON document. It uses an array of operation objects, each specifying an operation (like `add`, `remove`, `replace`), a target path (using JSON Pointer syntax), and optionally a value or a source path (`from`).
+
+This library provides:
+
+- A `JSONPatch` class offering a fluent API for building patches.
+- Functions like `createJSONPatch` and `createPatchProxy` for generating patches from object modifications.
+- An `applyPatch` function to apply patches immutably.
+- Support for custom operations beyond the standard RFC 6902 set.
+- Implementations for OT functions (`transform`, `invert`, `compose`) tailored for JSON Patch operations.
+
+## `JSONPatch` Class
+
+(`src/json-patch/jsonPatch.ts`)
+
+This class is the main way to work with patches programmatically.
+
+### Initialization
+
+```typescript
+import { JSONPatch, JSONPatchOp } from 'patches-ot';
+
+// Create an empty patch
+const patch1 = new JSONPatch();
+
+// Create with initial operations
+const initialOps: JSONPatchOp[] = [{ op: 'replace', path: '/name', value: 'Initial' }];
+const patch2 = new JSONPatch(initialOps);
+
+// Create with custom operation handlers (see Operation Handlers section)
+// const patch3 = new JSONPatch([], { '/@myOp': myCustomHandler });
+```
+
+### Standard Operations
+
+The class provides methods corresponding to standard JSON Patch operations:
+
+- **`test(path: PathLike, value: any): this`**
+  Adds a `test` operation. Asserts the value at `path` equals `value`.
+  ```typescript
+  patch.test('/status', 'active');
+  // { op: 'test', path: '/status', value: 'active' }
+  ```
+- **`add(path: PathLike, value: any, options?: WriteOptions): this`**
+  Adds an `add` operation. Adds/inserts `value` at `path`.
+  ```typescript
+  patch.add('/tags/-', 'new'); // Append to array
+  // { op: 'add', path: '/tags/-', value: 'new' }
+  patch.add('/user/profile', { bio: '...' });
+  // { op: 'add', path: '/user/profile', value: { bio: '...' } }
+  ```
+- **`remove(path: PathLike): this`**
+  Adds a `remove` operation. Removes the value at `path`.
+  ```typescript
+  patch.remove('/obsoleteField');
+  // { op: 'remove', path: '/obsoleteField' }
+  ```
+- **`replace(path: PathLike, value: any, options?: WriteOptions): this`**
+  Adds a `replace` operation. Replaces the value at `path` with `value`.
+  ```typescript
+  patch.replace('/config/timeout', 500);
+  // { op: 'replace', path: '/config/timeout', value: 500 }
+  ```
+- **`copy(from: PathLike, to: PathLike, options?: WriteOptions): this`**
+  Adds a `copy` operation. Copies the value from `from` path to `to` path.
+  ```typescript
+  patch.copy('/user/name', '/backup/userName');
+  // { op: 'copy', from: '/user/name', path: '/backup/userName' }
+  ```
+- **`move(from: PathLike, to: PathLike): this`**
+  Adds a `move` operation. Moves the value from `from` to `to`.
+  ```typescript
+  patch.move('/temporary/data', '/permanent/data');
+  // { op: 'move', from: '/temporary/data', path: '/permanent/data' }
+  ```
+
+_Note on `PathLike`:_ Paths can be strings (e.g., `'/user/name'`) or generated using the `createPatchProxy` helper for type safety (e.g., `proxy.user.name`).
+_Note on `WriteOptions`:_ The `soft` option can sometimes allow `add`/`replace`/`copy` operations to proceed even if intermediate objects in the path don't exist, potentially avoiding errors in specific backend implementations, but use with caution as it deviates from strict RFC behavior.
+
+### Custom Operations
+
+These provide convenient methods for common custom operations included in the library:
+
+- **`increment(path: PathLike, value: number = 1): this`**
+  Adds an `@inc` operation to increment a number.
+  ```typescript
+  patch.increment('/counter'); // Increment by 1
+  patch.increment('/score', 10); // Increment by 10
+  // { op: '@inc', path: '/counter', value: 1 }
+  // { op: '@inc', path: '/score', value: 10 }
+  ```
+- **`decrement(path: PathLike, value: number = 1): this`**
+  Adds an `@inc` operation with a negative value.
+  ```typescript
+  patch.decrement('/remaining', 5);
+  // { op: '@inc', path: '/remaining', value: -5 }
+  ```
+- **`bit(path: PathLike, index: number, on: boolean): this`**
+  Adds an `@bit` operation for bitmask manipulation (uses `createBitmask` utility).
+  ```typescript
+  patch.bit('/flags', 3, true); // Set 3rd bit ON
+  patch.bit('/flags', 0, false); // Set 0th bit OFF
+  // { op: '@bit', path: '/flags', value: 8 } // 1 << 3
+  // { op: '@bit', path: '/flags', value: 32768 } // 1 << (0 + 15)
+  ```
+- **`text(path: PathLike, delta: Delta | Op[]): this`**
+  Adds an `@text` operation for applying rich text deltas (requires `@typewriter/document` or similar).
+  ```typescript
+  // import { Delta } from '@typewriter/document';
+  patch.text('/textContent', new Delta().insert('Hello'));
+  // { op: '@text', path: '/textContent', value: { ops: [{ insert: 'Hello'}] } }
+  ```
+
+### Utility Methods
+
+- **`addUpdates(updates: { [key: string]: any }, pathPrefix: string = '/'): this`**
+  Generates `replace` (for defined values) or `remove` (for `undefined` values) operations for each key-value pair in the `updates` object, applying an optional `pathPrefix`.
+  ```typescript
+  patch.addUpdates({ title: 'New', status: undefined }, '/doc');
+  // { op: 'replace', path: '/doc/title', value: 'New' }
+  // { op: 'remove', path: '/doc/status' }
+  ```
+- **`apply<T>(obj: T, options?: ApplyJSONPatchOptions): { doc: T, errors: any[] }`**
+  Applies the patch's operations (`this.ops`) to the given object `obj`. Returns the new state and any errors encountered. See [`applyPatch()`](#applypatch-function).
+- **`transform(otherPatch: JSONPatch | JSONPatchOp[], obj?: any): JSONPatch`**
+  Transforms another patch against this one, assuming this patch happened first. Requires the original object state `obj` for accuracy. Uses logic from [`transformPatch`](../src/ot/transformPatch.ts). Returns a _new_ `JSONPatch` instance with the transformed operations.
+- **`invert(obj: any): JSONPatch`**
+  Generates an inverse patch. Requires the object state `obj` _before_ this patch was applied. Uses logic from [`invertPatch`](../src/ot/invertPatch.ts). Returns a _new_ `JSONPatch` instance.
+- **`compose(patch?: JSONPatch | JSONPatchOp[]): JSONPatch`**
+  Composes operations within this patch (and optionally another) into a more concise form (e.g., merging consecutive `@inc` ops). Uses logic from [`composePatch`](../src/ot/composePatch.ts). Returns a _new_ `JSONPatch` instance.
+- **`concat(patch: JSONPatch | JSONPatchOp[]): JSONPatch`**
+  Combines the operations from this patch and another into a single new patch. Returns a _new_ `JSONPatch` instance.
+- **`toJSON(): JSONPatchOp[]`**
+  Returns a copy of the raw array of operations (`this.ops`).
+- **`static fromJSON(ops?: JSONPatchOp[], custom?: JSONPatchOpHandlerMap): JSONPatch`**
+  Creates a new `JSONPatch` instance from an array of operations.
+
+## `createJSONPatch()` Helper
+
+(`src/json-patch/createJSONPatch.ts`)
+
+This function provides an Immer-like API for generating patches.
+
+```typescript
+import { createJSONPatch } from 'patches-ot';
+
+const myObj = { user: { name: 'Alice' }, count: 10, items: ['apple'] };
+
+const patch = createJSONPatch(myObj, (draft, p) => {
+  // Modify the draft object directly
+  draft.user.name = 'Bob';
+  draft.items.push('banana');
+  delete draft.count;
+
+  // Optionally, call methods on the patch instance `p` for custom ops
+  // p.increment(draft.someCounter); // Path needs to be generated correctly
+});
+
+// `patch` now contains the generated operations:
+// [ { op: 'replace', path: '/user/name', value: 'Bob' },
+//   { op: 'add', path: '/items/1', value: 'banana' },
+//   { op: 'remove', path: '/count' } ]
+```
+
+- It takes the initial `target` object and an `updater` function.
+- The `updater` receives a mutable `proxy` (draft) of the target and a `JSONPatch` instance.
+- Modifications to the `proxy` (property sets, deletes, array method calls like `push`, `splice`) automatically generate `add`/`remove`/`replace` operations on the `JSONPatch` instance.
+- You can also directly use the passed `patch` instance inside the updater.
+- Returns the `JSONPatch` instance containing all generated operations.
+- Uses [`createPatchProxy()`](#createpatchproxy-utility) internally.
+
+## `createPatchProxy()` Utility
+
+(`src/json-patch/patchProxy.ts`)
+
+This is the underlying mechanism used by `createJSONPatch`. It can be used directly in two modes:
+
+### Path Generation Mode
+
+If called without arguments (or just a type parameter), it creates a proxy where property access builds a JSON Pointer path string, accessible via `toString()`.
+
+```typescript
+import { createPatchProxy, JSONPatch } from 'patches-ot';
+
+interface Config {
+  settings: { timeout: number };
+}
+
+const patch = new JSONPatch();
+const configPath = createPatchProxy<Config>();
+
+patch.replace(configPath.settings.timeout, 60);
+// Path used: configPath.settings.timeout.toString() -> "/settings/timeout"
+
+console.log(patch.ops[0].path); // /settings/timeout
+```
+
+### Automatic Patch Generation Mode
+
+If called with a `target` object and a `JSONPatch` instance, it creates a proxy that automatically generates patch operations when modified (like within `createJSONPatch`).
+
+```typescript
+import { createPatchProxy, JSONPatch } from 'patches-ot';
+
+const data = { value: 1 };
+const patch = new JSONPatch();
+const proxy = createPatchProxy(data, patch);
+
+proxy.value = 2; // Automatically calls patch.replace('/value', 2)
+
+console.log(patch.ops.length); // 1
+```
+
+## `applyPatch()` Function
+
+(`src/json-patch/applyPatch.ts`)
+
+Applies an array of patch operations to an object immutably.
+
+```typescript
+import { applyPatch, JSONPatchOp } from 'patches-ot';
+
+const doc = { name: 'A', count: 1 };
+const ops: JSONPatchOp[] = [
+  { op: 'replace', path: '/name', value: 'B' },
+  { op: '@inc', path: '/count', value: 1 },
+];
+
+const { doc: newDoc, errors } = applyPatch(doc, ops);
+
+if (errors.length > 0) {
+  console.error('Patch failed:', errors);
+} else {
+  console.log(newDoc); // { name: 'B', count: 2 }
+  console.log(doc); // { name: 'A', count: 1 } (original unchanged)
+}
+```
+
+- Takes the `object`, `patches` array, optional `options`, and optional `custom` handlers.
+- Returns `{ doc: T, errors: any[] }` where `doc` is the new state and `errors` is an array of any errors encountered during application.
+- **Immutability:** Attempts to preserve object identity for parts of the tree that are not modified.
+- **Options:**
+  - `strict`: Throws on the first error.
+  - `rigid`: Stops processing and returns the original object on the first error.
+  - `createMissingObjects`: Allows `add`/`replace` to create necessary parent objects/arrays.
+  - `atPath`: Applies all operations relative to a base path.
+
+## Operation Handlers
+
+(`src/json-patch/ops/`)
+
+The library defines handlers for each standard JSON Patch operation and the included custom operations (`@inc`, `@bit`, `@text`). Each handler implements:
+
+- `apply(state, path, value, from?, createMissingObjects?)`: Logic to apply the operation.
+- `invert(state, op, valueBeforeOp, parentObject, isIndex)`: Logic to generate the inverse operation.
+- `transform(state, thisOp, otherOps)`: Logic to transform concurrent `otherOps` against `thisOp`.
+- `compose(state, value1, value2)`: (Optional) Logic to combine two consecutive operations.
+
+You can provide your own custom handlers when creating `JSONPatch` instances or using `applyPatch`.
+
+See [`Operational Transformation > Operation Handlers`](./operational-transformation.md#operation-handlers) for more on their role in OT.
+
+Custom handlers like [`@text`](../src/ot/custom/text-document.ts) integrate external logic.

@@ -11,13 +11,13 @@
  * all situaions. Please avoid using this syntax when using Operational Transformations.
  */
 
-import type { Delta } from '@typewriter/document';
+import { Delta } from '@typewriter/document';
+import { bitmask } from '../json-patch/ops/bitmask.js';
+import { composePatch } from '../ot/composePatch.js';
+import { invertPatch } from '../ot/invertPatch.js';
+import { transformPatch } from '../ot/transformPatch.js';
+import type { ApplyJSONPatchOptions, JSONPatchOp, JSONPatchOpHandlerMap } from '../types.js';
 import { applyPatch } from './applyPatch.js';
-import { composePatch } from './composePatch.js';
-import { invertPatch } from './invertPatch.js';
-import { bitmask } from './ops/bitmask.js';
-import { transformPatch } from './transformPatch.js';
-import type { ApplyJSONPatchOptions, JSONPatchOp, JSONPatchOpHandlerMap } from './types.js';
 
 export type PathLike = string | { toString(): string };
 export interface WriteOptions {
@@ -121,10 +121,15 @@ export class JSONPatch {
   /**
    * Applies a delta to a text document.
    */
-  text(path: PathLike, delta: Delta | Delta['ops']) {
-    // If delta is an array of ops, wrap it in an object with ops property
-    const value = Array.isArray(delta) ? { ops: delta } : delta;
-    return this.op('@text', path, value);
+  text(path: PathLike, value: Delta | Delta['ops']) {
+    if (Array.isArray(value)) {
+      value = new Delta(value);
+    } else if (!(value instanceof Delta) && Array.isArray((value as any)?.ops)) {
+      value = new Delta((value as any).ops);
+    } else if (!(value instanceof Delta)) {
+      throw new Error('Invalid Delta');
+    }
+    return this.op('@txt', path, value);
   }
 
   /**

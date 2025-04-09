@@ -1,6 +1,6 @@
-import { applyPatch } from '../applyPatch';
-import { JSONPatch } from '../jsonPatch';
-import type { Change, DeletedChange } from './types';
+import { applyPatch } from '../json-patch/applyPatch.js';
+import { JSONPatch } from '../json-patch/jsonPatch.js';
+import type { Change, DeletedChange } from './types.js';
 
 /**
  * Splits an array of changes into two arrays based on the presence of a baseRev.

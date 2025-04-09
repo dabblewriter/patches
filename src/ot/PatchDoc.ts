@@ -1,6 +1,6 @@
 import { createId } from 'crypto-id';
 import { GetSubscribe, signal } from 'easy-signal';
-import { createJSONPatch } from '../createJSONPatch';
+import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { Change, PatchSnapshot } from './types';
 import { applyChanges, rebaseChanges } from './utils';
 

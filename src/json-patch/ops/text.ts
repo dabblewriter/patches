@@ -1,10 +1,10 @@
 import type { Op } from '@typewriter/delta';
 import { Delta } from '@typewriter/delta';
+import type { JSONPatchOpHandler } from '../../types.js';
+import { get, log, updateRemovedOps } from '../../utils/index.js';
 import { replace } from '../ops/replace.js';
-import type { JSONPatchOpHandler } from '../types.js';
-import { get, log, updateRemovedOps } from '../utils/index.js';
 
-export const textDelta: JSONPatchOpHandler = {
+export const text: JSONPatchOpHandler = {
   like: 'replace',
 
   apply(state, path, value, _, createMissingObjects) {
@@ -38,7 +38,7 @@ export const textDelta: JSONPatchOpHandler = {
   },
 
   transform(state, thisOp, otherOps) {
-    log('Transforming ', otherOps, ' against "@text"', thisOp);
+    log('Transforming ', otherOps, ' against "@txt"', thisOp);
 
     return updateRemovedOps(state, thisOp.path, otherOps, false, true, thisOp.op, op => {
       if (op.path !== thisOp.path) return null; // If a subpath, it is overwritten
@@ -53,7 +53,7 @@ export const textDelta: JSONPatchOpHandler = {
   invert(state, { path, value }, oldValue: Delta, changedObj) {
     if (path.endsWith('/-')) path = path.replace('-', changedObj.length);
     const delta = new Delta(value);
-    return oldValue === undefined ? { op: 'remove', path } : { op: '@text', path, value: delta.invert(oldValue) };
+    return oldValue === undefined ? { op: 'remove', path } : { op: '@txt', path, value: delta.invert(oldValue) };
   },
 
   compose(state, delta1, delta2) {

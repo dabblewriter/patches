@@ -1,9 +1,9 @@
-import type { JSONPatchOpHandler } from '../types.js';
-import { deepEqual } from '../utils/deepEqual.js';
-import { getOpData } from '../utils/getOpData.js';
-import { log, updateRemovedOps } from '../utils/index.js';
-import { pluckWithShallowCopy } from '../utils/pluck.js';
-import { toArrayIndex } from '../utils/toArrayIndex.js';
+import type { JSONPatchOpHandler } from '../../types.js';
+import { deepEqual } from '../../utils/deepEqual.js';
+import { getOpData } from '../../utils/getOpData.js';
+import { log, updateRemovedOps } from '../../utils/index.js';
+import { pluckWithShallowCopy } from '../../utils/pluck.js';
+import { toArrayIndex } from '../../utils/toArrayIndex.js';
 
 export const replace: JSONPatchOpHandler = {
   like: 'replace',

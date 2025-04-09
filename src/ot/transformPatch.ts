@@ -11,11 +11,11 @@
  * all situaions. Please avoid using this syntax when using Operational Transformations.
  */
 
-import { getTypes } from './ops/index.js';
-import { runWithObject } from './state.js';
-import type { JSONPatchOp, JSONPatchOpHandlerMap } from './types.js';
-import { getType } from './utils/getType.js';
-import { log } from './utils/log.js';
+import { getTypes } from '../json-patch/ops/index.js';
+import { runWithObject } from '../json-patch/state.js';
+import type { JSONPatchOp, JSONPatchOpHandlerMap } from '../types.js';
+import { getType } from '../utils/getType.js';
+import { log } from '../utils/log.js';
 
 /**
  * Transform an array of JSON Patch operations against another array of JSON Patch operations. Returns a new array with

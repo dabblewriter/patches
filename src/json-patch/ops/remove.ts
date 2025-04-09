@@ -1,8 +1,8 @@
-import type { JSONPatchOpHandler } from '../types.js';
-import { getOpData } from '../utils/getOpData.js';
-import { log, transformRemove } from '../utils/index.js';
-import { pluckWithShallowCopy } from '../utils/pluck.js';
-import { toArrayIndex } from '../utils/toArrayIndex.js';
+import type { JSONPatchOpHandler } from '../../types.js';
+import { getOpData } from '../../utils/getOpData.js';
+import { log, transformRemove } from '../../utils/index.js';
+import { pluckWithShallowCopy } from '../../utils/pluck.js';
+import { toArrayIndex } from '../../utils/toArrayIndex.js';
 
 export const remove: JSONPatchOpHandler = {
   like: 'remove',

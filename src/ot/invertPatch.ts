@@ -1,7 +1,7 @@
-import { getTypes } from './ops/index.js';
-import { runWithObject } from './state.js';
-import type { JSONPatchOp, JSONPatchOpHandlerMap } from './types.js';
-import { getType } from './utils/getType.js';
+import { getTypes } from '../json-patch/ops/index.js';
+import { runWithObject } from '../json-patch/state.js';
+import type { JSONPatchOp, JSONPatchOpHandlerMap } from '../types.js';
+import { getType } from '../utils/getType.js';
 
 export function invertPatch(object: any, ops: JSONPatchOp[], custom: JSONPatchOpHandlerMap = {}): JSONPatchOp[] {
   const types = getTypes(custom);

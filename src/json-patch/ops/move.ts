@@ -1,5 +1,5 @@
-import type { JSONPatchOp, JSONPatchOpHandler, State } from '../types.js';
-import { getOpData } from '../utils/getOpData.js';
+import type { JSONPatchOp, JSONPatchOpHandler, State } from '../../types.js';
+import { getOpData } from '../../utils/getOpData.js';
 import {
   getArrayPrefixAndIndex,
   getIndexAndEnd,
@@ -10,9 +10,9 @@ import {
   mapAndFilterOps,
   updateArrayIndexes,
   updateRemovedOps,
-} from '../utils/index.js';
-import { getValue, pluckWithShallowCopy } from '../utils/pluck.js';
-import { toArrayIndex } from '../utils/toArrayIndex.js';
+} from '../../utils/index.js';
+import { getValue, pluckWithShallowCopy } from '../../utils/pluck.js';
+import { toArrayIndex } from '../../utils/toArrayIndex.js';
 import { add } from './add.js';
 
 export const move: JSONPatchOpHandler = {

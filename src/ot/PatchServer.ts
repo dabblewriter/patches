@@ -1,8 +1,8 @@
 import { createId } from 'crypto-id';
-import { applyPatch } from '../applyPatch';
-import { transformPatch } from '../transformPatch';
-import type { Change, PatchStoreBackend, VersionMetadata } from './types';
-import { applyChanges } from './utils';
+import { applyPatch } from '../json-patch/applyPatch.js';
+import { transformPatch } from './transformPatch.js';
+import type { Change, PatchStoreBackend, VersionMetadata } from './types.js';
+import { applyChanges } from './utils.js';
 
 /**
  * Configuration options for the PatchServer.

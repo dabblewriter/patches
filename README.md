@@ -1,519 +1,452 @@
-# Patches
+# Patches - A friendly and loyal realtime library using operational transformations
 
-![patches](assets/patches.png)
+![Patches the Dog](./patches.png)
 
-An operational transformation (OT) library for realtime editing of JSON objects built on
-[JSON Patch](https://tools.ietf.org/html/rfc6902). Requires a central server to determine order, making this OT simpler
-and more correct, but unable to work peer-to-peer.
+<!-- TODO: Add badges (npm version, build status, license, etc.) -->
 
-## Features
+Patches is a TypeScript library designed for building real-time collaborative applications. It leverages Operational Transformation (OT) with a centralized server model to ensure document consistency across multiple clients.
 
-- **Immutable**: The original JSON is not changed and data is shared as much as possible.
-- **Rollback**: If an error occurs, all patches are rejected unless requested. Return the original JSON.
-- **Customizable**: You can add custom operators.
-- **Patch API**: A JSONPatch object to simplify the creation and transformation of patches.
-- **Multiplayer**: You can transform patches against each other for collaborative systems using Operational
-  Transformation (OT).
-- **Syncable**: You can sync objects across server-clients using last-writer-wins (LWW) at the field level.
+While originally including JSON Patch functionality, the focus is now on providing a robust and understandable OT system for collaborative editing scenarios.
+
+**Key Concepts:**
+
+- **Centralized OT:** Uses a central authority (the server) to definitively order operations, simplifying conflict resolution compared to fully distributed OT systems. ([Learn more about centralized vs. distributed OT](https://marijnhaverbeke.nl/blog/collaborative-editing.html#centralization)).
+- **Rebasing:** Client changes are "rebased" on top of changes they receive from the server, ensuring local edits are adjusted correctly based on the server's history.
+- **Linear History:** The server maintains a single, linear history of document revisions.
+- **Client-Server Communication:** Clients send batches of changes (`Change` objects) tagged with the server revision they were based on (`baseRev`). The server transforms these changes, applies them, assigns a new revision number, and broadcasts the committed change back to clients.
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Core Components](#core-components)
+  - [PatchServer](#patchserver)
+  - [PatchDoc](#patchdoc)
+  - [HistoryManager](#historymanager)
+  - [BranchManager](#branchmanager)
+  - [Backend Store](#backend-store)
+- [Basic Workflow](#basic-workflow)
+  - [Client-Side](#client-side)
+  - [Server-Side](#server-side)
+- [Examples](#examples)
+  - [Simple Client Setup](#simple-client-setup)
+  - [Simple Server Setup](#simple-server-setup)
+- [Advanced Topics](#advanced-topics)
+  - [Offline Support & Versioning](#offline-support--versioning)
+  - [Branching and Merging](#branching-and-merging)
+  - [Custom OT Types](#custom-ot-types)
+- [JSON Patch (Legacy)](#json-patch-legacy)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Installation
 
-```
-$ npm install --save @typewriter/json-patch
-```
-
-## Quick Start
-
-The easiest way to use json-patch is with the `JSONPatch` API.
-
-```js
-import { JSONPatch } from '@typewriter/json-patch';
-
-const prevObject = { baz: 'qux', foo: 'bar' };
-
-const patch = new JSONPatch();
-patch.replace('/baz', 'boo');
-
-const nextObject = patch.apply(prevObject);
-// → { baz: "boo", foo: "bar" }
-//              |
-//             replaced
-
-console.log(prevObject);
-// → { baz: "qux", foo: "bar" }
-//              |
-//
+```bash
+npm install patches-ot # TODO: Update with actual package name
+# or
+yarn add patches-ot # TODO: Update with actual package name
 ```
 
-## Type-Safe Patch Creation with Proxies
+## Core Components
 
-This library provides utilities to create JSON patches in a type-safe manner using JavaScript Proxies. The primary helper function for this is `createJSONPatch`.
+These are the main classes you'll interact with when building a collaborative application with Patches.
 
-### `createJSONPatch<T>(target, updater)`
+### PatchServer
 
-This helper function simplifies the process of creating a patch based on modifications. You provide an initial object and an `updater` function. Inside the `updater`, you receive a proxy of the object and the `JSONPatch` instance. Changes made to the proxy (e.g., `proxy.name.first = 'Bob'`), or direct calls to the patch instance (e.g., `patch.increment(...)`), are collected into the final patch.
+(`PatchServer` Documentation: [`docs/PatchServer.md`](./docs/PatchServer.md))
 
-The proxy allows for type-safe property access and automatically generates `replace`, `add` (for array `push`), and `remove` (for `delete` or array `pop`/`splice`) operations.
+The heart of the server-side logic. See [`docs/operational-transformation.md#patchserver`](./docs/operational-transformation.md#patchserver) for its role in the OT flow.
 
-```ts
-import { createJSONPatch } from '@typewriter/json-patch';
+- **Receives Changes:** Handles incoming `Change` objects from clients.
+- **Transformation:** Transforms client changes against concurrent server changes using the OT algorithm.
+- **Applies Changes:** Applies the final transformed changes to the authoritative document state.
+- **Versioning:** Creates version snapshots based on time-based sessions or explicit triggers (useful for history and offline support).
+- **Persistence:** Uses a `PatchStoreBackend` implementation to save/load document state, changes, and versions.
 
-const myObj = { name: { first: 'Alice' }, age: 30, tags: ['a'] };
+See [`docs/PatchServer.md`](./docs/PatchServer.md) for detailed usage and examples.
 
-const patch = createJSONPatch(myObj, (proxy, patch) => {
-  // Modify the proxy directly - generates patch ops automatically
-  proxy.name.first = 'Bob';
-  proxy.tags.push('b');
+### PatchDoc
 
-  // Or call methods on the patch instance, using the proxy for type-safe paths
-  patch.increment(proxy.age, 1);
-});
+(`PatchDoc` Documentation: [`docs/PatchDoc.md`](./docs/PatchDoc.md))
 
-console.log(patch.ops);
-// Output:
-// [
-//   { op: 'replace', path: '/name/first', value: 'Bob' },
-//   { op: 'add', path: '/tags/1', value: 'b' },
-//   { op: '@inc', path: '/age', value: 1 }
-// ]
-```
+Represents the client-side view of a collaborative document. See [`docs/operational-transformation.md#patchdoc`](./docs/operational-transformation.md#patchdoc) for its role in the OT flow.
 
-### `createPatchProxy<T>(target?, patch?)`
+- **Local State Management:** Maintains the committed state (last known server state), sending changes (awaiting server confirmation), and pending changes (local edits not yet sent).
+- **Optimistic Updates:** Applies local changes immediately for a responsive UI.
+- **Synchronization:** Implements the client-side OT logic:
+  - Sends pending changes to the server (`getUpdatesForServer`).
+  - Applies server confirmations (`applyServerConfirmation`).
+  - Applies external server updates from other clients (`applyExternalServerUpdate`), rebasing local changes as needed.
+- **Event Emitters:** Provides hooks (`onUpdate`, `onChange`, etc.) to react to state changes.
 
-This is the underlying utility used by `createJSONPatch`. It generates the proxy object responsible for tracking changes or generating paths. While `createJSONPatch` is recommended for most use cases, `createPatchProxy` can be used directly in two ways:
+See [`docs/PatchDoc.md`](./docs/PatchDoc.md) for detailed usage and examples.
 
-1.  **Standalone Path Generation:** If you need to generate type-safe JSON Pointer paths _without_ creating a patch immediately or _without_ an initial target object, you can call `createPatchProxy` with only the type argument. Accessing properties on the returned proxy generates the path string via its `toString()` method.
+### HistoryManager
 
-    ```ts
-    import { JSONPatch, createPatchProxy } from '@typewriter/json-patch';
+(`HistoryManager` Documentation: [`docs/HistoryManager.md`](./docs/HistoryManager.md))
 
-    interface User {
-      name: {
-        first: string;
-        last: string;
-      };
-      age: number;
-    }
+Provides an API for querying the history ([`VersionMetadata`](./docs/types.ts)) of a document.
 
-    const patch = new JSONPatch();
-    const userPath = createPatchProxy<User>();
+- **List Versions:** Retrieve metadata about saved document versions (snapshots).
+- **Get Version State/Changes:** Load the full state or the specific changes associated with a past version.
+- **List Server Changes:** Query the raw sequence of committed server changes based on revision numbers.
 
-    // Use the proxy properties directly as paths
-    patch.replace(userPath.name.first, 'Bob');
-    patch.increment(userPath.age, 1);
+See [`docs/HistoryManager.md`](./docs/HistoryManager.md) for detailed usage and examples.
 
-    console.log(patch.ops);
-    // Output:
-    // [
-    //   { op: 'replace', path: '/name/first', value: 'Bob' },
-    //   { op: 'increment', path: '/age', value: 1 }
-    // ]
-    ```
+### BranchManager
 
-    This is useful when you need a path string programmatically before constructing the patch operation.
+(`BranchManager` Documentation: [`docs/BranchManager.md`](./docs/BranchManager.md))
 
-2.  **Manual Automatic Patch Generation:** You can replicate the behavior of `createJSONPatch` by calling `createPatchProxy` with a target object and your own `JSONPatch` instance. Modifications to the proxy will add operations to your patch instance.
+Manages branching ([`Branch`](./docs/types.ts)) and merging workflows.
 
-    ```ts
-    import { JSONPatch, createPatchProxy } from '@typewriter/json-patch';
+- **Create Branch:** Creates a new document branching off from a source document at a specific revision.
+- **List Branches:** Retrieves information about existing branches.
+- **Merge Branch:** Merges the changes made on a branch back into its source document (requires OT on the server to handle conflicts).
+- **Close Branch:** Marks a branch as closed, merged, or abandoned.
 
-    const myObj = { name: { first: 'Alice' }, tags: ['a', 'b'] };
-    const patch = new JSONPatch();
-    const proxy = createPatchProxy(myObj, patch);
+See [`docs/BranchManager.md`](./docs/BranchManager.md) for detailed usage and examples.
 
-    // Modifications to the proxy generate patch operations
-    proxy.name.first = 'Bob'; // Generates 'replace' op
-    proxy.tags.push('c'); // Generates 'add' op
-    proxy.tags.splice(0, 1); // Generates 'remove' op
+### Backend Store
 
-    console.log(patch.ops);
-    // Output:
-    // [
-    //   { op: 'replace', path: '/name/first', value: 'Bob' },
-    //   { op: 'add', path: '/tags/2', value: 'c' },
-    //   { op: 'remove', path: '/tags/0' }
-    // ]
-    ```
+([`PatchStoreBackend` / `BranchingStoreBackend`](./docs/operational-transformation.md#backend-store-interface) Documentation: [`docs/operational-transformation.md#backend-store-interface`](./docs/operational-transformation.md#backend-store-interface))
 
-### Working with Optional Properties
+This isn't a specific class provided by the library, but rather an _interface_ (`PatchStoreBackend` and `BranchingStoreBackend`) that you need to implement. This interface defines how the `PatchServer`, `HistoryManager`, and `BranchManager` interact with your chosen persistence layer (e.g., a database, file system, in-memory store).
 
-When working with optional properties in TypeScript, use the non-null assertion operator (!) to set values:
+You are responsible for providing an implementation that fulfills the methods defined in the interface (e.g., `getLatestRevision`, `saveChange`, `listVersions`, `createBranch`).
 
-```ts
-interface User {
-  name: string;
-  middleName?: string;
-  address?: {
-    street?: string;
-    city?: string;
-  };
-}
+See [`docs/operational-transformation.md#backend-store-interface`](./docs/operational-transformation.md#backend-store-interface) for the interface definition.
 
-const patch = new JSONPatch();
-const proxy = createPatchProxy<User>(user, patch);
+## Basic Workflow
 
-// Use ! to assert optional properties exist when setting values
-proxy.middleName! = 'John';
-proxy.address!.street! = '123 Main St';
-```
+### Client-Side (`PatchDoc`)
 
-### Special Operations
+1.  **Initialize `PatchDoc`:** Create an instance. See [`docs/PatchDoc.md#initialization`](./docs/PatchDoc.md#initialization).
+2.  **Subscribe to Updates:** Use [`doc.onUpdate`](./docs/PatchDoc.md#onupdate).
+3.  **Make Local Changes:** Use [`doc.update()`](./docs/PatchDoc.md#update).
+4.  **Send Changes:** Use [`doc.getUpdatesForServer()`](./docs/PatchDoc.md#getupdatesforserver) and [`doc.applyServerConfirmation()`](./docs/PatchDoc.md#applyserverconfirmation).
+5.  **Receive Server Changes:** Use [`doc.applyExternalServerUpdate()`](./docs/PatchDoc.md#applyexternalserverupdate).
 
-The JSONPatch class provides special operations for text editing, counters, and bit flags:
+### Server-Side (`PatchServer`)
 
-```ts
-import { Delta } from '@typewriter/document';
+1.  **Initialize `PatchServer`:** Create an instance. See [`docs/PatchServer.md#initialization`](./docs/PatchServer.md#initialization).
+2.  **Receive Client Changes:** Use [`server.receiveChanges()`](./docs/PatchServer.md#core-method-receivechanges).
+3.  **Handle History/Branching:** Use [`HistoryManager`](./docs/HistoryManager.md) and [`BranchManager`](./docs/BranchManager.md).
+
+## Examples
+
+_(Note: These are simplified examples. Real-world implementations require proper error handling, network communication, authentication, and backend setup.)_
+
+### Simple Client Setup
+
+```typescript
+import { PatchDoc, Change } from 'patches-ot';
 
 interface MyDoc {
-  content: Delta;
-  counter: number;
-  flags: number;
+  text: string;
+  count: number;
 }
 
-const patch = new JSONPatch();
-const proxy = createPatchProxy<MyDoc>(doc, patch);
-
-// Text operations with Delta objects
-patch.text(proxy.content, new Delta().retain(5).insert('new text'));
-
-// Increment/decrement operations
-patch.increment(proxy.counter, 5); // Increment by 5
-patch.decrement(proxy.counter, 3); // Decrement by 3
-
-// Bit operations
-patch.bit(proxy.flags, 2, true); // Set bit at index 2
-patch.bit(proxy.flags, 1, false); // Clear bit at index 1
-```
-
-## Operational Transformation Quick Start
-
-Using OT with JSON Patch requires operations to be applied in the same order on the server and across clients. This
-requires clients to keep a last-known-server version of the object in memory or storage as well as a current-local-state
-version of the object in memory or storage. The first is for applying changes in order and the second is for the app to
-have the current local state. A version/revision number should be used to track what version of the data a change was
-applied to in order to know what changes to transform it against, if any. As this is an advanced topic, a bare minimum
-is provided here to display usage of the API.
-
-```js
-// client.js
-import { JSONPatch } from '@typewriter/json-patch';
-
-// The latest version synced from the server
-let committedObject = { baz: 'qux', foo: 'bar' };
-let rev = 1;
-
-// Start off using this version in our app
-let localObject = committedObject;
-
-const localChange = new JSONPatch();
-localChange.replace('/baz', 'boo');
-
-// Update app data immediately
-localObject = patch.apply(committedObject);
-
-// Receive a change patch from the server
-const { patch: serverChange, rev: latestRev } = getChangeFromServer();
-
-// Apply server changes to our committed version
-committedObject = serverChange.apply(committedObject);
-rev = latestRev; // Keep track of the revsion so the server knows whether to transform incoming changes
-
-// Transform local changes against committed server changes
-const localChangeTransformed = serverChange.transform(committedObject, localChange);
-
-// Re-apply local changes to get the new version
-localObject = localChangeTransformed.apply(committedObject);
-
-// Send local change to server with the revision it was applied at
-sendChange(localChangeTransformed, rev);
-```
-
-## Low-level API
-
-If you don't want to use `JSONPatch` you can use these methods on plain JSON Patch objects.
-
-- `applyPatch(prevObject: object, patches: object[], [ opts: object ]): object`
-  - `opts.custom: object` custom operator definition.
-  - `opts.partial: boolean` not reject patches if error occurs (partial patching)
-  - `opts.strict: boolean` throw an exception if error occurs
-  - `opts.error: object` point to a cause patch if error occurs
-  - returns `nextObject: object`
-
-## Quick example
-
-```js
-import { applyPatch } from '@typewriter/json-patch';
-
-const prevObject = { baz: 'qux', foo: 'bar' };
-const patches = [{ op: 'replace', path: '/baz', value: 'boo' }];
-const nextObject = applyPatch(prevObject, patches);
-// → { baz: "boo", foo: "bar" }
-//              |
-//             replaced
-
-console.log(prevObject);
-// → { baz: "qux", foo: "bar" }
-//              |
-//             not changed
-```
-
-## How to apply patches
-
-### add
-
-```js
-const patches = [{ op: 'add', path: '/matrix/1/-', value: 9 }];
-```
-
-Return a new JSON. It contains shallow-copied elements that have some changes into child elements. And it contains original elements that were not updated.
-
-![add](assets/patch-add.png)
-
-```js
-assert(prevObject.matrix[0] === nextObject.matrix[0]);
-assert(prevObject.matrix[1] !== nextObject.matrix[1]);
-assert(prevObject.matrix[2] === nextObject.matrix[2]);
-```
-
-### remove
-
-```js
-const patches = [{ op: 'remove', path: '/matrix/1' }];
-```
-
-Return a new JSON. It contains shallow-copied elements that have some changes into child elements. And it contains original elements that are not updated any.
-
-![remove](assets/patch-remove.png)
-
-```js
-assert(prevObject.matrix[0] === nextObject.matrix[0]);
-assert(prevObject.matrix[1] !== nextObject.martix[1]);
-assert(prevObject.matrix[2] === nextObject.matrix[1]);
-```
-
-### replace
-
-```js
-const patches = [{ op: 'replace', path: '/matrix/1/1', value: 9 }];
-```
-
-Return a new JSON. It contains shallow-copied elements that have some changes into child elements. And it contains original elements that are not updated any.
-
-![replace](assets/patch-replace.png)
-
-```js
-assert(prevObject.matrix[0] === nextObject.matrix[0]);
-assert(prevObject.matrix[1] !== nextObject.matrix[1]);
-assert(prevObject.matrix[2] === nextObject.matrix[2]);
-```
-
-### replace (no changes)
-
-```js
-const patches = [{ op: 'replace', path: '/matrix/1/1', value: 4 }];
-```
-
-Return the original JSON. Because all elements are not changed.
-
-![replace](assets/patch-no-change.png)
-
-`prevObject.matrix[1][1]` is already `4`. So, this patch is need not to update any.
-
-```js
-assert(prevObject === nextObject);
-```
-
-### move
-
-```js
-const patches = [{ op: 'move', from: '/matrix/1', path: '/matrix/2' }];
-```
-
-Return a new JSON. `[op:move]` works as `[op:get(from)]` -> `[op:remove(from)]` -> `[op:add(path)]`.
-
-![move](assets/patch-move.png)
-
-```js
-assert(prevObject.matrix[0] === nextObject.matrix[0]);
-assert(prevObject.matrix[1] === nextObject.martix[2]);
-assert(prevObject.matrix[2] === nextObject.matrix[1]);
-```
-
-### copy
-
-```js
-const patches = [{ op: 'copy', from: '/matrix/1', path: '/matrix/1' }];
-```
-
-Return a new JSON. `[op:copy]` works as `[op:get(from)]` -> `[op:add(path)]`.
-
-![copy](assets/patch-copy.png)
-
-```js
-assert(prevObject.matrix[0] === nextObject.matrix[0]);
-assert(prevObject.matrix[1] === nextObject.martix[1]);
-assert(prevObject.matrix[1] === nextObject.martix[2]);
-assert(prevObject.matrix[2] === nextObject.matrix[3]);
-```
-
-### test failed
-
-```js
-const patch = [
-  { op: 'add', path: '/matrix/1/-', value: 9 },
-  { op: 'test', path: '/matrix/1/1', value: 0 },
-];
-```
-
-Return the original JSON. Because a test op is failed. All patches are rejected.
-
-![test](assets/patch-no-change.png)
-
-`prevObject.matrix[1][1]` is not `0` but `4`. So, this test is failed.
-
-```js
-assert(prevObject === nextObject);
-```
-
-### invalid patch
-
-```js
-const json = [{ op: 'replace', path: '/matrix/1/100', value: 9 }];
-```
-
-Return the original JSON. Because all patches are rejected when error occurs.
-
-![invalid](assets/patch-no-change.png)
-
-`prevObject.matrix[1][100]` is not defined. So, this patch is invalid.
-
-```js
-assert(prevObject === nextObject);
-```
-
-## Syncable Object Store
-
-json-patch provides a utility that will help sync an object field-by-field using the Last-Writer-Wins (LWW) algorithm.
-This sync method is not as robust as operational transformation, but it only stores a little data in addition to the
-object and is much simpler. It does not handle adding/removing array items, though entire arrays can
-be set. It should work great for documents that don't need merging text like Figma describes in
-https://www.figma.com/blog/how-figmas-multiplayer-technology-works/ and for objects like user preferences.
-
-It works by using metadata to track the current revision of the object, any outstanding changes needing to be sent to
-the server from the client, and the revisions of each added value on the server so that one may get all changes since
-the last revision was synced. The metadata will be minuscule on the client, and small-ish on the server. The metadata
-must be stored with the rest of the object to work. This is a tool to help with the harder part of LWW syncing.
-
-Syncable will auto-create objects in paths that need them. This helps with preventing data from being overwritten
-during merging that shouldn't be.
-
-It should work with offline, though clients will "win" when they come back online, even after days/weeks being offline.
-If offline is not desired, send the complete data from the server down when first connecting and then receive changes.
-If offline is desired but not allowed to "win" when coming online with changes that occurred while offline, you may
-use `changesSince(rev)` on the server and `receive(patch, serverRev, true /* overwrite local changes */)` to ensure
-local changes while offline do not win over changes made online on the server.
-
-Use whitelist and blacklist options to prevent property changes from being set by the client, only set by the server.
-This allows one-way syncable objects such as global configs, plans, billing information, etc. that can be set by trusted
-sources using `receive(patch, null, true /* ignoreLists */)` on the server.
-
-Example usage on the client:
-
-```js
-import { syncable } from '@typewriter/json-patch';
-
-// Create a new syncable object
-const newObject = syncable({ baz: 'qux', foo: 'bar' });
-
-// Send the initial object to the server
-newObject.send(async patch => {
-  // A function you define using fetch, websockets, etc
-  return await sendJSONPatchChangesToServer(patch);
+// Assume these are fetched initially
+const initialDocId = 'doc123';
+const initialServerState: MyDoc = { text: 'Hello', count: 0 };
+const initialServerRev = 5; // Revision corresponding to initialServerState
+
+// Your function to send changes and receive the server's commit
+async function sendChangesToServer(docId: string, changes: Change[]): Promise<Change[]> {
+  const response = await fetch(`/docs/${docId}/changes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ changes }),
+  });
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.error || `Server error: ${response.status}`);
+  }
+  return await response.json();
+}
+
+// --- Initialize PatchDoc ---
+const patchDoc = new PatchDoc<MyDoc>(initialServerState, initialServerRev);
+
+// --- UI Update Logic ---
+patchDoc.onUpdate(newState => {
+  console.log('Document updated:', newState);
+  // Update your UI element displaying newState.text, newState.count, etc.
 });
 
-// Or load a syncable object from storage (or from the server)
-const { data, metadata } = JSON.parse(localStorage.getItem('my-object-key'));
-const object = syncable(data, metadata);
+// --- Making a Local Change ---
+function handleTextInput(newText: string) {
+  patchDoc.update(draft => {
+    draft.text = newText;
+  });
+  // Trigger sending changes (e.g., debounced)
+  sendLocalChanges();
+}
 
-// Automatically send changes when changes happen.
-// This will be called immediately if there are outstanding changes needing to be sent.
-object.subscribe((data, meta, hasUnsentChanges) => {
-  if (hasUnsentChanges) {
-    object.send(async patch => {
-      // A function you define using fetch, websockets, etc. Be sure to use await/promises to know when it is complete
-      // or errored. Place the try/catch around send, not inside
-      await sendJSONPatchChangesToServer(patch);
-    });
+function handleIncrement() {
+  patchDoc.update(draft => {
+    draft.count = (draft.count || 0) + 1;
+  });
+  sendLocalChanges();
+}
+
+// --- Sending Changes ---
+let isSending = false;
+async function sendLocalChanges() {
+  if (isSending || !patchDoc.hasPending) return;
+
+  isSending = true;
+  try {
+    const changesToSend = patchDoc.getUpdatesForServer();
+    if (changesToSend.length > 0) {
+      console.log('Sending changes:', changesToSend);
+      const serverCommit = await sendChangesToServer(initialDocId, changesToSend);
+      console.log('Received confirmation:', serverCommit);
+      patchDoc.applyServerConfirmation(serverCommit);
+    }
+  } catch (error) {
+    console.error('Failed to send changes:', error);
+    // Handle error - maybe retry, revert local changes, or force resync
+    // For simplicity, just log here. PatchDoc state might be inconsistent.
+  } finally {
+    isSending = false;
+    // Check again in case new changes came in while sending
+    if (patchDoc.hasPending) {
+      setTimeout(sendLocalChanges, 100); // Basic retry/check again
+    }
+  }
+}
+
+// --- Receiving External Changes (e.g., via WebSocket) ---
+function handleServerBroadcast(externalChanges: Change[]) {
+  if (!externalChanges || externalChanges.length === 0) return;
+  console.log('Received external changes:', externalChanges);
+  try {
+    patchDoc.applyExternalServerUpdate(externalChanges);
+  } catch (error) {
+    console.error('Error applying external server changes:', error);
+    // Critical error - likely need to resync the document state
+  }
+}
+
+// --- Example Usage ---
+// handleTextInput("Hello World!");
+// handleIncrement();
+// Assume setup for receiving broadcasts via `handleServerBroadcast`
+```
+
+### Simple Server Setup
+
+```typescript
+import express from 'express';
+import {
+  PatchServer,
+  PatchStoreBackend,
+  Change,
+  VersionMetadata, //... other types
+} from 'patches-ot';
+
+// --- Basic In-Memory Store (Replace with a real backend!) ---
+class InMemoryStore implements PatchStoreBackend {
+  private docs: Map<string, { state: any; rev: number; changes: Change[]; versions: VersionMetadata[] }> = new Map();
+
+  async getLatestRevision(docId: string): Promise<number> {
+    return this.docs.get(docId)?.rev ?? 0;
+  }
+  async getLatestState(docId: string): Promise<any | undefined> {
+    const doc = this.docs.get(docId);
+    // Return a deep copy to prevent accidental mutation
+    return doc ? JSON.parse(JSON.stringify(doc.state)) : undefined;
+  }
+  async getStateAtRevision(docId: string, rev: number): Promise<any | undefined> {
+    // IMPORTANT: In-memory store cannot easily reconstruct past states without snapshots.
+    // A real implementation would replay changes or load version snapshots.
+    // This basic version only returns the latest state if rev matches.
+    const doc = this.docs.get(docId);
+    if (doc && doc.rev === rev) {
+      return JSON.parse(JSON.stringify(doc.state)); // Return copy
+    }
+    // Try finding a version snapshot matching the revision
+    const version = doc?.versions.find(v => v.endDate === rev); // Approximation!
+    if (version) {
+      return JSON.parse(JSON.stringify(version.state));
+    }
+    // Fallback: Cannot reconstruct this revision
+    if (rev === 0 && !doc) return {}; // Initial empty state at rev 0
+    console.warn(
+      `In-Memory Store: Cannot get state at revision ${rev} for doc ${docId}. Returning latest or undefined.`
+    );
+    return doc ? JSON.parse(JSON.stringify(doc.state)) : undefined; // Or throw error
+  }
+  async saveChange(docId: string, change: Change): Promise<void> {
+    let doc = this.docs.get(docId);
+    if (!doc) {
+      doc = { state: {}, rev: 0, changes: [], versions: [] };
+      this.docs.set(docId, doc);
+    }
+    // Apply change to get new state (use library's apply function)
+    const { applyChanges } = await import('patches-ot'); // Assuming exported
+    doc.state = applyChanges(doc.state, [change]);
+    doc.rev = change.rev;
+    doc.changes.push(change); // Store history of changes
+    console.log(`[Store] Saved change rev ${change.rev} for doc ${docId}. New state:`, doc.state);
+  }
+  async listChanges(docId: string, options: any): Promise<Change[]> {
+    const doc = this.docs.get(docId);
+    if (!doc) return [];
+    let changes = doc.changes;
+    if (options.startAfterRev !== undefined) {
+      changes = changes.filter(c => c.rev > options.startAfterRev!);
+    }
+    // Add other filter/limit/sort logic here based on options
+    changes.sort((a, b) => a.rev - b.rev); // Ensure ascending order
+    if (options.limit) {
+      changes = changes.slice(0, options.limit);
+    }
+    return changes;
+  }
+  async saveVersion(docId: string, version: VersionMetadata): Promise<void> {
+    const doc = this.docs.get(docId);
+    if (!doc) {
+      // This case is less likely if saveChange created the doc, but handle defensively
+      console.warn(`[Store] Cannot save version for non-existent doc ${docId}`);
+      return;
+    }
+    // Simple: just add to list. A real store might index/optimize.
+    doc.versions.push(version);
+    console.log(`[Store] Saved version ${version.id} (${version.origin}) for doc ${docId}.`);
+  }
+  async listVersions(docId: string, options: any): Promise<VersionMetadata[]> {
+    const doc = this.docs.get(docId);
+    if (!doc) return [];
+    let versions = doc.versions;
+    // Apply filtering/sorting based on options (simplified)
+    if (options.origin) {
+      versions = versions.filter(v => v.origin === options.origin);
+    }
+    if (options.groupId) {
+      versions = versions.filter(v => v.groupId === options.groupId);
+    }
+    // ... other filters ...
+    versions.sort((a, b) => (options.reverse ? b.startDate - a.startDate : a.startDate - b.startDate));
+    if (options.limit) {
+      versions = versions.slice(0, options.limit);
+    }
+    return versions;
+  }
+  async loadVersionMetadata(docId: string, versionId: string): Promise<VersionMetadata | null> {
+    const doc = this.docs.get(docId);
+    return doc?.versions.find(v => v.id === versionId) ?? null;
+  }
+  async loadVersionState(docId: string, versionId: string): Promise<any | undefined> {
+    const meta = await this.loadVersionMetadata(docId, versionId);
+    return meta ? JSON.parse(JSON.stringify(meta.state)) : undefined; // Return copy
+  }
+  async loadVersionChanges(docId: string, versionId: string): Promise<Change[]> {
+    const meta = await this.loadVersionMetadata(docId, versionId);
+    return meta ? meta.changes : [];
+  }
+  async getLatestVersionMetadata(docId: string): Promise<VersionMetadata | null> {
+    const doc = this.docs.get(docId);
+    if (!doc || doc.versions.length === 0) return null;
+    // Find version with the latest endDate
+    return doc.versions.reduce(
+      (latest, current) => (!latest || current.endDate > latest.endDate ? current : latest),
+      null as VersionMetadata | null
+    );
+  }
+  // Implement BranchingStoreBackend methods if needed...
+}
+
+// --- Server Setup ---
+const store = new InMemoryStore();
+const server = new PatchServer(store);
+const app = express();
+app.use(express.json());
+
+// --- Mock Broadcast (Replace with WebSocket/SSE etc.) ---
+const clients = new Map<string, Set<any>>(); // docId -> Set<client connections>
+function broadcastChanges(docId: string, changes: Change[], senderClientId: string | null) {
+  console.log(`Broadcasting changes for ${docId} to other clients:`, changes);
+  // Implement actual broadcast logic here (e.g., WebSockets)
+  // clients.get(docId)?.forEach(client => {
+  //     if (client.id !== senderClientId) { // Don't send back to sender
+  //         client.send(JSON.stringify({ type: 'changes', docId, changes }));
+  //     }
+  // });
+}
+
+// --- API Endpoint ---
+app.post('/docs/:docId/changes', async (req, res) => {
+  const docId = req.params.docId;
+  const clientChanges: Change[] = req.body.changes;
+  const clientId = req.headers['x-client-id'] as string | null; // Example client ID header
+
+  // Basic validation
+  if (!Array.isArray(clientChanges)) {
+    return res.status(400).json({ error: 'Invalid request: expected changes array.' });
+  }
+
+  console.log(`Received ${clientChanges.length} changes for doc ${docId} from client ${clientId || 'unknown'}`);
+
+  try {
+    const committedChanges = await server.receiveChanges(docId, clientChanges);
+    console.log(`Committed ${committedChanges.length} changes for doc ${docId}, rev: ${committedChanges[0]?.rev}`);
+    res.json(committedChanges); // Send confirmation back to sender
+
+    // Broadcast to others if changes were made
+    if (committedChanges.length > 0) {
+      broadcastChanges(docId, committedChanges, clientId);
+    }
+  } catch (error: any) {
+    console.error(`Error processing changes for doc ${docId}:`, error);
+    // Use 409 Conflict for revision mismatches, 500 for others
+    const statusCode = error.message.includes('out of sync') ? 409 : 500;
+    res.status(statusCode).json({ error: error.message });
   }
 });
 
-// Get changes since last synced after sending any outstanding changes
-const response = await getJSONPatchChangesFromServer(object.getRev());
-if (response.patch && response.rev) {
-  object.receive(response.patch, response.rev);
-}
-
-// When receiving a change from the server, call receive
-// (`onReceiveChanges` is a method created by you, could use websockets or polling, etc)
-onReceiveChanges((patch, rev) => {
-  object.receive(patch, rev);
+// Endpoint to get latest state (for new clients)
+app.get('/docs/:docId', async (req, res) => {
+  const docId = req.params.docId;
+  try {
+    const { state, rev } = await server.getLatestDocumentStateAndRev(docId);
+    res.json({ state: state ?? {}, rev }); // Provide empty object if state is undefined
+  } catch (error: any) {
+    console.error(`Error fetching state for doc ${docId}:`, error);
+    res.status(500).json({ error: 'Failed to fetch document state.' });
+  }
 });
 
-// persist to storage for offline use if desired. Will persist unsynced changes made offline.
-object.subscribe((data, metadata) => {
-  localStorage.setItem(
-    'my-object-key',
-    JSON.stringify({
-      data,
-      metadata,
-    })
-  );
+const PORT = 3000;
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
 });
-
-// Auto-create empty objects
-object.change(new JSONPatch().add(`/docs/${docId}/prefs/color`, 'blue'));
 ```
 
-On the server:
+## Advanced Topics
 
-```js
-import { syncable } from '@typewriter/json-patch';
+### Offline Support & Versioning
 
-// Create a new syncable object
-const newObject = syncable({ baz: 'qux', foo: 'bar' }, undefined, { server: true });
+See [`PatchServer Versioning`](./docs/PatchServer.md#versioning) and [`HistoryManager`](./docs/HistoryManager.md).
 
-// Or load syncable object from storage or from the server
-const { data, metadata } = db.loadObject('my-object');
-const object = syncable(data, metadata, { server: true });
+### Branching and Merging
 
-// Get changes from a client
-const [returnPatch, rev, patch] = object.receive(request.body.patch);
+See [`BranchManager`](./docs/BranchManager.md).
 
-// Automatically send changes to clients when changes happen
-object.onPatch((patch, rev) => {
-  clients.forEach(client => {
-    client.send({ patch, rev });
-  });
-});
+### Custom OT Types
 
-// Auto merge received changes from the client
-onReceiveChanges((clientSocket, patch) => {
-  // Notice this is different than the client. No rev is provided. The server sets the next rev
-  const [returnPatch, rev, broadcastPatch] = object.receive(patch);
-  storeObject();
-  sendToClient(clientSocket, [returnPatch, rev]);
-  sendToClientsExcept(clientSocket, [broadcastPatch, rev]);
-});
+See [`Operational Transformation > Operation Handlers`](./docs/operational-transformation.md#operation-handlers) and the [`@text` example](../src/ot/custom/text-document.ts).
 
-// persist to storage
-function storeObject() {
-  db.put('my-object-key', {
-    data: object.get(),
-    metadata: object.getMeta(),
-  });
-}
-```
+## JSON Patch (Legacy)
+
+See [`docs/json-patch.md`](./docs/json-patch.md) for documentation on the JSON Patch features, including [`JSONPatch`](./docs/json-patch.md#jsonpatch-class) and [`createJSONPatch`](./docs/json-patch.md#createjsonpatch-helper).
+
+## Contributing
+
+Contributions are welcome! Please feel free to open issues or submit pull requests.
+
+_(TODO: Add contribution guidelines)_
 
 ## License
 
-MIT
+[MIT](./LICENSE_MIT)

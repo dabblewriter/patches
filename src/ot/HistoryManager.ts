@@ -1,4 +1,4 @@
-import type { Change, PatchStoreBackend, VersionMetadata } from './types';
+import type { Change, PatchStoreBackend, VersionMetadata } from './types.js'; // No change needed
 
 /**
  * Helps retrieve historical information (versions, changes) for a document
@@ -106,7 +106,8 @@ export class HistoryManager {
       endBeforeRev?: number;
       reverse?: boolean;
     } = {}
-  ) {
+  ): Promise<Change[]> {
+    // Added return type
     return await this.store.listChanges(this.docId, options);
   }
 }

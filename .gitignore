@@ -1,6 +1,6 @@
 .DS_STORE
 .nyc_output
-.vscode
+.obsidian
 npm-debug.log
 node_modules/
 coverage/

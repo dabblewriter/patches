@@ -2,8 +2,6 @@
 
 ![Patches the Dog](./patches.png)
 
-<!-- TODO: Add badges (npm version, build status, license, etc.) -->
-
 Patches is a TypeScript library designed for building real-time collaborative applications. It leverages Operational Transformation (OT) with a centralized server model to ensure document consistency across multiple clients.
 
 While originally including JSON Patch functionality, the focus is now on providing a robust and understandable OT system for collaborative editing scenarios.

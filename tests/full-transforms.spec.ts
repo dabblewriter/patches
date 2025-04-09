@@ -1,4 +1,4 @@
-import { Delta } from '@typewriter/delta';
+import { Delta } from '@dabble/delta';
 import { describe, expect, it } from 'vitest';
 import { JSONPatch } from '../src/index.js';
 

@@ -1,4 +1,4 @@
-import { Delta } from '@typewriter/document';
+import { Delta } from '@dabble/delta';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { JSONPatch } from '../src/json-patch/jsonPatch.js';
 import { createPatchProxy } from '../src/json-patch/patchProxy.js';

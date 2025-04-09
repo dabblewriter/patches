@@ -1,5 +1,5 @@
-import type { Op } from '@typewriter/delta';
-import { Delta } from '@typewriter/delta';
+import type { Op } from '@dabble/delta';
+import { Delta } from '@dabble/delta';
 import type { JSONPatchOpHandler } from '../../types.js';
 import { get, log, updateRemovedOps } from '../../utils/index.js';
 import { replace } from '../ops/replace.js';

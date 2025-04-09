@@ -11,7 +11,7 @@
  * all situaions. Please avoid using this syntax when using Operational Transformations.
  */
 
-import { Delta } from '@typewriter/document';
+import { Delta } from '@dabble/delta';
 import { composePatch } from '../ot/composePatch.js';
 import { invertPatch } from '../ot/invertPatch.js';
 import { transformPatch } from '../ot/transformPatch.js';

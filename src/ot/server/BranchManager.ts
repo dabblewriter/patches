@@ -1,6 +1,6 @@
 import { createId } from 'crypto-id';
+import type { Branch, BranchingStoreBackend, Change, VersionMetadata } from '../types.js'; // Correct path is likely local
 import type { PatchServer } from './PatchServer.js'; // Try adding extension
-import type { Branch, BranchingStoreBackend, Change, VersionMetadata } from './types'; // Correct path is likely local
 
 /**
  * Helps manage branches for a document. A branch is a document that is branched from another document. Its first

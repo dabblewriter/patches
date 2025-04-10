@@ -1,4 +1,4 @@
-import type { Change, PatchStoreBackend, VersionMetadata } from './types.js'; // No change needed
+import type { Change, PatchStoreBackend, VersionMetadata } from '../types.js'; // No change needed
 
 /**
  * Helps retrieve historical information (versions, changes) for a document

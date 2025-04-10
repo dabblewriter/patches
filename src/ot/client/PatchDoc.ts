@@ -1,8 +1,8 @@
 import { createId } from 'crypto-id';
 import { GetSubscribe, signal } from 'easy-signal';
-import { createJSONPatch } from '../json-patch/createJSONPatch.js';
-import type { Change, PatchSnapshot } from './types';
-import { applyChanges, rebaseChanges } from './utils';
+import { createJSONPatch } from '../../json-patch/createJSONPatch.js';
+import type { Change, PatchSnapshot } from '../types.js';
+import { applyChanges, rebaseChanges } from '../utils.js';
 
 /**
  * Represents a document synchronized using JSON patches.

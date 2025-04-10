@@ -46,7 +46,7 @@ The `PatchDoc<T>` class is the client-side representation of a collaborative doc
 You create a `PatchDoc` instance, typically after fetching the initial document state and its corresponding revision number from your server.
 
 ```typescript
-import { PatchDoc } from 'patches-ot';
+import { PatchDoc } from '@dabble/patches';
 
 interface MyDocument {
   title: string;

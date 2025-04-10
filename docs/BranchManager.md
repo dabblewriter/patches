@@ -33,7 +33,7 @@ import {
   PatchServer,
   BranchManager,
   BranchingStoreBackend, // Your backend needs to implement this
-} from 'patches-ot';
+} from '@dabble/patches';
 import { MyDatabaseStore } from './my-store'; // Your backend implementation
 
 const store = new MyDatabaseStore(/* ... */);
@@ -131,7 +131,7 @@ import {
   BranchManager,
   HistoryManager,
   MyDatabaseStore, // Your implementation
-} from 'patches-ot';
+} from '@dabble/patches';
 
 const store = new MyDatabaseStore(/* ... */);
 const server = new PatchServer(store);

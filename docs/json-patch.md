@@ -40,7 +40,7 @@ This class is the main way to work with patches programmatically.
 ### Initialization
 
 ```typescript
-import { JSONPatch, JSONPatchOp } from 'patches-ot';
+import { JSONPatch, JSONPatchOp } from '@dabble/patches';
 
 // Create an empty patch
 const patch1 = new JSONPatch();
@@ -164,7 +164,7 @@ These provide convenient methods for common custom operations included in the li
 This function provides an Immer-like API for generating patches.
 
 ```typescript
-import { createJSONPatch } from 'patches-ot';
+import { createJSONPatch } from '@dabble/patches';
 
 const myObj = { user: { name: 'Alice' }, count: 10, items: ['apple'] };
 
@@ -202,7 +202,7 @@ This is the underlying mechanism used by `createJSONPatch`. It can be used direc
 If called without arguments (or just a type parameter), it creates a proxy where property access builds a JSON Pointer path string, accessible via `toString()`.
 
 ```typescript
-import { createPatchProxy, JSONPatch } from 'patches-ot';
+import { createPatchProxy, JSONPatch } from '@dabble/patches';
 
 interface Config {
   settings: { timeout: number };
@@ -222,7 +222,7 @@ console.log(patch.ops[0].path); // /settings/timeout
 If called with a `target` object and a `JSONPatch` instance, it creates a proxy that automatically generates patch operations when modified (like within `createJSONPatch`).
 
 ```typescript
-import { createPatchProxy, JSONPatch } from 'patches-ot';
+import { createPatchProxy, JSONPatch } from '@dabble/patches';
 
 const data = { value: 1 };
 const patch = new JSONPatch();
@@ -240,7 +240,7 @@ console.log(patch.ops.length); // 1
 Applies an array of patch operations to an object immutably.
 
 ```typescript
-import { applyPatch, JSONPatchOp } from 'patches-ot';
+import { applyPatch, JSONPatchOp } from '@dabble/patches';
 
 const doc = { name: 'A', count: 1 };
 const ops: JSONPatchOp[] = [

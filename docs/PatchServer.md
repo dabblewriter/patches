@@ -38,7 +38,7 @@ Key responsibilities of `PatchServer`:
 You instantiate `PatchServer` by providing an implementation of the [`PatchStoreBackend`](./operational-transformation.md#patchstorebackend) (or [`BranchingStoreBackend`](./operational-transformation.md#branchingstorebackend) if using branching features) and optional configuration.
 
 ```typescript
-import { PatchServer, PatchServerOptions } from 'patches-ot';
+import { PatchServer, PatchServerOptions } from '@dabble/patches';
 import { MyDatabaseStore } from './my-store'; // Your backend implementation
 
 // Instantiate your backend store

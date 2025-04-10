@@ -36,7 +36,7 @@ You instantiate `HistoryManager` by providing the specific `docId` you want to q
 import {
   HistoryManager,
   PatchStoreBackend, // Your backend needs to implement this
-} from 'patches-ot';
+} from '@dabble/patches';
 import { MyDatabaseStore } from './my-store'; // Your backend implementation
 
 const store = new MyDatabaseStore(/* ... */);
@@ -184,7 +184,7 @@ See the [example in this document](#example-usage) and the [main README examples
 import {
   HistoryManager,
   MyDatabaseStore, // Your implementation
-} from 'patches-ot';
+} from '@dabble/patches';
 
 const store = new MyDatabaseStore(/* ... */);
 const docId = 'my-collaborative-doc';

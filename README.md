@@ -136,7 +136,7 @@ _(Note: These are simplified examples. Real-world implementations require proper
 ### Simple Client Setup
 
 ```typescript
-import { PatchDoc, Change } from 'patches-ot';
+import { PatchDoc, Change } from '@dabble/patches';
 
 interface MyDoc {
   text: string;
@@ -241,7 +241,7 @@ import {
   PatchStoreBackend,
   Change,
   VersionMetadata, //... other types
-} from 'patches-ot';
+} from '@dabble/patches';
 
 // --- Basic In-Memory Store (Replace with a real backend!) ---
 class InMemoryStore implements PatchStoreBackend {
@@ -282,7 +282,7 @@ class InMemoryStore implements PatchStoreBackend {
       this.docs.set(docId, doc);
     }
     // Apply change to get new state (use library's apply function)
-    const { applyChanges } = await import('patches-ot'); // Assuming exported
+    const { applyChanges } = await import('@dabble/patches'); // Assuming exported
     doc.state = applyChanges(doc.state, [change]);
     doc.rev = change.rev;
     doc.changes.push(change); // Store history of changes

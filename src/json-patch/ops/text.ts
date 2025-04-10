@@ -1,13 +1,14 @@
 import type { Op } from '@dabble/delta';
 import { Delta } from '@dabble/delta';
-import type { JSONPatchOpHandler } from '../../types.js';
+import { type JSONPatchOpHandler } from '../../types.js';
 import { get, log, updateRemovedOps } from '../../utils/index.js';
+import { Compact } from '../compactPatch.js';
 import { replace } from '../ops/replace.js';
 
 export const text: JSONPatchOpHandler = {
   like: 'replace',
 
-  apply(state, path, value, _, createMissingObjects) {
+  apply(state, path, value) {
     const delta = Array.isArray(value) ? new Delta(value) : (value as Delta);
     if (!delta || !Array.isArray(delta.ops)) {
       return 'Invalid delta';
@@ -34,29 +35,33 @@ export const text: JSONPatchOpHandler = {
       return 'Invalid text delta provided for this text document';
     }
 
-    return replace.apply(state, path, doc, _, createMissingObjects);
+    return replace.apply(state, path, doc);
   },
 
   transform(state, thisOp, otherOps) {
     log('Transforming ', otherOps, ' against "@txt"', thisOp);
 
-    return updateRemovedOps(state, thisOp.path, otherOps, false, true, thisOp.op, op => {
-      if (op.path !== thisOp.path) return null; // If a subpath, it is overwritten
-      if (!op.value || !Array.isArray(op.value)) return null; // If not a delta, it is overwritten
-      const thisDelta = new Delta(thisOp.value);
-      let otherDelta = new Delta(op.value);
+    return updateRemovedOps(state, Compact.getPath(thisOp), otherOps, false, true, Compact.getOp(thisOp), op => {
+      if (Compact.getPath(op) !== Compact.getPath(thisOp)) return null; // If a subpath, it is overwritten
+      if (!Compact.getValue(op) || !Array.isArray(Compact.getValue(op))) return null; // If not a delta, it is overwritten
+      const thisDelta = new Delta(Compact.getValue(thisOp));
+      let otherDelta = new Delta(Compact.getValue(op));
       otherDelta = thisDelta.transform(otherDelta, true);
-      return { ...op, value: otherDelta.ops };
+      return Compact.create(Compact.getOp(op), Compact.getPath(op), otherDelta.ops);
     });
   },
 
-  invert(state, { path, value }, oldValue: Delta, changedObj) {
+  invert(_state, op, oldValue: Delta, changedObj) {
+    let path = Compact.getPath(op);
+    const value = Compact.getValue(op);
     if (path.endsWith('/-')) path = path.replace('-', changedObj.length);
     const delta = new Delta(value);
-    return oldValue === undefined ? { op: 'remove', path } : { op: '@txt', path, value: delta.invert(oldValue) };
+    return oldValue === undefined
+      ? Compact.create('remove', path)
+      : Compact.create('text', path, delta.invert(oldValue));
   },
 
-  compose(state, delta1, delta2) {
+  compose(_state, delta1, delta2) {
     return new Delta(delta1).compose(new Delta(delta2));
   },
 };

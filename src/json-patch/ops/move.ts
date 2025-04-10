@@ -1,4 +1,4 @@
-import type { JSONPatchOp, JSONPatchOpHandler, State } from '../../types.js';
+import { type CompactPatchOp, type JSONPatchOpHandler, type State } from '../../types.js';
 import { getOpData } from '../../utils/getOpData.js';
 import {
   getArrayPrefixAndIndex,
@@ -13,13 +13,15 @@ import {
 } from '../../utils/index.js';
 import { getValue, pluckWithShallowCopy } from '../../utils/pluck.js';
 import { toArrayIndex } from '../../utils/toArrayIndex.js';
+import { Compact } from '../compactPatch.js';
 import { add } from './add.js';
 
 export const move: JSONPatchOpHandler = {
   like: 'move',
 
-  apply(state, path, value, from: string, createMissingObjects) {
+  apply(state, path, from: string) {
     if (path === from) return;
+    let value: any;
     const [keys, lastKey, target] = getOpData(state, from);
 
     if (target === null) {
@@ -32,23 +34,26 @@ export const move: JSONPatchOpHandler = {
         return `[op:move] invalid array index: ${path}`;
       }
       value = target[index];
-      pluckWithShallowCopy(state, keys, createMissingObjects).splice(index, 1);
+      pluckWithShallowCopy(state, keys).splice(index, 1);
     } else {
       value = target[lastKey];
-      delete pluckWithShallowCopy(state, keys, createMissingObjects)[lastKey];
+      delete pluckWithShallowCopy(state, keys)[lastKey];
     }
 
-    return add.apply(state, path, value, '', createMissingObjects);
+    return add.apply(state, path, value);
   },
 
-  invert(state, { path, from }) {
-    return { op: 'move', from: path, path: '' + from };
+  invert(_state, op) {
+    const path = Compact.getPath(op);
+    const from = Compact.getFrom(op);
+    return Compact.create('move', from, path);
   },
 
   transform(state, thisOp, otherOps) {
     log('Transforming', otherOps, 'against "move"', thisOp);
     let removed = false;
-    const { from, path } = thisOp as { from: string; path: string };
+    const path = Compact.getPath(thisOp);
+    const from = Compact.getFrom(thisOp);
     if (from === path) return otherOps;
 
     const [fromPrefix, fromIndex] = getArrayPrefixAndIndex(state, from);
@@ -72,8 +77,8 @@ export const move: JSONPatchOpHandler = {
       if (removed) {
         return otherOp;
       }
-      const opLike = getTypeLike(state, otherOp);
-      if (opLike === 'remove' && from === otherOp.path) {
+      const opLike = getTypeLike(state, Compact.getOp(otherOp));
+      if (opLike === 'remove' && from === Compact.getPath(otherOp)) {
         // Once an operation removes the moved value, the following ops should be working on the old location and not
         // not the new one. Allow the following operations (which may include add/remove) to affect the old location
         removed = true;
@@ -114,17 +119,17 @@ export const move: JSONPatchOpHandler = {
  */
 function updateMovePath(
   state: State,
-  op: JSONPatchOp,
+  op: CompactPatchOp,
   pathName: 'from' | 'path',
   from: string,
   to: string,
-  original: JSONPatchOp
-): JSONPatchOp {
-  const path = op[pathName];
+  original: CompactPatchOp
+): CompactPatchOp {
+  const path = pathName === 'from' ? Compact.getFrom(op) : Compact.getPath(op);
   if (!path) return op; // No adjustment needed on a property that doesn't exist
 
   // If a value is being added or copied to the old location it should not be adjusted
-  if (isAdd(state, op, pathName) && op.path === from) {
+  if (isAdd(state, op, pathName) && Compact.getPath(op) === from) {
     return op;
   }
 
@@ -132,10 +137,10 @@ function updateMovePath(
   // adjust the array indexes to account for this change, we aren't changing this path we JUST set. We will remove the
   // $ prefix right after we adjust arrays affected by this move.
   if (path === from || path.indexOf(from + '/') === 0) {
-    if (op === original) op = Object.assign({}, op);
+    if (op === original) op = getValue(state, op);
     log('Moving', op, 'from', from, 'to', to);
     // Add a marker "$" so this path will not be double-updated by array index updates
-    op[pathName] = '$' + path.replace(from, to);
+    Compact.update(op, { [pathName]: '$' + path.replace(from, to) });
   }
 
   return op;
@@ -150,7 +155,7 @@ function updateArrayIndexesForMove(
   prefix: string,
   fromIndex: number,
   pathIndex: number,
-  otherOps: JSONPatchOp[]
+  otherOps: CompactPatchOp[]
 ) {
   // Check ops for any that need to be replaced
   log(`Shifting array indexes for a move between ${prefix}/${fromIndex} and ${prefix}/${pathIndex}`);
@@ -161,8 +166,9 @@ function updateArrayIndexesForMove(
     const pathUpdate = updateArrayPathForMove(state, otherOp, 'path', prefix, fromIndex, pathIndex);
     if (!fromUpdate || !pathUpdate) return null;
     if (fromUpdate !== otherOp || pathUpdate !== otherOp) {
-      otherOp = { ...otherOp, path: pathUpdate.path };
-      if (fromUpdate.from) otherOp.from = fromUpdate.from;
+      otherOp = getValue(state, otherOp);
+      Compact.update(otherOp, { path: Compact.getPath(pathUpdate) }) as CompactPatchOp;
+      if (Compact.getFrom(fromUpdate)) Compact.update(otherOp, { from: Compact.getFrom(fromUpdate) });
     }
     return otherOp;
   });
@@ -173,13 +179,13 @@ function updateArrayIndexesForMove(
  */
 function updateArrayPathForMove(
   state: State,
-  otherOp: JSONPatchOp,
+  otherOp: CompactPatchOp,
   pathName: 'from' | 'path',
   prefix: string,
   from: number,
   to: number
-): JSONPatchOp {
-  const path = otherOp[pathName];
+): CompactPatchOp {
+  const path = pathName === 'from' ? Compact.getFrom(otherOp) : Compact.getPath(otherOp);
   if (!path || !path.startsWith(prefix)) return otherOp;
 
   const min = Math.min(from, to);
@@ -187,7 +193,7 @@ function updateArrayPathForMove(
   const [otherIndex, end] = getIndexAndEnd(state, path, prefix.length);
   if (otherIndex === undefined) return otherOp; // if a prop on an array is being set, for e.g.
   const isFinalProp = end === path.length;
-  const opLike = getTypeLike(state, otherOp);
+  const opLike = getTypeLike(state, Compact.getOp(otherOp));
 
   // If this index is not within the movement boundary, don't touch it
   if (otherIndex < min || otherIndex > max) {
@@ -214,7 +220,7 @@ function updateArrayPathForMove(
     } else if (otherIndex === max) {
       if (max === from) {
         // treat like a remove
-        const fromIndex = getIndexAndEnd(state, otherOp.from, prefix.length)[0];
+        const fromIndex = getIndexAndEnd(state, Compact.getFrom(otherOp), prefix.length)[0];
         if (opLike === 'move' && pathName === 'path' && to <= fromIndex && fromIndex < from) return otherOp;
         // continue
       } else {
@@ -226,20 +232,20 @@ function updateArrayPathForMove(
 
   const modifier = from === min ? -1 : 1;
   const newPath = prefix + (otherIndex + modifier) + path.slice(end);
-  return getValue(state, otherOp, pathName, newPath);
+  return Compact.update(getValue(state, otherOp), { [pathName]: newPath });
 }
 
 /**
  * Remove any move markers placed during updateMovePath. This occurs in-place since these objects have already been
  * cloned.
  */
-function removeMoveMarkers(op: JSONPatchOp) {
-  if (op.path[0] === '$') {
-    op.path = op.path.slice(1);
+function removeMoveMarkers(op: CompactPatchOp) {
+  if (Compact.getPath(op)[0] === '$') {
+    Compact.update(op, { path: Compact.getPath(op).slice(1) });
   }
-  if (op.from && op.from[0] === '$') {
-    op.from = op.from.slice(1);
+  if (Compact.getFrom(op) && Compact.getFrom(op)[0] === '$') {
+    Compact.update(op, { from: Compact.getFrom(op).slice(1) });
   }
-  if (op.from === op.path) return null;
+  if (Compact.getPath(op) === Compact.getFrom(op)) return null;
   return op;
 }

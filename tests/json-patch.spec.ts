@@ -38,30 +38,6 @@ describe('JSONPatch', () => {
     expect(obj).toEqual({ test: true, name: 'Test' });
   });
 
-  it('can test for a value on an object before making changes', () => {
-    patch.test('/test', true);
-    patch.add('/name', 'Test');
-    const apply = () => (obj = patch.apply(obj));
-    expect(apply).not.toThrow();
-    expect(obj).toEqual({ test: true, name: 'Test' });
-  });
-
-  it('can test for a value and use an object’s toJSON before making changes', () => {
-    patch.test('/test', true);
-    patch.add('/name', 'Test');
-    const apply = () => (obj = patch.apply(obj));
-    expect(apply).not.toThrow();
-    expect(obj).toEqual({ test: true, name: 'Test' });
-  });
-
-  it('can fail a patch if the test does not pass', () => {
-    patch.test('/test', false);
-    patch.add('/name', 'Test');
-    const apply = () => (obj = patch.apply(obj, { strict: true }));
-    expect(apply).toThrow();
-    expect(obj).toEqual({ test: true });
-  });
-
   it('is does not mutate objects', () => {
     patch.add('/name', 'Test');
     const newObj = patch.apply(obj);
@@ -204,7 +180,8 @@ describe('JSONPatch', () => {
   });
 
   it('throws an error when it cannot apply the patch', () => {
-    patch.add('/sub/name', 'Test');
+    obj.text = new Delta().insert('Short');
+    patch.text('/text', new Delta().retain(20).insert('Long'));
     const apply = () => (obj = patch.apply(obj, { strict: true }));
     expect(apply).toThrow();
   });
@@ -267,8 +244,8 @@ describe('JSONPatch', () => {
     it('transforms over a patch or array of ops', () => {
       const other = new JSONPatch().move('/test', '/testing');
       patch.replace('/test', true);
-      expect(other.transform(patch).ops).toEqual([{ op: 'replace', path: '/testing', value: true }]);
-      expect(other.transform(patch.ops).ops).toEqual([{ op: 'replace', path: '/testing', value: true }]);
+      expect(other.transform(patch).ops).toEqual([['=/testing', true]]);
+      expect(other.transform(patch.ops).ops).toEqual([['=/testing', true]]);
     });
 
     it('transforms soft writes', () => {
@@ -288,12 +265,6 @@ describe('JSONPatch', () => {
         test: false,
         name: 'test',
       };
-    });
-
-    it('will not invert test', () => {
-      patch.test('/test', true);
-      obj = patch.invert(inverted).apply(obj);
-      expect(obj).toEqual({ test: true });
     });
 
     it('will invert add', () => {
@@ -366,13 +337,13 @@ describe('JSONPatch', () => {
     });
 
     it('will throw an error on unknown operation', () => {
-      patch.ops.push({ op: 'unknown' as 'add', path: '/x' });
+      patch.ops.push(['%/x' as any]);
       const invert = () => (obj = patch.invert(inverted).apply(obj));
       expect(invert).toThrow('Unknown patch operation, cannot invert');
     });
 
     it('will throw an error when the base object is incorrect', () => {
-      patch.ops.push({ op: 'remove', path: '/x/y' });
+      patch.ops.push(['-/x/y']);
       const invert = () => (obj = patch.invert({}).apply(obj, { strict: true }));
       expect(invert).toThrow(
         'Patch mismatch. This patch was not applied to the provided object and cannot be inverted.'

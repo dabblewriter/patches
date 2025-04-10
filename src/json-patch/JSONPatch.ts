@@ -15,8 +15,9 @@ import { Delta } from '@dabble/delta';
 import { composePatch } from '../ot/composePatch.js';
 import { invertPatch } from '../ot/invertPatch.js';
 import { transformPatch } from '../ot/transformPatch.js';
-import type { ApplyJSONPatchOptions, JSONPatchOp, JSONPatchOpHandlerMap } from '../types.js';
+import type { ApplyJSONPatchOptions, CompactPatchOp, JSONPatchOp, JSONPatchOpHandlerMap } from '../types.js';
 import { applyPatch } from './applyPatch.js';
+import { Compact } from './compactPatch.js';
 import { bitmask } from './ops/bitmask.js';
 
 export type PathLike = string | { toString(): string };
@@ -29,14 +30,14 @@ export interface WriteOptions {
  * together which may form a single operation or transaction.
  */
 export class JSONPatch {
-  ops: JSONPatchOp[];
+  ops: CompactPatchOp[];
   custom: JSONPatchOpHandlerMap;
 
   /**
    * Create a new JSONPatch, optionally with an existing array of operations.
    */
-  constructor(ops: JSONPatchOp[] = [], custom: JSONPatchOpHandlerMap = {}) {
-    this.ops = ops;
+  constructor(ops: JSONPatchOp[] | CompactPatchOp[] = [], custom: JSONPatchOpHandlerMap = {}) {
+    this.ops = Compact.to(ops);
     this.custom = custom;
   }
 
@@ -45,18 +46,9 @@ export class JSONPatch {
     if (from !== undefined) {
       from = checkPath(from);
     }
-    const patchOp = (from ? { op, from, path } : { op, path }) as JSONPatchOp;
-    if (value !== undefined) patchOp.value = value;
-    if (soft) patchOp.soft = soft;
-    this.ops.push(patchOp);
+    const compactOp = Compact.create(op, path as string, from || value, soft);
+    this.ops.push(compactOp);
     return this;
-  }
-
-  /**
-   * Tests a value exists. If it doesn't, the patch is not applied.
-   */
-  test(path: PathLike, value: any) {
-    return this.op('test', path, value);
   }
 
   /**
@@ -64,14 +56,14 @@ export class JSONPatch {
    */
   add(path: PathLike, value: any, options?: WriteOptions) {
     if (value && value.toJSON) value = value.toJSON();
-    return this.op('add', path, value, undefined, options?.soft);
+    return this.op('+', path, value, undefined, options?.soft);
   }
 
   /**
    * Deletes the value at the given path or removes it from an array.
    */
   remove(path: PathLike) {
-    return this.op('remove', path);
+    return this.op('-', path);
   }
 
   /**
@@ -79,14 +71,14 @@ export class JSONPatch {
    */
   replace(path: PathLike, value: any, options?: WriteOptions) {
     if (value && value.toJSON) value = value.toJSON();
-    return this.op('replace', path, value, undefined, options?.soft);
+    return this.op('=', path, value, undefined, options?.soft);
   }
 
   /**
    * Copies the value at `from` to `path`.
    */
   copy(from: PathLike, to: PathLike, options?: WriteOptions) {
-    return this.op('copy', to, undefined, from, options?.soft);
+    return this.op('&', to, undefined, from, options?.soft);
   }
 
   /**
@@ -94,28 +86,28 @@ export class JSONPatch {
    */
   move(from: PathLike, to: PathLike) {
     if (from === to) return this;
-    return this.op('move', to, undefined, from);
+    return this.op('>', to, undefined, from);
   }
 
   /**
    * Increments a numeric value by 1 or the given amount.
    */
   increment(path: PathLike, value: number = 1) {
-    return this.op('@inc', path, value);
+    return this.op('^', path, value);
   }
 
   /**
    * Decrements a numeric value by 1 or the given amount.
    */
   decrement(path: PathLike, value: number = 1) {
-    return this.op('@inc', path, -value);
+    return this.op('^', path, -value);
   }
 
   /**
    * Flips a bit at the given index in a bitmask to the given value.
    */
   bit(path: PathLike, index: number, on: boolean) {
-    return this.op('@bit', path, bitmask(index, on));
+    return this.op('~', path, bitmask(index, on));
   }
 
   /**
@@ -129,7 +121,7 @@ export class JSONPatch {
     } else if (!(value instanceof Delta)) {
       throw new Error('Invalid Delta');
     }
-    return this.op('@txt', path, value);
+    return this.op('T', path, value);
   }
 
   /**
@@ -177,10 +169,10 @@ export class JSONPatch {
    * the object these operations are being applied to if available to know for sure if a numerical path is an array
    * index or object key. Otherwise, all numerical paths are treated as array indexes.
    */
-  transform(patch: JSONPatch | JSONPatchOp[], obj?: any): this {
+  transform(patch: JSONPatch | JSONPatchOp[] | CompactPatchOp[], obj?: any): this {
     const JSONPatch = this.constructor as any;
     return new JSONPatch(
-      transformPatch(obj, this.ops, Array.isArray(patch) ? patch : patch.ops, this.custom),
+      transformPatch(obj, this.ops, Array.isArray(patch) ? Compact.to(patch) : patch.ops, this.custom),
       this.custom
     );
   }
@@ -197,19 +189,19 @@ export class JSONPatch {
   /**
    * Compose/collapse patches into fewer operations.
    */
-  compose(patch?: JSONPatch | JSONPatchOp[]): this {
+  compose(patch?: JSONPatch | JSONPatchOp[] | CompactPatchOp[]): this {
     const JSONPatch = this.constructor as any;
     let ops = this.ops;
-    if (patch) ops = ops.concat(Array.isArray(patch) ? patch : patch.ops);
+    if (patch) ops = ops.concat(Array.isArray(patch) ? Compact.to(patch) : patch.ops);
     return new JSONPatch(composePatch(ops), this.custom);
   }
 
   /**
    * Add two patches together.
    */
-  concat(patch: JSONPatch | JSONPatchOp[]): this {
+  concat(patch: JSONPatch | JSONPatchOp[] | CompactPatchOp[]): this {
     const JSONPatch = this.constructor as any;
-    return new JSONPatch(this.ops.concat(Array.isArray(patch) ? patch : patch.ops), this.custom);
+    return new JSONPatch(this.ops.concat(Array.isArray(patch) ? Compact.to(patch) : patch.ops), this.custom);
   }
 
   /**
@@ -223,8 +215,8 @@ export class JSONPatch {
    * Create a new JSONPatch with the provided JSON patch operations.
    */
   static fromJSON<T>(
-    this: { new (ops?: JSONPatchOp[], types?: JSONPatchOpHandlerMap): T },
-    ops?: JSONPatchOp[],
+    this: { new (ops?: JSONPatchOp[] | CompactPatchOp[], types?: JSONPatchOpHandlerMap): T },
+    ops?: JSONPatchOp[] | CompactPatchOp[],
     types?: JSONPatchOpHandlerMap
   ): T {
     return new this(ops, types);

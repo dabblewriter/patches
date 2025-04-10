@@ -1,10 +1,10 @@
-import type { JSONPatchOp } from '../types';
+import type { CompactPatchOp } from '../types';
 
 export interface Change {
   /** Unique identifier for the change, generated client-side. */
   id: string;
   /** The patch operations. */
-  ops: JSONPatchOp[];
+  ops: CompactPatchOp[];
   /** The revision number assigned on the client to the optimistic revision and updated by the server after commit. */
   rev: number;
   /** The server revision this change was based on. Required for client->server changes. */

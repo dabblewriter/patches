@@ -1,18 +1,19 @@
-import type { JSONPatchOpHandler } from '../../types.js';
+import { JSONPatchOpHandler } from '../../types.js';
 import { deepEqual } from '../../utils/deepEqual.js';
 import { getOpData } from '../../utils/getOpData.js';
 import { log, updateRemovedOps } from '../../utils/index.js';
 import { pluckWithShallowCopy } from '../../utils/pluck.js';
 import { toArrayIndex } from '../../utils/toArrayIndex.js';
+import { Compact } from '../compactPatch.js';
 
 export const replace: JSONPatchOpHandler = {
   like: 'replace',
 
-  apply(state, path, value, _, createMissingObjects) {
+  apply(state, path, value) {
     if (typeof value === 'undefined') {
       return '[op:replace] require value, but got undefined';
     }
-    const [keys, lastKey, target] = getOpData(state, path, createMissingObjects);
+    const [keys, lastKey, target] = getOpData(state, path, true);
 
     if (target === null) {
       return `[op:replace] path not found: ${path}`;
@@ -24,26 +25,27 @@ export const replace: JSONPatchOpHandler = {
         return `[op:replace] invalid array index: ${path}`;
       }
       if (!deepEqual(target[index], value)) {
-        pluckWithShallowCopy(state, keys, createMissingObjects).splice(index, 1, value);
+        pluckWithShallowCopy(state, keys).splice(index, 1, value);
       }
     } else {
       if (!deepEqual(target[lastKey], value)) {
-        pluckWithShallowCopy(state, keys, createMissingObjects)[lastKey] = value;
+        pluckWithShallowCopy(state, keys)[lastKey] = value;
       }
     }
   },
 
-  invert(state, { path }, value, changedObj) {
+  invert(_state, op, value, changedObj) {
+    let path = Compact.getPath(op);
     if (path.endsWith('/-')) path = path.replace('-', changedObj.length);
-    return value === undefined ? { op: 'remove', path } : { op: 'replace', path, value };
+    return value === undefined ? Compact.create('remove', path) : Compact.create('replace', path, value);
   },
 
   transform(state, thisOp, otherOps) {
     log('Transforming ', otherOps, ' against "replace"', thisOp);
-    return updateRemovedOps(state, thisOp.path, otherOps);
+    return updateRemovedOps(state, Compact.getPath(thisOp), otherOps);
   },
 
-  compose(state, value1, value2) {
+  compose(_state, _value1, value2) {
     return value2;
   },
 };

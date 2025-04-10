@@ -1,18 +1,18 @@
-import type { JSONPatchOpHandler } from '../../types.js';
+import { type JSONPatchOpHandler } from '../../types.js';
 import { getOpData } from '../../utils/getOpData.js';
 import { log, transformRemove } from '../../utils/index.js';
 import { pluckWithShallowCopy } from '../../utils/pluck.js';
 import { toArrayIndex } from '../../utils/toArrayIndex.js';
+import { Compact } from '../compactPatch.js';
 
 export const remove: JSONPatchOpHandler = {
   like: 'remove',
 
-  apply(state, path: string, value, _, createMissingObjects) {
+  apply(state, path: string) {
     const [keys, lastKey, target] = getOpData(state, path);
 
     if (target === null) {
-      if (createMissingObjects) return;
-      return `[op:remove] path not found: ${path}`;
+      return;
     }
 
     if (Array.isArray(target)) {
@@ -26,12 +26,13 @@ export const remove: JSONPatchOpHandler = {
     }
   },
 
-  invert(state, { path }, value) {
-    return { op: 'add', path, value };
+  invert(_state, op, value) {
+    const path = Compact.getPath(op);
+    return Compact.create('add', path, value);
   },
 
   transform(state, thisOp, otherOps) {
     log('Transforming', otherOps, 'against "remove"', thisOp);
-    return transformRemove(state, thisOp.path, otherOps, true);
+    return transformRemove(state, Compact.getPath(thisOp), otherOps, true);
   },
 };

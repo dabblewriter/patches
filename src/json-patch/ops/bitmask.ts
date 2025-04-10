@@ -10,16 +10,16 @@ import { replace } from './replace.js';
 export const bit: JSONPatchOpHandler = {
   like: 'replace',
 
-  apply(state, path, value, _, createMissingObjects) {
-    return replace.apply(state, path, applyBitmask(get(state, path) || 0, value || 0), '', createMissingObjects);
+  apply(state, path, value) {
+    return replace.apply(state, path, applyBitmask(get(state, path) || 0, value || 0));
   },
-  transform(state, thisOp, otherOps) {
-    return updateRemovedOps(state, thisOp.path, otherOps, false, true);
+  transform(state, [, path], otherOps) {
+    return updateRemovedOps(state, path, otherOps, false, true);
   },
   invert(state, op, value, changedObj, isIndex) {
     return replace.invert(state, op, value, changedObj, isIndex);
   },
-  compose(state, value1, value2) {
+  compose(_state, value1, value2) {
     return combineBitmasks(value1, value2);
   },
 };

@@ -1,34 +1,36 @@
-import type { ApplyJSONPatchOptions, JSONPatchOp, JSONPatchOpHandlerMap } from '../types.js';
+import type { ApplyJSONPatchOptions, CompactPatch, JSONPatchOpHandlerMap } from '../types.js';
 import { exit } from '../utils/exit.js';
 import { getType } from '../utils/getType.js';
+import { Compact } from './compactPatch.js';
 import { getTypes } from './ops/index.js';
 import { runWithObject } from './state.js';
 
 export function applyPatch(
   object: any,
-  patches: JSONPatchOp[],
+  patch: CompactPatch,
   opts: ApplyJSONPatchOptions = {},
   custom?: JSONPatchOpHandlerMap
 ) {
-  if (patches.length === 0) {
+  if (patch.length === 0) {
     return object;
   }
   if (opts.atPath) {
-    patches = patches.map(op => ({ ...op, path: opts.atPath + op.path }));
+    patch = patch.map(op => [op[0][0] + opts.atPath + op[0].slice(1), ...op.slice(1)]) as CompactPatch;
   }
 
   const types = getTypes(custom);
-  return runWithObject(object, types, patches.length > 1, state => {
-    for (let i = 0, imax = patches.length; i < imax; i++) {
-      const patch = patches[i];
-      const handler = getType(state, patch)?.apply;
-      const error = handler
-        ? handler(state, '' + patch.path, patch.value, '' + patch.from, opts.createMissingObjects)
-        : `[op:${patch.op}] unknown`;
+  return runWithObject(object, types, patch.length > 1, state => {
+    for (let i = 0, imax = patch.length; i < imax; i++) {
+      const op = Compact.getOp(patch[i]);
+      const path = Compact.getPath(patch[i]);
+      const value = Compact.getValue(patch[i]);
+      const from = Compact.getFrom(patch[i]);
+      const handler = getType(state, op[0][0])?.apply;
+      const error = handler ? handler(state, path, from || value) : `[op:${op}] unknown`;
       if (error) {
-        if ((!opts.silent && !opts.strict) || opts.silent === false) console.error(error, patch);
+        if ((!opts.silent && !opts.strict) || opts.silent === false) console.error(error, op);
         if (opts.strict) throw new TypeError(error);
-        if (opts.rigid) return exit(state, object, patch, opts);
+        if (opts.rigid) return exit(state, object, patch[i], opts);
       }
     }
   });

@@ -1,5 +1,6 @@
 import type { JSONPatchOpHandler } from '../../types.js';
 import { get, updateRemovedOps } from '../../utils/index.js';
+import { Compact } from '../compactPatch.js';
 import { replace } from './replace.js';
 
 /**
@@ -8,16 +9,17 @@ import { replace } from './replace.js';
 export const increment: JSONPatchOpHandler = {
   like: 'replace',
 
-  apply(state, path, value, _, createMissingObjects) {
-    return replace.apply(state, path, (get(state, path) || 0) + value, '', createMissingObjects);
+  apply(state, path, value) {
+    return replace.apply(state, path, (get(state, path) || 0) + value);
   },
-  transform(state, thisOp, otherOps) {
-    return updateRemovedOps(state, thisOp.path, otherOps, false, true);
+  transform(state, op, otherOps) {
+    const path = Compact.getPath(op);
+    return updateRemovedOps(state, path, otherOps, false, true);
   },
   invert(state, op, value, changedObj, isIndex) {
     return replace.invert(state, op, value, changedObj, isIndex);
   },
-  compose(state, value1, value2) {
+  compose(_state, value1, value2) {
     return value1 + value2;
   },
 };

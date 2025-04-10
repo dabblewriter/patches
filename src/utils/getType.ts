@@ -1,9 +1,9 @@
-import type { JSONPatchOp, State } from '../types.js';
+import type { State } from '../types.js';
 
-export function getType(state: State, patch: JSONPatchOp) {
-  return state.types?.[patch.op];
+export function getType(state: State, opName: string) {
+  return state.types?.[opName];
 }
 
-export function getTypeLike(state: State, patch: JSONPatchOp) {
-  return state.types?.[patch.op]?.like;
+export function getTypeLike(state: State, opName: string) {
+  return state.types?.[opName]?.like;
 }

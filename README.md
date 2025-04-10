@@ -1,6 +1,6 @@
 # Patches - A friendly and loyal realtime library using operational transformations
 
-<img src="./patches.png" alt="Patches the Dog" style="max-width: 300px;">
+<img src="./patches.png" alt="Patches the Dog" style="width: 300px;">
 
 Patches is a TypeScript library designed for building real-time collaborative applications. It leverages Operational Transformation (OT) with a centralized server model to ensure document consistency across multiple clients.
 

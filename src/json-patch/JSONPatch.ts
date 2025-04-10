@@ -37,7 +37,7 @@ export class JSONPatch {
    * Create a new JSONPatch, optionally with an existing array of operations.
    */
   constructor(ops: JSONPatchOp[] | CompactPatchOp[] = [], custom: JSONPatchOpHandlerMap = {}) {
-    this.ops = Compact.to(ops);
+    this.ops = Compact.from(ops);
     this.custom = custom;
   }
 
@@ -172,7 +172,7 @@ export class JSONPatch {
   transform(patch: JSONPatch | JSONPatchOp[] | CompactPatchOp[], obj?: any): this {
     const JSONPatch = this.constructor as any;
     return new JSONPatch(
-      transformPatch(obj, this.ops, Array.isArray(patch) ? Compact.to(patch) : patch.ops, this.custom),
+      transformPatch(obj, this.ops, Array.isArray(patch) ? Compact.from(patch) : patch.ops, this.custom),
       this.custom
     );
   }
@@ -192,7 +192,7 @@ export class JSONPatch {
   compose(patch?: JSONPatch | JSONPatchOp[] | CompactPatchOp[]): this {
     const JSONPatch = this.constructor as any;
     let ops = this.ops;
-    if (patch) ops = ops.concat(Array.isArray(patch) ? Compact.to(patch) : patch.ops);
+    if (patch) ops = ops.concat(Array.isArray(patch) ? Compact.from(patch) : patch.ops);
     return new JSONPatch(composePatch(ops), this.custom);
   }
 
@@ -201,7 +201,7 @@ export class JSONPatch {
    */
   concat(patch: JSONPatch | JSONPatchOp[] | CompactPatchOp[]): this {
     const JSONPatch = this.constructor as any;
-    return new JSONPatch(this.ops.concat(Array.isArray(patch) ? Compact.to(patch) : patch.ops), this.custom);
+    return new JSONPatch(this.ops.concat(Array.isArray(patch) ? Compact.from(patch) : patch.ops), this.custom);
   }
 
   /**

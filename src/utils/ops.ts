@@ -38,9 +38,9 @@ export function mapAndFilterOps(
     }
     let value = iterator(original, i, breakAfter);
 
-    if (value && !Compact.is(value) && Compact.getFrom(value) === Compact.getPath(value)) value = null;
+    if (value && !Compact.isCompact(value) && Compact.getFrom(value) === Compact.getPath(value)) value = null;
     if (!changed && value !== original) changed = true;
-    if (Compact.is(value)) mapped.push(...value);
+    if (Compact.isCompact(value)) mapped.push(...value);
     else if (value) mapped.push(value as CompactPatchOp);
     if (shouldBreak) {
       if (keepRest) mapped.push(...ops.slice(i + 1));

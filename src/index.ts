@@ -1,4 +1,5 @@
 export { applyPatch } from './json-patch/applyPatch.js';
+export * from './json-patch/compactPatch.js';
 export { applyBitmask, bitmask, combineBitmasks } from './json-patch/ops/bitmask.js';
 export * as defaultOps from './json-patch/ops/index.js';
 export { composePatch } from './ot/composePatch.js';

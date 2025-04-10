@@ -12,7 +12,7 @@ export const Compact = {
   /**
    * Checks if an array is already a CompactPatchOp array
    */
-  is(ops: any): ops is CompactPatchOp[] {
+  isCompact(ops: any): ops is CompactPatchOp[] {
     if (!Array.isArray(ops)) return false;
     if (ops.length === 0) return true;
     const firstOp = ops[0];
@@ -23,16 +23,16 @@ export const Compact = {
    * Converts an array of operations to CompactPatchOp format
    * If the input is already in CompactPatchOp format, it is returned as-is
    */
-  to(ops: JSONPatchOp[] | CompactPatchOp[]): CompactPatchOp[] {
-    return Compact.is(ops) ? ops : ops.map(jsonPatchOpToCompact);
+  from(ops: JSONPatchOp[] | CompactPatchOp[]): CompactPatchOp[] {
+    return Compact.isCompact(ops) ? ops : ops.map(jsonPatchOpToCompact);
   },
 
   /**
    * Converts an array of operations to JSONPatchOp format
    * If the input is already in JSONPatchOp format, it is returned as-is
    */
-  from(ops: JSONPatchOp[] | CompactPatchOp[]): JSONPatchOp[] {
-    return !Compact.is(ops) ? ops : ops.map(compactPatchOpToJSON);
+  toJSON(ops: JSONPatchOp[] | CompactPatchOp[]): JSONPatchOp[] {
+    return !Compact.isCompact(ops) ? ops : ops.map(compactPatchOpToJSON);
   },
 
   /**

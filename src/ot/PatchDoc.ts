@@ -97,7 +97,7 @@ export class PatchDoc<T extends object> {
    * @param mutator Function modifying a draft state.
    * @returns The generated Change object or null if no changes occurred.
    */
-  update(mutator: (draft: T) => void): Change | null {
+  change(mutator: (draft: T) => void): Change | null {
     const patch = createJSONPatch(this._state, mutator);
     if (patch.ops.length === 0) {
       return null;

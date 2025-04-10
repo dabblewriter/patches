@@ -6,13 +6,16 @@ A friendly realtime library based on operational transformations.
 
 Patches is a TypeScript library designed for building real-time collaborative applications. It leverages Operational Transformation (OT) with a centralized server model to ensure document consistency across multiple clients. It supports versioning, offline work, branching, and can handle very large and very long-lived documents.
 
-When working with a document in Patches, you are working with regular JavaScript data types. If it is supported by JSON, you can have it in your document. The `state` in your `doc.state` is your immutable data. When you modify your document with `doc.update(state => state.prop = 'new value')` the doc will get a new immutable `state` object with those changes applied.
+When working with a document in Patches, you are working with regular JavaScript data types. If it is supported by JSON, you can have it in your document. The `state` in your `doc.state` is your immutable data. When you modify your document with `doc.change(state => state.prop = 'new value')` the doc will get a new immutable `state` object with those changes applied.
 
 ## Table of Contents
 
 - [Why Operational Transformations?](#why-operational-transformations)
 - [Key Concepts](#key-concepts)
 - [Installation](#installation)
+- [Getting Started](#getting-started)
+  - [Client Example](#client-example)
+  - [Server Example](#server-example)
 - [Core Components](#core-components)
   - [PatchDoc](#patchdoc)
   - [PatchServer](#patchserver)
@@ -41,7 +44,7 @@ When working with a document in Patches, you are working with regular JavaScript
 **What about Y.js?**
 For those who may want to let us know that Y.js can handle large documents, we did run tests ourselves. We were impressed with what Y.js offers and were hopeful it would work for us. We prefer to focus on the user experience than on our syncing library. However, it was not to be.
 
-Our longest project contains over 480k operations in it. 😳 And considering we save written text in 30-second chunks, not character-by-character, you can start to understand how *extra* some of our customers are in their writing. That project took a few hours to re-create in Y.js from our OT patches, ~4 seconds to load in an optimized, GCed Y.js doc on a fast Mac Studio, and ~20ms to add a new change to it. Compare that to our (this) OT library which takes 1-2ms to load the doc and 0.2ms to apply a new change to it. As projects grow larger or longer, OT's performance remains constant and CRDT's diminish. For _most_ use-cases CRDTs may be better, but if you have very large—or more importantly long-lived (many changes over time)—documents, you may find OT a better choice.
+Our longest project contains over 480k operations in it. 😳 And considering we save written text in 30-second chunks, not character-by-character, you can start to understand how _extra_ some of our customers are in their writing. That project took a few hours to re-create in Y.js from our OT patches, ~4 seconds to load in an optimized, GCed Y.js doc on a fast Mac Studio, and ~20ms to add a new change to it. Compare that to our (this) OT library which takes 1-2ms to load the doc and 0.2ms to apply a new change to it. As projects grow larger or longer, OT's performance remains constant and CRDT's diminish. For _most_ use-cases CRDTs may be better, but if you have very large—or more importantly long-lived (many changes over time)—documents, you may find OT a better choice.
 
 ## Key Concepts
 
@@ -51,16 +54,16 @@ Our longest project contains over 480k operations in it. 😳 And considering we
 - **Client-Server Communication:** Clients send batches of changes (`Change` objects) tagged with the server revision they were based on (`baseRev`). The server transforms these changes, applies them, assigns a new revision number, and broadcasts the committed change back to clients.
 
 **Why Centralized?**
-There are many papers and algorithms for OT. There are problems—edge-cases—with those that don't rely on a central authority. To simplify, we use an algorithm that only transforms operations in one direction, rather than in 2. It is more like a git *rebase*. This method was inspired by [Marijn Haverbeke’s article](https://marijnhaverbeke.nl/blog/collaborative-editing.html) about the topic, and we originally had the server reject changes if new ones came in before them and require the client to transform (rebase) them and resubmit. This comes with a theoretical downside, however. Slow connections and quickly changing documents may keep slower clients resubmitting over and over and never committing. For example, if you had an OT document that tracked all the mouse movements of every client connected to a document, a slow client might have severe jitter while it tries to commit its mouse position. I wouldn't suggest using OT for this use-case, but as I said, it is a theoretical downside. So we have modified our approach to make the server do the transform and commit, sending back any new changes *and* the transformed submitted ones for the client to apply. This ensures all clients "get equal time with the server", even with slow connections.
+There are many papers and algorithms for OT. There are problems—edge-cases—with those that don't rely on a central authority. To simplify, we use an algorithm that only transforms operations in one direction, rather than in 2. It is more like a git _rebase_. This method was inspired by [Marijn Haverbeke’s article](https://marijnhaverbeke.nl/blog/collaborative-editing.html) about the topic, and we originally had the server reject changes if new ones came in before them and require the client to transform (rebase) them and resubmit. This comes with a theoretical downside, however. Slow connections and quickly changing documents may keep slower clients resubmitting over and over and never committing. For example, if you had an OT document that tracked all the mouse movements of every client connected to a document, a slow client might have severe jitter while it tries to commit its mouse position. I wouldn't suggest using OT for this use-case, but as I said, it is a theoretical downside. So we have modified our approach to make the server do the transform and commit, sending back any new changes _and_ the transformed submitted ones for the client to apply. This ensures all clients "get equal time with the server", even with slow connections.
 
 **Snapshots**
 OT documents are essentially an array of changes. To create the in-memory state of the document, the `doc.state` that you view, you must replay each change from the first to the last. You may recognize a problem here. For long documents (like ones with 480k changes), this could take some time. For this reason, OT will snapshot the data every X number of changes (200, 500, etc). This allows you to grab the latest snapshot and then any changes after it was created and replay those change on top of the snapshot to get the latest state. This is what allows OT to have consistent performance over time.
 
 **Versioning as Snapshots**
-Most realtime collaborative documents are accessed and changed in bursts—user sessions—where a person sits down to write, design, edit, whiteboard, etc. Most of these use-cases benefit from "versioning" features where the user can go back in time to see old versions of their project. Patches combines the concept of snapshots and versions. Instead of using X number of changes to decide when to create a snapshot, Patches creates a new versions/snapshots after there is more than 30 minutes between any 2 changes. Some versions or snapshots may only reflect 1 change. Others may reflect 100s. As long as your document isn't being constantly updated, the requirement of snapshots turns into a feature you can provide your users. *If you have an [IoT](https://en.wikipedia.org/wiki/Internet_of_things) use-case or something similar where there is no break to create versions, we'd be happy for a pull request that allows Patches to support both. But we didn't want to make the code more complex for something that may not be used.*
+Most realtime collaborative documents are accessed and changed in bursts—user sessions—where a person sits down to write, design, edit, whiteboard, etc. Most of these use-cases benefit from "versioning" features where the user can go back in time to see old versions of their project. Patches combines the concept of snapshots and versions. Instead of using X number of changes to decide when to create a snapshot, Patches creates a new versions/snapshots after there is more than 30 minutes between any 2 changes. Some versions or snapshots may only reflect 1 change. Others may reflect 100s. As long as your document isn't being constantly updated, the requirement of snapshots turns into a feature you can provide your users. _If you have an [IoT](https://en.wikipedia.org/wiki/Internet_of_things) use-case or something similar where there is no break to create versions, we'd be happy for a pull request that allows Patches to support both. But we didn't want to make the code more complex for something that may not be used._
 
 **Immutable State**
-Patches uses immutable data. That is, it uses gentleman's (and lady's) immutability, meaning, you *shouldn't* change the structure, but for performance the objects aren't frozen. Each change creates a new object in memory, keeping the old objects that didn't change and replacing only those that did. There are [articles](https://www.freecodecamp.org/news/immutable-javascript-improve-application-performance/) [about](http://www.cowtowncoder.com/blog/archives/2010/08/entry_409.html) the [benefits](https://medium.com/@mohitgadhavi1/the-power-of-immutability-improving-javascript-performance-and-code-quality-96d82134d8da) of using immutable data, but suffice it to say, Patches assumes you won't be changing the state data outside of the `doc.update(stateProxy => {...})` method (which uses a proxy, BTW, and does not operate on the state directly).
+Patches uses immutable data. That is, it uses gentleman's (and lady's) immutability, meaning, you _shouldn't_ change the structure, but for performance the objects aren't frozen. Each change creates a new object in memory, keeping the old objects that didn't change and replacing only those that did. There are [articles](https://www.freecodecamp.org/news/immutable-javascript-improve-application-performance/) [about](http://www.cowtowncoder.com/blog/archives/2010/08/entry_409.html) the [benefits](https://medium.com/@mohitgadhavi1/the-power-of-immutability-improving-javascript-performance-and-code-quality-96d82134d8da) of using immutable data, but suffice it to say, Patches assumes you won't be changing the state data outside of the `doc.change(stateProxy => {...})` method (which uses a proxy, BTW, and does not operate on the state directly).
 
 ## Installation
 
@@ -69,6 +72,133 @@ npm install @dabble/patches
 # or
 yarn add @dabble/patches
 ```
+
+## Getting Started
+
+Here's a quick overview of how to set up a basic client and server using Patches. These examples assume you have a way to communicate changes between the client and server (e.g., WebSockets, HTTP polling).
+
+_(Note: These are simplified examples. Real-world implementations require proper error handling, network communication, authentication, and a persistent backend store.)_
+
+### Client Example
+
+This shows how to initialize `PatchDoc`, make local changes, and handle sending/receiving updates.
+
+```typescript
+import { PatchDoc, Change } from '@dabble/patches';
+
+interface MyDoc {
+  text: string;
+  count: number;
+}
+
+const patchDoc = new PatchDoc<MyDoc>();
+
+// React to Updates (e.g., update UI)
+patchDoc.onUpdate(newState => {
+  console.log('Document updated:', newState);
+  // Update your UI here
+});
+
+// Make Local Changes
+patchDoc.change(draft => {
+  draft.text = 'Hello World!';
+  draft.count += 1;
+});
+
+// Triggered after local changes occur
+patchDoc.onChange(change => {
+  syncWithServer();
+});
+
+// Or Trigger Sync Periodically or On Events
+// setInterval(syncWithServer, 5000); // Example: sync every 5 seconds
+// syncWithServer(); // Initial sync
+
+// Syncing Logic (Simplified)
+async function syncWithServer() {
+  // 1. Get local changes to send
+  const changesToSend = patchDoc.getUpdatesForServer();
+  if (changesToSend.length > 0) {
+    try {
+      // 2. Send changes via your network layer (e.g., fetch, WebSocket)
+      //    Replace 'sendChangesToServer' with your actual implementation
+      const serverCommit = await sendChangesToServer(initialDocId, changesToSend);
+      // 3. Apply server's confirmation
+      patchDoc.applyServerConfirmation(serverCommit);
+    } catch (error) {
+      console.error('Error sending changes:', error);
+      // Handle error (e.g., retry, show message)
+    }
+  }
+
+  // 4. Receive external changes from server (e.g., via WebSocket listener)
+  //    Replace 'checkForServerUpdates' with your actual implementation
+  const externalChanges = await checkForServerUpdates(initialDocId, patchDoc.rev);
+  if (externalChanges && externalChanges.length > 0) {
+    try {
+      patchDoc.applyExternalServerUpdate(externalChanges);
+    } catch (error) {
+      console.error('Error applying external changes:', error);
+      // Handle error (potentially requires full resync)
+    }
+  }
+}
+```
+
+### Server Example
+
+This outlines a basic Express server using `PatchServer` with an in-memory store.
+
+```typescript
+import express from 'express';
+import { PatchServer, PatchStoreBackend, Change } from '@dabble/patches';
+
+// Server Setup
+const store = new InMemoryStore(); // Fictional in-memory backend, use a database
+const server = new PatchServer(store);
+const app = express();
+app.use(express.json());
+
+// Endpoint to receive changes
+app.post('/docs/:docId/changes', async (req, res) => {
+  const docId = req.params.docId;
+  const clientChanges: Change[] = req.body.changes;
+
+  if (!Array.isArray(clientChanges)) {
+    return res.status(400).json({ error: 'Invalid request' });
+  }
+
+  try {
+    // Process incoming changes
+    const committedChanges = await server.receiveChanges(docId, clientChanges);
+    // Send confirmation back to the sender
+    res.json(committedChanges);
+    // Broadcast committed changes to other connected clients (via WebSockets, etc.)
+    // broadcastChanges(docId, committedChanges, req.headers['x-client-id']);
+  } catch (error: any) {
+    console.error(`Error processing changes for ${docId}:`, error);
+    const statusCode = error.message.includes('out of sync') ? 409 : 500;
+    res.status(statusCode).json({ error: error.message });
+  }
+});
+
+// Endpoint to get initial state
+app.get('/docs/:docId', async (req, res) => {
+  const docId = req.params.docId;
+  try {
+    const { state, rev } = await server.getLatestDocumentStateAndRev(docId);
+    res.json({ state: state ?? {}, rev }); // Default to empty obj if new
+  } catch (error) {
+    console.error(`Error fetching state for ${docId}:`, error);
+    res.status(500).json({ error: 'Failed to fetch document state.' });
+  }
+});
+
+const PORT = 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+```
+
+For more detailed explanations and advanced features, dive into the [Core Components](#core-components) and [Examples](#examples) sections.
 
 ## Core Components
 
@@ -82,7 +212,7 @@ These are the main classes you'll interact with when building a collaborative ap
 
 This is what you'll be working with on the client in your app. It is the client-side view of a collaborative document. You can check out [`docs/operational-transformation.md#patchdoc`](./docs/operational-transformation.md#patchdoc) to learn more about its role in the OT flow.
 
-- **Local State Management:** Maintains the *committed* state (last known server state), sending changes (awaiting server confirmation), and pending changes (local edits not yet sent).
+- **Local State Management:** Maintains the _committed_ state (last known server state), sending changes (awaiting server confirmation), and pending changes (local edits not yet sent).
 - **Optimistic Updates:** Applies local changes immediately for a responsive UI.
 - **Synchronization:** Implements the client-side OT logic:
   - Sends pending changes to the server (`getUpdatesForServer`).
@@ -147,7 +277,7 @@ See [`docs/operational-transformation.md#backend-store-interface`](./docs/operat
 
 1.  **Initialize `PatchDoc`:** Create an instance. See [`docs/PatchDoc.md#initialization`](./docs/PatchDoc.md#initialization).
 2.  **Subscribe to Updates:** Use [`doc.onUpdate`](./docs/PatchDoc.md#onupdate).
-3.  **Make Local Changes:** Use [`doc.update()`](./docs/PatchDoc.md#update).
+3.  **Make Local Changes:** Use [`doc.change()`](./docs/PatchDoc.md#update).
 4.  **Send Changes:** Use [`doc.getUpdatesForServer()`](./docs/PatchDoc.md#getupdatesforserver) and [`doc.applyServerConfirmation()`](./docs/PatchDoc.md#applyserverconfirmation).
 5.  **Receive Server Changes:** Use [`doc.applyExternalServerUpdate()`](./docs/PatchDoc.md#applyexternalserverupdate).
 
@@ -201,7 +331,7 @@ patchDoc.onUpdate(newState => {
 
 // --- Making a Local Change ---
 function handleTextInput(newText: string) {
-  patchDoc.update(draft => {
+  patchDoc.change(draft => {
     draft.text = newText;
   });
   // Trigger sending changes (e.g., debounced)
@@ -209,7 +339,7 @@ function handleTextInput(newText: string) {
 }
 
 function handleIncrement() {
-  patchDoc.update(draft => {
+  patchDoc.change(draft => {
     draft.count = (draft.count || 0) + 1;
   });
   sendLocalChanges();

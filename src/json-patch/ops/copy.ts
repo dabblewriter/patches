@@ -1,7 +1,6 @@
 import type { JSONPatchOpHandler } from '../../types.js';
 import { getOpData } from '../../utils/getOpData.js';
 import { isArrayPath, log, updateArrayIndexes, updateRemovedOps } from '../../utils/index.js';
-import { Compact } from '../compactPatch.js';
 import { add } from './add.js';
 
 export const copy: JSONPatchOpHandler = {
@@ -17,23 +16,21 @@ export const copy: JSONPatchOpHandler = {
     return add.apply(state, path, target[lastKey]);
   },
 
-  invert(_state, op, value, changedObj, isIndex) {
-    const path = Compact.getPath(op);
-    if (path.endsWith('/-')) return Compact.create('remove', path.replace('-', changedObj.length));
-    else if (isIndex) return Compact.create('remove', path);
-    return value === undefined ? Compact.create('remove', path) : Compact.create('replace', path, value);
+  invert(_state, { path }, value, changedObj, isIndex) {
+    if (path.endsWith('/-')) return { op: 'remove', path: path.replace('-', changedObj.length) };
+    else if (isIndex) return { op: 'remove', path };
+    return value === undefined ? { op: 'remove', path } : { op: 'replace', path, value };
   },
 
   transform(state, thisOp, otherOps) {
     log('Transforming', otherOps, 'against "add"', thisOp);
-    const path = Compact.getPath(thisOp);
 
-    if (isArrayPath(path, state)) {
+    if (isArrayPath(thisOp.path, state)) {
       // Adjust any operations on the same array by 1 to account for this new entry
-      return updateArrayIndexes(state, path, otherOps, 1);
+      return updateArrayIndexes(state, thisOp.path, otherOps, 1);
     } else {
       // Remove anything that was done at this path since it is being overwritten
-      return updateRemovedOps(state, path, otherOps);
+      return updateRemovedOps(state, thisOp.path, otherOps);
     }
   },
 };

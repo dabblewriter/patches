@@ -11,10 +11,9 @@
  * all situaions. Please avoid using this syntax when using Operational Transformations.
  */
 
-import { Compact } from '../json-patch/compactPatch.js';
 import { getTypes } from '../json-patch/ops/index.js';
 import { runWithObject } from '../json-patch/state.js';
-import type { CompactPatchOp, JSONPatchOpHandlerMap } from '../types.js';
+import type { JSONPatchOp, JSONPatchOpHandlerMap } from '../types.js';
 import { getType } from '../utils/getType.js';
 import { log } from '../utils/log.js';
 
@@ -25,30 +24,19 @@ import { log } from '../utils/log.js';
  */
 export function transformPatch(
   obj: any,
-  thisOps: CompactPatchOp[],
-  otherOps: CompactPatchOp[],
+  thisOps: JSONPatchOp[],
+  otherOps: JSONPatchOp[],
   custom?: JSONPatchOpHandlerMap
-): CompactPatchOp[] {
+): JSONPatchOp[] {
   const types = getTypes(custom);
-  if (!Compact.validate(thisOps)) {
-    throw new Error('Invalid argument "thisOps" provided to transformPatch');
-  }
-  if (!Compact.validate(otherOps)) {
-    throw new Error('Invalid argument "otherOps" provided to transformPatch');
-  }
-
   return runWithObject(obj, types, false, state => {
-    return thisOps.reduce((otherOps: CompactPatchOp[], thisOp: CompactPatchOp) => {
+    return thisOps.reduce((otherOps: JSONPatchOp[], thisOp: JSONPatchOp) => {
       // transform ops with patch operation
-      const opName = Compact.getOp(thisOp);
-      const handler = getType(state, opName)?.transform;
+      const handler = getType(state, thisOp)?.transform;
       if (typeof handler === 'function') {
         otherOps = handler(state, thisOp, otherOps);
-        if (!Compact.validate(otherOps)) {
-          throw new Error('Invalid result from transform function for op ' + opName);
-        }
       } else {
-        log('No function to transform against for', opName);
+        log('No function to transform against for', thisOp.op);
       }
 
       return otherOps;

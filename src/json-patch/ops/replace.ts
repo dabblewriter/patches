@@ -1,10 +1,9 @@
-import { JSONPatchOpHandler } from '../../types.js';
+import type { JSONPatchOpHandler } from '../../types.js';
 import { deepEqual } from '../../utils/deepEqual.js';
 import { getOpData } from '../../utils/getOpData.js';
 import { log, updateRemovedOps } from '../../utils/index.js';
 import { pluckWithShallowCopy } from '../../utils/pluck.js';
 import { toArrayIndex } from '../../utils/toArrayIndex.js';
-import { Compact } from '../compactPatch.js';
 
 export const replace: JSONPatchOpHandler = {
   like: 'replace',
@@ -25,24 +24,23 @@ export const replace: JSONPatchOpHandler = {
         return `[op:replace] invalid array index: ${path}`;
       }
       if (!deepEqual(target[index], value)) {
-        pluckWithShallowCopy(state, keys).splice(index, 1, value);
+        pluckWithShallowCopy(state, keys, true).splice(index, 1, value);
       }
     } else {
       if (!deepEqual(target[lastKey], value)) {
-        pluckWithShallowCopy(state, keys)[lastKey] = value;
+        pluckWithShallowCopy(state, keys, true)[lastKey] = value;
       }
     }
   },
 
-  invert(_state, op, value, changedObj) {
-    let path = Compact.getPath(op);
+  invert(_state, { path }, value, changedObj) {
     if (path.endsWith('/-')) path = path.replace('-', changedObj.length);
-    return value === undefined ? Compact.create('remove', path) : Compact.create('replace', path, value);
+    return value === undefined ? { op: 'remove', path } : { op: 'replace', path, value };
   },
 
   transform(state, thisOp, otherOps) {
     log('Transforming ', otherOps, ' against "replace"', thisOp);
-    return updateRemovedOps(state, Compact.getPath(thisOp), otherOps);
+    return updateRemovedOps(state, thisOp.path, otherOps);
   },
 
   compose(_state, _value1, value2) {

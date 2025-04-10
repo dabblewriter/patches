@@ -11,7 +11,6 @@ import {
 } from '../../utils/index.js';
 import { pluckWithShallowCopy } from '../../utils/pluck.js';
 import { toArrayIndex } from '../../utils/toArrayIndex.js';
-import { Compact } from '../compactPatch.js';
 
 export const add: JSONPatchOpHandler = {
   like: 'add',
@@ -31,36 +30,33 @@ export const add: JSONPatchOpHandler = {
       if (target.length < index) {
         return `[op:add] invalid array index: ${path}`;
       }
-      pluckWithShallowCopy(state, keys).splice(index, 0, value);
+      pluckWithShallowCopy(state, keys, true).splice(index, 0, value);
     } else {
       if (!deepEqual(target[lastKey], value)) {
-        pluckWithShallowCopy(state, keys)[lastKey] = value;
+        pluckWithShallowCopy(state, keys, true)[lastKey] = value;
       }
     }
   },
 
-  invert(_state, op, value, changedObj, isIndex) {
-    const path = Compact.getPath(op);
-    if (path.endsWith('/-')) return Compact.create('remove', path.replace('-', changedObj.length));
-    else if (isIndex) return Compact.create('remove', path);
-    return value === undefined ? Compact.create('remove', path) : Compact.create('replace', path, value);
+  invert(_state, { path }, value, changedObj, isIndex) {
+    if (path.endsWith('/-')) return { op: 'remove', path: path.replace('-', changedObj.length) };
+    else if (isIndex) return { op: 'remove', path };
+    return value === undefined ? { op: 'remove', path } : { op: 'replace', path, value };
   },
 
   transform(state, thisOp, otherOps) {
     log('Transforming', otherOps, 'against "add"', thisOp);
-    const thisPath = Compact.getPath(thisOp);
-    const thisValue = Compact.getValue(thisOp);
 
-    if (isArrayPath(thisPath, state)) {
+    if (isArrayPath(thisOp.path, state)) {
       // Adjust any operations on the same array by 1 to account for this new entry
-      return updateArrayIndexes(state, thisPath, otherOps, 1);
-    } else if (isEmptyObject(thisValue)) {
+      return updateArrayIndexes(state, thisOp.path, otherOps, 1);
+    } else if (isEmptyObject(thisOp.value)) {
       // Treat empty objects special. If two empty objects are added to the same location, don't overwrite the existing
       // one, allowing for the merging of maps together which did not exist before
-      return updateSoftWrites(thisPath, otherOps);
+      return updateSoftWrites(thisOp.path, otherOps);
     } else {
       // Remove anything that was done at this path since it is being overwritten by the add
-      return updateRemovedOps(state, thisPath, otherOps);
+      return updateRemovedOps(state, thisOp.path, otherOps);
     }
   },
 };

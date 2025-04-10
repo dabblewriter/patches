@@ -13,8 +13,8 @@ export const bit: JSONPatchOpHandler = {
   apply(state, path, value) {
     return replace.apply(state, path, applyBitmask(get(state, path) || 0, value || 0));
   },
-  transform(state, [, path], otherOps) {
-    return updateRemovedOps(state, path, otherOps, false, true);
+  transform(state, thisOp, otherOps) {
+    return updateRemovedOps(state, thisOp.path, otherOps, false, true);
   },
   invert(state, op, value, changedObj, isIndex) {
     return replace.invert(state, op, value, changedObj, isIndex);

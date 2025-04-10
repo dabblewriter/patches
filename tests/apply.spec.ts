@@ -18,7 +18,7 @@ describe('applyPatch', () => {
     });
 
     it('move in arrays', () => {
-      expect(applyPatch(a, [['>/matrix/1/-', '/matrix/2/0']])).toEqual({
+      expect(applyPatch(a, [{ op: 'move', from: '/matrix/2/0', path: '/matrix/1/-' }])).toEqual({
         matrix: [
           [0, 1, 2],
           [3, 4, 5, 6],
@@ -29,7 +29,7 @@ describe('applyPatch', () => {
     });
 
     it('move correctly forward in one array', () => {
-      expect(applyPatch(a, [['>/matrix/0/2', '/matrix/0/0']])).toEqual({
+      expect(applyPatch(a, [{ op: 'move', from: '/matrix/0/0', path: '/matrix/0/2' }])).toEqual({
         matrix: [
           [1, 2, 0],
           [3, 4, 5],
@@ -40,7 +40,7 @@ describe('applyPatch', () => {
     });
 
     it('move correctly backward in one array', () => {
-      expect(applyPatch(a, [['>/matrix/0/0', '/matrix/0/2']])).toEqual({
+      expect(applyPatch(a, [{ op: 'move', from: '/matrix/0/2', path: '/matrix/0/0' }])).toEqual({
         matrix: [
           [2, 0, 1],
           [3, 4, 5],
@@ -51,7 +51,7 @@ describe('applyPatch', () => {
     });
 
     it('move correctly between arrays', () => {
-      expect(applyPatch(a, [['>/matrix/1/3', '/matrix/0/0']])).toEqual({
+      expect(applyPatch(a, [{ op: 'move', from: '/matrix/0/0', path: '/matrix/1/3' }])).toEqual({
         matrix: [
           [1, 2],
           [3, 4, 5, 0],
@@ -62,7 +62,7 @@ describe('applyPatch', () => {
     });
 
     it('object', () => {
-      expect(applyPatch(a, [['>/matrix/-', '/vector']])).toEqual({
+      expect(applyPatch(a, [{ op: 'move', from: '/vector', path: '/matrix/-' }])).toEqual({
         matrix: [
           [0, 1, 2],
           [3, 4, 5],
@@ -74,7 +74,7 @@ describe('applyPatch', () => {
 
     it('no changes', () => {
       const prevA = a;
-      expect(applyPatch(a, [['>/matrix/-', '/matrix/-']])).toEqual({
+      expect(applyPatch(a, [{ op: 'move', from: '/matrix/-', path: '/matrix/-' }])).toEqual({
         matrix: [
           [0, 1, 2],
           [3, 4, 5],
@@ -88,7 +88,7 @@ describe('applyPatch', () => {
 
     describe('increment', () => {
       it('increment in arrays', () => {
-        expect(applyPatch(a, [['^/matrix/0/0', 1]])).toEqual({
+        expect(applyPatch(a, [{ op: '@inc', path: '/matrix/0/0', value: 1 }])).toEqual({
           matrix: [
             [1, 1, 2],
             [3, 4, 5],
@@ -99,7 +99,7 @@ describe('applyPatch', () => {
       });
 
       it('increment in object', () => {
-        expect(applyPatch(a, [['^/vector/0', 5]])).toEqual({
+        expect(applyPatch(a, [{ op: '@inc', path: '/vector/0', value: 5 }])).toEqual({
           matrix: [
             [0, 1, 2],
             [3, 4, 5],
@@ -110,11 +110,11 @@ describe('applyPatch', () => {
       });
 
       it('increment in non-existing path', () => {
-        expect(applyPatch(a, [['^/nonexistent', 1]])).toEqual({ ...a, nonexistent: 1 });
+        expect(applyPatch(a, [{ op: '@inc', path: '/nonexistent', value: 1 }])).toEqual({ ...a, nonexistent: 1 });
       });
 
       it('decrement in object', () => {
-        expect(applyPatch(a, [['^/vector/0', -5]])).toEqual({
+        expect(applyPatch(a, [{ op: '@inc', path: '/vector/0', value: -5 }])).toEqual({
           matrix: [
             [0, 1, 2],
             [3, 4, 5],
@@ -139,7 +139,7 @@ describe('applyPatch', () => {
       });
 
       it('turn a bit on in a bitmask', () => {
-        expect(applyPatch(a, [['~/matrix/0/0', 4]])).toEqual({
+        expect(applyPatch(a, [{ op: '@bit', path: '/matrix/0/0', value: 4 }])).toEqual({
           matrix: [
             [4, 1, 2],
             [3, 4, 5],
@@ -148,7 +148,7 @@ describe('applyPatch', () => {
           vector: [10, 20],
         });
 
-        expect(applyPatch(a, [['~/matrix/0/1', 4]])).toEqual({
+        expect(applyPatch(a, [{ op: '@bit', path: '/matrix/0/1', value: 4 }])).toEqual({
           matrix: [
             [0, 5, 2],
             [3, 4, 5],
@@ -159,7 +159,7 @@ describe('applyPatch', () => {
       });
 
       it('turn a bit off in a bitmask', () => {
-        expect(applyPatch(a, [['~/matrix/1/2', 131072]])).toEqual({
+        expect(applyPatch(a, [{ op: '@bit', path: '/matrix/1/2', value: 131072 }])).toEqual({
           matrix: [
             [0, 1, 2],
             [3, 4, 1],
@@ -170,7 +170,11 @@ describe('applyPatch', () => {
       });
 
       it('turn 2 bits off in a bitmask', () => {
-        expect(applyPatch(a, [['~/matrix/1/2', combineBitmasks(bitmask(2, false), bitmask(0, false))]])).toEqual({
+        expect(
+          applyPatch(a, [
+            { op: '@bit', path: '/matrix/1/2', value: combineBitmasks(bitmask(2, false), bitmask(0, false)) },
+          ])
+        ).toEqual({
           matrix: [
             [0, 1, 2],
             [3, 4, 0],

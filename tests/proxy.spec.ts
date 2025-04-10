@@ -60,98 +60,102 @@ describe('Patch Proxy Utilities', () => {
 
     it('should generate replace op on property assignment', () => {
       proxy.foo = 'goodbye';
-      expect(patch.ops).toEqual([['=/foo', 'goodbye']]);
+      expect(patch.ops).toEqual([{ op: 'replace', path: '/foo', value: 'goodbye' }]);
     });
 
     it('should generate replace op on nested property assignment', () => {
       proxy.nested.a = 'universe';
-      expect(patch.ops).toEqual([['=/nested/a', 'universe']]);
+      expect(patch.ops).toEqual([{ op: 'replace', path: '/nested/a', value: 'universe' }]);
     });
 
     it('should generate add op for new optional property', () => {
       proxy.bar! = 123;
-      expect(patch.ops).toEqual([['=/bar', 123]]);
+      expect(patch.ops).toEqual([{ op: 'replace', path: '/bar', value: 123 }]);
     });
 
     it('should generate remove op on assigning undefined', () => {
       proxy.bar = undefined;
       target.bar = 5; // Pretend it existed before
       proxy.bar = undefined;
-      expect(patch.ops).toEqual([['-/bar']]);
+      expect(patch.ops).toEqual([{ op: 'remove', path: '/bar' }]);
     });
 
     it('should generate remove op on assigning undefined to required prop', () => {
       // @ts-expect-error Testing assigning undefined to required prop
       proxy.foo = undefined;
-      expect(patch.ops).toEqual([['-/foo']]);
+      expect(patch.ops).toEqual([{ op: 'remove', path: '/foo' }]);
     });
 
     it('should generate remove op on delete', () => {
       // @ts-expect-error Testing delete on required property
       delete proxy.foo;
-      expect(patch.ops).toEqual([['-/foo']]);
+      expect(patch.ops).toEqual([{ op: 'remove', path: '/foo' }]);
       patch.ops = []; // Clear ops
       // @ts-expect-error Testing delete on required property
       delete proxy.nested.a;
-      expect(patch.ops).toEqual([['-/nested/a']]);
+      expect(patch.ops).toEqual([{ op: 'remove', path: '/nested/a' }]);
     });
 
     // --- Array Operations ---
 
     it('should generate add op for array push', () => {
       proxy.simpleArr.push(40);
-      expect(patch.ops).toEqual([['+/simpleArr/3', 40]]);
+      expect(patch.ops).toEqual([{ op: 'add', path: '/simpleArr/3', value: 40 }]);
       patch.ops = [];
       proxy.simpleArr.push(50, 60);
       expect(patch.ops).toEqual([
-        ['+/simpleArr/3', 50],
-        ['+/simpleArr/4', 60],
+        { op: 'add', path: '/simpleArr/3', value: 50 },
+        { op: 'add', path: '/simpleArr/4', value: 60 },
       ]);
     });
 
     it('should generate remove op for array pop', () => {
       proxy.simpleArr.pop();
-      expect(patch.ops).toEqual([['-/simpleArr/2']]);
+      expect(patch.ops).toEqual([{ op: 'remove', path: '/simpleArr/2' }]);
     });
 
     it('should generate remove op for array shift', () => {
       proxy.simpleArr.shift();
-      expect(patch.ops).toEqual([['-/simpleArr/0']]);
+      expect(patch.ops).toEqual([{ op: 'remove', path: '/simpleArr/0' }]);
     });
 
     it('should generate add ops for array unshift', () => {
       proxy.simpleArr.unshift(0, 5);
       expect(patch.ops).toEqual([
-        ['+/simpleArr/0', 0],
-        ['+/simpleArr/1', 5],
+        { op: 'add', path: '/simpleArr/0', value: 0 },
+        { op: 'add', path: '/simpleArr/1', value: 5 },
       ]);
     });
 
     it('should generate remove/add ops for array splice (delete)', () => {
       proxy.simpleArr.splice(1, 1); // Remove 1 element at index 1
-      expect(patch.ops).toEqual([['-/simpleArr/1']]);
+      expect(patch.ops).toEqual([{ op: 'remove', path: '/simpleArr/1' }]);
     });
 
     it('should generate remove/add ops for array splice (insert)', () => {
       proxy.simpleArr.splice(1, 0, 15); // Insert 15 at index 1
-      expect(patch.ops).toEqual([['+/simpleArr/1', 15]]);
+      expect(patch.ops).toEqual([{ op: 'add', path: '/simpleArr/1', value: 15 }]);
     });
 
     it('should generate remove/add ops for array splice (replace)', () => {
       proxy.simpleArr.splice(1, 1, 15, 25); // Replace element at index 1 with 15, 25
-      expect(patch.ops).toEqual([['-/simpleArr/1'], ['+/simpleArr/1', 15], ['+/simpleArr/2', 25]]);
+      expect(patch.ops).toEqual([
+        { op: 'remove', path: '/simpleArr/1' },
+        { op: 'add', path: '/simpleArr/1', value: 15 },
+        { op: 'add', path: '/simpleArr/2', value: 25 },
+      ]);
     });
 
     it('should handle splice with negative start index', () => {
       proxy.simpleArr.splice(-1, 1); // Remove last element
-      expect(patch.ops).toEqual([['-/simpleArr/2']]);
+      expect(patch.ops).toEqual([{ op: 'remove', path: '/simpleArr/2' }]);
     });
 
     it('should handle splice delete count exceeding array bounds', () => {
       proxy.simpleArr.splice(1, 5); // Try to remove 5 from index 1 (only 2 available)
       expect(patch.ops).toEqual([
-        ['-/simpleArr/1'],
-        ['-/simpleArr/1'], // Path updates implicitly after first remove
+        { op: 'remove', path: '/simpleArr/1' },
+        { op: 'remove', path: '/simpleArr/1' }, // Path updates implicitly after first remove
       ]);
     });
 
@@ -170,7 +174,7 @@ describe('Patch Proxy Utilities', () => {
       extendedProxy.optionalNested!.prop = 'value';
 
       // Verify that the patch operation was generated correctly
-      expect(patch.ops).toEqual([['=/optionalNested/prop', 'value']]);
+      expect(patch.ops).toEqual([{ op: 'replace', path: '/optionalNested/prop', value: 'value' }]);
     });
   });
 
@@ -198,61 +202,127 @@ describe('Patch Proxy Utilities', () => {
     describe('text operations', () => {
       it('should allow delta to be set', () => {
         proxy.text = new Delta().insert('New text');
-        expect(patch.ops).toEqual([['=/text', { ops: [{ insert: 'New text' }] }]]);
+        expect(patch.ops).toEqual([
+          {
+            op: 'replace',
+            path: '/text',
+            value: { ops: [{ insert: 'New text' }] },
+          },
+        ]);
       });
 
       it('should apply text delta with insert', () => {
         patch.text(proxy.text, new Delta().retain(5).insert(' beautiful'));
-        expect(patch.ops).toEqual([['T/text', { ops: [{ retain: 5 }, { insert: ' beautiful' }] }]]);
+        expect(patch.ops).toEqual([
+          {
+            op: '@txt',
+            path: '/text',
+            value: { ops: [{ retain: 5 }, { insert: ' beautiful' }] },
+          },
+        ]);
       });
 
       it('should apply text delta with delete', () => {
         patch.text(proxy.text, new Delta().retain(5).delete(1));
-        expect(patch.ops).toEqual([['T/text', { ops: [{ retain: 5 }, { delete: 1 }] }]]);
+        expect(patch.ops).toEqual([
+          {
+            op: '@txt',
+            path: '/text',
+            value: { ops: [{ retain: 5 }, { delete: 1 }] },
+          },
+        ]);
       });
 
       it('should apply text delta with array of ops', () => {
         patch.text(proxy.text, [{ retain: 5 }, { insert: ' beautiful' }]);
-        expect(patch.ops).toEqual([['T/text', { ops: [{ retain: 5 }, { insert: ' beautiful' }] }]]);
+        expect(patch.ops).toEqual([
+          {
+            op: '@txt',
+            path: '/text',
+            value: { ops: [{ retain: 5 }, { insert: ' beautiful' }] },
+          },
+        ]);
       });
     });
 
     describe('increment/decrement operations', () => {
       it('should be able to still set a number value', () => {
         proxy.counter = 20;
-        expect(patch.ops).toEqual([['=/counter', 20]]);
+        expect(patch.ops).toEqual([
+          {
+            op: 'replace',
+            path: '/counter',
+            value: 20,
+          },
+        ]);
       });
 
       it('should increment with default value of 1', () => {
         patch.increment(proxy.counter);
-        expect(patch.ops).toEqual([['^/counter', 1]]);
+        expect(patch.ops).toEqual([
+          {
+            op: '@inc',
+            path: '/counter',
+            value: 1,
+          },
+        ]);
       });
 
       it('should increment with specified value', () => {
         patch.increment(proxy.counter, 5);
-        expect(patch.ops).toEqual([['^/counter', 5]]);
+        expect(patch.ops).toEqual([
+          {
+            op: '@inc',
+            path: '/counter',
+            value: 5,
+          },
+        ]);
       });
 
       it('should decrement with default value of 1', () => {
         patch.decrement(proxy.counter);
-        expect(patch.ops).toEqual([['^/counter', -1]]);
+        expect(patch.ops).toEqual([
+          {
+            op: '@inc',
+            path: '/counter',
+            value: -1,
+          },
+        ]);
       });
 
       it('should decrement with specified value', () => {
         patch.decrement(proxy.counter, 3);
-        expect(patch.ops).toEqual([['^/counter', -3]]);
+        expect(patch.ops).toEqual([
+          {
+            op: '@inc',
+            path: '/counter',
+            value: -3,
+          },
+        ]);
       });
     });
 
     describe('bit operations', () => {
       it('should set a bit', () => {
         patch.bit(proxy.flags, 2, true);
-        expect(patch.ops).toEqual([['~/flags', 4]]);
+        expect(patch.ops).toEqual([
+          {
+            op: '@bit',
+            path: '/flags',
+            value: 4,
+          },
+        ]);
       });
 
       it('should clear a bit', () => {
         patch.bit(proxy.flags, 1, false);
-        expect(patch.ops).toEqual([['~/flags', 65536]]);
+        expect(patch.ops).toEqual([
+          {
+            op: '@bit',
+            path: '/flags',
+            value: 65536,
+          },
+        ]);
       });
 
       it('should work with multiple bit operations', () => {
@@ -260,9 +330,21 @@ describe('Patch Proxy Utilities', () => {
         patch.bit(proxy.flags, 1, false);
         patch.bit(proxy.flags, 0, true);
         expect(patch.ops).toEqual([
-          ['~/flags', 4],
-          ['~/flags', 65536],
-          ['~/flags', 1],
+          {
+            op: '@bit',
+            path: '/flags',
+            value: 4,
+          },
+          {
+            op: '@bit',
+            path: '/flags',
+            value: 65536,
+          },
+          {
+            op: '@bit',
+            path: '/flags',
+            value: 1,
+          },
         ]);
       });
     });
@@ -275,10 +357,26 @@ describe('Patch Proxy Utilities', () => {
         patch.decrement(proxy.counter, 2);
 
         expect(patch.ops).toEqual([
-          ['T/text', { ops: [{ retain: 5 }, { insert: ' beautiful' }] }],
-          ['^/counter', 5],
-          ['~/flags', 4],
-          ['^/counter', -2],
+          {
+            op: '@txt',
+            path: '/text',
+            value: { ops: [{ retain: 5 }, { insert: ' beautiful' }] },
+          },
+          {
+            op: '@inc',
+            path: '/counter',
+            value: 5,
+          },
+          {
+            op: '@bit',
+            path: '/flags',
+            value: 4,
+          },
+          {
+            op: '@inc',
+            path: '/counter',
+            value: -2,
+          },
         ]);
       });
 
@@ -288,9 +386,21 @@ describe('Patch Proxy Utilities', () => {
         patch.bit(proxy.flags, 2, true);
 
         expect(patch.ops).toEqual([
-          ['=/text', { ops: [{ insert: 'direct set' }] }],
-          ['^/counter', 5],
-          ['~/flags', 4],
+          {
+            op: 'replace',
+            path: '/text',
+            value: { ops: [{ insert: 'direct set' }] },
+          },
+          {
+            op: '@inc',
+            path: '/counter',
+            value: 5,
+          },
+          {
+            op: '@bit',
+            path: '/flags',
+            value: 4,
+          },
         ]);
       });
     });

@@ -1,29 +1,28 @@
-import { Compact } from '../json-patch/compactPatch.js';
 import { getTypes } from '../json-patch/ops/index.js';
 import { runWithObject } from '../json-patch/state.js';
-import { type CompactPatchOp, type JSONPatchOpHandlerMap } from '../types.js';
+import type { JSONPatchOp, JSONPatchOpHandlerMap } from '../types.js';
 import { getType, getValue, mapAndFilterOps } from '../utils/index.js';
 
-export function composePatch(patch: CompactPatchOp[], custom: JSONPatchOpHandlerMap = {}): CompactPatchOp[] {
+export function composePatch(patches: JSONPatchOp[], custom: JSONPatchOpHandlerMap = {}): JSONPatchOp[] {
   const types = getTypes(custom);
-  const opsByPath = new Map<string, CompactPatchOp>();
+  const opsByPath = new Map<string, JSONPatchOp>();
 
   // Only composing ops next to each other on the same path. It becomes too complex to do more because of moves and arrays
-  return runWithObject(null, types, patch.length > 1, state => {
-    return mapAndFilterOps(patch, op => {
-      const type = getType(state, Compact.getOp(op));
+  return runWithObject(null, types, patches.length > 1, state => {
+    return mapAndFilterOps(patches, op => {
+      const type = getType(state, op);
       const handler = type?.compose;
       if (handler) {
-        const lastOp = opsByPath.get(Compact.getPath(op));
+        const lastOp = opsByPath.get(op.path);
         if (lastOp && match(lastOp, op)) {
-          Compact.update(lastOp, { value: handler(state, Compact.getValue(lastOp), Compact.getValue(op)) });
+          lastOp.value = handler(state, lastOp.value, op.value);
           return null;
         } else {
-          const prefix = `${Compact.getPath(op)}/`;
+          const prefix = `${op.path}/`;
           for (const path of opsByPath.keys()) {
             if (path.startsWith(prefix)) opsByPath.delete(path);
           }
-          opsByPath.set(Compact.getPath(op), (op = getValue(state, op)));
+          opsByPath.set(op.path, (op = getValue(state, op)));
         }
       } else {
         opsByPath.clear();
@@ -33,6 +32,6 @@ export function composePatch(patch: CompactPatchOp[], custom: JSONPatchOpHandler
   });
 }
 
-function match(op1: CompactPatchOp, op2?: CompactPatchOp) {
-  return op1 && op2 && op1[0] === op2[0];
+function match(op1: JSONPatchOp, op2?: JSONPatchOp) {
+  return op1 && op2 && op1.op === op2.op && op1.path === op2.path;
 }

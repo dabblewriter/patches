@@ -5,99 +5,103 @@ describe('composePatch', () => {
   it('replace compose', () => {
     expect(
       composePatch([
-        ['=/x', 4],
-        ['=/x', 2],
-        ['=/x', 8],
+        { op: 'replace', path: '/x', value: 4 },
+        { op: 'replace', path: '/x', value: 2 },
+        { op: 'replace', path: '/x', value: 8 },
       ])
-    ).toEqual([['=/x', 8]]);
+    ).toEqual([{ op: 'replace', path: '/x', value: 8 }]);
   });
 
   it('increment compose', () => {
     expect(
       composePatch([
-        ['^/x', 4],
-        ['^/x', 2],
-        ['^/x', -10],
-        ['^/x', 20],
+        { op: '@inc', path: '/x', value: 4 },
+        { op: '@inc', path: '/x', value: 2 },
+        { op: '@inc', path: '/x', value: -10 },
+        { op: '@inc', path: '/x', value: 20 },
       ])
-    ).toEqual([['^/x', 16]]);
+    ).toEqual([{ op: '@inc', path: '/x', value: 16 }]);
   });
 
   it('text compose', () => {
     expect(
       composePatch([
-        ['T/x', { ops: [{ insert: 'How about th' }] }],
-        ['T/x', { ops: [{ retain: 12 }, { insert: 'at!' }] }],
-        ['T/x', { ops: [{ delete: 3 }, { insert: 'Who' }, { retain: 1 }, { delete: 5 }, { insert: 'is' }] }],
+        { op: '@txt', path: '/x', value: { ops: [{ insert: 'How about th' }] } },
+        { op: '@txt', path: '/x', value: { ops: [{ retain: 12 }, { insert: 'at!' }] } },
+        {
+          op: '@txt',
+          path: '/x',
+          value: { ops: [{ delete: 3 }, { insert: 'Who' }, { retain: 1 }, { delete: 5 }, { insert: 'is' }] },
+        },
       ])
-    ).toEqual([['T/x', { ops: [{ insert: 'Who is that!' }] }]]);
+    ).toEqual([{ op: '@txt', path: '/x', value: { ops: [{ insert: 'Who is that!' }] } }]);
   });
 
   it('composes contiguous op', () => {
     expect(
       composePatch([
-        ['^/x/3', 4],
-        ['+/x/1', 2],
-        ['^/x/3', 1],
-        ['^/x/3', 1],
+        { op: '@inc', path: '/x/3', value: 4 },
+        { op: 'add', path: '/x/1', value: 2 },
+        { op: '@inc', path: '/x/3', value: 1 },
+        { op: '@inc', path: '/x/3', value: 1 },
       ])
     ).toEqual([
-      ['^/x/3', 4],
-      ['+/x/1', 2],
-      ['^/x/3', 2],
+      { op: '@inc', path: '/x/3', value: 4 },
+      { op: 'add', path: '/x/1', value: 2 },
+      { op: '@inc', path: '/x/3', value: 2 },
     ]);
   });
 
   it('safely composes non-contiguous if no non-composables are in between', () => {
     expect(
       composePatch([
-        ['^/y', 4],
-        ['^/y', 4],
-        ['=/x', 4],
-        ['=/x', 7],
-        ['=/y', 2],
-        ['=/x', 8],
-        ['^/y', 4],
+        { op: '@inc', path: '/y', value: 4 },
+        { op: '@inc', path: '/y', value: 4 },
+        { op: 'replace', path: '/x', value: 4 },
+        { op: 'replace', path: '/x', value: 7 },
+        { op: 'replace', path: '/y', value: 2 },
+        { op: 'replace', path: '/x', value: 8 },
+        { op: '@inc', path: '/y', value: 4 },
       ])
     ).toEqual([
-      ['^/y', 8],
-      ['=/x', 8],
-      ['=/y', 2],
-      ['^/y', 4],
+      { op: '@inc', path: '/y', value: 8 },
+      { op: 'replace', path: '/x', value: 8 },
+      { op: 'replace', path: '/y', value: 2 },
+      { op: '@inc', path: '/y', value: 4 },
     ]);
 
     expect(
       composePatch([
-        ['^/y', 4],
-        ['^/y', 4],
-        ['=/x', 4],
-        ['=/x', 7],
-        ['+/y', 2],
-        ['=/x', 8],
-        ['^/y', 4],
+        { op: '@inc', path: '/y', value: 4 },
+        { op: '@inc', path: '/y', value: 4 },
+        { op: 'replace', path: '/x', value: 4 },
+        { op: 'replace', path: '/x', value: 7 },
+        { op: 'add', path: '/y', value: 2 },
+        { op: 'replace', path: '/x', value: 8 },
+        { op: '@inc', path: '/y', value: 4 },
       ])
     ).toEqual([
-      ['^/y', 8],
-      ['=/x', 7],
-      ['+/y', 2],
-      ['=/x', 8],
-      ['^/y', 4],
+      { op: '@inc', path: '/y', value: 8 },
+      { op: 'replace', path: '/x', value: 7 },
+      { op: 'add', path: '/y', value: 2 },
+      { op: 'replace', path: '/x', value: 8 },
+      { op: '@inc', path: '/y', value: 4 },
     ]);
   });
 
   it('stops composing with higher paths', () => {
     expect(
       composePatch([
-        ['^/x/y', 1],
-        ['^/x/y', 1],
-        ['=/x', { y: 0 }],
-        ['^/x/y', 1],
-        ['^/x/y', 1],
+        { op: '@inc', path: '/x/y', value: 1 },
+        { op: '@inc', path: '/x/y', value: 1 },
+        { op: 'replace', path: '/x', value: { y: 0 } },
+        { op: '@inc', path: '/x/y', value: 1 },
+        { op: '@inc', path: '/x/y', value: 1 },
       ])
     ).toEqual([
-      ['^/x/y', 2],
-      ['=/x', { y: 0 }],
-      ['^/x/y', 2],
+      { op: '@inc', path: '/x/y', value: 2 },
+      { op: 'replace', path: '/x', value: { y: 0 } },
+      { op: '@inc', path: '/x/y', value: 2 },
     ]);
   });
 });

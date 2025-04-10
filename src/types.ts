@@ -1,8 +1,8 @@
 export interface JSONPatchOpHandler {
   like: 'add' | 'remove' | 'replace' | 'move' | 'copy' | 'test';
-  apply(state: State, path: string, value: any): string | void;
-  transform(state: State, other: CompactPatchOp, ops: CompactPatchOp[]): CompactPatchOp[];
-  invert(state: State, op: CompactPatchOp, value: any, changedObj: any, isIndex: boolean): CompactPatchOp;
+  apply(state: State, path: string, valueOrFrom: any): string | void;
+  transform(state: State, other: JSONPatchOp, ops: JSONPatchOp[]): JSONPatchOp[];
+  invert(state: State, op: JSONPatchOp, value: any, changedObj: any, isIndex: boolean): JSONPatchOp;
   compose?(state: State, value1: any, value2: any): any;
 }
 
@@ -34,7 +34,7 @@ export interface ApplyJSONPatchOptions {
   /**
    * Saves the patch that caused the error to this property of the options object
    */
-  error?: CompactPatchOp;
+  error?: JSONPatchOp;
 
   /**
    * Apply changes at a given path prefix
@@ -49,10 +49,6 @@ export interface JSONPatchOp {
   value?: any;
   soft?: boolean; // extension to JSON Patch to prevent an operation from overwriting existing data
 }
-
-export type PatchSymbol = '+' | '=' | '-' | '>' | '&' | 'T' | '^' | '~';
-export type CompactPatchOp = [`${PatchSymbol}${string}`, any?, 1?];
-export type CompactPatch = CompactPatchOp[];
 
 export interface Root {
   '': any;

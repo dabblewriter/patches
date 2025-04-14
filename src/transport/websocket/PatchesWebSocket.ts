@@ -7,7 +7,6 @@ import type {
 } from '../../ot/types.js';
 import { JSONRPCClient } from '../protocol/JSONRPCClient.js';
 import type {
-  AwarenessUpdateNotificationParams,
   // Types specific to the transport/protocol layer
   ConnectionState,
   ListOptions,
@@ -20,7 +19,7 @@ import { WebSocketTransport } from './WebSocketTransport.js';
 /**
  * High-level client for the Patches real-time collaboration service.
  * This class provides document subscription, patch notification handling,
- * awareness updates, versioning, and other OT-specific functionality
+ * versioning, and other OT-specific functionality
  * over a WebSocket connection.
  */
 export class PatchesWebSocket implements PatchesAPI {
@@ -34,9 +33,6 @@ export class PatchesWebSocket implements PatchesAPI {
 
   /** Signal emitted when the server pushes document changes. */
   public readonly onDocUpdate = signal<(params: PatchesNotificationParams) => void>();
-
-  /** Signal emitted when the server pushes awareness updates from other clients. */
-  public readonly onAwarenessUpdate = signal<(params: AwarenessUpdateNotificationParams) => void>();
 
   /** Signal emitted when the server forwards a WebRTC signaling message. */
   public readonly onSignal = signal<(params: SignalNotificationParams) => void>();
@@ -54,9 +50,6 @@ export class PatchesWebSocket implements PatchesAPI {
     // Note: Type assertions might be needed if rpc.on doesn't infer strongly enough
     this.rpc.on('doc-update', (params /*: PatchesNotificationParams */) => {
       this.onDocUpdate.emit(params as PatchesNotificationParams);
-    });
-    this.rpc.on('awareness-update', (params /*: AwarenessUpdateNotificationParams */) => {
-      this.onAwarenessUpdate.emit(params as AwarenessUpdateNotificationParams);
     });
     this.rpc.on('signal', (params /*: SignalNotificationParams */) => {
       this.onSignal.emit(params as SignalNotificationParams);

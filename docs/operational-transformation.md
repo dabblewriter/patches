@@ -189,26 +189,9 @@ _(See [`src/ot/types.ts`](../src/ot/types.ts) for full details)_
 
 The core of the OT algorithm lies in transforming operations against each other.
 
-### The `transformPatch` Function
+- For details on the patch manipulation utilities (`transformPatch`, `invertPatch`, `composePatch`), see [Patch Utilities in JSON Patch](./json-patch.md#patch-utilities-transformpatch-invertpatch-composepatch).
 
-([`src/ot/transformPatch.ts`](../src/ot/transformPatch.ts))
-
-This function takes two sets of operations, `thisOps` (considered to have happened first) and `otherOps` (concurrent), along with the document state _before_ either set was applied. It iterates through `thisOps`, and for each operation, it calls the appropriate `transform` handler to modify `otherOps`.
-
-The goal is to produce a new set of `otherOps` that can be applied _after_ `thisOps` to reach the same final state as if the operations had occurred in a specific server-defined order.
-
-**Note:** The accuracy of transformation heavily depends on the correct implementation of individual operation handlers and providing the correct state context to `transformPatch`.
-
-### Operation Handlers
-
-Each JSON Patch operation type (e.g., `add`, `remove`, `replace`, `@inc`, `@txt`) has a corresponding handler object (see [`src/json-patch/ops/`](../src/json-patch/ops/)). These handlers define:
-
-- `apply`: How the operation modifies the state.
-- `invert`: How to generate an operation that reverses the effect (for undo). See [`invertPatch`](../src/ot/invertPatch.ts).
-- `transform`: **Crucially for OT**, how to modify a list of concurrent operations (`otherOps`) given this operation (`thisOp`) occurred first.
-- `compose`: (Optional) How to merge two consecutive operations of the same type on the same path. See [`composePatch`](../src/ot/composePatch.ts).
-
-Implementing correct `transform` logic for each operation type is essential for the OT system to function reliably.
+The OT system relies on correct implementation of operation handlers for each patch type. See [Operation Handlers](./json-patch.md#operation-handlers) for more.
 
 ## Comparison to Other OT Approaches
 

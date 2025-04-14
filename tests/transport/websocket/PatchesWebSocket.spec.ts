@@ -3,7 +3,6 @@ import { signal, type Signal } from '../../../src/event-signal.js';
 import { Change, PatchSnapshot, VersionMetadata } from '../../../src/ot/types.js';
 import { JSONRPCClient } from '../../../src/transport/protocol/JSONRPCClient.js';
 import type {
-  AwarenessUpdateNotificationParams,
   ConnectionState,
   ListOptions,
   PatchesNotificationParams,
@@ -82,9 +81,7 @@ describe('PatchesWebSocket', () => {
 
   it('should register notification handlers with the RPC client', () => {
     expect(mockRpcImplementation.on).toHaveBeenCalledWith('doc-update', expect.any(Function));
-    expect(mockRpcImplementation.on).toHaveBeenCalledWith('awareness-update', expect.any(Function));
     expect(mockRpcImplementation.on).toHaveBeenCalledWith('signal', expect.any(Function));
-    expect(Object.keys(rpcNotificationHandlers)).toEqual(['doc-update', 'awareness-update', 'signal']);
   });
 
   describe('Connection Management', () => {
@@ -261,7 +258,6 @@ describe('PatchesWebSocket', () => {
     beforeEach(() => {
       // Spy on the emit methods of the actual signal instances
       vi.spyOn(patchesWs.onDocUpdate, 'emit');
-      vi.spyOn(patchesWs.onAwarenessUpdate, 'emit');
       vi.spyOn(patchesWs.onSignal, 'emit');
     });
 
@@ -273,17 +269,6 @@ describe('PatchesWebSocket', () => {
       rpcNotificationHandlers['doc-update'](params);
       expect(patchesWs.onDocUpdate.emit).toHaveBeenCalledTimes(1);
       expect(patchesWs.onDocUpdate.emit).toHaveBeenCalledWith(params);
-    });
-
-    it('should emit onAwarenessUpdate when receiving an awareness-update notification', () => {
-      const params: AwarenessUpdateNotificationParams = {
-        docId: 'doc1',
-        state: { added: ['user1'], updated: [], removed: [] },
-        clientId: 'sender-client-id',
-      };
-      rpcNotificationHandlers['awareness-update'](params);
-      expect(patchesWs.onAwarenessUpdate.emit).toHaveBeenCalledTimes(1);
-      expect(patchesWs.onAwarenessUpdate.emit).toHaveBeenCalledWith(params);
     });
 
     it('should emit onSignal when receiving a signal notification', () => {

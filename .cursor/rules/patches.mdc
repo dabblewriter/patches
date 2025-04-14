@@ -1,0 +1,83 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Patches
+
+## Project Overview
+
+- **Patches** is a TypeScript library for building real-time collaborative applications using Operational Transformation (OT) with a centralized server model.
+- Supports versioning, offline work, branching, and efficient handling of large/long-lived documents.
+- All document state is regular JSON-compatible data, managed immutably.
+
+## Key Concepts
+
+- **Centralized OT:** Server is the single source of truth for document history and conflict resolution.
+- **PatchDoc:** Client-side document, manages local state, optimistic updates, and syncs with server.
+- **PatchServer:** Server-side authority, applies/commits changes, manages versions and persistence.
+- **HistoryManager:** Query document versions and change history.
+- **BranchManager:** Supports branching/merging workflows.
+- **Backend Store:** You must implement a storage backend (see `PatchStoreBackend`/`BranchingStoreBackend` interfaces).
+
+## Directory Structure
+
+- `src/` — Main source code
+  - `ot/` — Core OT logic
+    - `client/` — Client-side (PatchDoc)
+    - `server/` — Server-side (PatchServer, HistoryManager, BranchManager)
+  - `json-patch/`, `transport/`, `utils/` — Supporting modules
+- `docs/` — In-depth documentation for each core component
+- `tests/` — Vitest-based test suite (unit/integration)
+- `dist/` — Build output
+- `assets/`, `.vscode/`, etc. — Miscellaneous/project config
+
+## How to Build & Test
+
+- **Build:**  
+  `npm run build`
+- **Run tests:**  
+  `npm test` (or `npm run tdd` for watch mode)
+- **Write tests:**  
+  - Place `.spec.ts` files in `tests/` or subfolders.
+  - Use [Vitest](mdc:https:/vitest.dev) syntax (see existing tests for examples).
+
+## Coding Conventions
+
+- TypeScript throughout; prefer type safety.
+- Use immutable data patterns (do not mutate state directly).
+- Organize new OT logic under `src/ot/`.
+- Keep all public API changes documented in `README.md` and relevant `docs/*.md`.
+
+## Cursor-Specific Rules
+
+- **Never edit files in `dist/` or `node_modules/`.**
+- **Do not modify `README.md` or `docs/*.md` unless explicitly requested.**
+- **When adding new features, update or create relevant documentation in `docs/`.**
+- **Tests must be added/updated for all new features or bugfixes.**
+- **When making changes to OT logic, ensure both client and server code are considered.**
+
+## Documentation Map
+
+- `README.md` — High-level intro, usage, and examples.
+- `docs/operational-transformation.md` — OT algorithm, client-server flow, backend interface.
+- `docs/PatchDoc.md` — Client-side API.
+- `docs/PatchServer.md` — Server-side API.
+- `docs/HistoryManager.md` — Version/history API.
+- `docs/BranchManager.md` — Branching/merging API.
+- `docs/json-patch.md` — JSON Patch/legacy features.
+- `docs/websocket.md` — WebSocket transport: real-time sync, subscribing, sending/receiving changes, versioning.
+- `docs/awareness.md` — Awareness (presence, cursors, etc.) via WebRTC: peer-to-peer presence and state sharing. 
+
+## Technologies
+
+- TypeScript, Node.js
+- Vitest (testing)
+- Svelte (for packaging, not core library)
+- Peer dependencies: `@dabble/delta`
+
+## How to Contribute
+
+- Follow the structure and conventions above.
+- All code must be tested and documented.
+- Open issues/PRs via [GitHub](mdc:https:/github.com/dabblewriter/patches).

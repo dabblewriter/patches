@@ -18,11 +18,11 @@ export class PatchDoc<T extends object> {
   private _changeMetadata: Record<string, any> = {};
 
   /** Subscribe to be notified before local state changes. */
-  readonly onBeforeChange = signal<(change: Change) => void>(this);
+  readonly onBeforeChange = signal<(change: Change) => void>();
   /** Subscribe to be notified after local state changes are applied. */
-  readonly onChange = signal<(change: Change) => void>(this);
+  readonly onChange = signal<(change: Change) => void>();
   /** Subscribe to be notified whenever state changes from any source. */
-  readonly onUpdate = signal<(newState: T) => void>(this);
+  readonly onUpdate = signal<(newState: T) => void>();
 
   /**
    * Creates an instance of PatchDoc.

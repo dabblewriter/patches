@@ -22,6 +22,8 @@ When working with a document in Patches, you are working with regular JavaScript
   - [HistoryManager](#historymanager)
   - [BranchManager](#branchmanager)
   - [Backend Store](#backend-store)
+  - [Transport & Networking](#transport--networking)
+  - [Awareness (Presence, Cursors, etc.)](#awareness-presence-cursors-etc)
 - [Basic Workflow](#basic-workflow)
   - [Client-Side](#client-side)
   - [Server-Side](#server-side)
@@ -54,7 +56,7 @@ Our longest project contains over 480k operations in it. 😳 And considering we
 - **Client-Server Communication:** Clients send batches of changes (`Change` objects) tagged with the server revision they were based on (`baseRev`). The server transforms these changes, applies them, assigns a new revision number, and broadcasts the committed change back to clients.
 
 **Why Centralized?**
-There are many papers and algorithms for OT. There are problems—edge-cases—with those that don't rely on a central authority. To simplify, we use an algorithm that only transforms operations in one direction, rather than in 2. It is more like a git _rebase_. This method was inspired by [Marijn Haverbeke’s article](https://marijnhaverbeke.nl/blog/collaborative-editing.html) about the topic, and we originally had the server reject changes if new ones came in before them and require the client to transform (rebase) them and resubmit. This comes with a theoretical downside, however. Slow connections and quickly changing documents may keep slower clients resubmitting over and over and never committing. For example, if you had an OT document that tracked all the mouse movements of every client connected to a document, a slow client might have severe jitter while it tries to commit its mouse position. I wouldn't suggest using OT for this use-case, but as I said, it is a theoretical downside. So we have modified our approach to make the server do the transform and commit, sending back any new changes _and_ the transformed submitted ones for the client to apply. This ensures all clients "get equal time with the server", even with slow connections.
+There are many papers and algorithms for OT. There are problems—edge-cases—with those that don't rely on a central authority. To simplify, we use an algorithm that only transforms operations in one direction, rather than in 2. It is more like a git _rebase_. This method was inspired by [Marijn Haverbeke's article](https://marijnhaverbeke.nl/blog/collaborative-editing.html) about the topic, and we originally had the server reject changes if new ones came in before them and require the client to transform (rebase) them and resubmit. This comes with a theoretical downside, however. Slow connections and quickly changing documents may keep slower clients resubmitting over and over and never committing. For example, if you had an OT document that tracked all the mouse movements of every client connected to a document, a slow client might have severe jitter while it tries to commit its mouse position. I wouldn't suggest using OT for this use-case, but as I said, it is a theoretical downside. So we have modified our approach to make the server do the transform and commit, sending back any new changes _and_ the transformed submitted ones for the client to apply. This ensures all clients "get equal time with the server", even with slow connections.
 
 **Snapshots**
 OT documents are essentially an array of changes. To create the in-memory state of the document, the `doc.state` that you view, you must replay each change from the first to the last. You may recognize a problem here. For long documents (like ones with 480k changes), this could take some time. For this reason, OT will snapshot the data every X number of changes (200, 500, etc). This allows you to grab the latest snapshot and then any changes after it was created and replay those change on top of the snapshot to get the latest state. This is what allows OT to have consistent performance over time.
@@ -270,6 +272,28 @@ This isn't a specific class provided by the library, but rather an _interface_ (
 You are responsible for providing an implementation that fulfills the methods defined in the interface (e.g., `getLatestRevision`, `saveChange`, `listVersions`, `createBranch`).
 
 See [`docs/operational-transformation.md#backend-store-interface`](./docs/operational-transformation.md#backend-store-interface) for the interface definition.
+
+## Transport & Networking
+
+Patches provides flexible networking options for real-time collaboration:
+
+- **WebSocket Transport:** For most applications, use the high-level [`PatchesWebSocket`](./docs/websocket.md) class to connect to a central Patches server. This handles document updates, awareness, and versioning over a persistent WebSocket connection.
+- **WebRTC Transport:** For peer-to-peer scenarios, use [`WebRTCTransport`](./docs/operational-transformation.md#webrtc) and [`WebRTCAwareness`](./docs/awareness.md) for direct client-to-client communication and awareness.
+
+See [WebSocket Transport](./docs/websocket.md) and [Awareness](./docs/awareness.md) for detailed usage and examples.
+
+**When to use which?**
+
+- Use WebSocket for most collaborative apps with a central server.
+- Use WebRTC for peer-to-peer or hybrid topologies, or to reduce server load for awareness/presence.
+
+---
+
+## Awareness (Presence, Cursors, etc.)
+
+"Awareness" lets you show who is online, where their cursor is, and more. Patches supports awareness over both WebSocket (server-mediated) and WebRTC (peer-to-peer). You can use awareness to build collaborative cursors, user lists, and more.
+
+See [Awareness documentation](./docs/awareness.md) for how to use awareness features in your app.
 
 ## Basic Workflow
 

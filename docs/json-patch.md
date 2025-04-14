@@ -18,6 +18,7 @@ This library includes a comprehensive implementation of JSON Patch (RFC 6902), a
   - [Automatic Patch Generation Mode](#automatic-patch-generation-mode)
 - [`applyPatch()` Function](#applypatch-function)
 - [Operation Handlers](#operation-handlers)
+- [Patch Utilities: `transformPatch`, `invertPatch`, `composePatch`](#patch-utilities-transformpatch-invertpatch-composepatch)
 
 ## Overview
 
@@ -149,17 +150,47 @@ These provide convenient methods for common custom operations included in the li
 - **`apply<T>(obj: T, options?: ApplyJSONPatchOptions): { doc: T, errors: any[] }`**
   Applies the patch's operations (`this.ops`) to the given object `obj`. Returns the new state and any errors encountered. See [`applyPatch()`](#applypatch-function).
 - **`transform(otherPatch: JSONPatch | JSONPatchOp[], obj?: any): JSONPatch`**
-  Transforms another patch against this one, assuming this patch happened first. Requires the original object state `obj` for accuracy. Uses logic from [`transformPatch`](../src/ot/transformPatch.ts). Returns a _new_ `JSONPatch` instance with the transformed operations.
+  Transforms another patch against this one, assuming this patch happened first. Requires the original object state `obj` for accuracy. Uses logic from [`transformPatch`](../src/json-patch/transformPatch.ts). Returns a _new_ `JSONPatch` instance with the transformed operations.
 - **`invert(obj: any): JSONPatch`**
-  Generates an inverse patch. Requires the object state `obj` _before_ this patch was applied. Uses logic from [`invertPatch`](../src/ot/invertPatch.ts). Returns a _new_ `JSONPatch` instance.
+  Generates an inverse patch. Requires the object state `obj` _before_ this patch was applied. Uses logic from [`invertPatch`](../src/json-patch/invertPatch.ts). Returns a _new_ `JSONPatch` instance.
 - **`compose(patch?: JSONPatch | JSONPatchOp[]): JSONPatch`**
-  Composes operations within this patch (and optionally another) into a more concise form (e.g., merging consecutive `@inc` ops). Uses logic from [`composePatch`](../src/ot/composePatch.ts). Returns a _new_ `JSONPatch` instance.
+  Composes operations within this patch (and optionally another) into a more concise form (e.g., merging consecutive `@inc` ops). Uses logic from [`composePatch`](../src/json-patch/composePatch.ts). Returns a _new_ `JSONPatch` instance.
 - **`concat(patch: JSONPatch | JSONPatchOp[]): JSONPatch`**
   Combines the operations from this patch and another into a single new patch. Returns a _new_ `JSONPatch` instance.
 - **`toJSON(): JSONPatchOp[]`**
   Returns a copy of the raw array of operations (`this.ops`).
 - **`static fromJSON(ops?: JSONPatchOp[], custom?: JSONPatchOpHandlerMap): JSONPatch`**
   Creates a new `JSONPatch` instance from an array of operations.
+
+## Patch Utilities: `transformPatch`, `invertPatch`, `composePatch`
+
+These advanced utilities allow you to manipulate and reason about JSON Patch operation arrays, supporting Operational Transformation (OT) workflows and more. They are used internally by the library and are available for advanced use cases.
+
+### `transformPatch`
+
+([`src/json-patch/transformPatch.ts`](../src/json-patch/transformPatch.ts))
+
+This function takes two sets of operations, `thisOps` (considered to have happened first) and `otherOps` (concurrent), along with the document state _before_ either set was applied. It iterates through `thisOps`, and for each operation, it calls the appropriate `transform` handler to modify `otherOps`.
+
+The goal is to produce a new set of `otherOps` that can be applied _after_ `thisOps` to reach the same final state as if the operations had occurred in a specific server-defined order.
+
+**Note:** The accuracy of transformation heavily depends on the correct implementation of individual operation handlers and providing the correct state context to `transformPatch`. See [Operation Handlers](#operation-handlers) for more details.
+
+### `invertPatch`
+
+([`src/json-patch/invertPatch.ts`](../src/json-patch/invertPatch.ts))
+
+This function generates an inverse patch for a given set of operations, allowing you to undo changes. It requires the object state _before_ the patch was applied. Each operation type must implement an `invert` handler for this to work correctly.
+
+### `composePatch`
+
+([`src/json-patch/composePatch.ts`](../src/json-patch/composePatch.ts))
+
+This function attempts to merge consecutive operations of the same type on the same path into a more concise form (e.g., merging multiple `@inc` operations into one). Each operation type can optionally implement a `compose` handler to define how composition works for that type.
+
+**See also:** [Operation Handlers](#operation-handlers) for how these utilities interact with custom operation logic.
+
+> For more on how these utilities are used in collaborative/OT workflows, see [Operational Transformation](./operational-transformation.md).
 
 ## `createJSONPatch()` Helper
 
@@ -271,13 +302,31 @@ console.log(doc); // { name: 'A', count: 1 } (original unchanged)
 
 (`src/json-patch/ops/`)
 
-The library defines handlers for each standard JSON Patch operation and the included custom operations (`@inc`, `@bit`, `@txt`). Each handler implements:
+The library defines handlers for each standard JSON Patch operation and the included custom operations (e.g., `add`, `remove`, `replace`, `@inc`, `@bit`, `@txt`). Each operation type has a corresponding handler object that implements the following methods:
 
-- `apply(state, path, value, from?, createMissingObjects?)`: Logic to apply the operation (receives parts derived from the compact op).
-- `invert(state, op: CompactPatchOp, ...)`: Logic to generate the inverse compact operation.
-- `transform(state, thisOp: CompactPatchOp, otherOps: CompactPatchOp[])`: Logic to transform concurrent compact `otherOps` against `thisOp`.
-- `compose(state, value1, value2)`: (Optional) Logic to combine two consecutive operations (values derived from compact ops).
+### Supported Operations
+
+| Operation | Description                                                                                         |
+| --------- | --------------------------------------------------------------------------------------------------- |
+| `add`     | Adds a value at the specified path. For arrays, inserts at the given index.                         |
+| `remove`  | Removes the value at the specified path. For arrays, removes the item at the given index.           |
+| `replace` | Replaces the value at the specified path with a new value.                                          |
+| `move`    | Moves a value from one path to another.                                                             |
+| `copy`    | Copies a value from one path to another.                                                            |
+| `test`    | Tests that a value at the specified path matches the provided value. Used for assertions.           |
+| `@inc`    | Increments (or decrements) a number at the specified path by the given value.                       |
+| `@bit`    | Sets or clears a specific bit in a bitmask at the specified path. Useful for compact boolean flags. |
+| `@txt`    | Applies a rich text delta (e.g., Quill Delta) to a text field at the specified path.                |
+
+### Handler Method Signatures
+
+- **`apply(state: State, path: string, valueOrFrom: any): string | void;`**: Defines how the operation modifies the state when applied. For most operations, `valueOrFrom` is the value to apply; for `move` and `copy`, it is the `from` path. Returns a string error message on failure, or nothing on success.
+- **`invert(state, op: CompactPatchOp, ...)`**: Generates an operation that reverses the effect of the original operation (used for undo functionality).
+- **`transform(state, thisOp: CompactPatchOp, otherOps: CompactPatchOp[])`**: Modifies a list of concurrent operations (`otherOps`) given that this operation (`thisOp`) occurred first. This is crucial for Operational Transformation (OT) and collaborative editing.
+- **`compose(state, value1, value2)`**: (Optional) Combines two consecutive operations of the same type on the same path into a single operation, if possible.
+
+> **Note:** Implementing correct `transform` logic for each operation type is essential for the OT system to function reliably. Mistakes in transform handlers can lead to incorrect document state or loss of user intent in collaborative scenarios.
 
 You can provide your own custom handlers when creating `JSONPatch` instances or using `applyPatch`.
 
-See [`Operational Transformation > Operation Handlers`](./operational-transformation.md#operation-handlers) for more on their role in OT.
+See [`Operational Transformation`](./operational-transformation.md#operation-handlers) for more on their role in OT.

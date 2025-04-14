@@ -30,5 +30,13 @@ export * from './json-patch/createJSONPatch.js';
 export * from './json-patch/JSONPatch.js';
 export * from './json-patch/patchProxy.js';
 
+// Transport
+export * from './transport/protocol/JSONRPCClient.js';
+export * from './transport/protocol/types.js';
+export * from './transport/webrtc/WebRTCAwareness.js';
+export * from './transport/webrtc/WebRTCTransport.js';
+export * from './transport/websocket/PatchesWebSocket.js';
+export * from './transport/websocket/WebSocketTransport.js';
+
 // Root Types (if any remain)
 export * from './types.js';

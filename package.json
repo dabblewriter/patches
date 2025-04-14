@@ -42,17 +42,18 @@
   "dependencies": {
     "alphacounter": "^2.x",
     "crypto-id": "^0.2.3",
-    "easy-signal": "^4.1.6"
+    "simple-peer": "^9.11.1"
   },
   "peerDependencies": {
     "@dabble/delta": "^1.2.4"
   },
   "devDependencies": {
     "@sveltejs/package": "^2.3.10",
-    "prettier": "^3.5.1",
-    "typescript": "^5.7.3",
-    "vite": "^6.1.1",
-    "vite-plugin-dts": "^4.5.0",
-    "vitest": "^3.0.6"
+    "@types/simple-peer": "^9.11.8",
+    "prettier": "^3.5.3",
+    "typescript": "^5.8.3",
+    "vite": "^6.2.6",
+    "vite-plugin-dts": "^4.5.3",
+    "vitest": "^3.1.1"
   }
 }

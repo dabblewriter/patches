@@ -1,5 +1,5 @@
 import { createId } from 'crypto-id';
-import { GetSubscribe, signal } from 'easy-signal';
+import { signal } from '../../event-signal.js';
 import { createJSONPatch } from '../../json-patch/createJSONPatch.js';
 import type { Change, PatchSnapshot } from '../types.js';
 import { applyChanges, rebaseChanges } from '../utils.js';
@@ -15,17 +15,14 @@ export class PatchDoc<T extends object> {
   private _committedRev: number;
   private _pendingChanges: Change[] = []; // Changes made locally, not yet sent
   private _sendingChanges: Change[] = []; // Changes sent to server, awaiting confirmation
-  private _onBeforeChange = signal<(change: Change, doc: PatchDoc<T>) => void>();
-  private _onChange = signal<(change: Change, doc: PatchDoc<T>) => void>();
-  private _onUpdate = signal<(newState: T, doc: PatchDoc<T>) => void>();
   private _changeMetadata: Record<string, any> = {};
 
   /** Subscribe to be notified before local state changes. */
-  readonly onBeforeChange = this._onBeforeChange(GetSubscribe);
+  readonly onBeforeChange = signal<(change: Change) => void>(this);
   /** Subscribe to be notified after local state changes are applied. */
-  readonly onChange = this._onChange(GetSubscribe);
+  readonly onChange = signal<(change: Change) => void>(this);
   /** Subscribe to be notified whenever state changes from any source. */
-  readonly onUpdate = this._onUpdate(GetSubscribe);
+  readonly onUpdate = signal<(newState: T) => void>(this);
 
   /**
    * Creates an instance of PatchDoc.
@@ -81,7 +78,7 @@ export class PatchDoc<T extends object> {
     this._pendingChanges = snapshot.changes ? snapshot.changes : [];
     this._sendingChanges = []; // Assume import resets sending state
     this._recalculateLocalState();
-    this._onUpdate(this._state, this);
+    this.onUpdate.emit(this._state);
   }
 
   /**
@@ -119,14 +116,14 @@ export class PatchDoc<T extends object> {
       ...(Object.keys(this._changeMetadata).length > 0 && { metadata: { ...this._changeMetadata } }),
     };
 
-    this._onBeforeChange(change, this);
+    this.onBeforeChange.emit(change);
 
     // Apply to local state immediately
     this._state = patch.apply(this._state);
     this._pendingChanges.push(change);
 
-    this._onChange(change, this);
-    this._onUpdate(this._state, this);
+    this.onChange.emit(change);
+    this.onUpdate.emit(this._state);
 
     return change;
   }
@@ -238,7 +235,7 @@ export class PatchDoc<T extends object> {
     this._recalculateLocalState();
 
     // 6. Notify listeners
-    this._onUpdate(this._state, this);
+    this.onUpdate.emit(this._state);
   }
 
   /**
@@ -294,7 +291,7 @@ export class PatchDoc<T extends object> {
     this._recalculateLocalState();
 
     // 5. Notify listeners
-    this._onUpdate(this._state, this);
+    this.onUpdate.emit(this._state);
   }
 
   /** Recalculates _state from _committedState + _sendingChanges + _pendingChanges */

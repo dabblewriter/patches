@@ -69,10 +69,6 @@ export interface VersionMetadata {
   endDate: number;
   /** The main timeline server revision number from which this version (or group) diverged. */
   baseRev: number;
-  /** Complete snapshot of the document state at the end of this version (`endDate`). */
-  state: any; // Consider making this generic <T> if possible
-  /** Array of the *original* Change objects included in this version. */
-  changes: Change[];
 }
 
 /**

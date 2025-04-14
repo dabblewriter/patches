@@ -1,5 +1,6 @@
 import type { JSONPatchOpHandler } from '../../types.js';
-import { get, updateRemovedOps } from '../../utils/index.js';
+import { get } from '../utils/get.js';
+import { updateRemovedOps } from '../utils/ops.js';
 import { replace } from './replace.js';
 
 /**

@@ -1,6 +1,6 @@
 import { createId } from 'crypto-id';
 import { applyPatch } from '../../json-patch/applyPatch.js';
-import { transformPatch } from '../transformPatch.js';
+import { transformPatch } from '../../json-patch/transformPatch.js';
 import type { Change, PatchStoreBackend, VersionMetadata } from '../types.js';
 import { applyChanges } from '../utils.js';
 

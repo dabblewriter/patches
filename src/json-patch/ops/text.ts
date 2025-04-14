@@ -1,13 +1,15 @@
 import type { Op } from '@dabble/delta';
 import { Delta } from '@dabble/delta';
 import type { JSONPatchOpHandler } from '../../types.js';
-import { get, log, updateRemovedOps } from '../../utils/index.js';
 import { replace } from '../ops/replace.js';
+import { get } from '../utils/get.js';
+import { log } from '../utils/log.js';
+import { updateRemovedOps } from '../utils/ops.js';
 
 export const text: JSONPatchOpHandler = {
   like: 'replace',
 
-  apply(state, path, value, _, createMissingObjects) {
+  apply(state, path, value) {
     const delta = Array.isArray(value) ? new Delta(value) : (value as Delta);
     if (!delta || !Array.isArray(delta.ops)) {
       return 'Invalid delta';
@@ -34,7 +36,7 @@ export const text: JSONPatchOpHandler = {
       return 'Invalid text delta provided for this text document';
     }
 
-    return replace.apply(state, path, doc, _, createMissingObjects);
+    return replace.apply(state, path, doc);
   },
 
   transform(state, thisOp, otherOps) {

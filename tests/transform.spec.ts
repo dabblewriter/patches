@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { transformPatch } from '../src/ot/transformPatch.js';
+import { transformPatch } from '../src/json-patch/transformPatch.js';
 
 const matrix = [[], [], [], [], [], [], []];
 const arr = [{}, {}, {}, {}, {}, {}, {}];

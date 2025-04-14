@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { composePatch } from '../src/ot/composePatch.js';
+import { composePatch } from '../src/json-patch/composePatch.js';
 
 describe('composePatch', () => {
   it('replace compose', () => {

@@ -1,8 +1,8 @@
 import type { ApplyJSONPatchOptions, JSONPatchOp, JSONPatchOpHandlerMap } from '../types.js';
-import { exit } from '../utils/exit.js';
-import { getType } from '../utils/getType.js';
 import { getTypes } from './ops/index.js';
 import { runWithObject } from './state.js';
+import { exit } from './utils/exit.js';
+import { getType } from './utils/getType.js';
 
 export function applyPatch(
   object: any,

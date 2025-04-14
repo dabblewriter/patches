@@ -1,18 +1,12 @@
 import type { JSONPatchOp, JSONPatchOpHandler, State } from '../../types.js';
-import { getOpData } from '../../utils/getOpData.js';
-import {
-  getArrayPrefixAndIndex,
-  getIndexAndEnd,
-  getTypeLike,
-  isAdd,
-  isArrayPath,
-  log,
-  mapAndFilterOps,
-  updateArrayIndexes,
-  updateRemovedOps,
-} from '../../utils/index.js';
-import { getValue, pluckWithShallowCopy } from '../../utils/pluck.js';
-import { toArrayIndex } from '../../utils/toArrayIndex.js';
+import { getOpData } from '../utils/getOpData.js';
+import { getTypeLike } from '../utils/getType.js';
+import { log } from '../utils/log.js';
+import { isAdd, mapAndFilterOps, updateRemovedOps } from '../utils/ops.js';
+import { getArrayPrefixAndIndex, getIndexAndEnd, isArrayPath } from '../utils/paths.js';
+import { getValue, pluckWithShallowCopy } from '../utils/pluck.js';
+import { toArrayIndex } from '../utils/toArrayIndex.js';
+import { updateArrayIndexes } from '../utils/updateArrayIndexes.js';
 import { add } from './add.js';
 
 export const move: JSONPatchOpHandler = {

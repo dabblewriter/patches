@@ -71,7 +71,7 @@ describe('WebRTCAwareness', () => {
 
   it('should create an awareness instance', () => {
     expect(awareness).toBeInstanceOf(WebRTCAwareness);
-    expect(awareness.state).toEqual([]);
+    expect(awareness.states).toEqual([]);
   });
 
   it('should subscribe to transport events on creation', () => {
@@ -152,14 +152,14 @@ describe('WebRTCAwareness', () => {
     messageHandler(JSON.stringify(peerState2));
 
     // Verify both peers are in the state
-    expect(awareness.state).toHaveLength(2);
+    expect(awareness.states).toHaveLength(2);
 
     // Simulate peer disconnection
     disconnectHandler('peer1');
 
     // Verify peer1 was removed
-    expect(awareness.state).toHaveLength(1);
-    expect(awareness.state[0].id).toBe('peer2');
+    expect(awareness.states).toHaveLength(1);
+    expect(awareness.states[0].id).toBe('peer2');
   });
 
   it('should process incoming awareness data', () => {
@@ -173,8 +173,8 @@ describe('WebRTCAwareness', () => {
     messageHandler(JSON.stringify(peerState));
 
     // Should add to the awareness state
-    expect(awareness.state).toHaveLength(1);
-    expect(awareness.state[0]).toEqual(peerState);
+    expect(awareness.states).toHaveLength(1);
+    expect(awareness.states[0]).toEqual(peerState);
   });
 
   it('should update existing peer data when receiving updates', () => {
@@ -194,14 +194,14 @@ describe('WebRTCAwareness', () => {
 
     // Add initial state
     messageHandler(JSON.stringify(initialState));
-    expect(awareness.state[0]).toEqual(initialState);
+    expect(awareness.states[0]).toEqual(initialState);
 
     // Process update
     messageHandler(JSON.stringify(updatedState));
 
     // Should update only the changed fields
-    expect(awareness.state).toHaveLength(1);
-    expect(awareness.state[0]).toEqual({
+    expect(awareness.states).toHaveLength(1);
+    expect(awareness.states[0]).toEqual({
       id: 'peer1',
       cursor: { x: 60, y: 80 }, // Updated
       selection: { start: 5, end: 10 }, // Preserved
@@ -237,14 +237,14 @@ describe('WebRTCAwareness', () => {
 
     // Add valid state first
     messageHandler(JSON.stringify(validState));
-    expect(awareness.state).toHaveLength(1);
+    expect(awareness.states).toHaveLength(1);
 
     // Try to process invalid data
     messageHandler(invalidData);
 
     // State should remain unchanged
-    expect(awareness.state).toHaveLength(1);
-    expect(awareness.state[0]).toEqual(validState);
+    expect(awareness.states).toHaveLength(1);
+    expect(awareness.states[0]).toEqual(validState);
   });
 
   it('should ignore data without an ID', () => {
@@ -256,7 +256,7 @@ describe('WebRTCAwareness', () => {
     messageHandler(dataWithoutId);
 
     // Should ignore the data
-    expect(awareness.state).toHaveLength(0);
+    expect(awareness.states).toHaveLength(0);
   });
 
   it('should handle multiple peers correctly', () => {
@@ -282,11 +282,11 @@ describe('WebRTCAwareness', () => {
     messageHandler(JSON.stringify(peer3State));
 
     // Verify all peers are in the state
-    expect(awareness.state).toHaveLength(3);
+    expect(awareness.states).toHaveLength(3);
 
     // Check ordering by insertion
-    expect(awareness.state[0].id).toBe('peer1');
-    expect(awareness.state[1].id).toBe('peer2');
-    expect(awareness.state[2].id).toBe('peer3');
+    expect(awareness.states[0].id).toBe('peer1');
+    expect(awareness.states[1].id).toBe('peer2');
+    expect(awareness.states[2].id).toBe('peer3');
   });
 });

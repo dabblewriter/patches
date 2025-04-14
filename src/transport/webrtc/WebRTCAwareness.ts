@@ -15,14 +15,14 @@ type AwarenessState = Record<string, any>;
  * @template T - The type of awareness state to be shared between peers
  */
 export class WebRTCAwareness<T extends AwarenessState = AwarenessState> {
-  private _state: T[] = [];
+  private _states: T[] = [];
   private _localState: T = {} as T;
 
   /**
    * Signal that emits when the awareness state is updated.
    * Subscribers receive the complete new awareness state array.
    */
-  readonly onUpdate = signal<(newState: T[]) => void>();
+  readonly onUpdate = signal<(states: T[]) => void>();
 
   /**
    * The peer ID of this client, obtained from the WebRTC transport.
@@ -60,8 +60,8 @@ export class WebRTCAwareness<T extends AwarenessState = AwarenessState> {
    * Gets the current combined awareness state of all peers.
    * @returns An array of awareness states from all connected peers
    */
-  get state(): T[] {
-    return this._state;
+  get states(): T[] {
+    return this._states;
   }
 
   /**
@@ -69,9 +69,9 @@ export class WebRTCAwareness<T extends AwarenessState = AwarenessState> {
    * This method is protected and typically used internally.
    * @param state - The new combined awareness state array
    */
-  protected set state(state: T[]) {
-    this._state = state;
-    this.onUpdate.emit(this._state);
+  protected set states(state: T[]) {
+    this._states = state;
+    this.onUpdate.emit(this._states);
   }
 
   /**
@@ -110,7 +110,7 @@ export class WebRTCAwareness<T extends AwarenessState = AwarenessState> {
    * @param peerId - ID of the disconnected peer
    */
   private _removePeer(peerId: string) {
-    this.state = this.state.filter(s => (s as any).id !== peerId);
+    this.states = this.states.filter(s => (s as any).id !== peerId);
   }
 
   /**
@@ -127,13 +127,13 @@ export class WebRTCAwareness<T extends AwarenessState = AwarenessState> {
       console.error('Invalid peer data:', err);
       return;
     }
-    const update = [...this.state];
+    const update = [...this.states];
     const existingIndex = update.findIndex(s => (s as any).id === peerState.id);
     if (existingIndex !== -1) {
       update.splice(existingIndex, 1, { ...update[existingIndex], ...peerState });
     } else {
       update.push(peerState as unknown as T);
     }
-    this.state = update;
+    this.states = update;
   }
 }

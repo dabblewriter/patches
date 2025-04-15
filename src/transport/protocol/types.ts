@@ -1,4 +1,4 @@
-import type { Change, PatchSnapshot, VersionMetadata } from '../../ot/types';
+import type { Change, PatchSnapshot, PatchState, VersionMetadata } from '../../ot/types';
 
 /**
  * Represents the possible states of a network transport connection.
@@ -122,8 +122,8 @@ export interface PatchesAPI {
   unsubscribe(ids: string | string[]): Promise<void>;
 
   // === Document Operations ===
-  /** Get the latest state and revision of a document. */
-  getDoc(docId: string): Promise<PatchSnapshot>;
+  /** Get the latest version of a document and changes since the last version. */
+  getDoc(docId: string, atRev?: number): Promise<PatchSnapshot>;
 
   /** Get changes that occurred after a specific revision. */
   getChangesSince(docId: string, rev: number): Promise<Change[]>;
@@ -142,7 +142,7 @@ export interface PatchesAPI {
   listVersions(docId: string, options: ListOptions): Promise<VersionMetadata[]>;
 
   /** Get the state snapshot for a specific version ID. */
-  getVersionState(docId: string, versionId: string): Promise<PatchSnapshot>;
+  getVersionState(docId: string, versionId: string): Promise<PatchState>;
 
   /** Get the original Change objects associated with a specific version ID. */
   getVersionChanges(docId: string, versionId: string): Promise<Change[]>;

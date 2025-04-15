@@ -26,7 +26,7 @@ export function splitChanges<T>(changes: Change[]): [Change[], Change[]] {
 export function applyChanges<T>(state: T, changes: Change[]): T {
   if (!changes.length) return state;
   for (const change of changes) {
-    state = applyPatch(state, change.ops, { createMissingObjects: true, strict: true });
+    state = applyPatch(state, change.ops, { strict: true });
   }
   return state;
 }

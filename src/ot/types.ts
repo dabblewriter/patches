@@ -23,10 +23,13 @@ export type DeletedChange = { id: string };
 /**
  * Represents the state of a document in the OT protocol.
  */
-export interface PatchSnapshot<T = any> {
+export interface PatchState<T = any> {
   state: T;
   rev: number;
-  changes?: Change[]; // Kept for potential PatchDoc export/import compatibility
+}
+
+export interface PatchSnapshot<T = any> extends PatchState<T> {
+  changes: Change[];
 }
 
 /** Status options for a branch */
@@ -55,14 +58,15 @@ export interface Branch {
 export interface VersionMetadata {
   /** Unique identifier (UUID) for this version record. */
   id: string;
-  /** ID of the parent version in the history DAG. Null for root versions. */
-  parentId: string | null;
-  /** Identifier linking versions from the same offline batch or branch. Null for regular online versions. */
-  groupId?: string | null;
+  name?: string;
+  /** ID of the parent version in the history DAG. Undefined for root versions and for the first branched version. */
+  parentId?: string;
+  /** Identifier linking versions from the same offline batch or branch. */
+  groupId?: string;
   /** Indicates how the version was created ('online', 'offline', 'branch'). */
-  origin: 'online' | 'offline' | 'branch';
+  origin: 'main' | 'offline' | 'branch';
   /** User-defined name if origin is 'branch'. */
-  branchName?: string | null;
+  branchName?: string;
   /** Timestamp marking the beginning of the changes included in this version (e.g., first change in session). */
   startDate: number;
   /** Timestamp marking the end of the changes included in this version (e.g., last change in session). */
@@ -94,14 +98,13 @@ export interface PatchStoreBackendListVersionsOptions {
   /** Return versions in descending start date order (latest first). Defaults to false (ascending). */
   reverse?: boolean;
   /** Filter by the origin type. */
-  origin?: 'online' | 'offline' | 'branch';
+  origin?: 'main' | 'offline' | 'branch';
   /** Filter by the group ID (branch ID or offline batch ID). */
   groupId?: string;
   /** List versions whose start date is strictly *after* this timestamp. */
   startDateAfter?: number;
   /** List versions whose end date is strictly *before* this timestamp. */
-  endDateBefore?: number;
-  // Consider adding pagination support, e.g., startAfterVersionId?: string
+  revBefore?: number;
 }
 
 /**
@@ -109,31 +112,29 @@ export interface PatchStoreBackendListVersionsOptions {
  * Defines methods needed by PatchServer, HistoryManager, etc.
  */
 export interface PatchStoreBackend {
-  /** Gets the latest committed revision number for a document. Returns 0 if the document doesn't exist. */
-  getLatestRevision(docId: string): Promise<number>;
+  /** Adds a subscription for a client to one or more documents. */
+  addSubscription(clientId: string, docIds: string[]): Promise<string[]>;
 
-  /** Gets the latest committed state for a document. Returns undefined if the document doesn't exist. */
-  getLatestState(docId: string): Promise<any | undefined>;
+  /** Removes a subscription for a client from one or more documents. */
+  removeSubscription(clientId: string, docIds: string[]): Promise<string[]>;
 
-  /** Reconstructs or retrieves the document state at a specific historical revision number. */
-  getStateAtRevision(docId: string, rev: number): Promise<any | undefined>;
-
-  /** Saves a committed server change record. */
-  saveChange(docId: string, change: Change): Promise<void>;
+  /** Saves a batch of committed server changes. */
+  saveChanges(docId: string, changes: Change[]): Promise<void>;
 
   /** Lists committed server changes based on revision numbers. */
   listChanges(docId: string, options: PatchStoreBackendListChangesOptions): Promise<Change[]>;
 
   /**
-   * Saves a version (metadata, state snapshot, and included changes).
+   * Saves version metadata, its state snapshot, and the original changes that constitute it.
+   * State and changes are stored separately from the core metadata.
    */
-  saveVersion(docId: string, version: VersionMetadata): Promise<void>;
+  createVersion(docId: string, metadata: VersionMetadata, state: any, changes: Change[]): Promise<void>;
+
+  /** Update a version's metadata. */
+  updateVersion(docId: string, versionId: string, metadata: Partial<VersionMetadata>): Promise<void>;
 
   /** Lists version metadata based on filtering/sorting options. */
   listVersions(docId: string, options: PatchStoreBackendListVersionsOptions): Promise<VersionMetadata[]>;
-
-  /** Loads only the metadata for a specific version ID. */
-  loadVersionMetadata(docId: string, versionId: string): Promise<VersionMetadata | null>;
 
   /** Loads the state snapshot for a specific version ID. */
   loadVersionState(docId: string, versionId: string): Promise<any | undefined>;
@@ -141,8 +142,8 @@ export interface PatchStoreBackend {
   /** Loads the original Change objects associated with a specific version ID. */
   loadVersionChanges(docId: string, versionId: string): Promise<Change[]>;
 
-  /** Gets the metadata of the most recent version saved for a document, regardless of origin. */
-  getLatestVersionMetadata(docId: string): Promise<VersionMetadata | null>;
+  /** Deletes a document. */
+  deleteDoc(docId: string): Promise<void>;
 }
 
 /**

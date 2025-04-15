@@ -4,6 +4,15 @@ import type { ApplyJSONPatchOptions, JSONPatchOp, JSONPatchOpHandlerMap } from '
 import { exit } from './utils/exit.js';
 import { getType } from './utils/getType.js';
 
+/**
+ * Applies a sequence of JSON patch operations to an object.
+ *
+ * @param object - The object to apply the patches to
+ * @param patches - The JSON patch operations to apply
+ * @param opts - Options for applying the patch
+ * @param custom - Custom patch operation handlers
+ * @returns The object after applying the patches
+ */
 export function applyPatch(
   object: any,
   patches: JSONPatchOp[],

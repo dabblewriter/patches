@@ -240,7 +240,7 @@ describe('WebSocketTransport', () => {
       expect(timer.delay).toBe(1000); // Initial backoff
     });
 
-    it.only('should increase backoff time on consecutive failures', async () => {
+    it('should increase backoff time on consecutive failures', async () => {
       // First attempt
       let connectPromise = transport.connect();
       mockWs.simulateError(new Error('Test error'));

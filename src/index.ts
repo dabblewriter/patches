@@ -8,7 +8,11 @@ export { transformPatch } from './json-patch/transformPatch.js';
 export * from './json-patch/ops/index.js'; // Exports all ops: add, remove, etc.
 
 export * from './json-patch/ops/index.js';
-export type { ApplyJSONPatchOptions, JSONPatchOpHandlerMap as JSONPatchCustomTypes, JSONPatchOp } from './types.js';
+export type {
+  ApplyJSONPatchOptions,
+  JSONPatchOpHandlerMap as JSONPatchCustomTypes,
+  JSONPatchOp,
+} from './json-patch/types.js';
 
 // OT Core
 export * from './json-patch/composePatch.js';
@@ -37,6 +41,3 @@ export * from './transport/webrtc/WebRTCAwareness.js';
 export * from './transport/webrtc/WebRTCTransport.js';
 export * from './transport/websocket/PatchesWebSocket.js';
 export * from './transport/websocket/WebSocketTransport.js';
-
-// Root Types (if any remain)
-export * from './types.js';

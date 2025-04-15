@@ -75,7 +75,7 @@ export class PatchDoc<T extends object> {
   import(snapshot: PatchSnapshot<T>) {
     this._committedState = JSON.parse(JSON.stringify(snapshot.state));
     this._committedRev = snapshot.rev;
-    this._pendingChanges = snapshot.changes ? snapshot.changes : [];
+    this._pendingChanges = snapshot.changes ?? [];
     this._sendingChanges = []; // Assume import resets sending state
     this._recalculateLocalState();
     this.onUpdate.emit(this._state);

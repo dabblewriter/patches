@@ -52,7 +52,7 @@ export class BranchManager {
       state: stateAtRev,
       changes: [],
     };
-    await this.store.saveVersion(branchDocId, initialVersionMetadata);
+    await this.store.createVersion(branchDocId, initialVersionMetadata);
 
     // 4. Create the branch metadata record
     const branch: Branch = {

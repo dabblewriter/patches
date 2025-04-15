@@ -1,4 +1,4 @@
-import type { JSONPatchOpHandlerMap } from '../../types.js';
+import type { JSONPatchOpHandlerMap } from '../types.js';
 import { add } from './add.js';
 import { bit } from './bitmask.js';
 import { copy } from './copy.js';

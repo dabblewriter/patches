@@ -1,4 +1,4 @@
-import type { JSONPatchOp } from '../types';
+import type { JSONPatchOp } from '../json-patch/types';
 
 export interface Change {
   /** Unique identifier for the change, generated client-side. */

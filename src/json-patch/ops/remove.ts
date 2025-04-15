@@ -1,4 +1,4 @@
-import type { JSONPatchOpHandler } from '../../types.js';
+import type { JSONPatchOpHandler } from '../types.js';
 import { getOpData } from '../utils/getOpData.js';
 import { log } from '../utils/log.js';
 import { transformRemove } from '../utils/ops.js';

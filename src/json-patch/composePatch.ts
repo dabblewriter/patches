@@ -1,6 +1,6 @@
-import type { JSONPatchOp, JSONPatchOpHandlerMap } from '../types.js';
 import { getTypes } from './ops/index.js';
 import { runWithObject } from './state.js';
+import type { JSONPatchOp, JSONPatchOpHandlerMap } from './types.js';
 import { getType } from './utils/getType.js';
 import { mapAndFilterOps } from './utils/ops.js';
 import { getValue } from './utils/pluck.js';

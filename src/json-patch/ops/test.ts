@@ -1,4 +1,4 @@
-import type { JSONPatchOp, JSONPatchOpHandler } from '../../types.js';
+import type { JSONPatchOp, JSONPatchOpHandler } from '../types.js';
 import { deepEqual } from '../utils/deepEqual.js';
 import { getOpData } from '../utils/getOpData.js';
 

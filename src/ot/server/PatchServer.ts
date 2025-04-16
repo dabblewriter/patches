@@ -1,8 +1,14 @@
 import { createId } from 'crypto-id';
 import { applyPatch } from '../../json-patch/applyPatch.js';
 import { transformPatch } from '../../json-patch/transformPatch.js';
-import type { ListOptions } from '../../transport/protocol/types.js';
-import type { Change, PatchSnapshot, PatchState, PatchStoreBackend, VersionMetadata } from '../types.js';
+import type {
+  Change,
+  ListVersionsOptions,
+  PatchSnapshot,
+  PatchState,
+  PatchStoreBackend,
+  VersionMetadata,
+} from '../types.js';
 import { applyChanges } from '../utils.js';
 
 /**
@@ -70,7 +76,7 @@ export class PatchServer {
    * @returns The changes that occurred after the specified revision.
    */
   getChangesSince(docId: string, rev: number): Promise<Change[]> {
-    return this.store.listChanges(docId, { startAfterRev: rev });
+    return this.store.listChanges(docId, { startAfter: rev });
   }
 
   /**
@@ -128,7 +134,7 @@ export class PatchServer {
     // 3. Load committed changes to check idempotency (and later for transformation
     const committedChanges = await this.store.listChanges(docId, {
       // Load the base change too to get at least 1 change to check if we need to create a new version
-      startAfterRev: baseRev,
+      startAfter: baseRev,
     });
 
     const commitedIds = new Set(committedChanges.map(c => c.id));
@@ -168,6 +174,7 @@ export class PatchServer {
               origin: 'offline',
               startDate: sessionChanges[0].created,
               endDate: sessionChanges[sessionChanges.length - 1].created,
+              rev: sessionChanges[sessionChanges.length - 1].rev,
               baseRev: baseRev, // Server rev the *batch* was based on
             };
             await this.store.createVersion(docId, sessionMetadata, currentSessionState, sessionChanges);
@@ -241,7 +248,10 @@ export class PatchServer {
    * @param options Filtering and sorting options.
    * @returns A list of version metadata objects.
    */
-  listVersions(docId: string, options: ListOptions): Promise<VersionMetadata[]> {
+  listVersions(docId: string, options: ListVersionsOptions): Promise<VersionMetadata[]> {
+    if (!options.orderBy) {
+      options.orderBy = 'startDate';
+    }
     return this.store.listVersions(docId, options);
   }
 
@@ -286,17 +296,20 @@ export class PatchServer {
     const versions = await this.store.listVersions(docId, {
       limit: 1,
       reverse: true,
-      revBefore: rev ? rev + 1 : undefined,
+      startAfter: rev ? rev + 1 : undefined,
       origin: 'main',
+      orderBy: 'rev',
     });
     const version = versions[0];
     const state = (version && (await this.store.loadVersionState(docId, version.id))) || null;
-    const baseRev = version?.baseRev || 0;
-    if (!rev) rev = baseRev;
-    const changes = await this.store.listChanges(docId, { startAfterRev: baseRev, endBeforeRev: rev + 1 });
+    const versionRev = version?.rev || 0;
+    const changes = await this.store.listChanges(docId, {
+      startAfter: versionRev,
+      endBefore: rev ? rev + 1 : undefined,
+    });
     return {
       state,
-      rev: baseRev,
+      rev: versionRev,
       changes,
     };
   }
@@ -322,6 +335,7 @@ export class PatchServer {
       origin: 'main',
       startDate: changes[0].created,
       endDate: changes[changes.length - 1].created,
+      rev: changes[changes.length - 1].rev,
       baseRev,
     };
     await this.store.createVersion(docId, sessionMetadata, state, changes);

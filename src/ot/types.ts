@@ -63,7 +63,7 @@ export interface VersionMetadata {
   parentId?: string;
   /** Identifier linking versions from the same offline batch or branch. */
   groupId?: string;
-  /** Indicates how the version was created ('online', 'offline', 'branch'). */
+  /** Indicates how the version was created ('main', 'offline', 'branch'). */
   origin: 'main' | 'offline' | 'branch';
   /** User-defined name if origin is 'branch'. */
   branchName?: string;
@@ -71,18 +71,20 @@ export interface VersionMetadata {
   startDate: number;
   /** Timestamp marking the end of the changes included in this version (e.g., last change in session). */
   endDate: number;
-  /** The main timeline server revision number from which this version (or group) diverged. */
+  /** The revision number this version was created at. */
+  rev: number;
+  /** The revision number on the main timeline before the changes that created this version. If this is an offline/branch version, this is the revision number of the source document where the branch was created and not . */
   baseRev: number;
 }
 
 /**
- * Options for listing committed server changes.
+ * Options for listing committed server changes. *Always* ordered by revision number.
  */
-export interface PatchStoreBackendListChangesOptions {
+export interface ListChangesOptions {
   /** List changes committed strictly *after* this revision number. */
-  startAfterRev?: number;
+  startAfter?: number;
   /** List changes committed strictly *before* this revision number. */
-  endBeforeRev?: number;
+  endBefore?: number;
   /** Maximum number of changes to return. */
   limit?: number;
   /** Return changes in descending revision order (latest first). Defaults to false (ascending). */
@@ -92,19 +94,21 @@ export interface PatchStoreBackendListChangesOptions {
 /**
  * Options for listing version metadata.
  */
-export interface PatchStoreBackendListVersionsOptions {
+export interface ListVersionsOptions {
+  /** List versions whose orderBy field is *after* this value. */
+  startAfter?: number;
+  /** List versions whose orderBy field is strictly *before* this value. */
+  endBefore?: number;
   /** Maximum number of versions to return. */
   limit?: number;
-  /** Return versions in descending start date order (latest first). Defaults to false (ascending). */
+  /** Sort by start date, rev, or baseRev. Defaults to 'rev'. */
+  orderBy?: 'startDate' | 'rev' | 'baseRev';
+  /** Return versions in descending order. Defaults to false (ascending). When reversed, startAfter and endBefore apply to the *reversed* list. */
   reverse?: boolean;
   /** Filter by the origin type. */
   origin?: 'main' | 'offline' | 'branch';
   /** Filter by the group ID (branch ID or offline batch ID). */
   groupId?: string;
-  /** List versions whose start date is strictly *after* this timestamp. */
-  startDateAfter?: number;
-  /** List versions whose end date is strictly *before* this timestamp. */
-  revBefore?: number;
 }
 
 /**
@@ -122,7 +126,7 @@ export interface PatchStoreBackend {
   saveChanges(docId: string, changes: Change[]): Promise<void>;
 
   /** Lists committed server changes based on revision numbers. */
-  listChanges(docId: string, options: PatchStoreBackendListChangesOptions): Promise<Change[]>;
+  listChanges(docId: string, options: ListChangesOptions): Promise<Change[]>;
 
   /**
    * Saves version metadata, its state snapshot, and the original changes that constitute it.
@@ -134,7 +138,7 @@ export interface PatchStoreBackend {
   updateVersion(docId: string, versionId: string, metadata: Partial<VersionMetadata>): Promise<void>;
 
   /** Lists version metadata based on filtering/sorting options. */
-  listVersions(docId: string, options: PatchStoreBackendListVersionsOptions): Promise<VersionMetadata[]>;
+  listVersions(docId: string, options: ListVersionsOptions): Promise<VersionMetadata[]>;
 
   /** Loads the state snapshot for a specific version ID. */
   loadVersionState(docId: string, versionId: string): Promise<any | undefined>;

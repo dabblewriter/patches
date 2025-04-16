@@ -1,6 +1,6 @@
 import { createId } from 'crypto-id';
-import type { Branch, BranchingStoreBackend, Change, VersionMetadata } from '../types.js'; // Correct path is likely local
-import type { PatchServer } from './PatchServer.js'; // Try adding extension
+import type { Branch, BranchingStoreBackend, BranchStatus, Change, VersionMetadata } from '../types.js';
+import type { PatchServer } from './PatchServer.js';
 
 /**
  * Helps manage branches for a document. A branch is a document that is branched from another document. Its first
@@ -31,30 +31,29 @@ export class BranchManager {
    * @returns The ID of the new branch document.
    */
   async createBranch(docId: string, rev: number, branchName?: string, metadata?: Record<string, any>): Promise<string> {
-    // 1. Get the state of the source document at the specified revision
-    const stateAtRev = await this.store.getStateAtRevision(docId, rev);
-
-    // 2. Create the new branch document ID
+    // Prevent branching off a branch
+    const maybeBranch = await this.store.loadBranch(docId);
+    if (maybeBranch) {
+      throw new Error('Cannot create a branch from another branch.');
+    }
+    // 1. Get the state at the branch point
+    const stateAtRev = (await this.patchServer._getStateAtRevision(docId, rev)).state;
     const branchDocId = createId();
-
-    // 3. Create and save the initial version for the branch document
     const now = Date.now();
-    const initialVersionId = createId();
+    // Create an initial version at the branch point rev (for snapshotting/large docs)
     const initialVersionMetadata: VersionMetadata = {
-      id: initialVersionId,
-      parentId: null,
-      groupId: branchDocId,
-      origin: 'branch',
-      branchName: branchName,
+      id: createId(),
+      origin: 'main', // Branch doc versions are 'main' until merged
       startDate: now,
       endDate: now,
+      rev,
       baseRev: rev,
-      state: stateAtRev,
-      changes: [],
+      name: branchName,
+      groupId: branchDocId,
+      branchName,
     };
-    await this.store.createVersion(branchDocId, initialVersionMetadata);
-
-    // 4. Create the branch metadata record
+    await this.store.createVersion(branchDocId, initialVersionMetadata, stateAtRev, []);
+    // 2. Create the branch metadata record
     const branch: Branch = {
       id: branchDocId,
       branchedFromId: docId,
@@ -65,7 +64,6 @@ export class BranchManager {
       ...(metadata && { metadata }),
     };
     await this.store.createBranch(branch);
-
     return branchDocId;
   }
 
@@ -74,7 +72,7 @@ export class BranchManager {
    * @param branchId - The ID of the branch to close.
    * @param status - The status to set for the branch.
    */
-  async closeBranch(branchId: string, status: Branch['status'] = 'closed'): Promise<void> {
+  async closeBranch(branchId: string, status: Exclude<BranchStatus, 'open'> = 'closed'): Promise<void> {
     await this.store.updateBranch(branchId, { status });
   }
 
@@ -93,50 +91,54 @@ export class BranchManager {
     if (branch.status !== 'open') {
       throw new Error(`Branch ${branchId} is not open (status: ${branch.status}). Cannot merge.`);
     }
-
     const sourceDocId = branch.branchedFromId;
     const branchStartRevOnSource = branch.branchedRev;
-
     // 2. Get all committed server changes made on the branch document since it was created.
-    const branchChanges = await this.store.listChanges(branchId, {
-      /* No startAfterRev needed? */
-    });
-
+    const branchChanges = await this.store.listChanges(branchId, {});
     if (branchChanges.length === 0) {
       console.log(`Branch ${branchId} has no changes to merge.`);
       await this.closeBranch(branchId, 'merged');
       return [];
     }
-
-    // 3. Prepare the changes for submission to the source document.
-    // NOTE: We might need to rebase these changes relative to the source document's current state
-    // if the source document has changed since the branch was created.
-    // This simplified version assumes the PatchServer handles potential conflicts during `receiveChanges`.
-    // A more robust implementation might involve getting the current revision of the source doc,
-    // getting changes on the source doc since `branchStartRevOnSource`, and explicitly rebasing
-    // `branchChanges` over those source changes before submission.
-    const changesToSubmit: Change[] = branchChanges.map((change: Change) => ({
-      ...change,
-      // The baseRev should ideally reflect the revision on the *source* doc
-      // that these changes are intended to apply to. If the source doc changed,
-      // this needs adjustment via rebasing. Assuming PatchServer handles this.
-      baseRev: branchStartRevOnSource, // This might need refinement
-    }));
-
-    // 4. Submit the batch of changes to the source document via PatchServer.
+    // 3. Get all versions from the branch doc (skip offline versions)
+    const branchVersions = await this.store.listVersions(branchId, { origin: 'main' });
+    // 4. For each version, create a corresponding version in the main doc with updated fields
+    let lastVersionId: string | undefined;
+    for (const v of branchVersions) {
+      const newVersionId = createId();
+      const newVersionMetadata: VersionMetadata = {
+        ...v,
+        id: newVersionId,
+        origin: 'branch',
+        baseRev: branchStartRevOnSource,
+        groupId: branchId,
+        branchName: branch.name,
+        parentId: lastVersionId,
+      };
+      const state = await this.store.loadVersionState(branchId, v.id);
+      const changes = await this.store.loadVersionChanges(branchId, v.id);
+      await this.store.createVersion(sourceDocId, newVersionMetadata, state, changes);
+      lastVersionId = newVersionId;
+    }
+    // 5. Flatten all branch changes into a single change for the main doc
+    const now = Date.now();
+    const flattenedChange: Change = {
+      id: createId(12),
+      ops: branchChanges.flatMap(c => c.ops),
+      rev: branchStartRevOnSource + branchChanges.length,
+      baseRev: branchStartRevOnSource,
+      created: now,
+    };
+    // 6. Commit the flattened change to the main doc
     let committedMergeChanges: Change[] = [];
     try {
-      // PatchServer's receiveChanges needs to handle the rebasing/conflict resolution
-      committedMergeChanges = await this.patchServer.receiveChanges(sourceDocId, changesToSubmit);
+      committedMergeChanges = await this.patchServer.patchDoc(sourceDocId, [flattenedChange]);
     } catch (error) {
       console.error(`Failed to merge branch ${branchId} into ${sourceDocId}:`, error);
-      // Consider more specific error handling or re-throwing different error types
       throw new Error(`Merge failed: ${error instanceof Error ? error.message : String(error)}`);
     }
-
-    // 5. Merge succeeded. Update the branch status.
+    // 7. Merge succeeded. Update the branch status.
     await this.closeBranch(branchId, 'merged');
-
     return committedMergeChanges;
   }
 }

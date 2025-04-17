@@ -1,3 +1,4 @@
+import { createId } from 'crypto-id';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { applyPatch } from '../../src/json-patch/applyPatch.js';
 import * as transformPatchModule from '../../src/json-patch/transformPatch.js'; // Import the module
@@ -537,7 +538,7 @@ describe('PatchServer', () => {
       expect(result[0].ops).toEqual(incomingChange.ops); // Mock transform returns original ops here
     });
 
-    it('should transform incoming changes against concurrent server changes', async () => {
+    it('should transform incoming changes against multiple concurrent server changes', async () => {
       // Setup
       const baseState = { text: ['a', 'b', 'c'] };
       const baseRev = 1;
@@ -548,27 +549,37 @@ describe('PatchServer', () => {
         baseRev: 0,
         rev: 1,
         ops: [{ op: 'add', path: '/', value: baseState }],
-        created: Date.now() - 2000,
+        created: Date.now() - 3000,
       };
 
-      // Server change: insert 'x' at the beginning
-      const serverChange: Change = {
+      // First server change: insert 'x' at the beginning
+      const serverChange1: Change = {
         id: 'server1',
         baseRev: 1,
         rev: 2,
         ops: [{ op: 'add', path: '/text/0', value: 'x' }],
+        created: Date.now() - 2000,
+      };
+
+      // Second server change: insert 'y' at index 2
+      const serverChange2: Change = {
+        id: 'server2',
+        baseRev: 2,
+        rev: 3,
+        ops: [{ op: 'add', path: '/text/2', value: 'y' }],
         created: Date.now() - 1000,
       };
 
       // Set up the initial document state
       mockStore.setInitialDocState(docId, baseState, baseRev, [baseChange]);
-      // Add the server change to the store
-      await mockStore.saveChange(docId, serverChange);
+      // Add the server changes to the store
+      await mockStore.saveChange(docId, serverChange1);
+      await mockStore.saveChange(docId, serverChange2);
 
-      // Client change: add 'd' at the end (based on baseRev 1, without knowing about serverChange)
+      // Client change: add 'd' at the end (based on baseRev 1, without knowing about server changes)
       const clientChange: Change = {
         id: 'client1',
-        baseRev: 1, // Same base as server change
+        baseRev: 1, // Same base as first server change
         rev: 0,
         ops: [{ op: 'add', path: '/text/3', value: 'd' }],
         created: Date.now(),
@@ -577,34 +588,29 @@ describe('PatchServer', () => {
       // Spy on the actual transformPatch function from the imported module
       const transformPatchSpy = vi.spyOn(transformPatchModule, 'transformPatch');
       transformPatchSpy.mockReturnValue([
-        { op: 'add', path: '/text/4', value: 'd' }, // Mock the transformed result
+        { op: 'add', path: '/text/5', value: 'd' }, // Mock the transformed result
       ]);
 
       // Execute
       const result = await patchServer.patchDoc(docId, [clientChange]);
 
-      // Verify transformPatch was called
-      expect(transformPatchSpy).toHaveBeenCalled();
+      // Verify transformPatch was called with the correct parameters
+      expect(transformPatchSpy).toHaveBeenCalledWith(
+        baseState, // Initial state at baseRev
+        [
+          { op: 'add', path: '/text/0', value: 'x' }, // First server change
+          { op: 'add', path: '/text/2', value: 'y' }, // Second server change
+        ],
+        [{ op: 'add', path: '/text/3', value: 'd' }] // Client change
+      );
 
-      // Verify the result contains both the committed server change and the transformed client change
-      const expectedTransformedOps = [{ op: 'add', path: '/text/4', value: 'd' }];
-      expect(result).toHaveLength(2);
-
-      // Check the committed server change (should be the first element)
-      expect(result[0]).toEqual(serverChange);
-
-      // Check the transformed client change (should be the second element)
-      expect(result[1].id).toBe('client1'); // ID of the transformed change
-      expect(result[1].baseRev).toBe(1); // Original baseRev before transformation
-      expect(result[1].ops).toEqual(expectedTransformedOps);
-
-      // Verify saveChanges was called with the transformed change and updated baseRev
-      // Note: The actual saveChanges call happens *inside* patchDoc and isn't directly tested here,
-      // but the returned result implies what *should* have been saved after transformation.
-      // We trust the internal logic uses the transformed ops.
-      // Let's refine the check on the *returned* change's baseRev.
-      // The returned change should reflect the baseRev *before* transformation.
-      // The *saved* change would have an updated baseRev internally.
+      // Verify the result contains all changes in the correct order
+      expect(result).toHaveLength(3);
+      expect(result[0]).toEqual(serverChange1);
+      expect(result[1]).toEqual(serverChange2);
+      expect(result[2].id).toBe('client1');
+      expect(result[2].baseRev).toBe(1);
+      expect(result[2].ops).toEqual([{ op: 'add', path: '/text/5', value: 'd' }]);
     });
 
     it('should handle idempotency: ignore already committed changes', async () => {
@@ -693,13 +699,6 @@ describe('PatchServer', () => {
       // Setup: Server at rev 5
       const baseRev = 5;
       const initialState = { value: 'rev5' };
-      const oldChange: Change = {
-        id: 'c0',
-        baseRev: 0,
-        rev: baseRev,
-        ops: [{ op: 'add', path: '/', value: initialState }],
-        created: Date.now() - 100000,
-      };
 
       // Offline changes (created > 1 min ago, close together)
       const now = Date.now();

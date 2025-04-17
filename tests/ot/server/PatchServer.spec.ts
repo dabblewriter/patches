@@ -155,6 +155,9 @@ class MockPatchStoreBackend implements PatchStoreBackend {
     if (options.origin) {
       docVersions = docVersions.filter(v => v.metadata.origin === options.origin);
     }
+    if (options.groupId) {
+      docVersions = docVersions.filter(v => v.metadata.groupId === options.groupId);
+    }
     if (options.reverse) {
       docVersions = docVersions.slice().reverse();
     }
@@ -1017,5 +1020,124 @@ describe('PatchServer', () => {
       await patchServer.updateVersion(docId, versionId, 'update');
       expect(mockStore.updateVersion).toHaveBeenCalledWith(docId, versionId, { name: 'update' });
     });
+  });
+});
+
+describe('PatchServer multi-batch offline/large edit support (batchId)', () => {
+  let store: MockPatchStoreBackend;
+  let server: PatchServer;
+  const docId = 'doc-batch-test';
+
+  beforeEach(() => {
+    store = new MockPatchStoreBackend();
+    server = new PatchServer(store, { sessionTimeoutMinutes: 30 });
+    store.setInitialDocState(docId, { text: '' }, 0, []);
+  });
+
+  it('should not transform multi-batch uploads with the same batchId over each other', async () => {
+    // Simulate a concurrent change from another client after baseRev
+    const concurrentChange: Change = {
+      id: 'server-1',
+      ops: [{ op: 'add', path: '/text', value: 'A' }],
+      rev: 1,
+      baseRev: 0,
+      created: Date.now() - 10000,
+    };
+    await store.saveChange(docId, concurrentChange);
+
+    // Offline client edits, split into two batches, same batchId
+    const batchId = 'batch-xyz';
+    const offlineChange1: Change = {
+      id: 'offline-1',
+      ops: [{ op: 'add', path: '/text', value: 'B' }],
+      rev: 2,
+      baseRev: 1,
+      created: Date.now() - 3600 * 1000, // 1 hour ago (offline)
+      batchId,
+    };
+    const offlineChange2: Change = {
+      id: 'offline-2',
+      ops: [{ op: 'add', path: '/text', value: 'C' }],
+      rev: 3,
+      baseRev: 1,
+      created: Date.now() - 3599 * 1000, // 1 hour ago, just after offlineChange1
+      batchId,
+    };
+    // First batch
+    let result = await server.patchDoc(docId, [offlineChange1]);
+    expect(result.some(c => c.id === 'offline-1')).toBe(true);
+    // Second batch (should not be transformed over offlineChange1, only over concurrentChange)
+    result = await server.patchDoc(docId, [offlineChange2]);
+    expect(result.some(c => c.id === 'offline-2')).toBe(true);
+    // Both changes should have the same batchId and be grouped in versioning
+    const versions = await store.listVersions(docId, { groupId: batchId });
+    expect(versions.length).toBeGreaterThanOrEqual(1);
+    expect(versions.every(v => v.groupId === batchId)).toBe(true);
+  });
+
+  it('should use default behavior if batchId is not present', async () => {
+    // Simulate a concurrent change from another client after baseRev
+    const concurrentChange: Change = {
+      id: 'server-1',
+      ops: [{ op: 'add', path: '/text', value: 'A' }],
+      rev: 1,
+      baseRev: 0,
+      created: Date.now() - 10000,
+    };
+    await store.saveChange(docId, concurrentChange);
+
+    // Two batches, no batchId
+    const offlineChange1: Change = {
+      id: 'offline-1',
+      ops: [{ op: 'add', path: '/text', value: 'B' }],
+      rev: 2,
+      baseRev: 1,
+      created: Date.now() - 3600 * 1000,
+    };
+    const offlineChange2: Change = {
+      id: 'offline-2',
+      ops: [{ op: 'add', path: '/text', value: 'C' }],
+      rev: 3,
+      baseRev: 1,
+      created: Date.now() - 3599 * 1000,
+    };
+    // First batch
+    let result = await server.patchDoc(docId, [offlineChange1]);
+    expect(result.some(c => c.id === 'offline-1')).toBe(true);
+    // Second batch (should be transformed over offlineChange1)
+    result = await server.patchDoc(docId, [offlineChange2]);
+    expect(result.some(c => c.id === 'offline-2')).toBe(true);
+    // No groupId in versioning
+    const versions = await store.listVersions(docId, {});
+    expect(versions.some(v => !v.groupId)).toBe(true);
+  });
+
+  it('should create two versions if batches with the same batchId are separated by a real session timeout', async () => {
+    const batchId = 'batch-timeout';
+    // First batch: 2 hours ago
+    const offlineChange1: Change = {
+      id: 'offline-1',
+      ops: [{ op: 'add', path: '/text', value: 'B' }],
+      rev: 1,
+      baseRev: 0,
+      created: Date.now() - 2 * 3600 * 1000,
+      batchId,
+    };
+    // Second batch: now (gap > sessionTimeout)
+    const offlineChange2: Change = {
+      id: 'offline-2',
+      ops: [{ op: 'add', path: '/text', value: 'C' }],
+      rev: 2,
+      baseRev: 0,
+      created: Date.now(),
+      batchId,
+    };
+    // First batch
+    await server.patchDoc(docId, [offlineChange1]);
+    // Second batch
+    await server.patchDoc(docId, [offlineChange2]);
+    // Should create two versions for the same batchId (since sessionTimeout exceeded)
+    const versions = await store.listVersions(docId, { groupId: batchId });
+    expect(versions.length).toBe(2);
   });
 });

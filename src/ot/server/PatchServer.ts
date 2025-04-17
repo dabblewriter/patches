@@ -117,13 +117,14 @@ export class PatchServer {
       );
     }
 
-    if (baseRev === 0 && currentRev > 0) {
+    const partOfInitialBatch = changes[0].batchId && changes[0].rev > 1;
+    if (baseRev === 0 && currentRev > 0 && !partOfInitialBatch) {
       throw new Error(
         `Client baseRev is 0 but server has already been created for doc ${docId}. Client needs to load the existing document.`
       );
     }
 
-    // Ensure all new changes’ `created` field is in the past, that each `rev` is correct, and that `baseRev` is set
+    // Ensure all new changes' `created` field is in the past, that each `rev` is correct, and that `baseRev` is set
     let rev = baseRev + 1;
     changes.forEach(c => {
       c.created = Math.min(c.created, Date.now());
@@ -138,8 +139,9 @@ export class PatchServer {
     }
 
     // 3. Load committed changes *after* the client's baseRev for transformation and idempotency checks
-    const committedChanges = await this.store.listChanges(docId, {
+    let committedChanges = await this.store.listChanges(docId, {
       startAfter: baseRev,
+      withoutBatchId: changes[0].batchId,
     });
 
     const commitedIds = new Set(committedChanges.map(c => c.id));
@@ -150,56 +152,13 @@ export class PatchServer {
       return committedChanges;
     }
 
-    // If the first incoming change was longer than a session ago, it's an offline session
-    const isOffline = changes[0].created < Date.now() - this.sessionTimeoutMillis;
-
-    // 4. Handle offline session versioning, creating a new version for each session
-    if (isOffline) {
-      // Group all offline changes into sessions as there may be multiple
-      // Get the state at the client's baseRev to apply original offline ops onto
-      let offlineBaseState = (await this._getStateAtRevision(docId, baseRev)).state;
-      let parentId: string | undefined; // Track parent for linking offline versions (first version has no parent)
-
-      let sessionStartIndex = 0;
-      const groupId = createId(); // Single groupId for all offline versions from this batch
-
-      for (let i = 1; i <= changes.length; i++) {
-        const isLastChange = i === changes.length;
-        const timeDiff = isLastChange ? Infinity : changes[i].created - changes[i - 1].created;
-
-        // Session ends if timeout exceeded OR it's the last change in the batch
-        if (timeDiff > this.sessionTimeoutMillis || isLastChange) {
-          const sessionChanges = changes.slice(sessionStartIndex, i);
-          if (sessionChanges.length > 0) {
-            // Apply *original* ops to the state *at baseRev*
-            offlineBaseState = applyChanges(offlineBaseState, sessionChanges);
-            const versionId = createId();
-            const sessionMetadata: VersionMetadata = {
-              id: versionId,
-              parentId,
-              groupId,
-              origin: 'offline',
-              startDate: sessionChanges[0].created,
-              endDate: sessionChanges[sessionChanges.length - 1].created,
-              rev: sessionChanges[sessionChanges.length - 1].rev,
-              baseRev: baseRev, // Server rev the *batch* was based on
-            };
-            // Save the version with the state *after* applying this session's original changes
-            await this.store.createVersion(docId, sessionMetadata, offlineBaseState, sessionChanges);
-
-            parentId = versionId; // Update parent for the next potential session
-            sessionStartIndex = i; // Move index for next slice
-          }
-        }
-      }
-
-      // Once versions are saved, offline changes are collapsed into one change for transformation
-      changes = [
-        changes.reduce((firstChange, nextChange) => {
-          firstChange.ops = [...firstChange.ops, ...nextChange.ops];
-          return firstChange;
-        }),
-      ];
+    // 4. Handle offline-session versioning:
+    // - batchId present (multi-batch uploads)
+    // - or the first change is older than the session timeout (single-batch offline)
+    const batchId = changes[0].batchId;
+    const isOfflineTimestamp = changes[0].created < Date.now() - this.sessionTimeoutMillis;
+    if (isOfflineTimestamp || batchId) {
+      changes = await this.handleOfflineBatches(docId, changes, baseRev, batchId);
     }
 
     // 5. Transform the *entire batch* of incoming (and potentially collapsed offline) changes
@@ -227,8 +186,102 @@ export class PatchServer {
       })
       .filter(Boolean) as Change[];
 
+    // Persist the newly transformed changes
+    if (transformedChanges.length > 0) {
+      await this.store.saveChanges(docId, transformedChanges);
+    }
     // Return committed changes followed by the successfully transformed incoming changes
     return [...committedChanges, ...transformedChanges];
+  }
+
+  /**
+   * Handles offline/large batch versioning logic for multi-batch uploads.
+   * Groups changes into sessions, merges with previous batch if needed, and creates/extends versions.
+   * @param docId Document ID
+   * @param changes The incoming changes (all with the same batchId)
+   * @param baseRev The base revision for the batch
+   * @param batchId The batch identifier
+   * @returns The collapsed changes for transformation
+   */
+  private async handleOfflineBatches(
+    docId: string,
+    changes: Change[],
+    baseRev: number,
+    batchId?: string
+  ): Promise<Change[]> {
+    // Use batchId as groupId for multi-batch uploads; default offline sessions have no groupId
+    const groupId = batchId ?? createId();
+    // Find the last version for this groupId (if any)
+    const [lastVersion] = await this.store.listVersions(docId, {
+      groupId,
+      reverse: true,
+      limit: 1,
+    });
+
+    let offlineBaseState: any;
+    let parentId: string | undefined;
+
+    if (lastVersion) {
+      // Continue from the last version's state
+      // loadVersionState returns a PatchState ({state, rev}); extract the .state
+      const vs = await this.store.loadVersionState(docId, lastVersion.id);
+      offlineBaseState = (vs as any).state ?? vs;
+      parentId = lastVersion.id;
+    } else {
+      // First batch for this batchId: start at baseRev
+      offlineBaseState = (await this._getStateAtRevision(docId, baseRev)).state;
+    }
+
+    let sessionStartIndex = 0;
+
+    for (let i = 1; i <= changes.length; i++) {
+      const isLastChange = i === changes.length;
+      const timeDiff = isLastChange ? Infinity : changes[i].created - changes[i - 1].created;
+
+      // Session ends if timeout exceeded OR it's the last change in the batch
+      if (timeDiff > this.sessionTimeoutMillis || isLastChange) {
+        const sessionChanges = changes.slice(sessionStartIndex, i);
+        if (sessionChanges.length > 0) {
+          // Check if this is a continuation of the previous session (merge/extend)
+          const isContinuation =
+            !!lastVersion && sessionChanges[0].created - lastVersion.endDate <= this.sessionTimeoutMillis;
+
+          if (isContinuation) {
+            // Merge/extend the existing version
+            const mergedState = applyChanges(offlineBaseState, sessionChanges);
+            await this.store.saveChanges(docId, sessionChanges);
+            await this.store.updateVersion(docId, lastVersion.id, {}); // metadata already updated above
+            offlineBaseState = mergedState;
+            parentId = lastVersion.parentId;
+          } else {
+            // Create a new version for this session
+            offlineBaseState = applyChanges(offlineBaseState, sessionChanges);
+            const versionId = createId();
+            const sessionMetadata: VersionMetadata = {
+              id: versionId,
+              parentId,
+              groupId,
+              origin: 'offline',
+              startDate: sessionChanges[0].created,
+              endDate: sessionChanges[sessionChanges.length - 1].created,
+              rev: sessionChanges[sessionChanges.length - 1].rev,
+              baseRev,
+            };
+            await this.store.createVersion(docId, sessionMetadata, offlineBaseState, sessionChanges);
+            parentId = versionId;
+          }
+          sessionStartIndex = i;
+        }
+      }
+    }
+
+    // Collapse all changes into one for transformation
+    return [
+      changes.reduce((firstChange, nextChange) => {
+        firstChange.ops = [...firstChange.ops, ...nextChange.ops];
+        return firstChange;
+      }),
+    ];
   }
 
   /**
@@ -361,7 +414,7 @@ export class PatchServer {
   async _createVersion(docId: string, state: any, changes: Change[], name?: string) {
     if (changes.length === 0) return;
     const baseRev = changes[0].baseRev;
-    if (!baseRev) {
+    if (baseRev === undefined) {
       throw new Error(`Client changes must include baseRev for doc ${docId}.`);
     }
     const versionId = createId();

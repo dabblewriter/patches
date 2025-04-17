@@ -13,6 +13,8 @@ export interface Change {
   created: number;
   /** Optional arbitrary metadata associated with the change. */
   metadata?: Record<string, any>;
+  /** Optional batch identifier for grouping changes that belong to the same client batch (for multi-batch offline/large edits). */
+  batchId?: string;
 }
 
 /**
@@ -97,6 +99,8 @@ export interface ListChangesOptions {
   limit?: number;
   /** Return changes in descending revision order (latest first). Defaults to false (ascending). */
   reverse?: boolean;
+  /** Filter out changes that have the given batch ID. */
+  withoutBatchId?: string;
 }
 
 /**

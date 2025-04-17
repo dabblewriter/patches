@@ -23,10 +23,11 @@ alwaysApply: true
 ## Directory Structure
 
 - `src/` — Main source code
-  - `ot/` — Core OT logic
-    - `client/` — Client-side (PatchDoc)
-    - `server/` — Server-side (PatchServer, HistoryManager, BranchManager)
-  - `json-patch/`, `transport/`, `utils/` — Supporting modules
+  - `client/` — Client-side OT implementation (PatchDoc)
+  - `server/` — Server-side OT implementation (PatchServer, HistoryManager, BranchManager)
+  - `net/` — Network layer (WebSocket, protocol, providers)
+  - `persist/` — Storage implementations
+  - `json-patch/`, `utils/` — Supporting modules
 - `docs/` — In-depth documentation for each core component
 - `tests/` — Vitest-based test suite (unit/integration)
 - `dist/` — Build output
@@ -34,11 +35,11 @@ alwaysApply: true
 
 ## How to Build & Test
 
-- **Build:**  
+- **Build:**
   `npm run build`
-- **Run tests:**  
+- **Run tests:**
   `npm test` (or `npm run tdd` for watch mode)
-- **Write tests:**  
+- **Write tests:**
   - Place `.spec.ts` files in `tests/` or subfolders.
   - Use [Vitest](mdc:https:/vitest.dev) syntax (see existing tests for examples).
 
@@ -46,7 +47,6 @@ alwaysApply: true
 
 - TypeScript throughout; prefer type safety.
 - Use immutable data patterns (do not mutate state directly).
-- Organize new OT logic under `src/ot/`.
 - Keep all public API changes documented in `README.md` and relevant `docs/*.md`.
 
 ## Cursor-Specific Rules
@@ -66,8 +66,9 @@ alwaysApply: true
 - `docs/HistoryManager.md` — Version/history API.
 - `docs/BranchManager.md` — Branching/merging API.
 - `docs/json-patch.md` — JSON Patch/legacy features.
-- `docs/websocket.md` — WebSocket transport: real-time sync, subscribing, sending/receiving changes, versioning.
-- `docs/awareness.md` — Awareness (presence, cursors, etc.) via WebRTC: peer-to-peer presence and state sharing. 
+- `docs/net.md` — Network layer: real-time sync, offline-first, WebSocket, protocol.
+- `docs/persist.md` — Storage implementations and offline support.
+- `docs/awareness.md` — Awareness (presence, cursors, etc.) via WebRTC.
 
 ## Technologies
 

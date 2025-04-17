@@ -121,7 +121,7 @@ The synchronization process follows these steps:
 
 - **[`PatchServer`](./PatchServer.md)**: Server-side orchestrator. Handles `receiveChanges`, transformation, persistence, versioning.
 - **[`PatchDoc`](./PatchDoc.md)**: Client-side document representation. Manages optimistic updates, local buffering, sending/receiving changes, rebasing.
-- **[`Change` Object](../src/ot/types.ts)**: The data structure passed between client and server, containing ops and metadata (especially `baseRev` and `rev`).
+- **[`Change` Object](../src/types.ts)**: The data structure passed between client and server, containing ops and metadata (especially `baseRev` and `rev`).
 
 ## Backend Store Interface
 
@@ -129,7 +129,7 @@ The OT system relies on a backend implementation provided by you.
 
 ### `PatchStoreBackend`
 
-(`src/ot/types.ts`)
+(`src/types.ts`)
 This interface defines the essential methods needed by [`PatchServer`](./PatchServer.md) and [`HistoryManager`](./HistoryManager.md) for basic OT and versioning.
 
 ```typescript
@@ -161,11 +161,11 @@ export interface PatchStoreBackend {
 }
 ```
 
-_(See [`src/ot/types.ts`](../src/ot/types.ts) for full details)_
+_(See [`src/types.ts`](../src/types.ts) for full details)_
 
 ### `BranchingStoreBackend`
 
-(`src/ot/types.ts`)
+(`src/types.ts`)
 This interface extends `PatchStoreBackend` with methods required by [`BranchManager`](./BranchManager.md).
 
 ```typescript
@@ -181,7 +181,7 @@ export interface BranchingStoreBackend extends PatchStoreBackend {
 }
 ```
 
-_(See [`src/ot/types.ts`](../src/ot/types.ts) for full details)_
+_(See [`src/types.ts`](../src/types.ts) for full details)_
 
 **Implementation:** You must provide a concrete class that implements these methods using your chosen database or storage solution (e.g., PostgreSQL, MongoDB, Redis, filesystem).
 

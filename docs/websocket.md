@@ -5,7 +5,7 @@
 The WebSocket transport is the primary way to connect your client application to a Patches server for real-time collaboration. It provides a high-level API for subscribing to documents, sending and receiving changes, and working with document versions—all over a persistent WebSocket connection.
 
 - **Class:** `PatchesWebSocket`
-- **Location:** `@dabble/patches/src/transport/websocket/PatchesWebSocket.ts`
+- **Location:** `@dabble/patches/src/net/websocket/PatchesWebSocket.ts`
 
 ## When to Use
 

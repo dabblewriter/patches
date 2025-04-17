@@ -12,12 +12,12 @@
  */
 
 import { Delta } from '@dabble/delta';
-import type { ApplyJSONPatchOptions, JSONPatchOp, JSONPatchOpHandlerMap } from '../types.js';
 import { applyPatch } from './applyPatch.js';
 import { composePatch } from './composePatch.js';
 import { invertPatch } from './invertPatch.js';
 import { bitmask } from './ops/bitmask.js';
 import { transformPatch } from './transformPatch.js';
+import type { ApplyJSONPatchOptions, JSONPatchOp, JSONPatchOpHandlerMap } from './types.js';
 
 export type PathLike = string | { toString(): string };
 export interface WriteOptions {

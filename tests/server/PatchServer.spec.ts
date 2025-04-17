@@ -596,7 +596,7 @@ describe('PatchServer', () => {
 
       // Verify transformPatch was called with the correct parameters
       expect(transformPatchSpy).toHaveBeenCalledWith(
-        baseState, // Initial state at baseRev
+        { '': baseState }, // Initial state at baseRev
         [
           { op: 'add', path: '/text/0', value: 'x' }, // First server change
           { op: 'add', path: '/text/2', value: 'y' }, // Second server change
@@ -1073,7 +1073,7 @@ describe('PatchServer multi-batch offline/large edit support (batchId)', () => {
     expect(versions.every(v => v.groupId === batchId)).toBe(true);
   });
 
-  it.only('should use default behavior if batchId is not present', async () => {
+  it('should use default behavior if batchId is not present', async () => {
     // Simulate a concurrent change from another client after baseRev
     const concurrentChange: Change = {
       id: 'server-1',

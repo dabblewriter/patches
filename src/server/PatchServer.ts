@@ -95,6 +95,7 @@ export class PatchServer {
     }
 
     // Assume all changes share the same baseRev. Client ensures this.
+    const batchId = changes[0].batchId;
     const baseRev = changes[0].baseRev;
     if (baseRev === undefined) {
       throw new Error(`Client changes must include baseRev for doc ${docId}.`);
@@ -117,7 +118,7 @@ export class PatchServer {
       );
     }
 
-    const partOfInitialBatch = changes[0].batchId && changes[0].rev > 1;
+    const partOfInitialBatch = batchId && changes[0].rev > 1;
     if (baseRev === 0 && currentRev > 0 && !partOfInitialBatch) {
       throw new Error(
         `Client baseRev is 0 but server has already been created for doc ${docId}. Client needs to load the existing document.`
@@ -141,7 +142,7 @@ export class PatchServer {
     // 3. Load committed changes *after* the client's baseRev for transformation and idempotency checks
     let committedChanges = await this.store.listChanges(docId, {
       startAfter: baseRev,
-      withoutBatchId: changes[0].batchId,
+      withoutBatchId: batchId,
     });
 
     const commitedIds = new Set(committedChanges.map(c => c.id));
@@ -155,7 +156,6 @@ export class PatchServer {
     // 4. Handle offline-session versioning:
     // - batchId present (multi-batch uploads)
     // - or the first change is older than the session timeout (single-batch offline)
-    const batchId = changes[0].batchId;
     const isOfflineTimestamp = changes[0].created < Date.now() - this.sessionTimeoutMillis;
     if (isOfflineTimestamp || batchId) {
       changes = await this.handleOfflineBatches(docId, changes, baseRev, batchId);

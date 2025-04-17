@@ -82,7 +82,7 @@ export class PatchServer {
   /**
    * Receives a batch of changes from a client, handles offline session versioning,
    * transforms changes against concurrent server history, applies them,
-   * and persists the results.
+   * and persists the results. *All* changes from a client should be sent in a single batch.
    *
    * @param docId - The ID of the document to apply the changes to.
    * @param changes - An array of change objects received from the client. Should be sorted by client timestamp/sequence.

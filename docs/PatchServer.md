@@ -6,7 +6,7 @@ The `PatchServer` class is the central authority in the Patches OT system. It re
 
 - [Overview](#overview)
 - [Initialization](#initialization)
-- [Core Method: `receiveChanges()`](#core-method-receivechanges)
+- [Core Method: `patchDoc()`](#core-method-patchdoc)
   - [Input](#input)
   - [Processing Steps](#processing-steps)
   - [Output](#output)
@@ -16,10 +16,11 @@ The `PatchServer` class is the central authority in the Patches OT system. It re
   - [Online Snapshots](#online-snapshots)
   - [Configuration (`sessionTimeoutMinutes`)](#configuration-sessiontimeoutminutes)
 - [State and History Retrieval](#state-and-history-retrieval)
-  - [`getLatestDocumentStateAndRev()`](#getlatestdocumentstateandrev)
-  - [`getStateAtRevision()`](#getstateatrevision)
-  - [`getVersionMetadata()`](#getversionmetadata)
+  - [`getDoc()`](#getdoc)
+  - [`_getStateAtRevision()`](#_getstateatrevision)
+  - [`getVersionState()`](#getversionstate)
   - [`listVersions()`](#listversions)
+- [Subscription Operations](#subscription-operations)
 - [Backend Store Dependency](#backend-store-dependency)
 - [Example Usage](#example-usage)
 
@@ -53,12 +54,12 @@ const options: PatchServerOptions = {
 const server = new PatchServer(store, options);
 ```
 
-## Core Method: `receiveChanges()`
+## Core Method: `patchDoc()`
 
 This is the main entry point for processing changes submitted by clients.
 
 ```typescript
-async receiveChanges(docId: string, changes: Change[]): Promise<Change[]> {
+async patchDoc(docId: string, changes: Change[]): Promise<Change[]> {
     // ... implementation ...
 }
 ```
@@ -73,48 +74,41 @@ async receiveChanges(docId: string, changes: Change[]): Promise<Change[]> {
 1.  **Validation:**
     - Checks if the `changes` array is empty (returns `[]` if so).
     - Validates that all `changes` in the batch share the same, valid `baseRev`.
-    - Retrieves the server's current revision (`currentRev`) for the `docId` from the store.
+    - Retrieves the server's current state and revision (`currentState` and `currentRev`) for the `docId` using `_getSnapshotAtRevision()`.
     - Throws an error if `baseRev` is invalid (e.g., > `currentRev`), indicating the client needs to sync/rebase.
-2.  **Offline Version Snapshotting (Internal):**
-    - If the incoming `changes` batch contains significant time gaps between operations (based on `sessionTimeoutMinutes`), it creates `VersionMetadata` snapshots with `origin: 'offline'`. These capture the state and original operations of distinct editing sessions within the batch.
-3.  **Load Concurrent History:**
-    - If `baseRev < currentRev`, it fetches all server-committed `Change` objects from the store that occurred _after_ `baseRev` (`historicalChanges`).
-4.  **Transformation:**
-    - Extracts all individual JSON Patch operations (`ops`) from the incoming client `changes`.
-    - If `historicalChanges` exist, it iteratively transforms the client `ops` over the `ops` of each historical change using the `transformPatch` function. This adjusts the client `ops` to account for the concurrent server history.
-5.  **Apply Transformed Operations:**
-    - Applies the final, transformed `ops` to the server's current authoritative state for the document.
-    - If the transformation resulted in an empty set of `ops` (meaning the client's changes were entirely cancelled out or made redundant by concurrent edits), the process stops here, and an empty array `[]` is prepared as the result.
-6.  **Commit and Save:**
-    - If the application was successful and resulted in changes:
-      - Increments the server's revision number (`newRev = currentRev + 1`).
-      - Creates a _single_, new `Change` object (`committedServerChange`) containing:
-        - A new server-generated `id`.
-        - The final, _transformed_ `ops` that were actually applied.
-        - The new server revision (`rev: newRev`).
-        - The original `baseRev` from the client batch.
-        - A server timestamp (`created`).
-        - Metadata linking back to the original client `Change` IDs.
-      - Saves this `committedServerChange` to the backend store using `store.saveChange()`.
-7.  **Online Version Snapshotting (Internal):**
-    - Checks if enough time has passed since the last version snapshot was created (based on `sessionTimeoutMinutes`). If so, it creates and saves a new `VersionMetadata` snapshot with `origin: 'online'`, containing the `committedServerChange` and the resulting `finalState`.
-8.  **Return Result:**
-    - Returns an array containing the single `committedServerChange` if changes were applied.
-    - Returns an empty array `[]` if the client's batch resulted in a no-op after transformation.
+2.  **Ensure Changes Integrity:**
+    - Ensures all changes' `created` timestamps are not in the future
+    - Updates each change's `rev` field to be sequential, starting from `baseRev + 1`
+    - Makes sure each change has the correct `baseRev` set
+3.  **Version Snapshot Check:**
+    - Checks if the last change was created more than a session ago (based on `sessionTimeoutMinutes`) and if so, creates a new version
+4.  **Check for Duplicates:**
+    - Fetches committed changes that occurred after `baseRev`
+    - Filters out any incoming changes that have already been committed (based on their `id`)
+5.  **Offline Session Handling:**
+    - Checks if the first incoming change was created longer than a session timeout ago
+    - If it's an offline session, groups changes into sessions based on time gaps
+    - Creates version snapshots for each offline session with `origin: 'offline'`
+    - Collapses offline changes into a single change for transformation
+6.  **Transformation:**
+    - Fetches the state at the client's `baseRev`
+    - Transforms the incoming changes' operations against the operations of changes committed since `baseRev` using `transformPatch`
+7.  **Return Result:**
+    - Returns the committed changes followed by successfully transformed incoming changes
 
 ### Output
 
 - `Promise<Change[]>`: A promise that resolves to:
-  - An array containing the single, newly committed server `Change` object if the client's batch resulted in a state change.
-  - An empty array `[]` if the client's batch was transformed into a no-op.
+  - An array containing the committed changes followed by the successfully transformed incoming changes.
+  - An empty array `[]` if the client's batch was empty or all changes were already committed.
 
 ### Error Handling
 
-`receiveChanges` throws errors in several situations:
+`patchDoc` throws errors in several situations:
 
 - **Invalid `baseRev`:** If the client's `baseRev` is missing, inconsistent within the batch, or ahead of the server's revision.
 - **Transformation Failure:** If the underlying `transformPatch` or specific operation transform handlers encounter an error.
-- **Application Failure:** If applying the final transformed `ops` fails (e.g., due to an invalid patch operation that survived transformation).
+- **Application Failure:** If applying the changes fails.
 - **Store Errors:** If interactions with the backend store fail.
 
 Clients should handle these errors, typically by informing the user and potentially triggering a state resynchronization with the server.
@@ -128,7 +122,7 @@ A `409 Conflict` HTTP status code is often appropriate for `baseRev` mismatches.
 
 ### Offline Snapshots
 
-When `receiveChanges` processes a batch potentially representing offline work (indicated by time gaps between `created` timestamps within the `changes` array exceeding `sessionTimeoutMinutes`), it generates one or more `VersionMetadata` objects with `origin: 'offline'`. Each snapshot:
+When `patchDoc` processes a batch potentially representing offline work (indicated by time gaps between `created` timestamps within the `changes` array exceeding `sessionTimeoutMinutes`), it generates one or more `VersionMetadata` objects with `origin: 'offline'`. Each snapshot:
 
 - Is linked via a common `groupId` specific to that batch.
 - Has a `parentId` linking it to the previous snapshot within the same batch.
@@ -138,14 +132,13 @@ When `receiveChanges` processes a batch potentially representing offline work (i
 
 ### Online Snapshots
 
-After successfully committing a change (from any client), `PatchServer` checks if `sessionTimeoutMinutes` has elapsed since the _last_ version snapshot (of any origin) was saved. If the timeout is exceeded, it creates a single `VersionMetadata` object with `origin: 'online'`.
+When `patchDoc` processes a new set of changes, it checks if `sessionTimeoutMinutes` has elapsed since the last change was created. If the timeout is exceeded, it creates a new version using the `_createVersion` method with `origin: 'main'`.
 
-- `parentId` links to the previous version snapshot.
-- `groupId` is typically `null`.
-- `baseRev` is the server revision _before_ the current commit.
-- `changes` contains the single `committedServerChange`.
-- `state` is the document state _after_ applying the `committedServerChange`.
-- `startDate` and `endDate` are both set to the commit timestamp.
+- It captures the current state and all changes since the last version
+- Assigns a unique `id` for the version
+- Sets the version metadata including `name` (if provided), `origin: 'main'`, and timestamps
+- Records the `rev` and `baseRev` values from the changes
+- Stores this version using the backend store
 
 ### Configuration (`sessionTimeoutMinutes`)
 
@@ -153,36 +146,39 @@ The `sessionTimeoutMinutes` option passed during `PatchServer` construction cont
 
 ## State and History Retrieval
 
-`PatchServer` provides methods (which typically delegate to the backend store) for retrieving document state and version information. These are often used in conjunction with [`HistoryManager`](./HistoryManager.md).
+`PatchServer` provides methods (which typically delegate to the backend store) for retrieving document state and version information.
 
-### `getLatestDocumentStateAndRev()`
+### `getDoc()`
 
-Fetches the most recent committed state and its corresponding revision number.
+Gets the latest version of a document and changes since the last version.
 
 ```typescript
-const { state, rev } = await server.getLatestDocumentStateAndRev(docId);
+const { state, rev, changes } = await server.getDoc(docId);
 // Use this to initialize new clients
+
+// You can also specify a revision to get the state at that revision:
+const snapshot = await server.getDoc(docId, 50);
 ```
 
-### `getStateAtRevision()`
+### `_getStateAtRevision()`
 
-Retrieves the document state as it was _after_ a specific historical revision `rev` was committed. Requires the backend store to be able to reconstruct or retrieve this state (e.g., from version snapshots or by replaying changes).
+Retrieves the document state as it was _after_ a specific historical revision `rev` was committed. This is an internal method used by other PatchServer methods.
 
 ```typescript
-const pastState = await server.getStateAtRevision(docId, 50);
+const { state, rev } = await server._getStateAtRevision(docId, 50);
 ```
 
-### `getVersionMetadata()`
+### `getVersionState()`
 
-Loads the metadata for a single version snapshot by its unique `versionId`.
+Gets the state snapshot for a specific version ID.
 
 ```typescript
-const versionInfo = await server.getVersionMetadata(docId, specificVersionId);
+const versionState = await server.getVersionState(docId, specificVersionId);
 ```
 
 ### `listVersions()`
 
-Lists `VersionMetadata` objects, supporting various filtering and sorting options (limit, reverse, origin, date ranges, etc.). See [`PatchStoreBackendListVersionsOptions`](./types.ts).
+Lists `VersionMetadata` objects, supporting various filtering and sorting options (limit, reverse, origin, date ranges, etc.).
 
 ```typescript
 // Get the last 10 offline version snapshots
@@ -190,7 +186,32 @@ const offlineVersions = await server.listVersions(docId, {
   origin: 'offline',
   limit: 10,
   reverse: true, // Latest first
+  orderBy: 'startDate'
 });
+```
+
+## Subscription Operations
+
+PatchServer provides methods for managing client subscriptions to documents.
+
+### `subscribe()`
+
+Subscribes a client to one or more documents.
+
+```typescript
+const subscribedIds = await server.subscribe(clientId, docId);
+// or with multiple document IDs:
+const subscribedIds = await server.subscribe(clientId, [docId1, docId2]);
+```
+
+### `unsubscribe()`
+
+Unsubscribes a client from one or more documents.
+
+```typescript
+const unsubscribedIds = await server.unsubscribe(clientId, docId);
+// or with multiple document IDs:
+const unsubscribedIds = await server.unsubscribe(clientId, [docId1, docId2]);
 ```
 
 ## Backend Store Dependency

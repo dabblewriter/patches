@@ -108,6 +108,7 @@ export class PatchServer {
     // 1. Load server state details (assuming store methods exist)
     let { state: currentState, rev: currentRev, changes: currentChanges } = await this._getSnapshotAtRevision(docId);
     currentState = applyChanges(currentState, currentChanges);
+    currentRev = currentChanges.at(-1)?.rev ?? currentRev;
 
     // Basic validation
     if (baseRev > currentRev) {
@@ -122,8 +123,13 @@ export class PatchServer {
       );
     }
 
-    // Ensure all new changes’ `created` field is in the past
-    changes.forEach(c => (c.created = Math.min(c.created, Date.now())));
+    // Ensure all new changes’ `created` field is in the past, that each `rev` is correct, and that `baseRev` is set
+    let rev = baseRev + 1;
+    changes.forEach(c => {
+      c.created = Math.min(c.created, Date.now());
+      c.rev = rev++;
+      c.baseRev = baseRev;
+    });
 
     // 2. Check if we need to create a new version - if the last change was created more than a session ago
     const lastChange = currentChanges[currentChanges.length - 1];
@@ -131,27 +137,27 @@ export class PatchServer {
       await this._createVersion(docId, currentState, currentChanges);
     }
 
-    // 3. Load committed changes to check idempotency (and later for transformation
+    // 3. Load committed changes *after* the client's baseRev for transformation and idempotency checks
     const committedChanges = await this.store.listChanges(docId, {
-      // Load the base change too to get at least 1 change to check if we need to create a new version
       startAfter: baseRev,
     });
 
     const commitedIds = new Set(committedChanges.map(c => c.id));
     changes = changes.filter(c => !commitedIds.has(c.id));
 
-    // If all changes were committed, return an empty array
+    // If all incoming changes were already committed, return the committed changes found
     if (changes.length === 0) {
-      return [];
+      return committedChanges;
     }
 
-    // If the first change was longer than a session ago, it's an offline session
+    // If the first incoming change was longer than a session ago, it's an offline session
     const isOffline = changes[0].created < Date.now() - this.sessionTimeoutMillis;
 
     // 4. Handle offline session versioning, creating a new version for each session
     if (isOffline) {
       // Group all offline changes into sessions as there may be multiple
-      let currentSessionState = (await this._getStateAtRevision(docId, baseRev)).state; // State to apply original ops onto
+      // Get the state at the client's baseRev to apply original offline ops onto
+      let offlineBaseState = (await this._getStateAtRevision(docId, baseRev)).state;
       let parentId: string | undefined; // Track parent for linking offline versions (first version has no parent)
 
       let sessionStartIndex = 0;
@@ -165,7 +171,8 @@ export class PatchServer {
         if (timeDiff > this.sessionTimeoutMillis || isLastChange) {
           const sessionChanges = changes.slice(sessionStartIndex, i);
           if (sessionChanges.length > 0) {
-            currentSessionState = applyChanges(currentSessionState, sessionChanges); // Apply *original* ops
+            // Apply *original* ops to the state *at baseRev*
+            offlineBaseState = applyChanges(offlineBaseState, sessionChanges);
             const versionId = createId();
             const sessionMetadata: VersionMetadata = {
               id: versionId,
@@ -177,7 +184,8 @@ export class PatchServer {
               rev: sessionChanges[sessionChanges.length - 1].rev,
               baseRev: baseRev, // Server rev the *batch* was based on
             };
-            await this.store.createVersion(docId, sessionMetadata, currentSessionState, sessionChanges);
+            // Save the version with the state *after* applying this session's original changes
+            await this.store.createVersion(docId, sessionMetadata, offlineBaseState, sessionChanges);
 
             parentId = versionId; // Update parent for the next potential session
             sessionStartIndex = i; // Move index for next slice
@@ -185,7 +193,7 @@ export class PatchServer {
         }
       }
 
-      // Once versions are saved, offline changes are collapsed into one change
+      // Once versions are saved, offline changes are collapsed into one change for transformation
       changes = [
         changes.reduce((firstChange, nextChange) => {
           firstChange.ops = [...firstChange.ops, ...nextChange.ops];
@@ -194,25 +202,32 @@ export class PatchServer {
       ];
     }
 
-    // 5. Transform the *entire batch* of incoming changes against committed changes
+    // 5. Transform the *entire batch* of incoming (and potentially collapsed offline) changes
+    //    against committed changes that happened *after* the client's baseRev.
+    //    The state used for transformation should be the server state *at the client's baseRev*.
+    let stateAtBaseRev = (await this._getStateAtRevision(docId, baseRev)).state;
     const committedOps = committedChanges.flatMap(c => c.ops);
 
+    // Apply transformation based on state at baseRev
     const transformedChanges = changes
       .map(change => {
-        change.ops = transformPatch(currentState, change.ops, committedOps);
-        if (change.ops.length === 0) {
-          return null;
+        // Transform the incoming change's ops against the ops committed since baseRev
+        const transformedOps = transformPatch(stateAtBaseRev, change.ops, committedOps);
+        if (transformedOps.length === 0) {
+          return null; // Change is obsolete after transformation
         }
         try {
-          currentState = applyPatch(currentState, change.ops, { strict: true });
+          stateAtBaseRev = applyPatch(stateAtBaseRev, change.ops, { strict: true });
         } catch (error) {
           console.error(`Error applying change ${change.id} to state:`, error);
           return null;
         }
-        return change;
+        // Return a new change object with transformed ops and original metadata
+        return { ...change, ops: transformedOps };
       })
       .filter(Boolean) as Change[];
 
+    // Return committed changes followed by the successfully transformed incoming changes
     return [...committedChanges, ...transformedChanges];
   }
 
@@ -289,8 +304,8 @@ export class PatchServer {
    * Retrieves the document state of the version before the given revision and changes after up to that revision or all
    * changes since that version.
    * @param docId The document ID.
-   * @param rev The revision number.
-   * @returns The document state and changes at the specified revision.
+   * @param rev The revision number. If not provided, the latest state, its revision, and all changes since are returned.
+   * @returns The document state at the last version before the revision, its revision number, and all changes up to the specified revision (or all changes if no revision is provided).
    */
   async _getSnapshotAtRevision(docId: string, rev?: number): Promise<PatchSnapshot> {
     const versions = await this.store.listVersions(docId, {
@@ -300,28 +315,49 @@ export class PatchServer {
       origin: 'main',
       orderBy: 'rev',
     });
-    const version = versions[0];
-    const state = (version && (await this.store.loadVersionState(docId, version.id))) || null;
-    const versionRev = version?.rev || 0;
-    const changes = await this.store.listChanges(docId, {
+    const latestMainVersion = versions[0];
+    const versionState =
+      (latestMainVersion && (await this.store.loadVersionState(docId, latestMainVersion.id))) || null;
+    const versionRev = latestMainVersion?.rev ?? 0;
+
+    // Get *all* changes since that version up to the target revision (if specified)
+    const changesSinceVersion = await this.store.listChanges(docId, {
       startAfter: versionRev,
       endBefore: rev ? rev + 1 : undefined,
     });
+
     return {
-      state,
-      rev: versionRev,
-      changes,
+      state: versionState, // State from the base version
+      rev: versionRev, // Revision of the base version's state
+      changes: changesSinceVersion, // Changes that occurred *after* the base version state
     };
   }
 
+  /**
+   * Gets the state at a specific revision.
+   * @param docId The document ID.
+   * @param rev The revision number. If not provided, the latest state and its revision is returned.
+   * @returns The state at the specified revision *and* its revision number.
+   */
   async _getStateAtRevision(docId: string, rev?: number): Promise<PatchState> {
-    const { state, rev: currentRev, changes } = await this._getSnapshotAtRevision(docId, rev);
+    // Note: _getSnapshotAtRevision now returns the state *of the version* and changes *since* it.
+    // We need to apply the changes to get the state *at* the target revision.
+    const { state: versionState, rev: snapshotRev, changes } = await this._getSnapshotAtRevision(docId, rev);
     return {
-      state: applyChanges(state, changes),
-      rev: changes.at(-1)?.rev ?? currentRev,
+      // Ensure null is passed if versionState or versionState.state is null/undefined
+      state: applyChanges(versionState?.state ?? null, changes),
+      rev: changes.at(-1)?.rev ?? snapshotRev,
     };
   }
 
+  /**
+   * Creates a new version snapshot of a document's current state.
+   * @param docId The document ID.
+   * @param state The document state at the time of the version.
+   * @param changes The changes since the last version that created the state (the last change's rev is the state's rev and will be the version's rev).
+   * @param name The name of the version.
+   * @returns The ID of the created version.
+   */
   async _createVersion(docId: string, state: any, changes: Change[], name?: string) {
     if (changes.length === 0) return;
     const baseRev = changes[0].baseRev;

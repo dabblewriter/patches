@@ -22,12 +22,20 @@ export type DeletedChange = { id: string };
 
 /**
  * Represents the state of a document in the OT protocol.
+ * @property state - The state of the document.
+ * @property rev - The revision number of the state.
  */
 export interface PatchState<T = any> {
   state: T;
   rev: number;
 }
 
+/**
+ * Represents a snapshot of a document in the OT protocol.
+ * @property state - The state of the document.
+ * @property rev - The revision number of the state.
+ * @property changes - Any unapplied changes since `rev` that may be applied to the `state` to get the latest state.
+ */
 export interface PatchSnapshot<T = any> extends PatchState<T> {
   changes: Change[];
 }

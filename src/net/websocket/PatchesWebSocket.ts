@@ -12,7 +12,6 @@ import type {
   ListOptions,
   PatchesAPI,
   PatchesNotificationParams,
-  SignalNotificationParams,
 } from '../protocol/types.js';
 import { WebSocketTransport } from './WebSocketTransport.js';
 
@@ -34,9 +33,6 @@ export class PatchesWebSocket implements PatchesAPI {
   /** Signal emitted when the server pushes document changes. */
   public readonly onDocUpdate = signal<(params: PatchesNotificationParams) => void>();
 
-  /** Signal emitted when the server forwards a WebRTC signaling message. */
-  public readonly onSignal = signal<(params: SignalNotificationParams) => void>();
-
   /**
    * Creates a new Patches WebSocket client instance.
    * @param url - The WebSocket server URL to connect to
@@ -50,9 +46,6 @@ export class PatchesWebSocket implements PatchesAPI {
     // Note: Type assertions might be needed if rpc.on doesn't infer strongly enough
     this.rpc.on('doc-update', (params /*: PatchesNotificationParams */) => {
       this.onDocUpdate.emit(params as PatchesNotificationParams);
-    });
-    this.rpc.on('signal', (params /*: SignalNotificationParams */) => {
-      this.onSignal.emit(params as SignalNotificationParams);
     });
   }
 

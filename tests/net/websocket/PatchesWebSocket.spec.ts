@@ -1,12 +1,7 @@
 import { beforeEach, describe, expect, it, vi, type Mocked } from 'vitest';
 import { signal, type Signal } from '../../../src/event-signal.js';
 import { JSONRPCClient } from '../../../src/net/protocol/JSONRPCClient.js';
-import type {
-  ConnectionState,
-  ListOptions,
-  PatchesNotificationParams,
-  SignalNotificationParams,
-} from '../../../src/net/protocol/types.js';
+import type { ConnectionState, ListOptions, PatchesNotificationParams } from '../../../src/net/protocol/types.js';
 import { PatchesWebSocket } from '../../../src/net/websocket/PatchesWebSocket.js';
 import { WebSocketTransport } from '../../../src/net/websocket/WebSocketTransport.js';
 import { Change, PatchSnapshot, VersionMetadata } from '../../../src/types.js';
@@ -81,7 +76,6 @@ describe('PatchesWebSocket', () => {
 
   it('should register notification handlers with the RPC client', () => {
     expect(mockRpcImplementation.on).toHaveBeenCalledWith('doc-update', expect.any(Function));
-    expect(mockRpcImplementation.on).toHaveBeenCalledWith('signal', expect.any(Function));
   });
 
   describe('Connection Management', () => {
@@ -142,7 +136,7 @@ describe('PatchesWebSocket', () => {
     });
 
     it('getDoc should call rpc.request with correct params', async () => {
-      const expectedSnapshot: PatchSnapshot = { rev: REV, state: 'content' };
+      const expectedSnapshot: PatchSnapshot = { rev: REV, state: 'content', changes: [] };
       mockRpcImplementation.request.mockResolvedValue(expectedSnapshot);
       const result = await patchesWs.getDoc(DOC_ID);
       expect(mockRpcImplementation.request).toHaveBeenCalledWith('getDoc', {
@@ -193,10 +187,10 @@ describe('PatchesWebSocket', () => {
       const expectedMetadata: VersionMetadata[] = [
         {
           id: VERSION_ID,
-          parentId: null,
-          origin: 'online',
+          origin: 'main',
           startDate: Date.now() - 1000,
           endDate: Date.now(),
+          rev: REV,
           baseRev: REV - 5,
         },
       ];
@@ -221,7 +215,7 @@ describe('PatchesWebSocket', () => {
     });
 
     it('getVersionState should call rpc.request with correct params', async () => {
-      const expectedSnapshot: PatchSnapshot = { rev: REV, state: 'version content' };
+      const expectedSnapshot: PatchSnapshot = { rev: REV, state: 'version content', changes: [] };
       mockRpcImplementation.request.mockResolvedValue(expectedSnapshot);
       const result = await patchesWs.getVersionState(DOC_ID, VERSION_ID);
       expect(mockRpcImplementation.request).toHaveBeenCalledWith('getVersionState', {
@@ -258,7 +252,6 @@ describe('PatchesWebSocket', () => {
     beforeEach(() => {
       // Spy on the emit methods of the actual signal instances
       vi.spyOn(patchesWs.onDocUpdate, 'emit');
-      vi.spyOn(patchesWs.onSignal, 'emit');
     });
 
     it('should emit onDocUpdate when receiving a doc-update notification', () => {
@@ -269,16 +262,6 @@ describe('PatchesWebSocket', () => {
       rpcNotificationHandlers['doc-update'](params);
       expect(patchesWs.onDocUpdate.emit).toHaveBeenCalledTimes(1);
       expect(patchesWs.onDocUpdate.emit).toHaveBeenCalledWith(params);
-    });
-
-    it('should emit onSignal when receiving a signal notification', () => {
-      const params: SignalNotificationParams = {
-        fromClientId: 'client2',
-        data: { type: 'offer', sdp: '...' },
-      };
-      rpcNotificationHandlers['signal'](params);
-      expect(patchesWs.onSignal.emit).toHaveBeenCalledTimes(1);
-      expect(patchesWs.onSignal.emit).toHaveBeenCalledWith(params);
     });
   });
 });

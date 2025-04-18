@@ -132,7 +132,7 @@ export class BranchManager {
     // 6. Commit the flattened change to the main doc
     let committedMergeChanges: Change[] = [];
     try {
-      committedMergeChanges = await this.patchServer.patchDoc(sourceDocId, [flattenedChange]);
+      [, committedMergeChanges] = await this.patchServer.commitChanges(sourceDocId, [flattenedChange]);
     } catch (error) {
       console.error(`Failed to merge branch ${branchId} into ${sourceDocId}:`, error);
       throw new Error(`Merge failed: ${error instanceof Error ? error.message : String(error)}`);

@@ -205,7 +205,7 @@ class MockPatchStoreBackend implements PatchStoreBackend {
     docData.rev = change.rev;
     docData.state = applyPatch(docData.state, change.ops); // Update internal state for transforms
   }
-  // Helper to set initial state for testing getDoc/patchDoc
+  // Helper to set initial state for testing getDoc/commitChanges
   setInitialDocState(docId: string, state: any, rev: number = 0, changes: Change[] = []) {
     this.docs.set(docId, { state, rev, changes });
   }
@@ -414,23 +414,25 @@ describe('PatchServer', () => {
     });
   });
 
-  describe('patchDoc', () => {
-    it('should return empty arrays if no changes provided', async () => {
-      const result = await patchServer.patchDoc(docId, []);
+  describe('commitChanges', () => {
+    it('handles empty changes array', async () => {
+      const result = await patchServer.commitChanges(docId, []);
       expect(result).toEqual([[], []]);
     });
 
-    it('should throw if changes have no baseRev', async () => {
-      const changes: Change[] = [{ id: 'c1', rev: 0, ops: [], created: Date.now() } as any]; // Missing baseRev, added rev: 0
-      await expect(patchServer.patchDoc(docId, changes)).rejects.toThrow('Client changes must include baseRev');
+    it('rejects changes without baseRev', async () => {
+      const changes = [{ id: '1', ops: [], rev: 1, created: Date.now() }];
+      await expect(patchServer.commitChanges(docId, changes)).rejects.toThrow('Client changes must include baseRev');
     });
 
-    it('should throw if changes have inconsistent baseRev', async () => {
-      const changes: Change[] = [
-        { id: 'c1', rev: 0, baseRev: 0, ops: [], created: Date.now() },
-        { id: 'c2', rev: 0, baseRev: 1, ops: [], created: Date.now() }, // Inconsistent baseRev
+    it('rejects changes with inconsistent baseRev', async () => {
+      const changes = [
+        { id: '1', ops: [], rev: 1, baseRev: 0, created: Date.now() },
+        { id: '2', ops: [], rev: 2, baseRev: 1, created: Date.now() },
       ];
-      await expect(patchServer.patchDoc(docId, changes)).rejects.toThrow('Client changes must have consistent baseRev');
+      await expect(patchServer.commitChanges(docId, changes)).rejects.toThrow(
+        'Client changes must have consistent baseRev'
+      );
     });
 
     it('should throw if client baseRev is ahead of server revision', async () => {
@@ -449,7 +451,7 @@ describe('PatchServer', () => {
       vi.spyOn(patchServer as any, '_getStateAtRevision').mockResolvedValue({ state: { data: 1 }, rev: 1 });
 
       const changes: Change[] = [{ id: 'c1', rev: 0, baseRev: 2, ops: [], created: Date.now() }];
-      await expect(patchServer.patchDoc(docId, changes)).rejects.toThrow(
+      await expect(patchServer.commitChanges(docId, changes)).rejects.toThrow(
         /Client baseRev \(2\) is ahead of server revision \(1\) for doc test-doc-1. Client needs to reload the document./
       );
     });
@@ -467,7 +469,7 @@ describe('PatchServer', () => {
       vi.spyOn(patchServer as any, '_getStateAtRevision').mockResolvedValue({ state: { data: 1 }, rev: 1 });
 
       const changes: Change[] = [{ id: 'c1', rev: 0, baseRev: 0, ops: [], created: Date.now() }];
-      await expect(patchServer.patchDoc(docId, changes)).rejects.toThrow(
+      await expect(patchServer.commitChanges(docId, changes)).rejects.toThrow(
         /Client baseRev is 0 but server has already been created for doc test-doc-1. Client needs to load the existing document./
       );
     });
@@ -486,7 +488,7 @@ describe('PatchServer', () => {
       };
       mockStore.listChanges.mockResolvedValueOnce([]); // No committed changes after baseRev 0
 
-      const [committedChanges, transformedChanges] = await patchServer.patchDoc(docId, [incomingChange]);
+      const [committedChanges, transformedChanges] = await patchServer.commitChanges(docId, [incomingChange]);
 
       // Expect no committed changes and the original change to be returned (no transformation needed)
       expect(committedChanges).toHaveLength(0);
@@ -520,9 +522,9 @@ describe('PatchServer', () => {
       };
 
       // Execute
-      const [committedChanges, transformedChanges] = await patchServer.patchDoc(docId, [incomingChange]);
+      const [committedChanges, transformedChanges] = await patchServer.commitChanges(docId, [incomingChange]);
 
-      // patchDoc returns committed + transformed changes.
+      // commitChanges returns committed + transformed changes.
       // In this case, no committed changes after baseRev 1, so only transformed.
       const expectedSavedChange = {
         ...incomingChange,
@@ -594,7 +596,7 @@ describe('PatchServer', () => {
       ]);
 
       // Execute
-      const [committedChanges, transformedChanges] = await patchServer.patchDoc(docId, [clientChange]);
+      const [committedChanges, transformedChanges] = await patchServer.commitChanges(docId, [clientChange]);
 
       // Verify transformPatch was called with the correct parameters
       expect(transformPatchSpy).toHaveBeenCalledWith(
@@ -645,7 +647,7 @@ describe('PatchServer', () => {
       };
 
       // Execute
-      const [committedChanges, transformedChanges] = await patchServer.patchDoc(docId, [clientChange]);
+      const [committedChanges, transformedChanges] = await patchServer.commitChanges(docId, [clientChange]);
 
       // Expect the result to contain the committed changes found
       expect(committedChanges).toHaveLength(1);
@@ -688,12 +690,12 @@ describe('PatchServer', () => {
         .mockResolvedValue({ id: 'mock-version-id' });
 
       // Execute
-      const [committedChanges, transformedChanges] = await shortTimeoutServer.patchDoc(docId, [newChange]);
+      const [committedChanges, transformedChanges] = await shortTimeoutServer.commitChanges(docId, [newChange]);
 
       // Verify _createVersion was called (spy is on the server instance)
       expect(createVersionSpy).toHaveBeenCalled();
 
-      // patchDoc returns the transformed changes, it doesn't save them itself.
+      // commitChanges returns the transformed changes, it doesn't save them itself.
       // We only need to verify that _createVersion was called due to the timeout.
     });
 
@@ -732,7 +734,7 @@ describe('PatchServer', () => {
         rev: baseRev,
       });
 
-      const [committedChanges, transformedChanges] = await server.patchDoc(docId, offlineChanges);
+      const [committedChanges, transformedChanges] = await server.commitChanges(docId, offlineChanges);
 
       // Check version creation
       expect(mockStore.createVersion).toHaveBeenCalledTimes(1);
@@ -810,7 +812,7 @@ describe('PatchServer', () => {
         rev: baseRev,
       });
 
-      const [committedChanges, transformedChanges] = await server.patchDoc(docId, offlineChanges);
+      const [committedChanges, transformedChanges] = await server.commitChanges(docId, offlineChanges);
 
       // Check version creation (should create two versions, linked)
       expect(mockStore.createVersion).toHaveBeenCalledTimes(2);
@@ -1051,10 +1053,10 @@ describe('PatchServer multi-batch offline/large edit support (batchId)', () => {
       batchId,
     };
     // First batch
-    let [, transformedChanges1] = await server.patchDoc(docId, [offlineChange1]);
+    let [, transformedChanges1] = await server.commitChanges(docId, [offlineChange1]);
     expect(transformedChanges1.some(c => c.id === 'offline-1')).toBe(true);
     // Second batch (should not be transformed over offlineChange1, only over concurrentChange)
-    let [, transformedChanges2] = await server.patchDoc(docId, [offlineChange2]);
+    let [, transformedChanges2] = await server.commitChanges(docId, [offlineChange2]);
     expect(transformedChanges2.some(c => c.id === 'offline-2')).toBe(true);
     // Both changes should have the same batchId and be grouped in versioning
     const versions = await store.listVersions(docId, { groupId: batchId });
@@ -1089,10 +1091,10 @@ describe('PatchServer multi-batch offline/large edit support (batchId)', () => {
       created: Date.now() - 3599 * 1000,
     };
     // First batch
-    let [, transformedChanges1] = await server.patchDoc(docId, [offlineChange1]);
+    let [, transformedChanges1] = await server.commitChanges(docId, [offlineChange1]);
     expect(transformedChanges1.some(c => c.id === 'offline-1')).toBe(true);
     // Second batch (should be transformed over offlineChange1)
-    let [, transformedChanges2] = await server.patchDoc(docId, [offlineChange2]);
+    let [, transformedChanges2] = await server.commitChanges(docId, [offlineChange2]);
     expect(transformedChanges2.some(c => c.id === 'offline-2')).toBe(true);
     // No groupId in versioning
     const versions = await store.listVersions(docId, {});
@@ -1120,9 +1122,9 @@ describe('PatchServer multi-batch offline/large edit support (batchId)', () => {
       batchId,
     };
     // First batch
-    await server.patchDoc(docId, [offlineChange1]);
+    await server.commitChanges(docId, [offlineChange1]);
     // Second batch
-    await server.patchDoc(docId, [offlineChange2]);
+    await server.commitChanges(docId, [offlineChange2]);
     // Should create two versions for the same batchId (since sessionTimeout exceeded)
     const versions = await store.listVersions(docId, { groupId: batchId });
     expect(versions.length).toBe(2);

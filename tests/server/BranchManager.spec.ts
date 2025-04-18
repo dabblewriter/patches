@@ -235,7 +235,7 @@ describe('BranchManager', () => {
     // Mock PatchServer with just the methods BranchManager needs
     mockPatchServer = {
       _getStateAtRevision: vi.fn().mockResolvedValue({ state: { value: 'test' }, rev: 10 }),
-      patchDoc: vi.fn().mockResolvedValue([]),
+      commitChanges: vi.fn().mockResolvedValue([[], []]),
     };
 
     branchManager = new BranchManager(mockStore as BranchingStoreBackend, mockPatchServer as PatchServer);
@@ -416,14 +416,17 @@ describe('BranchManager', () => {
       mockStore.loadVersionChanges.mockResolvedValue(changes);
 
       // Mock patchDoc to return a successful merge
-      (mockPatchServer.patchDoc as Mock).mockResolvedValue([
-        {
-          id: 'merged-change',
-          ops: changes.flatMap(c => c.ops),
-          rev: 11,
-          baseRev: 10,
-          created: Date.now(),
-        },
+      (mockPatchServer.commitChanges as Mock).mockResolvedValue([
+        [],
+        [
+          {
+            id: 'merged-change',
+            ops: changes.flatMap(c => c.ops),
+            rev: 11,
+            baseRev: 10,
+            created: Date.now(),
+          },
+        ],
       ]);
     });
 
@@ -449,7 +452,7 @@ describe('BranchManager', () => {
 
       expect(result).toEqual([]);
       expect(mockStore.updateBranch).toHaveBeenCalledWith(branchDocId, { status: 'merged' });
-      expect(mockPatchServer.patchDoc).not.toHaveBeenCalled();
+      expect(mockPatchServer.commitChanges).not.toHaveBeenCalled();
     });
 
     it('should copy branch versions to main doc and flatten changes', async () => {
@@ -472,7 +475,7 @@ describe('BranchManager', () => {
       );
 
       // Should create flattened change with all ops
-      expect(mockPatchServer.patchDoc).toHaveBeenCalledWith(mainDocId, [
+      expect(mockPatchServer.commitChanges).toHaveBeenCalledWith(mainDocId, [
         expect.objectContaining({
           ops: expect.arrayContaining([
             { op: 'add', path: '/property1', value: 'value1' },
@@ -486,7 +489,7 @@ describe('BranchManager', () => {
       // Should mark branch as merged
       expect(mockStore.updateBranch).toHaveBeenCalledWith(branchDocId, { status: 'merged' });
 
-      // Should return the result from patchDoc
+      // Should return the result from commitChanges
       expect(result).toEqual([
         expect.objectContaining({
           id: 'merged-change',
@@ -496,7 +499,7 @@ describe('BranchManager', () => {
 
     it('should handle merge failure', async () => {
       const error = new Error('Merge conflict');
-      (mockPatchServer.patchDoc as Mock).mockRejectedValue(error);
+      (mockPatchServer.commitChanges as Mock).mockRejectedValue(error);
 
       await expect(branchManager.mergeBranch(branchDocId)).rejects.toThrow('Merge failed: Merge conflict');
 

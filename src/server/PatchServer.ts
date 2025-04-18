@@ -80,18 +80,14 @@ export class PatchServer {
   }
 
   /**
-   * Receives a batch of changes from a client, handles offline session versioning,
-   * transforms changes against concurrent server history, applies them,
-   * and persists the results. *All* changes from a client should be sent in a single batch.
-   *
-   * @param docId - The ID of the document to apply the changes to.
-   * @param changes - An array of change objects received from the client. Should be sorted by client timestamp/sequence.
-   * @returns A tuple containing:
-   *   - [0]: The committed changes that were already on the server that need to be returned to the client
-   *   - [1]: The newly transformed changes that were just committed that need to be returned to the client and broadcast to other clients
-   * @throws Error if the batch's baseRev is inconsistent or transformation fails.
+   * Commits a set of changes to a document, applying operational transformation as needed.
+   * @param docId - The ID of the document.
+   * @param changes - The changes to commit.
+   * @returns A tuple of [committedChanges, transformedChanges] where:
+   *   - committedChanges: Changes that were already committed to the server after the client's base revision
+   *   - transformedChanges: The client's changes after being transformed against concurrent changes
    */
-  async patchDoc(docId: string, changes: Change[]): Promise<[Change[], Change[]]> {
+  async commitChanges(docId: string, changes: Change[]): Promise<[Change[], Change[]]> {
     if (changes.length === 0) {
       return [[], []];
     }

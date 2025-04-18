@@ -39,9 +39,8 @@ await ws.subscribe('doc123'); // or multiple: ws.subscribe(['doc1', 'doc2'])
 ### 4. Listen for Document Updates
 
 ```typescript
-ws.onDocUpdate(params => {
-  // params: { docId, changes }
-  // Apply changes to your PatchDoc or update your UI
+ws.onChangesCommitted(params => {
+  console.log('Received document changes:', params);
 });
 ```
 
@@ -49,7 +48,7 @@ ws.onDocUpdate(params => {
 
 ```typescript
 // Use your PatchDoc to generate changes, then:
-await ws.patchDoc('doc123', changesArray);
+await ws.commitChanges('doc123', changesArray);
 ```
 
 ### 6. Versioning and History
@@ -70,8 +69,8 @@ const snapshot = await ws.getVersionState('doc123', versionId);
 - `connect()` / `disconnect()` — Open/close the WebSocket connection
 - `subscribe(ids)` / `unsubscribe(ids)` — Subscribe/unsubscribe to document updates
 - `getDoc(docId)` — Fetch the latest state of a document
-- `patchDoc(docId, changes)` — Send changes to the server
-- `onDocUpdate` — Signal for document changes from the server
+- `commitChanges(docId, changes)` — Send changes to the server
+- `onChangesCommitted` — Signal for document changes from the server
 - `createVersion`, `listVersions`, `getVersionState`, `getVersionChanges`, `updateVersion` — Versioning APIs
 
 ## Example: Real-World Client Integration
@@ -93,7 +92,7 @@ const { state: initialState, rev: initialRev } = await ws.getDoc('doc123');
 const patchDoc = new PatchDoc(initialState, {}); // Optionally pass metadata as 2nd arg
 
 // 4. Listen for document updates from the server (from other clients)
-ws.onDocUpdate(({ docId, changes }) => {
+ws.onChangesCommitted(({ docId, changes }) => {
   if (docId === 'doc123') {
     patchDoc.applyExternalServerUpdate(changes);
   }
@@ -104,7 +103,7 @@ patchDoc.onChange(() => {
   // Only send if not already sending a batch
   if (!patchDoc.isSending && patchDoc.hasPending) {
     const changes = patchDoc.getUpdatesForServer();
-    ws.patchDoc('doc123', changes)
+    ws.commitChanges('doc123', changes)
       .then(serverCommit => {
         patchDoc.applyServerConfirmation(serverCommit);
       })

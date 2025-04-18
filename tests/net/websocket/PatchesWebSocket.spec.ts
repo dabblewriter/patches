@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi, type Mocked } from 'vitest';
 import { signal, type Signal } from '../../../src/event-signal.js';
 import { JSONRPCClient } from '../../../src/net/protocol/JSONRPCClient.js';
-import type { ConnectionState, ListOptions, PatchesNotificationParams } from '../../../src/net/protocol/types.js';
+import type { ConnectionState, ListOptions } from '../../../src/net/protocol/types.js';
 import { PatchesWebSocket } from '../../../src/net/websocket/PatchesWebSocket.js';
 import { WebSocketTransport } from '../../../src/net/websocket/WebSocketTransport.js';
 import { Change, PatchSnapshot, VersionMetadata } from '../../../src/types.js';
@@ -75,7 +75,7 @@ describe('PatchesWebSocket', () => {
   });
 
   it('should register notification handlers with the RPC client', () => {
-    expect(mockRpcImplementation.on).toHaveBeenCalledWith('doc-update', expect.any(Function));
+    expect(mockRpcImplementation.on).toHaveBeenCalledWith('changesCommitted', expect.any(Function));
   });
 
   describe('Connection Management', () => {
@@ -156,8 +156,8 @@ describe('PatchesWebSocket', () => {
     it('patchDoc should call rpc.request with correct params', async () => {
       const committedChanges = [...CHANGES];
       mockRpcImplementation.request.mockResolvedValue(committedChanges);
-      const result = await patchesWs.patchDoc(DOC_ID, CHANGES);
-      expect(mockRpcImplementation.request).toHaveBeenCalledWith('patchDoc', {
+      const result = await patchesWs.commitChanges(DOC_ID, CHANGES);
+      expect(mockRpcImplementation.request).toHaveBeenCalledWith('commitChanges', {
         docId: DOC_ID,
         changes: CHANGES,
       });
@@ -251,17 +251,14 @@ describe('PatchesWebSocket', () => {
   describe('Notifications', () => {
     beforeEach(() => {
       // Spy on the emit methods of the actual signal instances
-      vi.spyOn(patchesWs.onDocUpdate, 'emit');
+      vi.spyOn(patchesWs.onChangesCommitted, 'emit');
     });
 
-    it('should emit onDocUpdate when receiving a doc-update notification', () => {
-      const params: PatchesNotificationParams = {
-        docId: 'doc1',
-        changes: [{ id: 'change-a', ops: [], rev: 1, created: Date.now() }],
-      };
-      rpcNotificationHandlers['doc-update'](params);
-      expect(patchesWs.onDocUpdate.emit).toHaveBeenCalledTimes(1);
-      expect(patchesWs.onDocUpdate.emit).toHaveBeenCalledWith(params);
+    it('should emit onChangesCommitted when receiving a changesCommitted notification', () => {
+      const params = { docId: 'test-doc', changes: [{ id: 'change-a', ops: [], rev: 1, created: Date.now() }] };
+      rpcNotificationHandlers['changesCommitted'](params);
+      expect(patchesWs.onChangesCommitted.emit).toHaveBeenCalledTimes(1);
+      expect(patchesWs.onChangesCommitted.emit).toHaveBeenCalledWith(params);
     });
   });
 });

@@ -60,7 +60,7 @@ const server = new PatchServer(store, options);
 This is the main entry point for processing changes submitted by clients.
 
 ```typescript
-async patchDoc(docId: string, changes: Change[]): Promise<Change[]> {
+async patchDoc(docId: string, changes: Change[]): Promise<[Change[], Change[]]> {
     // ... implementation ...
 }
 ```
@@ -99,9 +99,9 @@ async patchDoc(docId: string, changes: Change[]): Promise<Change[]> {
 
 ### Output
 
-- `Promise<Change[]>`: A promise that resolves to:
-  - An array containing the committed changes followed by the successfully transformed incoming changes.
-  - An empty array `[]` if the client's batch was empty or all changes were already committed.
+- `Promise<[Change[], Change[]]>`: A promise that resolves to a tuple containing:
+  - `committedChanges`: An array of changes that were already committed to the server after the client's base revision. These changes are returned to help the client catch up with the server state.
+  - `transformedChanges`: An array of changes that have been transformed against any concurrent changes. These changes can be applied to the client's state to bring it up to date with the server.
 
 ### Error Handling
 

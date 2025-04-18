@@ -86,12 +86,14 @@ export class PatchServer {
    *
    * @param docId - The ID of the document to apply the changes to.
    * @param changes - An array of change objects received from the client. Should be sorted by client timestamp/sequence.
-   * @returns An array containing the single committed server change representing the batch outcome.
+   * @returns A tuple containing:
+   *   - [0]: The committed changes that were already on the server that need to be returned to the client
+   *   - [1]: The newly transformed changes that were just committed that need to be returned to the client and broadcast to other clients
    * @throws Error if the batch's baseRev is inconsistent or transformation fails.
    */
-  async patchDoc(docId: string, changes: Change[]): Promise<Change[]> {
+  async patchDoc(docId: string, changes: Change[]): Promise<[Change[], Change[]]> {
     if (changes.length === 0) {
-      return [];
+      return [[], []];
     }
 
     // Assume all changes share the same baseRev. Client ensures this.
@@ -150,7 +152,7 @@ export class PatchServer {
 
     // If all incoming changes were already committed, return the committed changes found
     if (changes.length === 0) {
-      return committedChanges;
+      return [committedChanges, []];
     }
 
     // 4. Handle offline-session versioning:
@@ -190,8 +192,8 @@ export class PatchServer {
     if (transformedChanges.length > 0) {
       await this.store.saveChanges(docId, transformedChanges);
     }
-    // Return committed changes followed by the successfully transformed incoming changes
-    return [...committedChanges, ...transformedChanges];
+    // Return committed changes and newly transformed changes separately
+    return [committedChanges, transformedChanges];
   }
 
   /**

@@ -65,7 +65,7 @@ describe('PatchesWebSocket', () => {
 
   it('should instantiate WebSocketTransport and JSONRPCClient with the correct URL and transport', () => {
     expect(WebSocketTransport).toHaveBeenCalledTimes(1);
-    expect(WebSocketTransport).toHaveBeenCalledWith(MOCK_URL);
+    expect(WebSocketTransport).toHaveBeenCalledWith(MOCK_URL, undefined);
     expect(JSONRPCClient).toHaveBeenCalledTimes(1);
     expect(vi.mocked(JSONRPCClient).mock.calls[0][0]).toBe(mockTransportImplementation);
   });

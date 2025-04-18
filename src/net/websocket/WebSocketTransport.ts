@@ -1,5 +1,10 @@
 import { AbstractTransport } from '../AbstractTransport.js';
 
+/** WebSocket constructor options (subset) */
+export interface WebSocketOptions {
+  protocol?: string | string[];
+}
+
 /**
  * WebSocket-based transport implementation that provides communication over the WebSocket protocol.
  * Includes automatic reconnection with exponential backoff.
@@ -14,8 +19,12 @@ export class WebSocketTransport extends AbstractTransport {
   /**
    * Creates a new WebSocket transport instance.
    * @param url - The WebSocket server URL to connect to
+   * @param wsOptions - Optional configuration for the WebSocket connection
    */
-  constructor(private url: string) {
+  constructor(
+    private url: string,
+    private wsOptions?: WebSocketOptions
+  ) {
     super();
   }
 
@@ -42,7 +51,10 @@ export class WebSocketTransport extends AbstractTransport {
     // Create a new connection promise
     this.connectionPromise = new Promise<void>((resolve, reject) => {
       try {
-        this.ws = new WebSocket(this.url);
+        // Pass protocol option if available (standard 2nd arg)
+        // Other options like headers are not standard and require specific server/client handling
+        // or a different WebSocket client library.
+        this.ws = new WebSocket(this.url, this.wsOptions?.protocol);
 
         this.ws.onopen = () => {
           this.backoff = 1000; // Reset backoff on successful connection

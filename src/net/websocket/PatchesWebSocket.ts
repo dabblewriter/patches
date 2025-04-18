@@ -13,7 +13,7 @@ import type {
   PatchesAPI,
   PatchesNotificationParams,
 } from '../protocol/types.js';
-import { WebSocketTransport } from './WebSocketTransport.js';
+import { WebSocketTransport, type WebSocketOptions } from './WebSocketTransport.js';
 
 /**
  * High-level client for the Patches real-time collaboration service.
@@ -36,9 +36,10 @@ export class PatchesWebSocket implements PatchesAPI {
   /**
    * Creates a new Patches WebSocket client instance.
    * @param url - The WebSocket server URL to connect to
+   * @param wsOptions - Optional configuration for the underlying WebSocket connection
    */
-  constructor(url: string) {
-    this.transport = new WebSocketTransport(url);
+  constructor(url: string, wsOptions?: WebSocketOptions) {
+    this.transport = new WebSocketTransport(url, wsOptions);
     this.rpc = new JSONRPCClient(this.transport);
     this.onStateChange = this.transport.onStateChange;
 

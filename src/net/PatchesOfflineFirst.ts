@@ -1,3 +1,3 @@
-import { PatchesRealtime } from '../ot/client/PatchesRealtime';
+import { PatchesRealtime } from '../client/PatchesRealtime';
 
 export class PatchesOfflineFirst extends PatchesRealtime {}

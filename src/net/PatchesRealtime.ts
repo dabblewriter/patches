@@ -1,7 +1,7 @@
+import { PatchDoc } from '../client/PatchDoc.js';
 import { type Signal } from '../event-signal.js';
-import { PatchDoc } from '../ot/client/PatchDoc.js';
-import type { ConnectionState, SignalNotificationParams } from '../transport/protocol/types.js';
-import { PatchesWebSocket } from '../transport/websocket/PatchesWebSocket.js';
+import type { ConnectionState } from './protocol/types.js';
+import { PatchesWebSocket } from './websocket/PatchesWebSocket.js';
 
 export interface PatchesRealtimeOptions {
   /** Initial metadata to attach to changes from this client */
@@ -62,13 +62,6 @@ export class PatchesRealtime {
   }
 
   /**
-   * Returns a signal channel for WebRTC signaling
-   */
-  signalChannel(): Signal<(data: SignalNotificationParams) => void> {
-    return this.ws.onSignal;
-  }
-
-  /**
    * Closes all connections and cleans up resources
    */
   close(): void {
@@ -89,7 +82,7 @@ export class PatchesRealtime {
 
   private _setupDocSync(docId: string, doc: PatchDoc<any>): void {
     // Listen for remote changes
-    this.ws.onDocUpdate.on(({ docId: updateDocId, changes }) => {
+    this.ws.onChangesCommitted(({ docId: updateDocId, changes }) => {
       if (updateDocId === docId) {
         doc.applyExternalServerUpdate(changes);
       }
@@ -100,7 +93,7 @@ export class PatchesRealtime {
       if (!doc.isSending && doc.hasPending) {
         try {
           const changes = doc.getUpdatesForServer();
-          const serverCommit = await this.ws.patchDoc(docId, changes);
+          const serverCommit = await this.ws.commitChanges(docId, changes);
           doc.applyServerConfirmation(serverCommit);
         } catch (err) {
           console.error('Error sending changes to server:', err);

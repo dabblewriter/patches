@@ -1,3 +1,5 @@
+export { PatchesOfflineFirst } from './PatchesOfflineFirst';
+export { PatchesRealtime } from './PatchesRealtime';
 export { JSONRPCClient } from './protocol/JSONRPCClient';
 export { PatchesWebSocket } from './websocket/PatchesWebSocket';
 export { WebSocketTransport } from './websocket/WebSocketTransport';

@@ -26,22 +26,30 @@ The store maintains several tables:
    - Stores the last known committed state
    - Optimized for quick document loading
    - Automatically compacted to prevent bloat
+   - Keyed by document ID
+   - Contains: `{ docId: string; state: any; rev: number }`
 
 2. **Committed Changes**
 
    - Records of server-confirmed changes
    - Used for history and state reconstruction
    - Cleaned up after snapshot compaction
+   - Keyed by `[docId, rev]`
+   - Contains: `Change & { docId: string }`
 
 3. **Pending Changes**
 
    - Local changes awaiting server confirmation
    - Preserved across app restarts
    - Removed after successful sync
+   - Keyed by `[docId, rev]`
+   - Contains: `Change & { docId: string }`
 
 4. **Deleted Documents**
    - Tombstones for deleted documents
    - Ensures proper cleanup on reconnect
+   - Keyed by document ID
+   - Contains: `{ docId: string }`
 
 ## Best Practices
 
@@ -50,32 +58,61 @@ The store maintains several tables:
    - Monitor storage usage
    - Implement cleanup strategies
    - Consider TTL for old documents
+   - Use appropriate compaction thresholds (default: 200 changes)
 
 2. **Offline Work**
 
    - Design for offline-first
    - Handle storage errors gracefully
    - Implement conflict resolution
+   - Preserve pending changes across restarts
 
 3. **Performance**
    - Batch changes when possible
    - Use appropriate compaction thresholds
    - Consider document size limits
+   - Leverage IndexedDB transactions for atomic operations
 
 ## Implementation Details
 
 The store uses a sophisticated compaction strategy:
 
-1. Changes are stored in order
-2. Snapshots are created periodically (e.g., every 100 changes)
-3. Old changes are cleaned up after snapshot creation
-4. Pending changes are preserved until confirmed
+1. Changes are stored in order with revision numbers
+2. Snapshots are created after `SNAPSHOT_INTERVAL` changes (default: 200)
+3. Snapshot creation is conditional:
+   - Only occurs if there are no pending changes based on revisions older than the latest committed change
+   - This ensures pending changes can be properly rebased
+4. Old changes are cleaned up after snapshot creation
+5. Pending changes are preserved until confirmed by the server
+
+### Utility Functions
+
+The store provides several utility functions for IndexedDB operations:
+
+```typescript
+// Promise-based request handling
+promisifyRequest<T>(request: IDBRequest<T>): Promise<T>
+promisifyTransaction(tx: IDBTransaction): Promise<void>
+
+// Store operations
+getAllFromStore<T>(store: IDBObjectStore, range?: IDBKeyRange, count?: number): Promise<T[]>
+getFromStore<T>(store: IDBObjectStore, key: IDBValidKey): Promise<T | undefined>
+addToStore<T>(store: IDBObjectStore, value: T): Promise<IDBValidKey>
+deleteFromStore(store: IDBObjectStore, key: IDBKeyRange | IDBValidKey): Promise<void>
+countFromStore(store: IDBObjectStore, range?: IDBKeyRange): Promise<number>
+
+// Cursor operations
+getFirstFromCursor<T>(store: IDBObjectStore, range?: IDBKeyRange): Promise<T | undefined>
+getLastFromCursor<T>(store: IDBObjectStore, range?: IDBKeyRange): Promise<T | undefined>
+```
 
 This approach balances:
 
 - Quick document loading (via snapshots)
 - Efficient storage (via compaction)
 - Reliable offline work (via change queuing)
+- Type safety (via TypeScript interfaces)
+- Error handling (via Promise-based operations)
 
 ## See Also
 

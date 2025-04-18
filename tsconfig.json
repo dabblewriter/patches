@@ -9,7 +9,8 @@
     "moduleResolution": "bundler",
     "module": "ESNext",
     "strict": true,
-    "noImplicitAny": true
+    "noImplicitAny": true,
+    "types": ["vitest/globals"] // Add Vitest global types
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts"] // Also include test files
 }

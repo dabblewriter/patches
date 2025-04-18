@@ -30,9 +30,9 @@ export class PatchDoc<T extends object> {
    * @param initialMetadata Optional metadata to add to generated changes.
    */
   constructor(initialState: T = {} as T, initialMetadata: Record<string, any> = {}) {
-    // Ensure initial state is properly cloned if it's an object/array
-    this._committedState = JSON.parse(JSON.stringify(initialState));
-    this._state = JSON.parse(JSON.stringify(initialState));
+    // Use structuredClone for robust deep cloning
+    this._committedState = structuredClone(initialState);
+    this._state = structuredClone(initialState);
     this._committedRev = 0;
     this._changeMetadata = initialMetadata;
   }
@@ -64,19 +64,20 @@ export class PatchDoc<T extends object> {
     return {
       state: this._committedState,
       rev: this._committedRev,
-      // Includes only pending, not sending changes. This is incomplete.
-      changes: [...this._pendingChanges],
+      // Includes sending and pending changes. On import, all become pending.
+      changes: [...this._sendingChanges, ...this._pendingChanges],
     };
   }
 
   /**
-   * Basic import for potential persistence (may lose sending state).
+   * Basic import for potential persistence.
+   * Resets any `_sendingChanges` state and treats all imported changes as pending.
    */
   import(snapshot: PatchSnapshot<T>) {
-    this._committedState = JSON.parse(JSON.stringify(snapshot.state));
+    this._committedState = structuredClone(snapshot.state); // Use structuredClone
     this._committedRev = snapshot.rev;
-    this._pendingChanges = snapshot.changes ?? [];
-    this._sendingChanges = []; // Assume import resets sending state
+    this._pendingChanges = snapshot.changes ?? []; // All imported changes become pending
+    this._sendingChanges = []; // Reset sending state on import
     this._recalculateLocalState();
     this.onUpdate.emit(this._state);
   }
@@ -294,16 +295,38 @@ export class PatchDoc<T extends object> {
     this.onUpdate.emit(this._state);
   }
 
+  /**
+   * Handles the scenario where sending changes to the server failed.
+   * Moves the changes that were in the process of being sent back to the
+   * beginning of the pending queue to be retried later.
+   */
+  handleSendFailure(): void {
+    if (this.isSending) {
+      console.warn(`Handling send failure: Moving ${this._sendingChanges.length} changes back to pending queue.`);
+      // Prepend sending changes back to pending queue to maintain order and prioritize retry
+      this._pendingChanges.unshift(...this._sendingChanges);
+      this._sendingChanges = [];
+      // Do NOT recalculate state here, as the state didn't actually advance
+      // due to the failed send. The state should still reflect the last known
+      // good state + pending changes (which now includes the failed ones).
+    } else {
+      console.warn('handleSendFailure called but no changes were marked as sending.');
+    }
+  }
+
   /** Recalculates _state from _committedState + _sendingChanges + _pendingChanges */
   private _recalculateLocalState(): void {
     try {
-      let state = applyChanges(this._committedState, this._sendingChanges);
-      this._state = applyChanges(state, this._pendingChanges);
+      // Apply sending changes first, then pending changes over that result
+      // Note: The previous implementation combined them, which might be okay if applyChanges handles arrays,
+      // but separating them is clearer conceptually if applyChanges expects one state and one array of changes.
+      // Assuming applyChanges handles an array of changes correctly:
+      this._state = applyChanges(this._committedState, [...this._sendingChanges, ...this._pendingChanges]);
     } catch (error) {
-      console.error('Error recalculating local state after update:', error);
+      console.error('CRITICAL: Error recalculating local state after update:', error);
       // This indicates a potentially serious issue with patch application or rebasing logic.
-      // Consider marking the document as desynchronized and requesting a full state refresh.
-      // For now, log the error. State might be inconsistent.
+      // Re-throw the error to allow higher-level handling (e.g., trigger resync)
+      throw error;
     }
   }
 

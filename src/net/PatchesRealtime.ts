@@ -29,9 +29,9 @@ export class PatchesRealtime {
     connected: false,
     syncing: null,
   };
-  private ws: PatchesWebSocket;
-  private docs: Map<string, ManagedDoc<any>> = new Map();
-  private options: PatchesRealtimeOptions;
+  protected ws: PatchesWebSocket;
+  protected docs: Map<string, ManagedDoc<any>> = new Map();
+  protected options: PatchesRealtimeOptions;
   private wsChangesUnsubscriber: Unsubscriber | null = null;
 
   /** Emitted when an error occurs during synchronization or connection. */
@@ -47,7 +47,7 @@ export class PatchesRealtime {
     >();
 
   /** Emitted when the WebSocket connection state changes. */
-  readonly onStateChange = signal<(state: PatchesState) => void>();
+  protected readonly onStateChange = signal<(state: PatchesState) => void>();
 
   /**
    * Creates an instance of PatchesRealtime.
@@ -224,7 +224,7 @@ export class PatchesRealtime {
    * @returns An unsubscriber function to remove the listener.
    * @internal
    */
-  private _setupDocSync(docId: string, doc: PatchDoc<any>): Unsubscriber {
+  protected _setupDocSync(docId: string, doc: PatchDoc<any>): Unsubscriber {
     // Listen for local changes and attempt to send them.
     return doc.onChange(async () => {
       // Attempt to send immediately after a local change
@@ -241,7 +241,7 @@ export class PatchesRealtime {
    * @param doc The `PatchDoc` instance.
    * @internal
    */
-  private async _sendPendingIfNecessary(docId: string, doc: PatchDoc<any>): Promise<void> {
+  protected async _sendPendingIfNecessary(docId: string, doc: PatchDoc<any>): Promise<void> {
     // Only proceed if there are pending changes and we are not already sending.
     if (!doc.isSending && doc.hasPending) {
       let changes;
@@ -293,7 +293,7 @@ export class PatchesRealtime {
    * @param docId The ID of the document to resynchronize.
    * @internal
    */
-  private async _resyncDoc(docId: string): Promise<void> {
+  protected async _resyncDoc(docId: string): Promise<void> {
     const managedDoc = this.docs.get(docId);
     if (!managedDoc) {
       console.warn(`_resyncDoc called for non-managed doc: ${docId}`);

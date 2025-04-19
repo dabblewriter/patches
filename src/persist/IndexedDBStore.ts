@@ -2,8 +2,9 @@ import { signal } from '../event-signal.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
 import type { Change, PatchSnapshot } from '../types.js';
 import { applyChanges } from '../utils.js';
+import type { OfflineStore, TrackedDoc } from './OfflineStore.js';
 
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const SNAPSHOT_INTERVAL = 200;
 
 interface Snapshot {
@@ -22,13 +23,14 @@ interface StoredChange extends Change {
  * - committedChanges<Change & { docId: string; }> (primary key: [docId, rev])
  * - pendingChanges<Change & { docId: string; }> (primary key: [docId, rev])
  * - deleted<{ docId: string; }> (primary key: docId)
+ * - docs<{ docId: string; committedRev: number; deleted?: boolean }> (primary key: docId)
  *
  * Under the hood, this class will store snapshots of the document only for committed state. It will not update the
  * committed state on *every* received committed change as this can cause issues with IndexedDB with many large updates.
  * After every 200 committed changes, the class will save the current state to the snapshot store and delete the committed changes that went into it.
  * A snapshot will not be created if there are pending changes based on revisions older than the 200th committed change until those pending changes are committed.
  */
-export class IndexedDBStore {
+export class IndexedDBStore implements OfflineStore {
   private db: IDBDatabase | null = null;
   private dbName: string;
   private dbPromise: Promise<IDBDatabase>;
@@ -65,7 +67,10 @@ export class IndexedDBStore {
           db.createObjectStore('pendingChanges', { keyPath: ['docId', 'rev'] });
         }
         if (!db.objectStoreNames.contains('deleted')) {
-          db.createObjectStore('deleted', { keyPath: 'docId' });
+          db.deleteObjectStore('deleted');
+        }
+        if (!db.objectStoreNames.contains('docs')) {
+          db.createObjectStore('docs', { keyPath: 'docId' });
         }
       };
     });
@@ -85,6 +90,7 @@ export class IndexedDBStore {
     if (this.db) {
       this.db.close();
       this.db = null;
+      this.dbPromise = this.initDB();
     }
   }
 
@@ -111,13 +117,19 @@ export class IndexedDBStore {
    * 5. return { state, rev, changes: pending }
    */
   async getDoc(docId: string): Promise<PatchSnapshot | undefined> {
-    const [tx, snapshots, committedChanges, pendingChanges] = await this.transaction(
-      ['snapshots', 'committedChanges', 'pendingChanges'],
+    const [tx, docsStore, snapshots, committedChanges, pendingChanges] = await this.transaction(
+      ['docs', 'snapshots', 'committedChanges', 'pendingChanges'],
       'readonly'
     );
 
+    const docMeta = await docsStore.get<TrackedDoc>(docId);
+    if (docMeta?.deleted) {
+      await tx.complete();
+      return undefined;
+    }
+
     const snapshot = await snapshots.get<Snapshot>(docId);
-    const committed = await committedChanges.getAll<StoredChange>([docId, snapshot?.rev ?? 0 + 1], [docId, Infinity]);
+    const committed = await committedChanges.getAll<StoredChange>([docId, snapshot?.rev ?? 0], [docId, Infinity]);
     const pending = await pendingChanges.getAll<StoredChange>([docId, 0], [docId, Infinity]);
 
     if (!snapshot && !committed.length && !pending.length) return undefined;
@@ -150,20 +162,21 @@ export class IndexedDBStore {
 
   /**
    * Completely remove all data for this docId and mark it
-   * as deleted (tombstone).  Provider will call `patchAPI.deleteDoc`
-   * on reconnect.
+   * as deleted (tombstone).
    */
   async deleteDoc(docId: string): Promise<void> {
-    const [tx, snapshots, committedChanges, pendingChanges, deleted] = await this.transaction(
-      ['snapshots', 'committedChanges', 'pendingChanges', 'deleted'],
+    const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.transaction(
+      ['snapshots', 'committedChanges', 'pendingChanges', 'docs'],
       'readwrite'
     );
+
+    const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
+    await docsStore.put({ ...docMeta, deleted: true });
 
     await Promise.all([
       snapshots.delete(docId),
       committedChanges.delete([docId, 0], [docId, Infinity]),
       pendingChanges.delete([docId, 0], [docId, Infinity]),
-      deleted.add({ docId }),
     ]);
 
     await tx.complete();
@@ -176,7 +189,17 @@ export class IndexedDBStore {
    * Called *before* you attempt to send them to the server.
    */
   async savePendingChanges(docId: string, changes: Change[]): Promise<void> {
-    const [tx, pendingChanges] = await this.transaction(['pendingChanges'], 'readwrite');
+    const [tx, pendingChanges, docsStore] = await this.transaction(['pendingChanges', 'docs'], 'readwrite');
+
+    let docMeta = await docsStore.get<TrackedDoc>(docId);
+    if (!docMeta) {
+      docMeta = { docId, committedRev: 0 };
+      await docsStore.add(docMeta);
+    } else if (docMeta.deleted) {
+      delete docMeta.deleted;
+      await docsStore.put(docMeta);
+      console.warn(`Revived document ${docId} by saving pending changes.`);
+    }
 
     await Promise.all(changes.map(change => pendingChanges.add<StoredChange>({ ...change, docId })));
 
@@ -205,8 +228,8 @@ export class IndexedDBStore {
    * from the server in response to a patchDoc request.
    */
   async saveCommittedChanges(docId: string, changes: Change[], sentPendingRange?: [number, number]): Promise<void> {
-    const [tx, committedChanges, pendingChanges, snapshots] = await this.transaction(
-      ['committedChanges', 'pendingChanges', 'snapshots'],
+    const [tx, committedChanges, pendingChanges, snapshots, docsStore] = await this.transaction(
+      ['committedChanges', 'pendingChanges', 'snapshots', 'docs'],
       'readwrite'
     );
 
@@ -245,7 +268,24 @@ export class IndexedDBStore {
       }
     }
 
+    // Update committedRev in the docs store if changes were saved
+    const lastCommittedRev = changes.at(-1)?.rev;
+    if (lastCommittedRev !== undefined) {
+      const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
+      if (lastCommittedRev > docMeta.committedRev) {
+        await docsStore.put({ ...docMeta, committedRev: lastCommittedRev, deleted: undefined });
+      }
+    }
+
     await tx.complete();
+  }
+
+  // --- New method for OfflineStore interface ---
+  async listDocs(): Promise<TrackedDoc[]> {
+    const [tx, docsStore] = await this.transaction(['docs'], 'readonly');
+    const allDocs = await docsStore.getAll<TrackedDoc>();
+    await tx.complete();
+    return allDocs.filter(doc => !doc.deleted);
   }
 
   // ─── Revision Tracking ─────────────────────────────────────────────────────
@@ -360,6 +400,14 @@ class IDBStoreWrapper {
     return new Promise((resolve, reject) => {
       const request = this.store.openCursor(this.createRange(lower, upper), 'prev');
       request.onsuccess = () => resolve(request.result?.value);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async put<T>(value: T): Promise<IDBValidKey> {
+    return new Promise((resolve, reject) => {
+      const request = this.store.put(value);
+      request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
   }

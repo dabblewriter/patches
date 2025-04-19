@@ -13,6 +13,7 @@ export type {
   SignalNotificationParams,
 } from './protocol/types';
 
+export * from './PatchesOfflineFirst.js';
 export * from './protocol/types.js';
 export * from './webrtc/WebRTCAwareness.js';
 export * from './webrtc/WebRTCTransport.js';

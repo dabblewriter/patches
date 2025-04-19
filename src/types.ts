@@ -179,3 +179,9 @@ export interface BranchingStoreBackend extends PatchStoreBackend {
    */
   closeBranch(branchId: string): Promise<void>;
 }
+
+export interface Deferred<T = void> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: any) => void;
+}

@@ -35,6 +35,7 @@ export abstract class AbstractTransport implements Transport {
    * @param state - The new connection state
    */
   protected set state(state: ConnectionState) {
+    if (state === this._state) return;
     this._state = state;
     this.onStateChange.emit(state);
   }

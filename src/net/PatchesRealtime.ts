@@ -1,6 +1,7 @@
 import { PatchDoc } from '../client/PatchDoc.js';
-import { signal, type Signal, type Unsubscriber } from '../event-signal.js';
-import type { ConnectionState } from './protocol/types.js';
+import { signal, type Unsubscriber } from '../event-signal.js';
+import type { PatchesState } from './types.js';
+import { onlineState } from './websocket/onlineState.js';
 import { PatchesWebSocket } from './websocket/PatchesWebSocket.js';
 import type { WebSocketOptions } from './websocket/WebSocketTransport.js';
 
@@ -23,11 +24,15 @@ interface ManagedDoc<T extends object> {
  * Manages WebSocket connection and document synchronization.
  */
 export class PatchesRealtime {
+  private _state: PatchesState = {
+    online: false,
+    connected: false,
+    syncing: null,
+  };
   private ws: PatchesWebSocket;
   private docs: Map<string, ManagedDoc<any>> = new Map();
   private options: PatchesRealtimeOptions;
   private wsChangesUnsubscriber: Unsubscriber | null = null;
-  private connectionState: ConnectionState = 'disconnected'; // Track internal state
 
   /** Emitted when an error occurs during synchronization or connection. */
   readonly onError =
@@ -42,7 +47,7 @@ export class PatchesRealtime {
     >();
 
   /** Emitted when the WebSocket connection state changes. */
-  readonly onStateChange: Signal<(state: ConnectionState) => void>;
+  readonly onStateChange = signal<(state: PatchesState) => void>();
 
   /**
    * Creates an instance of PatchesRealtime.
@@ -52,13 +57,10 @@ export class PatchesRealtime {
   constructor(url: string, opts: PatchesRealtimeOptions = {}) {
     this.ws = new PatchesWebSocket(url, opts.wsOptions);
     this.options = opts;
+
     // Re-emit the state change signal and track internally
-    this.onStateChange = signal<(state: ConnectionState) => void>(); // Explicit type
-    this.ws.onStateChange((state: ConnectionState) => {
-      // Call signal directly to subscribe
-      this.connectionState = state;
-      this.onStateChange.emit(state); // Pass through the signal
-    });
+    this.ws.onStateChange(state => (this.state = { connected: state === 'connected' }));
+    onlineState.onOnlineChange(isOnline => (this.state = { online: isOnline }));
 
     // Register a single listener for all incoming changes from the WebSocket.
     this.wsChangesUnsubscriber = this.ws.onChangesCommitted(({ docId, changes }) => {
@@ -82,6 +84,15 @@ export class PatchesRealtime {
     });
   }
 
+  get state(): PatchesState {
+    return this._state;
+  }
+
+  protected set state(value: Partial<PatchesState>) {
+    this._state = { ...this._state, ...value };
+    this.onStateChange.emit(this._state);
+  }
+
   /**
    * Establishes the WebSocket connection to the server.
    * Automatically called by `openDoc` if not already connected.
@@ -89,6 +100,14 @@ export class PatchesRealtime {
   async connect(): Promise<void> {
     // The underlying PatchesWebSocket handles connection state and idempotency.
     await this.ws.connect();
+  }
+
+  /**
+   * Establishes the WebSocket connection to the server.
+   * Automatically called by `openDoc` if not already connected.
+   */
+  disconnect(): void {
+    this.ws.disconnect();
   }
 
   /**
@@ -256,7 +275,7 @@ export class PatchesRealtime {
         this.onError.emit({ type: 'sendFailed', docId, error: err, recoveryAttempted: true });
 
         // Use the internally tracked state
-        if (this.connectionState === 'connected' || this.connectionState === 'connecting') {
+        if (this._state.connected) {
           console.warn(`Attempting recovery via resync for doc ${docId} after send failure.`);
           // Use void to explicitly ignore the promise returned by _resyncDoc
           void this._resyncDoc(docId);

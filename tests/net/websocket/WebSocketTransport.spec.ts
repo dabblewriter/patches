@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocketTransport } from '../../../src/net/websocket/WebSocketTransport';
+import { onlineState } from '../../../src/net/websocket/onlineState';
 
 // Mock WebSocket implementation
 class MockWebSocket {
@@ -78,6 +79,9 @@ describe('WebSocketTransport', () => {
     global.setTimeout = mockSetTimeout as any;
     global.clearTimeout = mockClearTimeout as any;
 
+    // Mock online
+    (onlineState as any)._isOnline = true;
+
     // Create transport instance
     transport = new WebSocketTransport(testUrl);
   });
@@ -87,6 +91,7 @@ describe('WebSocketTransport', () => {
     global.WebSocket = originalWebSocket;
     global.setTimeout = originalSetTimeout;
     global.clearTimeout = originalClearTimeout;
+    (mockWs as any) = undefined;
   });
 
   it('should create a WebSocketTransport instance with correct initial state', () => {
@@ -105,7 +110,29 @@ describe('WebSocketTransport', () => {
       expect(transport.state).toBe('connected');
     });
 
+    it('should defer connection when offline', async () => {
+      // Set offline state
+      (onlineState as any)._isOnline = false;
+
+      const connectPromise = transport.connect();
+
+      // Connection should be deferred
+      expect(transport.state).toBe('disconnected');
+      expect(mockWs).toBeUndefined();
+
+      // Go back online
+      (onlineState as any)._isOnline = true;
+      onlineState.onOnlineChange.emit(true);
+
+      // Now connection should proceed
+      mockWs.simulateOpen();
+      await connectPromise;
+      expect(transport.state).toBe('connected');
+      console.log('Finished Running This Test');
+    });
+
     it('should return existing promise when connect is called while connecting', async () => {
+      console.log('Started Running Next Test');
       const firstPromise = transport.connect();
       const secondPromise = transport.connect();
 
@@ -238,6 +265,25 @@ describe('WebSocketTransport', () => {
       expect(mockTimers.size).toBe(1);
       const [[timerId, timer]] = mockTimers.entries();
       expect(timer.delay).toBe(1000); // Initial backoff
+    });
+
+    it('should not schedule reconnect when offline', async () => {
+      const connectPromise = transport.connect();
+      (onlineState as any)._isOnline = false;
+      onlineState.onOnlineChange.emit(false);
+
+      // Simulate error and close
+      mockWs.simulateError(new Error('Test error'));
+      mockWs.simulateClose();
+
+      try {
+        await connectPromise;
+      } catch (error) {
+        // Expected error, ignore
+      }
+
+      // Should not have scheduled a reconnect
+      expect(mockTimers.size).toBe(0);
     });
 
     it('should increase backoff time on consecutive failures', async () => {

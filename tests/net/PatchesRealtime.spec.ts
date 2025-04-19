@@ -407,16 +407,23 @@ describe('PatchesRealtime Error Handling', () => {
     // Clear mock calls after initial setup
     mockDocInstance.import.mockClear();
 
-    let onErrorResolver: (value?: unknown) => void;
-    const onErrorPromise = new Promise(resolve => {
-      onErrorResolver = resolve;
+    // Create promises for both error emissions
+    let sendFailedResolver: (value?: unknown) => void;
+    const sendFailedPromise = new Promise(resolve => {
+      sendFailedResolver = resolve;
     });
-    let onErrorCallCount = 0;
+    let syncErrorResolver: (value?: unknown) => void;
+    const syncErrorPromise = new Promise(resolve => {
+      syncErrorResolver = resolve;
+    });
+
+    // Setup error emission spy
     const emitSpy = vi.spyOn(mockOnErrorSignalInstance, 'emit');
     emitSpy.mockImplementation(async (payload: any) => {
-      onErrorCallCount++;
-      if (onErrorCallCount === 2 && payload && payload.type === 'syncError') {
-        onErrorResolver();
+      if (payload && payload.type === 'sendFailed') {
+        sendFailedResolver();
+      } else if (payload && payload.type === 'syncError') {
+        syncErrorResolver();
       }
     });
 
@@ -430,8 +437,9 @@ describe('PatchesRealtime Error Handling', () => {
     });
     expect(changeMade).toBeDefined();
 
-    // Wait for the second error emission
-    await onErrorPromise;
+    // Wait for both error emissions in sequence
+    await sendFailedPromise;
+    await syncErrorPromise;
 
     // Assertions
     expect(mockWsInstance.commitChanges).toHaveBeenCalledWith(DOC_ID, expect.any(Array));

@@ -1,6 +1,6 @@
 import { applyPatch } from './json-patch/applyPatch.js';
 import { JSONPatch } from './json-patch/JSONPatch.js';
-import type { Change, DeletedChange } from './types.js';
+import type { Change, Deferred } from './types.js';
 
 /**
  * Splits an array of changes into two arrays based on the presence of a baseRev.
@@ -86,6 +86,12 @@ export function rebaseChanges(serverChanges: Change[], localChanges: Change[]): 
     .filter(Boolean) as Change[];
 }
 
-export function isChange(change: Change | DeletedChange): change is Change {
-  return 'rev' in change;
+export function deferred<T = void>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: any) => void;
+  const promise = new Promise<T>((_resolve, _reject) => {
+    resolve = _resolve;
+    reject = _reject;
+  });
+  return { promise, resolve, reject };
 }

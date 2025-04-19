@@ -1,4 +1,8 @@
+import type { Unsubscriber } from '../../event-signal.js';
+import type { Deferred } from '../../types.js';
+import { deferred } from '../../utils.js';
 import { AbstractTransport } from '../AbstractTransport.js';
+import { onlineState } from './onlineState.js';
 
 /** WebSocket constructor options (subset) */
 export interface WebSocketOptions {
@@ -14,7 +18,11 @@ export class WebSocketTransport extends AbstractTransport {
   private reconnectTimer: any = null;
   private backoff = 1000;
   private connecting: boolean = false;
-  private connectionPromise: Promise<void> | null = null;
+  private connectionDeferred: Deferred | null = null;
+  private onlineUnsubscriber: Unsubscriber | null = null;
+
+  /** Flag representing the *intent* to be connected. It is set by `connect()` and cleared by `disconnect()`. */
+  private shouldBeConnected = false;
 
   /**
    * Creates a new WebSocket transport instance.
@@ -35,84 +43,107 @@ export class WebSocketTransport extends AbstractTransport {
    * @returns A promise that resolves when the connection is established or rejects on error
    */
   async connect(): Promise<void> {
+    // Record the caller's intent.
+    this.shouldBeConnected = true;
+
+    // Make sure we react to browser connectivity changes
+    this._ensureOnlineOfflineListeners();
+
+    // If the browser is known to be offline, defer the actual connection until
+    // it comes back online.  We still return a promise that resolves once the
+    // connection is eventually established, so callers can `await` safely.
+    if (onlineState.isOffline) {
+      if (!this.connectionDeferred) {
+        this.connectionDeferred = deferred();
+      }
+      return this.connectionDeferred.promise;
+    }
+
     // Return existing connection if already connected
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       return Promise.resolve();
     }
 
     // Return pending connection promise if already connecting
-    if (this.connecting && this.connectionPromise) {
-      return this.connectionPromise;
+    if (this.connecting && this.connectionDeferred) {
+      return this.connectionDeferred.promise;
     }
 
     this.connecting = true;
     this.state = 'connecting';
 
     // Create a new connection promise
-    this.connectionPromise = new Promise<void>((resolve, reject) => {
-      try {
-        // Pass protocol option if available (standard 2nd arg)
-        // Other options like headers are not standard and require specific server/client handling
-        // or a different WebSocket client library.
-        this.ws = new WebSocket(this.url, this.wsOptions?.protocol);
+    this.connectionDeferred = deferred();
+    const { resolve, reject } = this.connectionDeferred;
 
-        this.ws.onopen = () => {
-          this.backoff = 1000; // Reset backoff on successful connection
-          this.state = 'connected';
-          this.connecting = false;
-          resolve();
-        };
+    try {
+      // Pass protocol option if available (standard 2nd arg)
+      // Other options like headers are not standard and require specific server/client handling
+      // or a different WebSocket client library.
+      this.ws = new WebSocket(this.url, this.wsOptions?.protocol);
 
-        this.ws.onclose = () => {
-          this.state = 'disconnected';
-
-          // If we were in the process of connecting, reject the promise
-          if (this.connecting) {
-            reject(new Error('Connection closed'));
-            this.connecting = false;
-          }
-
-          // Schedule reconnect regardless of whether it was a clean close
-          // as WebSockets don't always emit error events before closing
-          this.scheduleReconnect();
-        };
-
-        this.ws.onerror = error => {
-          this.state = 'error';
-
-          // If we're in the connection phase, reject the promise
-          if (this.connecting) {
-            this.connecting = false;
-            reject(error);
-          } else {
-            // If error happens after established connection,
-            // schedule a reconnect. The socket will likely close
-            // right after this, but we schedule it anyway to be sure.
-            this.scheduleReconnect();
-          }
-
-          // Log the error for debugging
-          console.error('WebSocket error:', error);
-        };
-
-        this.ws.onmessage = event => {
-          this.onMessage.emit(event.data);
-        };
-      } catch (error) {
-        this.state = 'error';
+      this.ws.onopen = () => {
+        this.backoff = 1000; // Reset backoff on successful connection
+        this.state = 'connected';
         this.connecting = false;
-        reject(error);
-        this.scheduleReconnect();
-      }
-    });
+        resolve();
+      };
 
-    return this.connectionPromise;
+      this.ws.onclose = () => {
+        this.state = 'disconnected';
+
+        // If we were in the process of connecting, reject the promise
+        if (this.connecting) {
+          reject(new Error('Connection closed'));
+          this.connecting = false;
+        }
+
+        // Schedule reconnect regardless of whether it was a clean close
+        // as WebSockets don't always emit error events before closing
+        this._scheduleReconnect();
+      };
+
+      this.ws.onerror = error => {
+        this.state = 'error';
+
+        // If we're in the connection phase, reject the promise
+        if (this.connecting) {
+          this.connecting = false;
+          reject(error);
+        } else {
+          // If error happens after established connection,
+          // schedule a reconnect. The socket will likely close
+          // right after this, but we schedule it anyway to be sure.
+          this._scheduleReconnect();
+        }
+
+        // Log the error for debugging
+        console.error('WebSocket error:', error);
+      };
+
+      this.ws.onmessage = event => {
+        this.onMessage.emit(event.data);
+      };
+    } catch (error) {
+      this.state = 'error';
+      this.connecting = false;
+      reject(error);
+      this._scheduleReconnect();
+    }
+
+    return this.connectionDeferred.promise;
   }
 
   /**
    * Terminates the WebSocket connection and cancels any pending reconnection attempts.
    */
   disconnect(): void {
+    // Clearing the intent stops automatic reconnection attempts.
+    this.shouldBeConnected = false;
+
+    // Remove listener now that we no longer intend to stay connected.
+    this._removeOnlineOfflineListeners();
+
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -148,7 +179,12 @@ export class WebSocketTransport extends AbstractTransport {
    * The backoff time increases with each failed attempt, up to a maximum of 30 seconds.
    * @private
    */
-  private scheduleReconnect(): void {
+  private _scheduleReconnect(): void {
+    // Only schedule a reconnect if the caller still wants to be connected.
+    if (!this.shouldBeConnected || onlineState.isOffline) {
+      return;
+    }
+
     if (this.reconnectTimer) {
       return;
     }
@@ -161,5 +197,32 @@ export class WebSocketTransport extends AbstractTransport {
     }, this.backoff);
 
     this.backoff = Math.min(this.backoff * 1.5, 30000);
+  }
+
+  /**
+   * Internal helper that adds (once) listeners for the browser's online/offline
+   * events so we can automatically attempt to connect when the network comes
+   * back and forcibly close when it goes away.
+   */
+  private _ensureOnlineOfflineListeners(): void {
+    if (!this.onlineUnsubscriber) {
+      this.onlineUnsubscriber = onlineState.onOnlineChange(isOnline => {
+        if (isOnline && this.shouldBeConnected && !this.connecting && this.state !== 'connected') {
+          const { resolve, reject } = this.connectionDeferred!;
+          this.connectionDeferred = null;
+          this.connect().then(resolve, reject);
+        } else if (!isOnline && this.ws) {
+          this.ws.close();
+        }
+      });
+    }
+  }
+
+  /** Removes previously registered online/offline listeners (if any) */
+  private _removeOnlineOfflineListeners(): void {
+    if (this.onlineUnsubscriber) {
+      this.onlineUnsubscriber();
+      this.onlineUnsubscriber = null;
+    }
   }
 }

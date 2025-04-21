@@ -1,6 +1,6 @@
 ---
-description: 
-globs: 
+description:
+globs:
 alwaysApply: true
 ---
 # Patches
@@ -47,6 +47,7 @@ alwaysApply: true
 
 - TypeScript throughout; prefer type safety.
 - Use immutable data patterns (do not mutate state directly).
+- Organize new OT logic under `src/`.
 - Keep all public API changes documented in `README.md` and relevant `docs/*.md`.
 
 ## Cursor-Specific Rules

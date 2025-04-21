@@ -2,7 +2,7 @@ import { signal } from '../event-signal.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
 import type { Change, PatchSnapshot } from '../types.js';
 import { applyChanges } from '../utils.js';
-import type { OfflineStore, TrackedDoc } from './OfflineStore.js';
+import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
 const DB_VERSION = 2;
 const SNAPSHOT_INTERVAL = 200;
@@ -30,7 +30,7 @@ interface StoredChange extends Change {
  * After every 200 committed changes, the class will save the current state to the snapshot store and delete the committed changes that went into it.
  * A snapshot will not be created if there are pending changes based on revisions older than the 200th committed change until those pending changes are committed.
  */
-export class IndexedDBStore implements OfflineStore {
+export class IndexedDBStore implements PatchesStore {
   private db: IDBDatabase | null = null;
   private dbName: string;
   private dbPromise: Promise<IDBDatabase>;
@@ -164,22 +164,26 @@ export class IndexedDBStore implements OfflineStore {
    * Completely remove all data for this docId and mark it
    * as deleted (tombstone).
    */
-  async deleteDoc(docId: string): Promise<void> {
-    const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.transaction(
-      ['snapshots', 'committedChanges', 'pendingChanges', 'docs'],
-      'readwrite'
-    );
+  async deleteDoc(docId: string, deleteTombstone = true): Promise<void> {
+    if (deleteTombstone) {
+      const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.transaction(
+        ['snapshots', 'committedChanges', 'pendingChanges', 'docs'],
+        'readwrite'
+      );
 
-    const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
-    await docsStore.put({ ...docMeta, deleted: true });
+      const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
+      await docsStore.put({ ...docMeta, deleted: true });
 
-    await Promise.all([
-      snapshots.delete(docId),
-      committedChanges.delete([docId, 0], [docId, Infinity]),
-      pendingChanges.delete([docId, 0], [docId, Infinity]),
-    ]);
+      await Promise.all([
+        snapshots.delete(docId),
+        committedChanges.delete([docId, 0], [docId, Infinity]),
+        pendingChanges.delete([docId, 0], [docId, Infinity]),
+      ]);
 
-    await tx.complete();
+      await tx.complete();
+    } else {
+      await this.untrackDocs([docId]);
+    }
   }
 
   // ─── Pending Changes ────────────────────────────────────────────────────────
@@ -281,11 +285,50 @@ export class IndexedDBStore implements OfflineStore {
   }
 
   // --- New method for OfflineStore interface ---
-  async listDocs(): Promise<TrackedDoc[]> {
+  async listDocs(includeDeleted = false): Promise<TrackedDoc[]> {
     const [tx, docsStore] = await this.transaction(['docs'], 'readonly');
     const allDocs = await docsStore.getAll<TrackedDoc>();
     await tx.complete();
-    return allDocs.filter(doc => !doc.deleted);
+    return includeDeleted ? allDocs : allDocs.filter(doc => !doc.deleted);
+  }
+
+  // ─── Metadata / Tracking ───────────────────────────────────────────
+  async trackDocs(docIds: string[]): Promise<void> {
+    const [tx, docsStore] = await this.transaction(['docs'], 'readwrite');
+    await Promise.all(
+      docIds.map(async docId => {
+        const existing = await docsStore.get<TrackedDoc>(docId);
+        if (existing) {
+          // If exists but deleted, undelete it
+          if (existing.deleted) {
+            await docsStore.put({ ...existing, deleted: undefined });
+          }
+          // Otherwise, it's already tracked and not deleted, do nothing
+        } else {
+          // If doesn't exist, add it
+          await docsStore.add({ docId, committedRev: 0 });
+        }
+      })
+    );
+    await tx.complete();
+  }
+
+  async untrackDocs(docIds: string[]): Promise<void> {
+    const [tx, docsStore, snapshots, committedChanges, pendingChanges] = await this.transaction(
+      ['docs', 'snapshots', 'committedChanges', 'pendingChanges'],
+      'readwrite'
+    );
+    await Promise.all(
+      docIds.map(docId => {
+        return Promise.all([
+          docsStore.delete(docId),
+          snapshots.delete(docId),
+          committedChanges.delete([docId, 0], [docId, Infinity]),
+          pendingChanges.delete([docId, 0], [docId, Infinity]),
+        ]);
+      })
+    );
+    await tx.complete();
   }
 
   // ─── Revision Tracking ─────────────────────────────────────────────────────

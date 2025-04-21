@@ -10,12 +10,13 @@ import { applyChanges, rebaseChanges } from '../utils.js';
  * changes currently being sent to the server.
  */
 export class PatchDoc<T extends object> {
-  private _state: T;
-  private _committedState: T;
-  private _committedRev: number;
-  private _pendingChanges: Change[] = []; // Changes made locally, not yet sent
-  private _sendingChanges: Change[] = []; // Changes sent to server, awaiting confirmation
-  private _changeMetadata: Record<string, any> = {};
+  protected _id: string | null = null;
+  protected _state: T;
+  protected _committedState: T;
+  protected _committedRev: number;
+  protected _pendingChanges: Change[] = []; // Changes made locally, not yet sent
+  protected _sendingChanges: Change[] = []; // Changes sent to server, awaiting confirmation
+  protected _changeMetadata: Record<string, any> = {};
 
   /** Subscribe to be notified before local state changes. */
   readonly onBeforeChange = signal<(change: Change) => void>();
@@ -35,6 +36,11 @@ export class PatchDoc<T extends object> {
     this._state = structuredClone(initialState);
     this._committedRev = 0;
     this._changeMetadata = initialMetadata;
+  }
+
+  /** The unique identifier for this document, once assigned. */
+  get id(): string | null {
+    return this._id;
   }
 
   /** Current local state (committed + sending + pending). */
@@ -315,7 +321,7 @@ export class PatchDoc<T extends object> {
   }
 
   /** Recalculates _state from _committedState + _sendingChanges + _pendingChanges */
-  private _recalculateLocalState(): void {
+  protected _recalculateLocalState(): void {
     try {
       // Apply sending changes first, then pending changes over that result
       // Note: The previous implementation combined them, which might be okay if applyChanges handles arrays,
@@ -335,5 +341,19 @@ export class PatchDoc<T extends object> {
    */
   toJSON(): PatchSnapshot<T> {
     return this.export();
+  }
+
+  /**
+   * Assigns an identifier to this document. Can only be set once.
+   * @param id The unique identifier for the document.
+   * @throws Error if the ID has already been set.
+   */
+  setId(id: string): void {
+    if (this._id !== null && this._id !== id) {
+      throw new Error(`Document ID cannot be changed once set. Current: ${this._id}, Attempted: ${id}`);
+    }
+    if (this._id === null) {
+      this._id = id;
+    }
   }
 }

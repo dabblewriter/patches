@@ -20,6 +20,7 @@ The `PatchDoc<T>` class is the client-side representation of a collaborative doc
   - [`applyServerConfirmation()`](#applyserverconfirmation)
   - [`applyExternalServerUpdate()`](#applyexternalserverupdate)
 - [Accessing State and Metadata](#accessing-state-and-metadata)
+  - [`id` (Getter)](#id-getter)
   - [`state` (Getter)](#state-getter)
   - [`committedRev` (Getter)](#committedrev-getter)
   - [`isSending` (Getter)](#issending-getter)
@@ -27,6 +28,7 @@ The `PatchDoc<T>` class is the client-side representation of a collaborative doc
   - [`export()`](#export)
   - [`import()`](#import)
   - [`setChangeMetadata()`](#setchangemetadata)
+  - [`setId()`](#setid)
 - [Event Emitters](#event-emitters)
   - [`onUpdate`](#onupdate)
   - [`onChange`](#onchange)
@@ -64,6 +66,10 @@ const clientMetadata = { userId: 'user-123', sessionId: 'session-xyz' };
 
 const doc = new PatchDoc<MyDocument>(initialServerState, initialServerRev, clientMetadata);
 
+// The ID might be set later, e.g., after the document is fully registered
+doc.setId(initialDocId);
+
+console.log(doc.id); // 'doc-abc'
 console.log(doc.state); // Initially equals initialServerState
 console.log(doc.committedRev); // Initially equals initialServerRev
 ```
@@ -149,6 +155,17 @@ Call this method when receiving changes from the server that originated from _ot
 
 ## Accessing State and Metadata
 
+### `id` (Getter)
+
+Returns the unique identifier for this document (`_id`), or `null` if it hasn't been set yet via `setId()`.
+
+```typescript
+const documentId = doc.id;
+if (documentId) {
+  console.log('Working on document:', documentId);
+}
+```
+
 ### `state` (Getter)
 
 Returns the current optimistic local state ( `_committedState` + `_sendingChanges` + `_pendingChanges`). This is the state you should typically render in the UI.
@@ -219,6 +236,29 @@ doc.change(draft => {
 });
 // The resulting Change object in _pendingChanges will have:
 // metadata: { userId: 'user-456', theme: 'dark' }
+```
+
+### `setId()`
+
+Assigns a unique identifier to the `PatchDoc` instance. This is typically the ID used to reference the document on the server.
+
+**Important:** The ID can only be set once. Attempting to call `setId()` with a different ID after it has already been set will throw an error.
+
+```typescript
+const newDoc = new PatchDoc<{ text: string }>({ text: '' });
+console.log(newDoc.id); // null
+
+newDoc.setId('document-xyz-123');
+console.log(newDoc.id); // 'document-xyz-123'
+
+try {
+  newDoc.setId('another-id'); // This will throw an error
+} catch (e) {
+  console.error(e.message); // "Document ID cannot be changed once set..."
+}
+
+// Calling setId with the *same* ID again is allowed (it's idempotent)
+newDoc.setId('document-xyz-123'); // OK
 ```
 
 ## Event Emitters

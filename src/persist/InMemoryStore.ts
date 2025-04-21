@@ -1,0 +1,124 @@
+import { signal } from '../event-signal.js';
+import { transformPatch } from '../json-patch/transformPatch.js';
+import type { Change, PatchSnapshot } from '../types.js';
+import { applyChanges } from '../utils.js';
+import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
+
+interface DocBuffers {
+  snapshot?: { state: any; rev: number };
+  committed: Change[];
+  pending: Change[];
+  deleted?: true;
+}
+
+/**
+ * A trivial in‑memory implementation of OfflineStore (soon PatchStore).
+ * All data lives in JS objects – nothing survives a page reload.
+ * Useful for unit tests or when you want the old 'stateless realtime' behaviour.
+ */
+export class InMemoryStore implements PatchesStore {
+  private docs: Map<string, DocBuffers> = new Map();
+
+  /** Signal emitted when pending changes are added (mirrors IndexedDBStore API) */
+  readonly onPendingChanges = signal<(docId: string, changes: Change[]) => void>();
+
+  // ─── Reconstruction ────────────────────────────────────────────────────
+  async getDoc(docId: string): Promise<PatchSnapshot | undefined> {
+    const buf = this.docs.get(docId);
+    if (!buf || buf.deleted) return undefined;
+
+    const state = applyChanges(buf.snapshot?.state ?? null, buf.committed);
+    const committedRev = buf.committed.at(-1)?.rev ?? buf.snapshot?.rev ?? 0;
+
+    // Rebase pending if they are stale w.r.t committed
+    if (buf.pending.length && buf.pending[0].baseRev! < committedRev) {
+      const patch = buf.committed.filter(c => c.rev > buf.pending[0].baseRev!).flatMap(c => c.ops);
+      const offset = committedRev - buf.pending[0].baseRev!;
+      buf.pending.forEach(ch => {
+        ch.rev += offset;
+        ch.ops = transformPatch(state, patch, ch.ops);
+      });
+    }
+
+    return {
+      state,
+      rev: committedRev,
+      changes: [...buf.pending],
+    };
+  }
+
+  async getPendingChanges(docId: string): Promise<Change[]> {
+    return this.docs.get(docId)?.pending.slice() ?? [];
+  }
+
+  async getLastRevs(docId: string): Promise<[number, number]> {
+    const buf = this.docs.get(docId);
+    if (!buf) return [0, 0];
+    const committedRev = buf.committed.at(-1)?.rev ?? buf.snapshot?.rev ?? 0;
+    const pendingRev = buf.pending.at(-1)?.rev ?? committedRev;
+    return [committedRev, pendingRev];
+  }
+
+  async listDocs(includeDeleted = false): Promise<TrackedDoc[]> {
+    return Array.from(this.docs.entries())
+      .filter(([, b]) => includeDeleted || !b.deleted)
+      .map(([docId, buf]) => ({
+        docId,
+        committedRev: buf.snapshot?.rev ?? buf.committed.at(-1)?.rev ?? 0,
+        deleted: buf.deleted,
+      }));
+  }
+
+  // ─── Writes ────────────────────────────────────────────────────────────
+  async savePendingChanges(docId: string, changes: Change[]): Promise<void> {
+    const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
+    if (!this.docs.has(docId)) this.docs.set(docId, buf);
+    buf.pending.push(...changes);
+    this.onPendingChanges.emit(docId, changes);
+  }
+
+  async saveCommittedChanges(docId: string, changes: Change[], sentPendingRange?: [number, number]): Promise<void> {
+    const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
+    if (!this.docs.has(docId)) this.docs.set(docId, buf);
+
+    buf.committed.push(...changes);
+
+    if (sentPendingRange) {
+      const [min, max] = sentPendingRange;
+      buf.pending = buf.pending.filter(p => p.rev < min || p.rev > max);
+    }
+  }
+
+  // ─── Metadata / Tracking ───────────────────────────────────────────
+  async trackDocs(docIds: string[]): Promise<void> {
+    for (const docId of docIds) {
+      const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
+      buf.deleted = undefined; // Ensure not marked as deleted
+      if (!this.docs.has(docId)) {
+        this.docs.set(docId, buf);
+      }
+    }
+  }
+
+  async untrackDocs(docIds: string[]): Promise<void> {
+    for (const docId of docIds) {
+      this.docs.delete(docId);
+    }
+  }
+
+  // ─── Misc / Lifecycle ────────────────────────────────────────────────
+  async deleteDoc(docId: string, writeTombstone = true): Promise<void> {
+    const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
+    if (writeTombstone) {
+      buf.deleted = true;
+    }
+    buf.committed = [];
+    buf.pending = [];
+    buf.snapshot = undefined;
+    this.docs.set(docId, buf);
+  }
+
+  async close(): Promise<void> {
+    // Nothing to clean up for in‑memory implementation.
+  }
+}

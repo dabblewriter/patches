@@ -1,7 +1,7 @@
 import { signal } from '../event-signal.js';
 import type { PatchesStore, TrackedDoc } from '../persist/PatchesStore.js';
-import type { Change } from '../types.js';
 import { breakIntoBatches } from '../utils/batching.js';
+import { Patches } from './Patches.js';
 import type { ConnectionState } from './protocol/types.js';
 import { PatchesWebSocket } from './websocket/PatchesWebSocket.js';
 import type { WebSocketOptions } from './websocket/WebSocketTransport.js';
@@ -20,38 +20,50 @@ export interface PatchesSyncState {
 
 /**
  * Handles WebSocket connection, document subscriptions, and syncing logic between
- * the PatchStore and the server.
+ * the Patches instance and the server.
  */
 export class PatchesSync {
   private ws: PatchesWebSocket;
+  private patches: Patches;
   private store: PatchesStore;
   private options: PatchesSyncOptions;
-  private trackedDocs = new Set<string>();
+  private trackedDocs: Set<string>;
   private isFlushing = new Set<string>();
   private globalSyncTimeout: ReturnType<typeof setTimeout> | null = null;
   private _state: PatchesSyncState = { online: false, connected: false, syncing: null };
 
   // Signals
   readonly onStateChange = signal<(state: PatchesSyncState) => void>();
-  readonly onServerCommit = signal<(docId: string, changes: Change[]) => void>();
   readonly onError = signal<(error: Error, context?: { docId?: string }) => void>();
 
-  constructor(url: string, store: PatchesStore, options: PatchesSyncOptions = {}) {
-    this.store = store;
+  constructor(url: string, patches: Patches, options: PatchesSyncOptions = {}) {
+    this.patches = patches;
+    this.store = patches.store;
     this.options = options;
     this.ws = new PatchesWebSocket(url, options.wsOptions);
     this._state.online = onlineState.isOnline;
+    this.trackedDocs = new Set(patches.trackedDocs);
 
     // --- Event Listeners ---
     onlineState.onOnlineChange(this._handleOnlineChange);
     this.ws.onStateChange(this._handleConnectionChange);
     this.ws.onChangesCommitted(({ docId, changes }) => {
-      // Persist first, then notify Patches class to update PatchDoc instance
+      // Persist first, then notify Patches instance to update PatchDoc
       this.store
         .saveCommittedChanges(docId, changes)
-        .then(() => this.onServerCommit.emit(docId, changes))
+        .then(() => this.patches.applyServerChanges(docId, changes))
         .catch((err: Error) => this.onError.emit(err, { docId }));
     });
+
+    // Forward errors to Patches error signal
+    this.onError((err, context) => {
+      patches.onError.emit(err, context);
+    });
+
+    // Listen to Patches for tracking changes
+    patches.onTrackDocs(this._handleDocsTracked);
+    patches.onUntrackDocs(this._handleDocsUntracked);
+    patches.onDeleteDoc(this._handleDocDeleted);
   }
 
   get state(): PatchesSyncState {
@@ -85,43 +97,7 @@ export class PatchesSync {
     this.setState({ connected: false, syncing: null });
   }
 
-  // --- Doc Tracking & Subscription ---
-  async trackDocs(docIds: string[]): Promise<void> {
-    const newIds = docIds.filter(id => !this.trackedDocs.has(id));
-    if (!newIds.length) return;
-
-    await this.store.trackDocs(newIds);
-    newIds.forEach(id => this.trackedDocs.add(id));
-
-    if (this.state.connected && newIds.length > 0) {
-      try {
-        await this.ws.subscribe(newIds);
-        // Trigger sync for newly tracked docs immediately
-        await Promise.all(newIds.map(id => this.syncDoc(id)));
-      } catch (err) {
-        console.warn(`Failed to subscribe/sync newly tracked docs: ${newIds.join(', ')}`, err);
-        this.onError.emit(err as Error);
-        // State remains tracked locally, will retry on next sync
-      }
-    }
-  }
-
-  async untrackDocs(docIds: string[]): Promise<void> {
-    const existingIds = docIds.filter(id => this.trackedDocs.has(id));
-    if (!existingIds.length) return;
-
-    existingIds.forEach(id => this.trackedDocs.delete(id));
-    if (this.state.connected && existingIds.length > 0) {
-      try {
-        await this.ws.unsubscribe(existingIds);
-      } catch (err) {
-        console.warn(`Failed to unsubscribe docs: ${existingIds.join(', ')}`, err);
-        // Continue with local untrack
-      }
-    }
-    // Always untrack locally regardless of network state
-    await this.store.untrackDocs(existingIds);
-  }
+  // --- Doc Tracking & Subscription (Now handled via signals) ---
 
   // --- Syncing Logic ---
   private scheduleGlobalSync() {
@@ -165,7 +141,7 @@ export class PatchesSync {
           console.info(`Attempting server delete for tombstoned doc: ${docId}`);
           await this.ws.deleteDoc(docId);
           // If server delete succeeds, remove tombstone and all data locally
-          await this.store.deleteDoc(docId, false);
+          await this.store.confirmDeleteDoc(docId);
           console.info(`Successfully deleted and untracked doc: ${docId}`);
         } catch (err) {
           // If server delete fails (e.g., offline, already deleted), keep tombstone for retry
@@ -199,7 +175,7 @@ export class PatchesSync {
         const serverChanges = await this.ws.getChangesSince(docId, committedRev);
         if (serverChanges.length > 0) {
           await this.store.saveCommittedChanges(docId, serverChanges);
-          this.onServerCommit.emit(docId, serverChanges);
+          this.patches.applyServerChanges(docId, serverChanges);
         }
       }
     } catch (err) {
@@ -219,8 +195,13 @@ export class PatchesSync {
     }
 
     try {
+      // Get changes from Patches for this doc
       let pending = await this.store.getPendingChanges(docId);
-      if (!pending.length) return; // Nothing to flush
+      if (!pending.length) {
+        // Try to get from memory if available
+        pending = this.patches.getDocChanges(docId);
+        if (!pending.length) return; // Nothing to flush
+      }
 
       const batches = breakIntoBatches(pending, this.options.maxBatchSize);
 
@@ -230,14 +211,16 @@ export class PatchesSync {
         const committed = await this.ws.commitChanges(docId, batch);
         // Persist committed + remove pending in store
         await this.store.saveCommittedChanges(docId, committed, range);
-        // Notify Patches via signal so it can update PatchDoc
-        this.onServerCommit.emit(docId, committed);
+        // Notify Patches to update PatchDoc
+        this.patches.applyServerChanges(docId, committed);
         // Fetch remaining pending for next batch or check completion
         pending = await this.store.getPendingChanges(docId);
       }
     } catch (err) {
       console.error(`Flush failed for doc ${docId}:`, err);
       this.onError.emit(err as Error, { docId });
+      // Let Patches know about the failure
+      this.patches.handleSendFailure(docId);
       // Don't clear flushing flag, let next sync attempt retry
       throw err; // Re-throw so caller (like syncAll) knows it failed
     } finally {
@@ -250,24 +233,22 @@ export class PatchesSync {
   }
 
   // --- Server Operations ---
-  async deleteDoc(docId: string): Promise<void> {
-    // 1. Ensure locally untracked
-    await this.untrackDocs([docId]);
-    // 2. Mark tombstone in store
-    await this.store.deleteDoc(docId);
-    // 3. Attempt server delete if online
+  /**
+   * Initiates the deletion process for a document both locally and on the server.
+   * This now delegates the local tombstone marking to Patches.
+   */
+  async _handleDocDeleted(docId: string): Promise<void> {
+    // Attempt server delete if online
     if (this.state.connected) {
       try {
         await this.ws.deleteDoc(docId);
-        await this.store.deleteDoc(docId, true);
+        await this.store.confirmDeleteDoc(docId);
       } catch (err) {
-        console.error(`Server delete failed for doc ${docId}, will retry on reconnect/resync?`, err);
-        // TODO: How to handle server delete failure? Store needs a way to mark pending deletes.
+        console.error(`Server delete failed for doc ${docId}, will retry on reconnect/resync.`, err);
         this.onError.emit(err as Error, { docId });
         throw err;
       }
     } else {
-      // TODO: Need to queue server delete for when back online
       console.warn(`Offline: Server delete for doc ${docId} deferred.`);
     }
   }
@@ -297,6 +278,40 @@ export class PatchesSync {
     if (isConnected) {
       // Sync everything on connect/reconnect
       void this.syncAllKnownDocs();
+    }
+  };
+
+  private _handleDocsTracked = async (docIds: string[]) => {
+    const newIds = docIds.filter(id => !this.trackedDocs.has(id));
+    if (!newIds.length) return;
+
+    newIds.forEach(id => this.trackedDocs.add(id));
+
+    if (this.state.connected) {
+      try {
+        await this.ws.subscribe(newIds);
+        // Trigger sync for newly tracked docs immediately
+        await Promise.all(newIds.map(id => this.syncDoc(id)));
+      } catch (err) {
+        console.warn(`Failed to subscribe/sync newly tracked docs: ${newIds.join(', ')}`, err);
+        this.onError.emit(err as Error);
+        // State remains tracked locally, will retry on next sync
+      }
+    }
+  };
+
+  private _handleDocsUntracked = async (docIds: string[]) => {
+    const existingIds = docIds.filter(id => this.trackedDocs.has(id));
+    if (!existingIds.length) return;
+
+    existingIds.forEach(id => this.trackedDocs.delete(id));
+    if (this.state.connected) {
+      try {
+        await this.ws.unsubscribe(existingIds);
+      } catch (err) {
+        console.warn(`Failed to unsubscribe docs: ${existingIds.join(', ')}`, err);
+        // Continue with local untrack
+      }
     }
   };
 }

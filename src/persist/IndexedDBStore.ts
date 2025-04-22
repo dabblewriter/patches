@@ -86,8 +86,18 @@ export class IndexedDBStore implements PatchesStore {
     if (this.db) {
       this.db.close();
       this.db = null;
-      this.dbPromise = this.initDB();
+      this.dbPromise = Promise.resolve(null as any);
     }
+  }
+
+  async deleteDB(): Promise<void> {
+    await this.close();
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.deleteDatabase(this.dbName);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => reject(request.error);
+    });
   }
 
   private async transaction(
@@ -157,29 +167,30 @@ export class IndexedDBStore implements PatchesStore {
   }
 
   /**
-   * Completely remove all data for this docId and mark it
-   * as deleted (tombstone).
+   * Completely remove all data for this docId and mark it as deleted (tombstone).
    */
-  async deleteDoc(docId: string, deleteTombstone = true): Promise<void> {
-    if (deleteTombstone) {
-      const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.transaction(
-        ['snapshots', 'committedChanges', 'pendingChanges', 'docs'],
-        'readwrite'
-      );
+  async deleteDoc(docId: string): Promise<void> {
+    const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.transaction(
+      ['snapshots', 'committedChanges', 'pendingChanges', 'docs'],
+      'readwrite'
+    );
 
-      const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
-      await docsStore.put({ ...docMeta, deleted: true });
+    const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
+    await docsStore.put({ ...docMeta, deleted: true });
 
-      await Promise.all([
-        snapshots.delete(docId),
-        committedChanges.delete([docId, 0], [docId, Infinity]),
-        pendingChanges.delete([docId, 0], [docId, Infinity]),
-      ]);
+    await Promise.all([
+      snapshots.delete(docId),
+      committedChanges.delete([docId, 0], [docId, Infinity]),
+      pendingChanges.delete([docId, 0], [docId, Infinity]),
+    ]);
 
-      await tx.complete();
-    } else {
-      await this.untrackDocs([docId]);
-    }
+    await tx.complete();
+  }
+
+  async confirmDeleteDoc(docId: string): Promise<void> {
+    const [tx, docsStore] = await this.transaction(['docs'], 'readwrite');
+    await docsStore.delete(docId);
+    await tx.complete();
   }
 
   // ─── Pending Changes ────────────────────────────────────────────────────────

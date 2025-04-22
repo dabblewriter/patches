@@ -1,5 +1,4 @@
 import type { Change, PatchSnapshot } from '../types.js';
-
 /** Represents metadata for a document tracked by the store. */
 export interface TrackedDoc {
   docId: string;
@@ -36,12 +35,17 @@ export interface PatchesStore {
   getPendingChanges(docId: string): Promise<Change[]>;
   getLastRevs(docId: string): Promise<[committedRev: number, pendingRev: number]>;
 
-  // ─── Writes ---------------------------------------------------------
+  // ─── Writes ────────────────────────────────────────────────────────
   savePendingChanges(docId: string, changes: Change[]): Promise<void>;
   saveCommittedChanges(docId: string, changes: Change[], sentPendingRange?: [number, number]): Promise<void>;
 
-  // ─── Lifecycle ------------------------------------------------------
-  /** Permanently delete document (writes tombstone so server delete happens later, or deletes the tombstone if `deleteTombstone` is true). */
-  deleteDoc(docId: string, deleteTombstone?: boolean): Promise<void>;
+  // ─── Lifecycle ──────────────────────────────────────────────────────
+  /** Permanently delete document (writes tombstone so server delete happens later). */
+  deleteDoc(docId: string): Promise<void>;
+
+  /** Confirm that a doc has been deleted (e.g., after a tombstone has been written). */
+  confirmDeleteDoc(docId: string): Promise<void>;
+
+  /** Close the store */
   close(): Promise<void>;
 }

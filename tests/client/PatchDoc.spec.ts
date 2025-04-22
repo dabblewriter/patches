@@ -82,9 +82,9 @@ describe('PatchDoc Error Handling', () => {
 
     // Expect applyServerConfirmation, which triggers _recalculateLocalState, to throw
     expect(() => doc.applyServerConfirmation(serverCommit)).toThrow(
-      new Error('Critical sync error applying server commit: ' + error.message)
+      new Error('Critical sync error applying external server update: ' + error.message)
     );
-    expect(console.error).toHaveBeenCalledWith('Failed to apply server commit to committed state:', error);
+    expect(console.error).toHaveBeenCalledWith('Failed to apply external server update to committed state:', error);
     // Ensure the first applyChanges (for committed state) was called
     expect(callCount).toBe(2);
   });

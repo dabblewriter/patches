@@ -1,13 +1,10 @@
 import { PatchDoc } from '../client/PatchDoc.js';
-import { type Unsubscriber } from '../event-signal.js';
+import { type Unsubscriber, signal } from '../event-signal.js';
 import type { PatchesStore } from '../persist/PatchesStore.js';
 import type { Change } from '../types.js';
-import { PatchesSync, type PatchesSyncOptions, type PatchesSyncState } from './PatchesSync.js';
 
-// Combine options for constructor convenience
-export interface PatchesOptions extends PatchesSyncOptions {
-  /** URL of the Patches WebSocket server. */
-  url: string;
+// Simplified options without sync-specific parameters
+export interface PatchesOptions {
   /** Persistence layer instance (e.g., new IndexedDBStore('my-db') or new InMemoryStore()). */
   store: PatchesStore;
   /** Initial metadata to attach to changes from this client (merged with per-doc metadata). */
@@ -18,72 +15,57 @@ export interface PatchesOptions extends PatchesSyncOptions {
 interface ManagedDoc<T extends object> {
   doc: PatchDoc<T>;
   onChangeUnsubscriber: Unsubscriber;
-  // isFlushing/hasPending are now managed within PatchesSync
 }
 
 /**
  * Main client-side entry point for the Patches library.
- * Manages document instances (`PatchDoc`), persistence (`PatchStore`),
- * and network synchronization (`PatchesSync`).
+ * Manages document instances (`PatchDoc`) and persistence (`PatchStore`).
+ * Can be used standalone or with PatchesSync for network synchronization.
  */
 export class Patches {
-  protected store: PatchesStore;
-  protected sync: PatchesSync;
   protected options: PatchesOptions;
   protected docs: Map<string, ManagedDoc<any>> = new Map();
 
-  // Public signals (re-emitted from PatchesSync)
-  readonly onStateChange: typeof this.sync.onStateChange;
-  readonly onError: typeof this.sync.onError;
+  readonly store: PatchesStore;
+  readonly trackedDocs = new Set<string>();
+
+  // Public signals
+  readonly onError = signal<(error: Error, context?: { docId?: string }) => void>();
+  readonly onServerCommit = signal<(docId: string, changes: Change[]) => void>();
+  readonly onTrackDocs = signal<(docIds: string[]) => void>();
+  readonly onUntrackDocs = signal<(docIds: string[]) => void>();
+  readonly onDeleteDoc = signal<(docId: string) => void>();
 
   constructor(opts: PatchesOptions) {
     this.options = opts;
-
-    // Initialize store - Now guaranteed by options type
     this.store = opts.store;
-
-    // Initialize sync layer
-    this.sync = new PatchesSync(opts.url, this.store, {
-      wsOptions: opts.wsOptions,
-      maxBatchSize: opts.maxBatchSize,
+    this.store.listDocs().then(docs => {
+      this.trackDocs(docs.map(({ docId }) => docId));
     });
-
-    // Expose signals
-    this.onStateChange = this.sync.onStateChange;
-    this.onError = this.sync.onError;
-
-    // Handle server commits coming from the sync layer
-    this.sync.onServerCommit(this._handleServerCommit);
-
-    // Initialize connection (don't block constructor)
-    void this.sync.connect();
   }
 
   // --- Public API Methods ---
 
-  get state(): PatchesSyncState {
-    return this.sync.state;
-  }
-
-  async connect(): Promise<void> {
-    await this.sync.connect();
-  }
-
-  disconnect(): void {
-    this.sync.disconnect();
-  }
-
   async trackDocs(docIds: string[]): Promise<void> {
-    await this.sync.trackDocs(docIds);
+    docIds = docIds.filter(id => !this.trackedDocs.has(id));
+    if (!docIds.length) return;
+    docIds.forEach(this.trackedDocs.add, this.trackedDocs);
+    this.onTrackDocs.emit(docIds);
+    await this.store.trackDocs(docIds);
   }
 
   async untrackDocs(docIds: string[]): Promise<void> {
+    docIds = docIds.filter(id => this.trackedDocs.has(id));
+    if (!docIds.length) return;
+    docIds.forEach(this.trackedDocs.delete, this.trackedDocs);
+    this.onUntrackDocs.emit(docIds);
+
     // Close any open PatchDoc instances first
     const closedPromises = docIds.filter(id => this.docs.has(id)).map(id => this.closeDoc(id)); // closeDoc removes from this.docs map
     await Promise.all(closedPromises);
 
-    // Then tell sync layer to untrack and remove from store
-    await this.sync.untrackDocs(docIds);
+    // Remove from store
+    await this.store.untrackDocs(docIds);
   }
 
   async openDoc<T extends object>(docId: string, opts: { metadata?: Record<string, any> } = {}): Promise<PatchDoc<T>> {
@@ -103,15 +85,9 @@ export class Patches {
       doc.import(snapshot);
     }
 
-    // Set up local listener -> store -> sync
+    // Set up local listener -> store
     const unsub = this._setupLocalDocListener(docId, doc);
     this.docs.set(docId, { doc, onChangeUnsubscriber: unsub });
-
-    // Trigger initial sync for this specific doc (if needed)
-    // Note: Global sync on connect already handles most cases
-    if (this.sync.state.connected) {
-      await this.sync.syncDoc(docId);
-    }
 
     return doc;
   }
@@ -132,14 +108,59 @@ export class Patches {
     if (this.docs.has(docId)) {
       await this.closeDoc(docId);
     }
-    // Delegate delete (incl. untracking) to sync layer
-    await this.sync.deleteDoc(docId);
+    // Unsubscribe from server if tracked
+    if (this.trackedDocs.has(docId)) {
+      await this.untrackDocs([docId]);
+    }
+    // Mark document as deleted in store
+    await this.store.deleteDoc(docId);
+    this.onDeleteDoc.emit(docId);
+  }
+
+  /**
+   * Gets all tracked document IDs that are currently open.
+   * Used by PatchesSync to check which docs need syncing.
+   */
+  getOpenDocIds(): string[] {
+    return Array.from(this.docs.keys());
+  }
+
+  /**
+   * Retrieves changes for a document that should be sent to the server.
+   * Used by PatchesSync during synchronization.
+   */
+  getDocChanges(docId: string): Change[] {
+    const doc = this.docs.get(docId)?.doc;
+    if (!doc) return [];
+    try {
+      return doc.getUpdatesForServer();
+    } catch (err) {
+      console.error(`Error getting updates for doc ${docId}:`, err);
+      this.onError.emit(err as Error, { docId });
+      return [];
+    }
+  }
+
+  /**
+   * Handles failure to send changes to the server.
+   * Used by PatchesSync to requeue changes after failures.
+   */
+  handleSendFailure(docId: string): void {
+    const doc = this.docs.get(docId)?.doc;
+    if (doc) {
+      doc.handleSendFailure();
+    }
+  }
+
+  /**
+   * Apply server changes to a document.
+   * Used by PatchesSync to update documents with server changes.
+   */
+  applyServerChanges(docId: string, changes: Change[]): void {
+    this._handleServerCommit(docId, changes);
   }
 
   close(): void {
-    // Disconnect sync layer (stops WebSocket)
-    this.sync.disconnect();
-
     // Clean up local PatchDoc listeners
     this.docs.forEach(managed => managed.onChangeUnsubscriber());
     this.docs.clear();
@@ -156,8 +177,7 @@ export class Patches {
       if (!changes.length) return;
       try {
         await this.store.savePendingChanges(docId, changes);
-        // Notify sync layer to flush changes for this doc
-        void this.sync.flushDoc(docId);
+        // Note: When used with PatchesSync, it will handle flushing the changes
       } catch (err) {
         console.error(`Error saving pending changes for doc ${docId}:`, err);
         this.onError.emit(err as Error, { docId });
@@ -174,8 +194,6 @@ export class Patches {
       } catch (err) {
         console.error(`Error applying server commit for doc ${docId}:`, err);
         this.onError.emit(err as Error, { docId });
-        // TODO: Consider triggering a resync or other recovery?
-        void this.sync.syncDoc(docId); // Attempt resync on apply failure
       }
     }
     // If doc isn't open locally, changes were already saved to store by PatchesSync

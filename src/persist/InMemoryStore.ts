@@ -101,24 +101,24 @@ export class InMemoryStore implements PatchesStore {
   }
 
   async untrackDocs(docIds: string[]): Promise<void> {
-    for (const docId of docIds) {
-      this.docs.delete(docId);
-    }
+    docIds.forEach(this.docs.delete, this.docs);
   }
 
   // ─── Misc / Lifecycle ────────────────────────────────────────────────
-  async deleteDoc(docId: string, writeTombstone = true): Promise<void> {
+  async deleteDoc(docId: string): Promise<void> {
     const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
-    if (writeTombstone) {
-      buf.deleted = true;
-    }
+    buf.deleted = true;
     buf.committed = [];
     buf.pending = [];
     buf.snapshot = undefined;
     this.docs.set(docId, buf);
   }
 
+  async confirmDeleteDoc(docId: string): Promise<void> {
+    this.docs.delete(docId);
+  }
+
   async close(): Promise<void> {
-    // Nothing to clean up for in‑memory implementation.
+    this.docs.clear();
   }
 }

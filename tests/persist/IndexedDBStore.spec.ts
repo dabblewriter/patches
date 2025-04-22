@@ -37,39 +37,15 @@ describe('IndexedDBStore', () => {
     // Close the database connection
     if (store) {
       await store.close();
-      // Set to null to help garbage collection
-      (store as any).db = null;
     }
 
     // Delete test database
-    await new Promise<void>((resolve, reject) => {
-      // Try to delete the database
-      const request = indexedDB.deleteDatabase(TEST_DB_NAME);
-      const timeout = setTimeout(() => {
-        // If we timeout, force a new IDBFactory instance
-        indexedDB = new IDBFactory();
-        resolve(); // Resolve anyway to continue tests
-      }, TEST_TIMEOUT);
-
-      request.onsuccess = () => {
-        clearTimeout(timeout);
-        resolve();
-      };
-
-      request.onerror = () => {
-        clearTimeout(timeout);
-        console.warn('Failed to delete database, continuing anyway');
-        indexedDB = new IDBFactory(); // Force reset
-        resolve(); // Continue tests
-      };
-
-      request.onblocked = () => {
-        clearTimeout(timeout);
-        console.warn('Database deletion blocked, continuing anyway');
-        indexedDB = new IDBFactory(); // Force reset
-        resolve(); // Continue tests
-      };
-    });
+    try {
+      await store.deleteDB();
+    } catch (error) {
+      // console.warn('Failed to delete database, continuing anyway');
+      indexedDB = new IDBFactory();
+    }
   });
 
   describe('Document Operations', () => {

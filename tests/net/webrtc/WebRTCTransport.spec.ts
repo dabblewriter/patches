@@ -234,7 +234,9 @@ describe('WebRTCTransport', () => {
     const signalData = { type: 'answer', sdp: 'test' };
 
     // This will retrieve the signal handler and call it with our test data
-    const signalHandlers = mockPeers.peer1.on.mock.calls.filter(call => call[0] === 'signal').map(call => call[1]);
+    const signalHandlers = mockPeers.peer1.on.mock.calls
+      .filter((call: any) => call[0] === 'signal')
+      .map((call: any) => call[1]);
 
     signalHandlers[0](signalData);
 

@@ -14,8 +14,8 @@ export class PatchDoc<T extends object> {
   protected _state: T;
   protected _committedState: T;
   protected _committedRev: number;
-  protected _pendingChanges: Change[] = []; // Changes made locally, not yet sent
-  protected _sendingChanges: Change[] = []; // Changes sent to server, awaiting confirmation
+  protected _pendingChanges: Change[] = [];
+  protected _sendingChanges: Change[] = [];
   protected _changeMetadata: Record<string, any> = {};
 
   /** Subscribe to be notified before local state changes. */
@@ -31,7 +31,6 @@ export class PatchDoc<T extends object> {
    * @param initialMetadata Optional metadata to add to generated changes.
    */
   constructor(initialState: T = {} as T, initialMetadata: Record<string, any> = {}) {
-    // Use structuredClone for robust deep cloning
     this._committedState = structuredClone(initialState);
     this._state = structuredClone(initialState);
     this._committedRev = 0;
@@ -64,7 +63,10 @@ export class PatchDoc<T extends object> {
   }
 
   /**
-   * Basic export for potential persistence (may lose sending state).
+   * Exports the document state for persistence.
+   * NOTE: Any changes currently marked as `sending` are included in the
+   * `changes` array alongside `pending` changes. On import, all changes
+   * are treated as pending.
    */
   export(): PatchSnapshot<T> {
     return {
@@ -76,8 +78,8 @@ export class PatchDoc<T extends object> {
   }
 
   /**
-   * Basic import for potential persistence.
-   * Resets any `_sendingChanges` state and treats all imported changes as pending.
+   * Imports previously exported document state.
+   * Resets sending state and treats all imported changes as pending.
    */
   import(snapshot: PatchSnapshot<T>) {
     this._committedState = structuredClone(snapshot.state); // Use structuredClone
@@ -90,7 +92,6 @@ export class PatchDoc<T extends object> {
 
   /**
    * Sets metadata to be added to future changes.
-   * @param metadata Metadata to be added to future changes.
    */
   setChangeMetadata(metadata: Record<string, any>) {
     this._changeMetadata = metadata;
@@ -107,18 +108,17 @@ export class PatchDoc<T extends object> {
       return null;
     }
 
-    const rev =
-      this._pendingChanges[this._pendingChanges.length - 1]?.rev ??
-      this._sendingChanges[this._sendingChanges.length - 1]?.rev ??
-      this._committedRev;
+    // Determine the client-side rev for local ordering before server assigns final rev.
+    const lastPendingRev = this._pendingChanges[this._pendingChanges.length - 1]?.rev;
+    const lastSendingRev = this._sendingChanges[this._sendingChanges.length - 1]?.rev;
+    const latestLocalRev = Math.max(this._committedRev, lastPendingRev ?? 0, lastSendingRev ?? 0);
 
-    // Note: Client-side 'rev' is just for local ordering and might be removed.
     // It's the baseRev that matters for sending.
     const change: Change = {
+      rev: latestLocalRev + 1, // Tentative rev for local sorting
       id: createId(),
       ops: patch.ops,
-      rev,
-      baseRev: this._committedRev, // Based on the last known committed state
+      baseRev: this._committedRev,
       created: Date.now(),
       ...(Object.keys(this._changeMetadata).length > 0 && { metadata: { ...this._changeMetadata } }),
     };
@@ -153,20 +153,17 @@ export class PatchDoc<T extends object> {
     this._sendingChanges = this._pendingChanges;
     this._pendingChanges = [];
 
-    // Ensure the baseRev is set correctly based on the committedRev *at the time of sending*
-    // (The update method already does this, but double-check if logic changes)
-    this._sendingChanges.forEach(change => {
-      change.baseRev = this._committedRev;
-    });
-
     return this._sendingChanges;
   }
 
   /**
    * Processes the server's response to a batch of changes sent via `getUpdatesForServer`.
    * @param serverCommit The array of committed changes from the server.
-   *                     Expected to be empty (`[]`) if the sent batch was a no-op,
-   *                     or contain a single `Change` object representing the batch commit.
+   *                     Expected to be empty (`[]`) if the sent batch was a no‑op,
+   *                     or contain **one or more** `Change` objects consisting of:
+   *                       • any missing history since the client's `baseRev`, followed by
+   *                       • the server‑side result of the client's batch (typically the
+   *                         transformed versions of the changes the client sent).
    * @throws Error if the input format is unexpected or application fails.
    */
   applyServerConfirmation(serverCommit: Change[]): void {
@@ -191,57 +188,33 @@ export class PatchDoc<T extends object> {
     }
 
     if (serverCommit.length === 0) {
-      // Server confirmed the batch was a no-op (transformed away).
-      // The client's `_sendingChanges` are effectively discarded.
-      console.log('Server confirmed batch as no-op.');
+      // Server confirmed no change; discard the sending changes.
       this._sendingChanges = [];
-      // No change to _committedState or _committedRev
-      // Rebase any *new* pending changes against the *old* committed state (no server change occurred)
-      // Since baseRev didn't change, no rebase needed. Just recalculate state.
-    } else if (serverCommit.length === 1) {
-      // Server confirmed the batch and returned the single resulting commit.
-      const committedChange = serverCommit[0];
-
-      if (!committedChange.rev || committedChange.rev <= this._committedRev) {
-        throw new Error(`Server commit invalid revision: ${committedChange.rev}, expected > ${this._committedRev}`);
-      }
-      // if (committedChange.rev !== this._committedRev + 1) {
-      //   // This indicates a potential issue, maybe missed updates?
-      //   // Or server batches multiple client requests?
-      //   // For now, strictly expect +1 unless server protocol changes.
-      //   console.warn(`Server commit revision ${committedChange.rev} !== expected ${this._committedRev + 1}`);
-      //   // Decide recovery strategy: request resync? Accept gap?
-      // }
-
-      // 1. Apply the server's committed change to our committed state
-      try {
-        this._committedState = applyChanges(this._committedState, [committedChange]);
-      } catch (error) {
-        console.error('Failed to apply server commit to committed state:', error);
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        throw new Error(`Critical sync error applying server commit: ${errorMessage}`);
-      }
-
-      // 2. Update committed revision
-      this._committedRev = committedChange.rev;
-
-      // 3. Discard the confirmed _sendingChanges
-      const confirmedSentChanges = this._sendingChanges;
-      this._sendingChanges = [];
-
-      // 4. Rebase any *new* pending changes (added after getUpdatesForServer was called)
-      //    against the change that the server *actually* applied.
-      if (this.hasPending) {
-        this._pendingChanges = rebaseChanges([committedChange], this._pendingChanges);
-      }
     } else {
-      throw new Error(`Unexpected server confirmation format: Expected 0 or 1 change, received ${serverCommit.length}`);
+      // Server responded with one *or more* changes:
+      //   1. possibly earlier missing revisions produced by other clients
+      //   2. followed by the server‑side commit(s) that correspond to the batch we sent.
+
+      // Basic sanity check – final revision in the array should advance committedRev.
+      const lastChange = serverCommit[serverCommit.length - 1];
+      if (!lastChange.rev || lastChange.rev <= this._committedRev) {
+        throw new Error(`Server commit invalid final revision: ${lastChange.rev}, expected > ${this._committedRev}`);
+      }
+
+      // 1. Discard the confirmed _sendingChanges first so that the delegated
+      //    external‑update path does not attempt to rebase them.
+      this._sendingChanges = [];
+
+      // 2. Apply everything through the common external‑update handler which
+      //    will update committed state, revision, rebase pending changes, etc.
+      this.applyExternalServerUpdate(serverCommit);
+
+      return; // done – external handler emitted updates
     }
 
-    // 5. Recalculate the local state from the new committed state + rebased pending changes
+    // For the zero‑length confirmation path we still need to recalc state and
+    // notify listeners (the 1‑change path is handled by applyExternalServerUpdate).
     this._recalculateLocalState();
-
-    // 6. Notify listeners
     this.onUpdate.emit(this._state);
   }
 
@@ -323,10 +296,6 @@ export class PatchDoc<T extends object> {
   /** Recalculates _state from _committedState + _sendingChanges + _pendingChanges */
   protected _recalculateLocalState(): void {
     try {
-      // Apply sending changes first, then pending changes over that result
-      // Note: The previous implementation combined them, which might be okay if applyChanges handles arrays,
-      // but separating them is clearer conceptually if applyChanges expects one state and one array of changes.
-      // Assuming applyChanges handles an array of changes correctly:
       this._state = applyChanges(this._committedState, [...this._sendingChanges, ...this._pendingChanges]);
     } catch (error) {
       console.error('CRITICAL: Error recalculating local state after update:', error);
@@ -340,6 +309,7 @@ export class PatchDoc<T extends object> {
    * @deprecated Use export() - kept for backward compatibility if needed.
    */
   toJSON(): PatchSnapshot<T> {
+    console.warn('PatchDoc.toJSON() is deprecated. Use export() instead.');
     return this.export();
   }
 

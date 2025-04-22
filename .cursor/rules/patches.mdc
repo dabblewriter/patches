@@ -5,6 +5,8 @@ alwaysApply: true
 ---
 # Patches
 
+Patches is an unrelease project, in stealth mode, being iterated on until it is ready for a release. Backwards compatability is not a concern. Getting the API right and the code correct and clean is the main concern.
+
 ## Project Overview
 
 - **Patches** is a TypeScript library for building real-time collaborative applications using Operational Transformation (OT) with a centralized server model.
@@ -14,6 +16,7 @@ alwaysApply: true
 ## Key Concepts
 
 - **Centralized OT:** Server is the single source of truth for document history and conflict resolution.
+- **Patches:** The main client-side interface, loading docs, syncing with the server, and storing data. Supported by PatchesSync and PatchesStore for implementation.
 - **PatchDoc:** Client-side document, manages local state, optimistic updates, and syncs with server.
 - **PatchServer:** Server-side authority, applies/commits changes, manages versions and persistence.
 - **HistoryManager:** Query document versions and change history.
@@ -32,6 +35,11 @@ alwaysApply: true
 - `tests/` — Vitest-based test suite (unit/integration)
 - `dist/` — Build output
 - `assets/`, `.vscode/`, etc. — Miscellaneous/project config
+
+## Files
+
+Imports refer to the *.js file path, but every file is a TypeScript file, so when you see a `.js` file extension in imports, you
+can safely assume it is a `.ts` file and look it up accordingly with its `path/to/file.ts` path.
 
 ## How to Build & Test
 

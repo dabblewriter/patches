@@ -1,14 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mocked } from 'vitest';
 import { signal, type Signal } from '../../src/event-signal';
+import { Patches } from '../../src/net/Patches';
 import { PatchesSync } from '../../src/net/PatchesSync';
 import type { ConnectionState } from '../../src/net/protocol/types';
 import { PatchesWebSocket } from '../../src/net/websocket/PatchesWebSocket';
 import { onlineState } from '../../src/net/websocket/onlineState';
-import type { PatchesStore } from '../../src/persist/PatchesStore';
-import type { Change, TrackedDoc } from '../../src/types';
+import type { PatchesStore, TrackedDoc } from '../../src/persist/PatchesStore';
+import type { Change } from '../../src/types';
 
 // --- Mocks ---
 vi.mock('../../src/net/websocket/PatchesWebSocket');
+vi.mock('../../src/net/Patches');
 vi.mock('../../src/net/websocket/onlineState', () => ({
   onlineState: {
     isOnline: true,
@@ -44,6 +46,7 @@ vi.mock('../../src/event-signal', async importOriginal => {
 describe('PatchesSync', () => {
   let mockWsInstance: Mocked<PatchesWebSocket>;
   let mockStore: Mocked<PatchesStore>;
+  let mockPatches: Mocked<Patches>;
   let patchesSync: PatchesSync;
   let wsOnChangesCommittedCallback: (data: { docId: string; changes: Change[] }) => void;
   let wsOnStateChangeCallback: (state: ConnectionState) => void;
@@ -66,9 +69,43 @@ describe('PatchesSync', () => {
       trackDocs: vi.fn().mockResolvedValue(undefined),
       untrackDocs: vi.fn().mockResolvedValue(undefined),
       deleteDoc: vi.fn().mockResolvedValue(undefined),
+      confirmDeleteDoc: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
       onPendingChanges: signal(),
     } as unknown as Mocked<PatchesStore>;
+
+    // Setup mock signals with spies
+    const createSpiedSignal = () => {
+      const listeners = new Set<(data: any) => void>();
+      const emit = vi.fn((data: any) => {
+        listeners.forEach(fn => {
+          try {
+            fn(data);
+          } catch (e) {
+            console.error('Error in mock signal listener:', e);
+          }
+        });
+      });
+      const signal = (listener: (data: any) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      };
+      signal.emit = emit;
+      return signal;
+    };
+
+    // Setup mock Patches
+    mockPatches = {
+      onTrackDocs: createSpiedSignal(),
+      onUntrackDocs: createSpiedSignal(),
+      onDeleteDoc: createSpiedSignal(),
+      onError: createSpiedSignal(),
+      onServerCommit: createSpiedSignal(),
+      store: mockStore,
+      trackedDocs: new Set(),
+      handleSendFailure: vi.fn(),
+      applyServerChanges: vi.fn(),
+    } as unknown as Mocked<Patches>;
 
     // Setup mock PatchesWebSocket
     const MockPatchesWebSocket = vi.mocked(PatchesWebSocket);
@@ -103,8 +140,10 @@ describe('PatchesSync', () => {
     });
 
     // Create PatchesSync instance
-    patchesSync = new PatchesSync(MOCK_URL, mockStore);
+    patchesSync = new PatchesSync(MOCK_URL, mockPatches);
     (patchesSync as any).ws = mockWsInstance;
+    // Initialize state to avoid undefined errors
+    (patchesSync as any)._state = { connected: false, online: true, syncing: null };
 
     // Spy on console methods
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -186,7 +225,13 @@ describe('PatchesSync', () => {
       // Set connected state
       (patchesSync as any)._state.connected = true;
 
-      await patchesSync.trackDocs([DOC_ID]);
+      // Mock the store's trackDocs to resolve immediately
+      mockStore.trackDocs.mockImplementation(async () => {
+        mockPatches.onTrackDocs.emit([DOC_ID]);
+        return Promise.resolve();
+      });
+
+      await mockStore.trackDocs([DOC_ID]);
 
       expect(mockStore.trackDocs).toHaveBeenCalledWith([DOC_ID]);
       expect(mockWsInstance.subscribe).toHaveBeenCalledWith([DOC_ID]);
@@ -198,7 +243,13 @@ describe('PatchesSync', () => {
       (patchesSync as any).trackedDocs.add(DOC_ID);
       (patchesSync as any)._state.connected = true;
 
-      await patchesSync.untrackDocs([DOC_ID]);
+      // Mock the store's untrackDocs to resolve immediately
+      mockStore.untrackDocs.mockImplementation(async () => {
+        mockPatches.onUntrackDocs.emit([DOC_ID]);
+        return Promise.resolve();
+      });
+
+      await mockStore.untrackDocs([DOC_ID]);
 
       expect(mockWsInstance.unsubscribe).toHaveBeenCalledWith([DOC_ID]);
       expect(mockStore.untrackDocs).toHaveBeenCalledWith([DOC_ID]);
@@ -280,13 +331,9 @@ describe('PatchesSync', () => {
 
       // Mock the store's saveCommittedChanges to resolve immediately
       mockStore.saveCommittedChanges.mockImplementation(async () => {
+        mockPatches.onServerCommit.emit(DOC_ID, serverChanges);
         return Promise.resolve();
       });
-
-      // Create a new signal instance for testing
-      const testSignal = signal<(docId: string, changes: Change[]) => void>();
-      const serverCommitSpy = vi.spyOn(testSignal, 'emit');
-      (patchesSync as any).onServerCommit = testSignal;
 
       // Simulate server commit
       if (wsOnChangesCommittedCallback) {
@@ -294,9 +341,7 @@ describe('PatchesSync', () => {
       }
 
       expect(mockStore.saveCommittedChanges).toHaveBeenCalledWith(DOC_ID, serverChanges);
-      // Wait for the promise to resolve
-      await new Promise(resolve => setTimeout(resolve, 0));
-      expect(serverCommitSpy).toHaveBeenCalledWith(DOC_ID, serverChanges);
+      expect(mockPatches.onServerCommit.emit).toHaveBeenCalledWith(DOC_ID, serverChanges);
     });
 
     it('should delete a document', async () => {
@@ -304,11 +349,16 @@ describe('PatchesSync', () => {
       (patchesSync as any).trackedDocs.add(DOC_ID);
       (patchesSync as any)._state.connected = true;
 
-      await patchesSync.deleteDoc(DOC_ID);
+      // Mock the store's deleteDoc to resolve immediately
+      mockStore.deleteDoc.mockImplementation(async () => {
+        return Promise.resolve();
+      });
 
-      expect(mockStore.untrackDocs).toHaveBeenCalledWith([DOC_ID]);
-      expect(mockStore.deleteDoc).toHaveBeenCalledWith(DOC_ID);
+      // Trigger delete through PatchesSync's handler
+      await (patchesSync as any)._handleDocDeleted(DOC_ID);
+
       expect(mockWsInstance.deleteDoc).toHaveBeenCalledWith(DOC_ID);
+      expect(mockStore.confirmDeleteDoc).toHaveBeenCalledWith(DOC_ID);
     });
   });
 

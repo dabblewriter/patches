@@ -4,7 +4,7 @@ import type { Change, PatchSnapshot } from '../types.js';
 import { applyChanges } from '../utils.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
-const DB_VERSION = 2;
+const DB_VERSION = 1;
 const SNAPSHOT_INTERVAL = 200;
 
 interface Snapshot {
@@ -22,7 +22,6 @@ interface StoredChange extends Change {
  * - snapshots<{ docId: string; rev: number; state: any }> (primary key: docId)
  * - committedChanges<Change & { docId: string; }> (primary key: [docId, rev])
  * - pendingChanges<Change & { docId: string; }> (primary key: [docId, rev])
- * - deleted<{ docId: string; }> (primary key: docId)
  * - docs<{ docId: string; committedRev: number; deleted?: boolean }> (primary key: docId)
  *
  * Under the hood, this class will store snapshots of the document only for committed state. It will not update the
@@ -65,9 +64,6 @@ export class IndexedDBStore implements PatchesStore {
         }
         if (!db.objectStoreNames.contains('pendingChanges')) {
           db.createObjectStore('pendingChanges', { keyPath: ['docId', 'rev'] });
-        }
-        if (!db.objectStoreNames.contains('deleted')) {
-          db.deleteObjectStore('deleted');
         }
         if (!db.objectStoreNames.contains('docs')) {
           db.createObjectStore('docs', { keyPath: 'docId' });

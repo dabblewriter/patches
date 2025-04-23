@@ -236,26 +236,3 @@ function checkPath(path: PathLike): string {
   if ((path as string).length && (path as string)[0] !== '/') path = `/${path}`;
   return path as string;
 }
-
-export type JSONPath<T> = T extends object
-  ? T extends Array<infer U>
-    ? { readonly [K in keyof T & number]-?: JSONPathValue<U> }
-    : { readonly [K in keyof T as T[K] extends Function ? never : K]-?: JSONPathValue<NonNullable<T[K]>> }
-  : never;
-
-export type JSONPathValue<T> = {
-  toString(): string;
-} & (T extends object ? JSONPath<T> : {});
-
-export function createJSONPath<T = unknown>(): JSONPath<T> {
-  const handler = {
-    get(target: { path?: string }, prop: string) {
-      if (prop === 'toString') {
-        return () => target.path ?? '';
-      }
-      return new Proxy({ path: `${target.path}/${prop}` }, handler);
-    },
-  };
-
-  return new Proxy({ path: '' } as any, handler);
-}

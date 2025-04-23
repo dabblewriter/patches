@@ -10,7 +10,7 @@ import { applyChanges, rebaseChanges } from '../utils.js';
  * Manages committed state, pending (local-only) changes, and
  * changes currently being sent to the server.
  */
-export class PatchesDoc<T extends object> {
+export class PatchesDoc<T extends object = object> {
   protected _id: string | null = null;
   protected _state: T;
   protected _committedState: T;

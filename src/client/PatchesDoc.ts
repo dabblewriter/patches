@@ -1,6 +1,7 @@
 import { createId } from 'crypto-id';
 import { signal } from '../event-signal.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
+import type { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { Change, PatchesSnapshot } from '../types.js';
 import { applyChanges, rebaseChanges } from '../utils.js';
 
@@ -102,7 +103,7 @@ export class PatchesDoc<T extends object> {
    * @param mutator Function modifying a draft state.
    * @returns The generated Change object or null if no changes occurred.
    */
-  change(mutator: (draft: T) => void): Change | null {
+  change(mutator: (draft: T, patch: JSONPatch) => void): Change | null {
     const patch = createJSONPatch(this._state, mutator);
     if (patch.ops.length === 0) {
       return null;

@@ -1,5 +1,5 @@
 // Core client and sync mechanism
-export { Patches } from './Patches.js';
+export { Patches } from '../client/Patches.js';
 export { PatchesSync } from './PatchesSync.js';
 
 // Underlying protocol and transport

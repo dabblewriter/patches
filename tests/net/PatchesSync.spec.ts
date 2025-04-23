@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mocked } from 'vitest';
+import { Patches } from '../../src/client/Patches';
 import { signal, type Signal } from '../../src/event-signal';
-import { Patches } from '../../src/net/Patches';
 import { PatchesSync } from '../../src/net/PatchesSync';
 import type { ConnectionState } from '../../src/net/protocol/types';
 import { PatchesWebSocket } from '../../src/net/websocket/PatchesWebSocket';
@@ -10,7 +10,7 @@ import type { Change } from '../../src/types';
 
 // --- Mocks ---
 vi.mock('../../src/net/websocket/PatchesWebSocket');
-vi.mock('../../src/net/Patches');
+vi.mock('../../src/Patches');
 vi.mock('../../src/net/websocket/onlineState', () => ({
   onlineState: {
     isOnline: true,

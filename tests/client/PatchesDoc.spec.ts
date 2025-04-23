@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { PatchDoc } from '../../src/client/PatchDoc';
+import { PatchesDoc } from '../../src/client/PatchesDoc';
 import type { Change } from '../../src/types';
 import * as utils from '../../src/utils'; // To mock applyChanges
 
@@ -18,8 +18,8 @@ vi.mock('crypto-id', () => ({
   createId: vi.fn(() => 'mock-id-' + Math.random().toString(36).substring(7)),
 }));
 
-describe('PatchDoc Error Handling', () => {
-  let doc: PatchDoc<{ count: number }>;
+describe('PatchesDoc Error Handling', () => {
+  let doc: PatchesDoc<{ count: number }>;
   const mockApplyChanges = vi.mocked(utils.applyChanges);
   const mockRebaseChanges = vi.mocked(utils.rebaseChanges);
 
@@ -28,7 +28,7 @@ describe('PatchDoc Error Handling', () => {
     // Reset mocks to default behavior (calling original implementation)
     mockApplyChanges.mockImplementation(utils.applyChanges);
     mockRebaseChanges.mockImplementation(utils.rebaseChanges);
-    doc = new PatchDoc({ count: 0 });
+    doc = new PatchesDoc({ count: 0 });
   });
 
   it('should throw error from _recalculateLocalState if applyChanges fails during import', () => {

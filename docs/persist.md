@@ -117,5 +117,5 @@ This approach balances:
 ## See Also
 
 - [net.md](./net.md) - Network synchronization
-- [PatchDoc](./PatchDoc.md) - Document editing
+- [PatchesDoc](./PatchesDoc.md) - Document editing
 - [operational-transformation.md](./operational-transformation.md) - Core OT concepts

@@ -2,13 +2,13 @@ import { createId } from 'crypto-id';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { applyPatch } from '../../src/json-patch/applyPatch.js';
 import * as transformPatchModule from '../../src/json-patch/transformPatch.js'; // Import the module
-import { PatchServer } from '../../src/server/PatchServer.js';
+import { PatchesServer } from '../../src/server/PatchesServer.js';
 import type {
   Change,
   ListChangesOptions,
   ListVersionsOptions,
-  PatchState,
-  PatchStoreBackend,
+  PatchesState,
+  PatchesStoreBackend,
   VersionMetadata,
 } from '../../src/types.js';
 
@@ -73,8 +73,8 @@ vi.mock('../../../src/json-patch/transformPatch', () => ({
   }),
 }));
 
-// --- Mock PatchStoreBackend ---
-class MockPatchStoreBackend implements PatchStoreBackend {
+// --- Mock PatchesStoreBackend ---
+class MockPatchesStoreBackend implements PatchesStoreBackend {
   private docs: Map<string, { state: any; rev: number; changes: Change[] }> = new Map();
   private versions: Map<string, { metadata: VersionMetadata; state: any; changes: Change[] }[]> = new Map();
   private subscriptions: Map<string, Set<string>> = new Map(); // clientId -> Set<docId>
@@ -167,7 +167,7 @@ class MockPatchStoreBackend implements PatchStoreBackend {
     return docVersions.map(v => v.metadata);
   });
 
-  loadVersionState = vi.fn(async (docId: string, versionId: string): Promise<PatchState> => {
+  loadVersionState = vi.fn(async (docId: string, versionId: string): Promise<PatchesState> => {
     const version = this._getDocVersions(docId).find(v => v.metadata.id === versionId);
     if (!version) throw new Error(`Version ${versionId} not found for doc ${docId}`);
     return { state: version.state, rev: version.metadata.baseRev ?? 0 }; // Assuming rev is baseRev for state
@@ -225,16 +225,16 @@ class MockPatchStoreBackend implements PatchStoreBackend {
 
 // --- Tests ---
 
-describe('PatchServer', () => {
-  let mockStore: MockPatchStoreBackend;
-  let patchServer: PatchServer;
+describe('PatchesServer', () => {
+  let mockStore: MockPatchesStoreBackend;
+  let patchesServer: PatchesServer;
   const docId = 'test-doc-1';
   const clientId = 'client-1';
 
   beforeEach(() => {
     vi.restoreAllMocks(); // Restore original implementations and clear mocks
-    mockStore = new MockPatchStoreBackend();
-    patchServer = new PatchServer(mockStore);
+    mockStore = new MockPatchesStoreBackend();
+    patchesServer = new PatchesServer(mockStore);
 
     // Reset mock Id generator
     let idCounter = 0;
@@ -244,11 +244,11 @@ describe('PatchServer', () => {
   // === Initialization & Basic Getters ===
 
   it('should initialize with default session timeout', () => {
-    expect((patchServer as any).sessionTimeoutMillis).toBe(30 * 60 * 1000);
+    expect((patchesServer as any).sessionTimeoutMillis).toBe(30 * 60 * 1000);
   });
 
   it('should initialize with custom session timeout', () => {
-    const server = new PatchServer(mockStore, { sessionTimeoutMinutes: 10 });
+    const server = new PatchesServer(mockStore, { sessionTimeoutMinutes: 10 });
     expect((server as any).sessionTimeoutMillis).toBe(10 * 60 * 1000);
   });
 
@@ -257,15 +257,15 @@ describe('PatchServer', () => {
   describe('subscribe/unsubscribe', () => {
     it('should add subscriptions', async () => {
       const ids = [docId, 'doc-2'];
-      const result = await patchServer.subscribe(clientId, ids);
+      const result = await patchesServer.subscribe(clientId, ids);
       expect(result).toEqual(ids);
       expect(mockStore.addSubscription).toHaveBeenCalledWith(clientId, ids);
     });
 
     it('should remove subscriptions', async () => {
       const ids = [docId];
-      await patchServer.subscribe(clientId, [docId, 'doc-2']); // Add first
-      const result = await patchServer.unsubscribe(clientId, ids);
+      await patchesServer.subscribe(clientId, [docId, 'doc-2']); // Add first
+      const result = await patchesServer.unsubscribe(clientId, ids);
       expect(result).toEqual(ids);
       expect(mockStore.removeSubscription).toHaveBeenCalledWith(clientId, ids);
     });
@@ -275,7 +275,7 @@ describe('PatchServer', () => {
 
   describe('getDoc', () => {
     it('should return null state and rev 0 for a new document', async () => {
-      const snapshot = await patchServer.getDoc(docId);
+      const snapshot = await patchesServer.getDoc(docId);
       expect(snapshot.state).toBeNull();
       expect(snapshot.rev).toBe(0);
       expect(snapshot.changes).toEqual([]);
@@ -321,7 +321,7 @@ describe('PatchServer', () => {
       };
       await mockStore.listChanges.mockResolvedValueOnce([change1, change2]); // Mock changes since version
 
-      const snapshot = await patchServer.getDoc(docId);
+      const snapshot = await patchesServer.getDoc(docId);
 
       expect(mockStore.listVersions).toHaveBeenCalledWith(docId, {
         limit: 1,
@@ -383,7 +383,7 @@ describe('PatchServer', () => {
       await mockStore.listChanges.mockResolvedValueOnce([change1, change2]); // Mock loading changes up to rev 7
 
       const targetRev = 7;
-      const snapshot = await patchServer.getDoc(docId, targetRev);
+      const snapshot = await patchesServer.getDoc(docId, targetRev);
 
       // Should find the version before or at rev 7+1
       expect(mockStore.listVersions).toHaveBeenCalledWith(docId, {
@@ -409,20 +409,20 @@ describe('PatchServer', () => {
   describe('getChangesSince', () => {
     it('should call store.listChanges with correct parameters', async () => {
       const rev = 5;
-      await patchServer.getChangesSince(docId, rev);
+      await patchesServer.getChangesSince(docId, rev);
       expect(mockStore.listChanges).toHaveBeenCalledWith(docId, { startAfter: rev });
     });
   });
 
   describe('commitChanges', () => {
     it('handles empty changes array', async () => {
-      const result = await patchServer.commitChanges(docId, []);
+      const result = await patchesServer.commitChanges(docId, []);
       expect(result).toEqual([[], []]);
     });
 
     it('rejects changes without baseRev', async () => {
       const changes = [{ id: '1', ops: [], rev: 1, created: Date.now() }];
-      await expect(patchServer.commitChanges(docId, changes)).rejects.toThrow('Client changes must include baseRev');
+      await expect(patchesServer.commitChanges(docId, changes)).rejects.toThrow('Client changes must include baseRev');
     });
 
     it('rejects changes with inconsistent baseRev', async () => {
@@ -430,7 +430,7 @@ describe('PatchServer', () => {
         { id: '1', ops: [], rev: 1, baseRev: 0, created: Date.now() },
         { id: '2', ops: [], rev: 2, baseRev: 1, created: Date.now() },
       ];
-      await expect(patchServer.commitChanges(docId, changes)).rejects.toThrow(
+      await expect(patchesServer.commitChanges(docId, changes)).rejects.toThrow(
         'Client changes must have consistent baseRev'
       );
     });
@@ -448,10 +448,10 @@ describe('PatchServer', () => {
 
       // Mock _getStateAtRevision to ensure it returns the correct current rev
       // Although saveChange updates the internal mock state, explicitly mocking helps isolate
-      vi.spyOn(patchServer as any, '_getStateAtRevision').mockResolvedValue({ state: { data: 1 }, rev: 1 });
+      vi.spyOn(patchesServer as any, '_getStateAtRevision').mockResolvedValue({ state: { data: 1 }, rev: 1 });
 
       const changes: Change[] = [{ id: 'c1', rev: 0, baseRev: 2, ops: [], created: Date.now() }];
-      await expect(patchServer.commitChanges(docId, changes)).rejects.toThrow(
+      await expect(patchesServer.commitChanges(docId, changes)).rejects.toThrow(
         /Client baseRev \(2\) is ahead of server revision \(1\) for doc test-doc-1. Client needs to reload the document./
       );
     });
@@ -466,10 +466,10 @@ describe('PatchServer', () => {
         created: Date.now() - 1000,
       };
       await mockStore.saveChange(docId, initialChange); // Server is now at rev 1
-      vi.spyOn(patchServer as any, '_getStateAtRevision').mockResolvedValue({ state: { data: 1 }, rev: 1 });
+      vi.spyOn(patchesServer as any, '_getStateAtRevision').mockResolvedValue({ state: { data: 1 }, rev: 1 });
 
       const changes: Change[] = [{ id: 'c1', rev: 0, baseRev: 0, ops: [], created: Date.now() }];
-      await expect(patchServer.commitChanges(docId, changes)).rejects.toThrow(
+      await expect(patchesServer.commitChanges(docId, changes)).rejects.toThrow(
         /Client baseRev is 0 but server has already been created for doc test-doc-1. Client needs to load the existing document./
       );
     });
@@ -488,7 +488,7 @@ describe('PatchServer', () => {
       };
       mockStore.listChanges.mockResolvedValueOnce([]); // No committed changes after baseRev 0
 
-      const [committedChanges, transformedChanges] = await patchServer.commitChanges(docId, [incomingChange]);
+      const [committedChanges, transformedChanges] = await patchesServer.commitChanges(docId, [incomingChange]);
 
       // Expect no committed changes and the original change to be returned (no transformation needed)
       expect(committedChanges).toHaveLength(0);
@@ -522,7 +522,7 @@ describe('PatchServer', () => {
       };
 
       // Execute
-      const [committedChanges, transformedChanges] = await patchServer.commitChanges(docId, [incomingChange]);
+      const [committedChanges, transformedChanges] = await patchesServer.commitChanges(docId, [incomingChange]);
 
       // commitChanges returns committed + transformed changes.
       // In this case, no committed changes after baseRev 1, so only transformed.
@@ -596,7 +596,7 @@ describe('PatchServer', () => {
       ]);
 
       // Execute
-      const [committedChanges, transformedChanges] = await patchServer.commitChanges(docId, [clientChange]);
+      const [committedChanges, transformedChanges] = await patchesServer.commitChanges(docId, [clientChange]);
 
       // Verify transformPatch was called with the correct parameters
       expect(transformPatchSpy).toHaveBeenCalledWith(
@@ -647,7 +647,7 @@ describe('PatchServer', () => {
       };
 
       // Execute
-      const [committedChanges, transformedChanges] = await patchServer.commitChanges(docId, [clientChange]);
+      const [committedChanges, transformedChanges] = await patchesServer.commitChanges(docId, [clientChange]);
 
       // Expect the result to contain the committed changes found
       expect(committedChanges).toHaveLength(1);
@@ -659,7 +659,7 @@ describe('PatchServer', () => {
     });
 
     it('should create a new main version if session timeout exceeded', async () => {
-      const shortTimeoutServer = new PatchServer(mockStore, { sessionTimeoutMinutes: 1 / 60 }); // 1 second timeout
+      const shortTimeoutServer = new PatchesServer(mockStore, { sessionTimeoutMinutes: 1 / 60 }); // 1 second timeout
 
       // Setup: Server state at rev 1, change created long ago
       const initialState = { count: 1 };
@@ -700,7 +700,7 @@ describe('PatchServer', () => {
     });
 
     it('should handle offline changes: single session, create offline version, collapse change', async () => {
-      const server = new PatchServer(mockStore, { sessionTimeoutMinutes: 1 }); // 1 min timeout
+      const server = new PatchesServer(mockStore, { sessionTimeoutMinutes: 1 }); // 1 min timeout
 
       // Setup: Server at rev 5
       const baseRev = 5;
@@ -715,7 +715,7 @@ describe('PatchServer', () => {
         { id: 'off2', rev: 0, baseRev, ops: [{ op: 'add', path: '/offline2', value: true }], created: offlineCreated2 },
       ];
 
-      // Mock what PatchServer._getSnapshotAtRevision sees
+      // Mock what PatchesServer._getSnapshotAtRevision sees
       mockStore.listVersions.mockResolvedValue([]);
       mockStore.listChanges.mockResolvedValue([]); // No concurrent changes
 
@@ -771,7 +771,7 @@ describe('PatchServer', () => {
     });
 
     it('should handle offline changes: multiple sessions, create linked versions', async () => {
-      const server = new PatchServer(mockStore, { sessionTimeoutMinutes: 1 }); // 1 min timeout
+      const server = new PatchesServer(mockStore, { sessionTimeoutMinutes: 1 }); // 1 min timeout
 
       // Setup: Server at rev 5
       const baseRev = 5;
@@ -793,7 +793,7 @@ describe('PatchServer', () => {
         { id: 'off4', rev: 0, baseRev, ops: [{ op: 'add', path: '/session2_2', value: 4 }], created: session2End },
       ];
 
-      // Mock what PatchServer._getSnapshotAtRevision sees
+      // Mock what PatchesServer._getSnapshotAtRevision sees
       mockStore.listVersions.mockResolvedValue([]);
       mockStore.listChanges.mockResolvedValue([]); // No concurrent changes
 
@@ -877,7 +877,7 @@ describe('PatchServer', () => {
 
   describe('deleteDoc', () => {
     it('should call store.deleteDoc', async () => {
-      await patchServer.deleteDoc(docId);
+      await patchesServer.deleteDoc(docId);
       expect(mockStore.deleteDoc).toHaveBeenCalledWith(docId);
     });
   });
@@ -906,7 +906,7 @@ describe('PatchServer', () => {
         rev: 1,
         changes: [initialChange],
       };
-      vi.spyOn(patchServer as any, '_getSnapshotAtRevision').mockResolvedValue(mockSnapshot);
+      vi.spyOn(patchesServer as any, '_getSnapshotAtRevision').mockResolvedValue(mockSnapshot);
 
       // Mock _createVersion to bypass baseRev validation
       const versionMetadata = {
@@ -919,7 +919,7 @@ describe('PatchServer', () => {
         baseRev: 0,
       };
 
-      vi.spyOn(patchServer as any, '_createVersion').mockImplementation(async (...args) => {
+      vi.spyOn(patchesServer as any, '_createVersion').mockImplementation(async (...args) => {
         const changes = args[2] as Change[];
         const name = args[3] as string | undefined;
         // Create the metadata
@@ -935,7 +935,7 @@ describe('PatchServer', () => {
       });
 
       const versionName = 'v-main';
-      const versionId = await patchServer.createVersion(docId, versionName);
+      const versionId = await patchesServer.createVersion(docId, versionName);
       expect(typeof versionId).toBe('string');
       expect(mockStore.createVersion).toHaveBeenCalled();
     });
@@ -945,14 +945,16 @@ describe('PatchServer', () => {
       mockStore.listVersions.mockResolvedValueOnce([]);
       mockStore.listChanges.mockResolvedValueOnce([]); // No changes
 
-      await expect(patchServer.createVersion(docId, 'Empty Version')).rejects.toThrow(/No changes to create a version/);
+      await expect(patchesServer.createVersion(docId, 'Empty Version')).rejects.toThrow(
+        /No changes to create a version/
+      );
     });
   });
 
   describe('listVersions', () => {
     it('should call store.listVersions with provided options', async () => {
       const options: ListVersionsOptions = { limit: 5, reverse: true, origin: 'offline' };
-      await patchServer.listVersions(docId, options);
+      await patchesServer.listVersions(docId, options);
       expect(mockStore.listVersions).toHaveBeenCalledWith(docId, options);
     });
   });
@@ -970,7 +972,7 @@ describe('PatchServer', () => {
         rev: 0,
       };
       mockStore.createVersion(docId, versionMetadata, {}, []);
-      await patchServer.getVersionState(docId, versionId);
+      await patchesServer.getVersionState(docId, versionId);
       expect(mockStore.loadVersionState).toHaveBeenCalledWith(docId, versionId);
     });
   });
@@ -988,7 +990,7 @@ describe('PatchServer', () => {
         rev: 0,
       };
       mockStore.createVersion(docId, versionMetadata, {}, []);
-      await patchServer.getVersionChanges(docId, versionId);
+      await patchesServer.getVersionChanges(docId, versionId);
       expect(mockStore.loadVersionChanges).toHaveBeenCalledWith(docId, versionId);
     });
   });
@@ -1006,20 +1008,20 @@ describe('PatchServer', () => {
         rev: 0,
       };
       mockStore.createVersion(docId, versionMetadata, {}, []);
-      await patchServer.updateVersion(docId, versionId, 'update');
+      await patchesServer.updateVersion(docId, versionId, 'update');
       expect(mockStore.updateVersion).toHaveBeenCalledWith(docId, versionId, { name: 'update' });
     });
   });
 });
 
-describe('PatchServer multi-batch offline/large edit support (batchId)', () => {
-  let store: MockPatchStoreBackend;
-  let server: PatchServer;
+describe('PatchesServer multi-batch offline/large edit support (batchId)', () => {
+  let store: MockPatchesStoreBackend;
+  let server: PatchesServer;
   const docId = 'doc-batch-test';
 
   beforeEach(() => {
-    store = new MockPatchStoreBackend();
-    server = new PatchServer(store, { sessionTimeoutMinutes: 30 });
+    store = new MockPatchesStoreBackend();
+    server = new PatchesServer(store, { sessionTimeoutMinutes: 30 });
     store.setInitialDocState(docId, { text: '' }, 0, []);
   });
 

@@ -17,10 +17,11 @@ When working with a document in Patches, you are working with regular JavaScript
   - [Client Example](#client-example)
   - [Server Example](#server-example)
 - [Core Components](#core-components)
-  - [PatchDoc](#patchdoc)
-  - [PatchServer](#patchserver)
-  - [HistoryManager](#historymanager)
-  - [BranchManager](#branchmanager)
+  - [Patches](#patches-client-entry-point)
+  - [PatchesDoc](#patchdoc)
+  - [PatchesServer](#patchserver)
+  - [PatchesHistoryManager](#historymanager)
+  - [PatchesBranchManager](#branchmanager)
   - [Backend Store](#backend-store)
   - [Transport & Networking](#transport--networking)
   - [Awareness (Presence, Cursors, etc.)](#awareness-presence-cursors-etc)
@@ -83,81 +84,59 @@ _(Note: These are simplified examples. Real-world implementations require proper
 
 ### Client Example
 
-This shows how to initialize `PatchDoc`, make local changes, and handle sending/receiving updates.
+This shows how to initialize `Patches` (the main client interface) with an in-memory store and set up real-time sync with `PatchesSync`.
 
 ```typescript
-import { PatchDoc, Change } from '@dabble/patches';
+import { Patches } from '@dabble/patches';
+import { InMemoryStore } from '@dabble/patches/persist/InMemoryStore';
+import { PatchesSync } from '@dabble/patches/net/PatchesSync';
 
 interface MyDoc {
   text: string;
   count: number;
 }
 
-const patchDoc = new PatchDoc<MyDoc>();
+// 1. Create a store (in-memory for demo; use IndexedDB or your own for production)
+const store = new InMemoryStore();
 
-// React to Updates (e.g., update UI)
-patchDoc.onUpdate(newState => {
+// 2. Create the main Patches client instance
+const patches = new Patches({ store });
+
+// 3. Set up real-time sync with your server
+const sync = new PatchesSync('wss://your-server-url', patches);
+await sync.connect(); // Connect to the server (returns a promise)
+
+// 4. Open or create a document by ID
+const doc = await patches.openDoc<MyDoc>('my-doc-1');
+
+// 5. React to updates (e.g., update UI)
+doc.onUpdate(newState => {
   console.log('Document updated:', newState);
   // Update your UI here
 });
 
-// Make Local Changes
-patchDoc.change(draft => {
+// 6. Make local changes
+// (Changes are applied optimistically and will be synced to the server)
+doc.change(draft => {
   draft.text = 'Hello World!';
-  draft.count += 1;
+  draft.count = (draft.count || 0) + 1;
 });
 
-// Triggered after local changes occur
-patchDoc.onChange(change => {
-  syncWithServer();
-});
-
-// Or Trigger Sync Periodically or On Events
-// setInterval(syncWithServer, 5000); // Example: sync every 5 seconds
-// syncWithServer(); // Initial sync
-
-// Syncing Logic (Simplified)
-async function syncWithServer() {
-  // 1. Get local changes to send
-  const changesToSend = patchDoc.getUpdatesForServer();
-  if (changesToSend.length > 0) {
-    try {
-      // 2. Send changes via your network layer (e.g., fetch, WebSocket)
-      //    Replace 'sendChangesToServer' with your actual implementation
-      const serverCommit = await sendChangesToServer(initialDocId, changesToSend);
-      // 3. Apply server's confirmation
-      patchDoc.applyServerConfirmation(serverCommit);
-    } catch (error) {
-      console.error('Error sending changes:', error);
-      // Handle error (e.g., retry, show message)
-    }
-  }
-
-  // 4. Receive external changes from server (e.g., via WebSocket listener)
-  //    Replace 'checkForServerUpdates' with your actual implementation
-  const externalChanges = await checkForServerUpdates(initialDocId, patchDoc.rev);
-  if (externalChanges && externalChanges.length > 0) {
-    try {
-      patchDoc.applyExternalServerUpdate(externalChanges);
-    } catch (error) {
-      console.error('Error applying external changes:', error);
-      // Handle error (potentially requires full resync)
-    }
-  }
-}
+// 7. Changes are automatically synced using PatchesSync.
+//    If not using PatchesSync, you can manually flush changes to your backend as needed.
 ```
 
 ### Server Example
 
-This outlines a basic Express server using `PatchServer` with an in-memory store.
+This outlines a basic Express server using `PatchesServer` with an in-memory store.
 
 ```typescript
 import express from 'express';
-import { PatchServer, PatchStoreBackend, Change } from '@dabble/patches';
+import { PatchesServer, PatchesStoreBackend, Change } from '@dabble/patches';
 
 // Server Setup
 const store = new InMemoryStore(); // Fictional in-memory backend, use a database
-const server = new PatchServer(store);
+const server = new PatchesServer(store);
 const app = express();
 app.use(express.json());
 
@@ -208,11 +187,24 @@ Centralized OT has two different areas of focus, the server and the client. They
 
 These are the main classes you'll interact with when building a collaborative application with Patches.
 
-### PatchDoc
+### Patches (Main Client)
 
-(`PatchDoc` Documentation: [`docs/PatchDoc.md`](./docs/PatchDoc.md))
+(`Patches` Documentation: [`docs/Patches.md`](./docs/Patches.md))
 
-This is what you'll be working with on the client in your app. It is the client-side view of a collaborative document. You can check out [`docs/operational-transformation.md#patchdoc`](./docs/operational-transformation.md#patchdoc) to learn more about its role in the OT flow.
+This is the main entry point you'll use on the client in your app. It manages document instances (`PatchesDoc`) and persistence (`PatchesStore`). You obtain a `PatchesDoc` by calling `patches.openDoc(docId)`.
+
+- **Document Management:** Handles opening, tracking, and closing collaborative documents.
+- **Persistence:** Integrates with a pluggable store (e.g., in-memory, IndexedDB, custom backend).
+- **Sync Integration:** Works with `PatchesSync` for real-time server sync.
+- **Event Emitters:** Provides hooks (`onError`, `onServerCommit`, etc.) to react to system-level events.
+
+See [`docs/PatchesDoc.md`](./docs/PatchesDoc.md) for detailed usage and examples.
+
+### PatchesDoc (Document Instance)
+
+(`PatchesDoc` Documentation: [`docs/PatchesDoc.md`](./docs/PatchesDoc.md))
+
+A `PatchesDoc` represents a single collaborative document. You do not instantiate this directly in most apps; instead, use `patches.openDoc(docId)`.
 
 - **Local State Management:** Maintains the _committed_ state (last known server state), sending changes (awaiting server confirmation), and pending changes (local edits not yet sent).
 - **Optimistic Updates:** Applies local changes immediately for a responsive UI.
@@ -222,11 +214,11 @@ This is what you'll be working with on the client in your app. It is the client-
   - Applies external server updates from other clients (`applyExternalServerUpdate`), rebasing local changes as needed.
 - **Event Emitters:** Provides hooks (`onUpdate`, `onChange`, etc.) to react to state changes.
 
-See [`docs/PatchDoc.md`](./docs/PatchDoc.md) for detailed usage and examples.
+See [`docs/PatchesDoc.md`](./docs/PatchesDoc.md) for detailed usage and examples.
 
-### PatchServer
+### PatchesServer
 
-(`PatchServer` Documentation: [`docs/PatchServer.md`](./docs/PatchServer.md))
+(`PatchesServer` Documentation: [`docs/PatchesServer.md`](./docs/PatchesServer.md))
 
 The heart of the server-side logic. See [`docs/operational-transformation.md#patchserver`](./docs/operational-transformation.md#patchserver) for its role in the OT flow.
 
@@ -234,13 +226,13 @@ The heart of the server-side logic. See [`docs/operational-transformation.md#pat
 - **Transformation:** Transforms client changes against concurrent server changes using the OT algorithm.
 - **Applies Changes:** Applies the final transformed changes to the authoritative document state.
 - **Versioning:** Creates version snapshots based on time-based sessions or explicit triggers (useful for history and offline support).
-- **Persistence:** Uses a `PatchStoreBackend` implementation to save/load document state, changes, and versions.
+- **Persistence:** Uses a `PatchesStoreBackend` implementation to save/load document state, changes, and versions.
 
-See [`docs/PatchServer.md`](./docs/PatchServer.md) for detailed usage and examples.
+See [`docs/PatchesServer.md`](./docs/PatchesServer.md) for detailed usage and examples.
 
-### HistoryManager
+### PatchesHistoryManager
 
-(`HistoryManager` Documentation: [`docs/HistoryManager.md`](./docs/HistoryManager.md))
+(`PatchesHistoryManager` Documentation: [`docs/PatchesHistoryManager.md`](./docs/PatchesHistoryManager.md))
 
 Provides an API for querying the history ([`VersionMetadata`](./docs/types.ts)) of a document.
 
@@ -248,11 +240,11 @@ Provides an API for querying the history ([`VersionMetadata`](./docs/types.ts)) 
 - **Get Version State/Changes:** Load the full state or the specific changes associated with a past version.
 - **List Server Changes:** Query the raw sequence of committed server changes based on revision numbers.
 
-See [`docs/HistoryManager.md`](./docs/HistoryManager.md) for detailed usage and examples.
+See [`docs/PatchesHistoryManager.md`](./docs/PatchesHistoryManager.md) for detailed usage and examples.
 
-### BranchManager
+### PatchesBranchManager
 
-(`BranchManager` Documentation: [`docs/BranchManager.md`](./docs/BranchManager.md))
+(`PatchesBranchManager` Documentation: [`docs/PatchesBranchManager.md`](./docs/PatchesBranchManager.md))
 
 Manages branching ([`Branch`](./docs/types.ts)) and merging workflows.
 
@@ -261,13 +253,13 @@ Manages branching ([`Branch`](./docs/types.ts)) and merging workflows.
 - **Merge Branch:** Merges the changes made on a branch back into its source document (requires OT on the server to handle conflicts).
 - **Close Branch:** Marks a branch as closed, merged, or abandoned.
 
-See [`docs/BranchManager.md`](./docs/BranchManager.md) for detailed usage and examples.
+See [`docs/PatchesBranchManager.md`](./docs/PatchesBranchManager.md) for detailed usage and examples.
 
 ### Backend Store
 
-([`PatchStoreBackend` / `BranchingStoreBackend`](./docs/operational-transformation.md#backend-store-interface) Documentation: [`docs/operational-transformation.md#backend-store-interface`](./docs/operational-transformation.md#backend-store-interface))
+([`PatchesStoreBackend` / `BranchingStoreBackend`](./docs/operational-transformation.md#backend-store-interface) Documentation: [`docs/operational-transformation.md#backend-store-interface`](./docs/operational-transformation.md#backend-store-interface))
 
-This isn't a specific class provided by the library, but rather an _interface_ (`PatchStoreBackend` and `BranchingStoreBackend`) that you need to implement. This interface defines how the `PatchServer`, `HistoryManager`, and `BranchManager` interact with your chosen persistence layer (e.g., a database, file system, in-memory store).
+This isn't a specific class provided by the library, but rather an _interface_ (`PatchesStoreBackend` and `BranchingStoreBackend`) that you need to implement. This interface defines how the `PatchesServer`, `PatchesHistoryManager`, and `PatchesBranchManager` interact with your chosen persistence layer (e.g., a database, file system, in-memory store).
 
 You are responsible for providing an implementation that fulfills the methods defined in the interface (e.g., `getLatestRevision`, `saveChange`, `listVersions`, `createBranch`).
 
@@ -297,19 +289,19 @@ See [Awareness documentation](./docs/awareness.md) for how to use awareness feat
 
 ## Basic Workflow
 
-### Client-Side (`PatchDoc`)
+### Client-Side (`Patches` and `PatchesDoc`)
 
-1.  **Initialize `PatchDoc`:** Create an instance. See [`docs/PatchDoc.md#initialization`](./docs/PatchDoc.md#initialization).
-2.  **Subscribe to Updates:** Use [`doc.onUpdate`](./docs/PatchDoc.md#onupdate).
-3.  **Make Local Changes:** Use [`doc.change()`](./docs/PatchDoc.md#update).
-4.  **Send Changes:** Use [`doc.getUpdatesForServer()`](./docs/PatchDoc.md#getupdatesforserver) and [`doc.applyServerConfirmation()`](./docs/PatchDoc.md#applyserverconfirmation).
-5.  **Receive Server Changes:** Use [`doc.applyExternalServerUpdate()`](./docs/PatchDoc.md#applyexternalserverupdate).
+1.  **Initialize `Patches`:** Create an instance with a store (e.g., `InMemoryStore`).
+2.  **Track and Open a Document:** Use `patches.trackDocs([docId])` and `patches.openDoc(docId)` to get a `PatchesDoc` instance.
+3.  **Subscribe to Updates:** Use `doc.onUpdate`.
+4.  **Make Local Changes:** Use `doc.change()`.
+5.  **Sync Changes:** If using `PatchesSync`, changes are synced automatically. Otherwise, use the store or your own sync logic.
 
-### Server-Side (`PatchServer`)
+### Server-Side (`PatchesServer`)
 
-1.  **Initialize `PatchServer`:** Create an instance. See [`docs/PatchServer.md#initialization`](./docs/PatchServer.md#initialization).
-2.  **Receive Client Changes:** Use [`server.receiveChanges()`](./docs/PatchServer.md#core-method-receivechanges).
-3.  **Handle History/Branching:** Use [`HistoryManager`](./docs/HistoryManager.md) and [`BranchManager`](./docs/BranchManager.md).
+1.  **Initialize `PatchesServer`:** Create an instance. See [`docs/PatchesServer.md#initialization`](./docs/PatchesServer.md#initialization).
+2.  **Receive Client Changes:** Use [`server.receiveChanges()`](./docs/PatchesServer.md#core-method-receivechanges).
+3.  **Handle History/Branching:** Use [`PatchesHistoryManager`](./docs/PatchesHistoryManager.md) and [`PatchesBranchManager`](./docs/PatchesBranchManager.md).
 
 ## Examples
 
@@ -318,100 +310,29 @@ _(Note: These are simplified examples. Real-world implementations require proper
 ### Simple Client Setup
 
 ```typescript
-import { PatchDoc, Change } from '@dabble/patches';
+import { Patches } from '@dabble/patches';
+import { InMemoryStore } from '@dabble/patches/persist/InMemoryStore';
 
 interface MyDoc {
   text: string;
   count: number;
 }
 
-// Assume these are fetched initially
-const initialDocId = 'doc123';
-const initialServerState: MyDoc = { text: 'Hello', count: 0 };
-const initialServerRev = 5; // Revision corresponding to initialServerState
+const store = new InMemoryStore();
+const patches = new Patches({ store });
+const docId = 'doc123';
+await patches.trackDocs([docId]);
+const doc = await patches.openDoc<MyDoc>(docId);
 
-// Your function to send changes and receive the server's commit
-async function sendChangesToServer(docId: string, changes: Change[]): Promise<Change[]> {
-  const response = await fetch(`/docs/${docId}/changes`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ changes }),
-  });
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(errorData.error || `Server error: ${response.status}`);
-  }
-  return await response.json();
-}
-
-// --- Initialize PatchDoc ---
-const patchDoc = new PatchDoc<MyDoc>(initialServerState, initialServerRev);
-
-// --- UI Update Logic ---
-patchDoc.onUpdate(newState => {
+doc.onUpdate(newState => {
   console.log('Document updated:', newState);
-  // Update your UI element displaying newState.text, newState.count, etc.
 });
 
-// --- Making a Local Change ---
-function handleTextInput(newText: string) {
-  patchDoc.change(draft => {
-    draft.text = newText;
-  });
-  // Trigger sending changes (e.g., debounced)
-  sendLocalChanges();
-}
-
-function handleIncrement() {
-  patchDoc.change(draft => {
-    draft.count = (draft.count || 0) + 1;
-  });
-  sendLocalChanges();
-}
-
-// --- Sending Changes ---
-let isSending = false;
-async function sendLocalChanges() {
-  if (isSending || !patchDoc.hasPending) return;
-
-  isSending = true;
-  try {
-    const changesToSend = patchDoc.getUpdatesForServer();
-    if (changesToSend.length > 0) {
-      console.log('Sending changes:', changesToSend);
-      const serverCommit = await sendChangesToServer(initialDocId, changesToSend);
-      console.log('Received confirmation:', serverCommit);
-      patchDoc.applyServerConfirmation(serverCommit);
-    }
-  } catch (error) {
-    console.error('Failed to send changes:', error);
-    // Handle error - maybe retry, revert local changes, or force resync
-    // For simplicity, just log here. PatchDoc state might be inconsistent.
-  } finally {
-    isSending = false;
-    // Check again in case new changes came in while sending
-    if (patchDoc.hasPending) {
-      setTimeout(sendLocalChanges, 100); // Basic retry/check again
-    }
-  }
-}
-
-// --- Receiving External Changes (e.g., via WebSocket) ---
-function handleServerBroadcast(externalChanges: Change[]) {
-  if (!externalChanges || externalChanges.length === 0) return;
-  console.log('Received external changes:', externalChanges);
-  try {
-    patchDoc.applyExternalServerUpdate(externalChanges);
-  } catch (error) {
-    console.error('Error applying external server changes:', error);
-    // Critical error - likely need to resync the document state
-  }
-}
-
-// --- Example Usage ---
-// handleTextInput("Hello World!");
-// handleIncrement();
-// Assume setup for receiving broadcasts via `handleServerBroadcast`
+doc.change(draft => {
+  draft.text = 'Hello';
+  draft.count = 0;
+});
+// If using PatchesSync, changes are synced automatically.
 ```
 
 ### Simple Server Setup
@@ -419,14 +340,14 @@ function handleServerBroadcast(externalChanges: Change[]) {
 ```typescript
 import express from 'express';
 import {
-  PatchServer,
-  PatchStoreBackend,
+  PatchesServer,
+  PatchesStoreBackend,
   Change,
   VersionMetadata, //... other types
 } from '@dabble/patches';
 
 // --- Basic In-Memory Store (Replace with a real backend!) ---
-class InMemoryStore implements PatchStoreBackend {
+class InMemoryStore implements PatchesStoreBackend {
   private docs: Map<string, { state: any; rev: number; changes: Change[]; versions: VersionMetadata[] }> = new Map();
 
   async getLatestRevision(docId: string): Promise<number> {
@@ -539,7 +460,7 @@ class InMemoryStore implements PatchStoreBackend {
 
 // --- Server Setup ---
 const store = new InMemoryStore();
-const server = new PatchServer(store);
+const server = new PatchesServer(store);
 const app = express();
 app.use(express.json());
 
@@ -607,11 +528,11 @@ app.listen(PORT, () => {
 
 ### Offline Support & Versioning
 
-See [`PatchServer Versioning`](./docs/PatchServer.md#versioning) and [`HistoryManager`](./docs/HistoryManager.md).
+See [`PatchesServer Versioning`](./docs/PatchesServer.md#versioning) and [`PatchesHistoryManager`](./docs/PatchesHistoryManager.md).
 
 ### Branching and Merging
 
-See [`BranchManager`](./docs/BranchManager.md).
+See [`PatchesBranchManager`](./docs/PatchesBranchManager.md).
 
 ### Custom OT Types
 

@@ -2,7 +2,7 @@ import { signal, type Signal } from '../../event-signal.js';
 import type {
   // Types imported directly from OT definitions
   Change,
-  PatchSnapshot,
+  PatchesSnapshot,
   VersionMetadata,
 } from '../../types.js';
 import { JSONRPCClient } from '../protocol/JSONRPCClient.js';
@@ -96,7 +96,7 @@ export class PatchesWebSocket implements PatchesAPI {
    * @param docId - The ID of the document.
    * @returns A promise resolving with the document snapshot.
    */
-  async getDoc(docId: string): Promise<PatchSnapshot> {
+  async getDoc(docId: string): Promise<PatchesSnapshot> {
     return this.rpc.request('getDoc', { docId });
   }
 
@@ -156,7 +156,7 @@ export class PatchesWebSocket implements PatchesAPI {
    * @param versionId - The ID of the version to retrieve.
    * @returns A promise resolving with the document snapshot for that version.
    */
-  async getVersionState(docId: string, versionId: string): Promise<PatchSnapshot> {
+  async getVersionState(docId: string, versionId: string): Promise<PatchesSnapshot> {
     return this.rpc.request('getVersionState', { docId, versionId });
   }
 

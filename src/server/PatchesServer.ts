@@ -4,17 +4,17 @@ import { transformPatch } from '../json-patch/transformPatch.js';
 import type {
   Change,
   ListVersionsOptions,
-  PatchSnapshot,
-  PatchState,
-  PatchStoreBackend,
+  PatchesSnapshot,
+  PatchesState,
+  PatchesStoreBackend,
   VersionMetadata,
 } from '../types.js';
 import { applyChanges } from '../utils.js';
 
 /**
- * Configuration options for the PatchServer.
+ * Configuration options for the PatchesServer.
  */
-export interface PatchServerOptions {
+export interface PatchesServerOptions {
   /**
    * The maximum time difference in minutes between consecutive changes
    * to be considered part of the same editing session for versioning.
@@ -28,12 +28,12 @@ export interface PatchServerOptions {
  * coordinating batches of changes, managing versioning based on sessions (including offline),
  * and persisting data using a backend store.
  */
-export class PatchServer {
+export class PatchesServer {
   private readonly sessionTimeoutMillis: number;
 
   constructor(
-    private readonly store: PatchStoreBackend,
-    options: PatchServerOptions = {}
+    private readonly store: PatchesStoreBackend,
+    options: PatchesServerOptions = {}
   ) {
     this.sessionTimeoutMillis = (options.sessionTimeoutMinutes ?? 30) * 60 * 1000;
   }
@@ -65,7 +65,7 @@ export class PatchServer {
    * @param docId - The ID of the document.
    * @returns The latest version of the document and changes since the last version.
    */
-  async getDoc(docId: string, atRev?: number): Promise<PatchSnapshot> {
+  async getDoc(docId: string, atRev?: number): Promise<PatchesSnapshot> {
     return this._getSnapshotAtRevision(docId, atRev);
   }
 
@@ -327,7 +327,7 @@ export class PatchServer {
    * @param versionId The ID of the version.
    * @returns The state snapshot for the specified version.
    */
-  getVersionState(docId: string, versionId: string): Promise<PatchState> {
+  getVersionState(docId: string, versionId: string): Promise<PatchesState> {
     return this.store.loadVersionState(docId, versionId);
   }
 
@@ -358,7 +358,7 @@ export class PatchServer {
    * @param rev The revision number. If not provided, the latest state, its revision, and all changes since are returned.
    * @returns The document state at the last version before the revision, its revision number, and all changes up to the specified revision (or all changes if no revision is provided).
    */
-  async _getSnapshotAtRevision(docId: string, rev?: number): Promise<PatchSnapshot> {
+  async _getSnapshotAtRevision(docId: string, rev?: number): Promise<PatchesSnapshot> {
     const versions = await this.store.listVersions(docId, {
       limit: 1,
       reverse: true,
@@ -390,7 +390,7 @@ export class PatchServer {
    * @param rev The revision number. If not provided, the latest state and its revision is returned.
    * @returns The state at the specified revision *and* its revision number.
    */
-  async _getStateAtRevision(docId: string, rev?: number): Promise<PatchState> {
+  async _getStateAtRevision(docId: string, rev?: number): Promise<PatchesState> {
     // Note: _getSnapshotAtRevision now returns the state *of the version* and changes *since* it.
     // We need to apply the changes to get the state *at* the target revision.
     const { state: versionState, rev: snapshotRev, changes } = await this._getSnapshotAtRevision(docId, rev);

@@ -1,6 +1,6 @@
-# `PatchServer`
+# `PatchesServer`
 
-The `PatchServer` class is the central authority in the Patches OT system. It resides on the server and is responsible for receiving changes from clients, transforming them against concurrent edits, applying them to the authoritative document state, managing revisions, creating version snapshots, and persisting data via a backend store.
+The `PatchesServer` class is the central authority in the Patches OT system. It resides on the server and is responsible for receiving changes from clients, transforming them against concurrent edits, applying them to the authoritative document state, managing revisions, creating version snapshots, and persisting data via a backend store.
 
 **Table of Contents**
 
@@ -27,32 +27,32 @@ The `PatchServer` class is the central authority in the Patches OT system. It re
 
 ## Overview
 
-Key responsibilities of `PatchServer`:
+Key responsibilities of `PatchesServer`:
 
 1.  **Central Authority:** Defines the canonical order of operations.
 2.  **Transformation:** Ensures concurrent client changes converge correctly using OT.
 3.  **State Management:** Maintains the authoritative document state and revision number.
-4.  **Persistence:** Interacts with a `PatchStoreBackend` to save/load document data, changes, and versions.
+4.  **Persistence:** Interacts with a `PatchesStoreBackend` to save/load document data, changes, and versions.
 5.  **Versioning:** Creates snapshots (`VersionMetadata`) of the document state, particularly useful for offline support and history features.
 
 ## Initialization
 
-You instantiate `PatchServer` by providing an implementation of the [`PatchStoreBackend`](./operational-transformation.md#patchstorebackend) (or [`BranchingStoreBackend`](./operational-transformation.md#branchingstorebackend) if using branching features) and optional configuration.
+You instantiate `PatchesServer` by providing an implementation of the [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) (or [`BranchingStoreBackend`](./operational-transformation.md#branchingstorebackend) if using branching features) and optional configuration.
 
 ```typescript
-import { PatchServer, PatchServerOptions } from '@dabble/patches';
+import { PatchesServer, PatchesServerOptions } from '@dabble/patches';
 import { MyDatabaseStore } from './my-store'; // Your backend implementation
 
 // Instantiate your backend store
 const store = new MyDatabaseStore(/* connection details, etc. */);
 
 // Configure options (optional)
-const options: PatchServerOptions = {
+const options: PatchesServerOptions = {
   // Create version snapshots if gap between ops in a batch > 15 mins
   sessionTimeoutMinutes: 15,
 };
 
-const server = new PatchServer(store, options);
+const server = new PatchesServer(store, options);
 ```
 
 ## Core Method: `commitChanges()`
@@ -125,9 +125,9 @@ When `commitChanges` processes a new set of changes, it checks if `sessionTimeou
 
 ## Versioning
 
-`PatchServer` automatically creates version snapshots ([`VersionMetadata`](./types.ts)) to facilitate history tracking and understanding offline edits.
+`PatchesServer` automatically creates version snapshots ([`VersionMetadata`](./types.ts)) to facilitate history tracking and understanding offline edits.
 
-- See [`HistoryManager`](./HistoryManager.md) for querying versions.
+- See [`PatchesHistoryManager`](./PatchesHistoryManager.md) for querying versions.
 
 ### Offline Snapshots
 
@@ -145,11 +145,11 @@ When `commitChanges` processes a new set of changes, it checks if `sessionTimeou
 
 ### Configuration (`sessionTimeoutMinutes`)
 
-The `sessionTimeoutMinutes` option passed during `PatchServer` construction controls the threshold for creating both offline and online version snapshots. The default is 30 minutes.
+The `sessionTimeoutMinutes` option passed during `PatchesServer` construction controls the threshold for creating both offline and online version snapshots. The default is 30 minutes.
 
 ## State and History Retrieval
 
-`PatchServer` provides methods (which typically delegate to the backend store) for retrieving document state and version information.
+`PatchesServer` provides methods (which typically delegate to the backend store) for retrieving document state and version information.
 
 ### `getDoc()`
 
@@ -165,7 +165,7 @@ const snapshot = await server.getDoc(docId, 50);
 
 ### `_getStateAtRevision()`
 
-Retrieves the document state as it was _after_ a specific historical revision `rev` was committed. This is an internal method used by other PatchServer methods.
+Retrieves the document state as it was _after_ a specific historical revision `rev` was committed. This is an internal method used by other PatchesServer methods.
 
 ```typescript
 const { state, rev } = await server._getStateAtRevision(docId, 50);
@@ -195,7 +195,7 @@ const offlineVersions = await server.listVersions(docId, {
 
 ## Subscription Operations
 
-PatchServer provides methods for managing client subscriptions to documents.
+PatchesServer provides methods for managing client subscriptions to documents.
 
 ### `subscribe()`
 
@@ -219,7 +219,7 @@ const unsubscribedIds = await server.unsubscribe(clientId, [docId1, docId2]);
 
 ## Backend Store Dependency
 
-`PatchServer` is entirely dependent on a functional implementation of the [`PatchStoreBackend`](./operational-transformation.md#patchstorebackend) interface provided during construction. It does not manage persistence itself but delegates all storage operations (saving/loading states, changes, versions) to the backend.
+`PatchesServer` is entirely dependent on a functional implementation of the [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) interface provided during construction. It does not manage persistence itself but delegates all storage operations (saving/loading states, changes, versions) to the backend.
 
 See [Backend Store Interface](./operational-transformation.md#backend-store-interface) for details.
 

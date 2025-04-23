@@ -92,6 +92,6 @@ The network layer uses a JSON-RPC protocol for communication:
 
 ## See Also
 
-- [PatchDoc](./PatchDoc.md) - Document editing
+- [PatchesDoc](./PatchesDoc.md) - Document editing
 - [persist.md](./persist.md) - Storage and offline support
 - [awareness.md](./awareness.md) - Presence and collaboration features

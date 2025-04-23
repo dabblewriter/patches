@@ -1,16 +1,16 @@
 import { createId } from 'crypto-id';
 import type { Branch, BranchingStoreBackend, BranchStatus, Change, VersionMetadata } from '../types.js';
-import type { PatchServer } from './PatchServer.js';
+import type { PatchesServer } from './PatchesServer.js';
 
 /**
  * Helps manage branches for a document. A branch is a document that is branched from another document. Its first
  * version will be the point-in-time of the original document at the time of the branch. Branches allow for parallel
  * development of a document with the ability to merge changes back into the original document later.
  */
-export class BranchManager {
+export class PatchesBranchManager {
   constructor(
     private readonly store: BranchingStoreBackend,
-    private readonly patchServer: PatchServer
+    private readonly patchesServer: PatchesServer
   ) {}
 
   /**
@@ -37,7 +37,7 @@ export class BranchManager {
       throw new Error('Cannot create a branch from another branch.');
     }
     // 1. Get the state at the branch point
-    const stateAtRev = (await this.patchServer._getStateAtRevision(docId, rev)).state;
+    const stateAtRev = (await this.patchesServer._getStateAtRevision(docId, rev)).state;
     const branchDocId = createId();
     const now = Date.now();
     // Create an initial version at the branch point rev (for snapshotting/large docs)
@@ -132,7 +132,7 @@ export class BranchManager {
     // 6. Commit the flattened change to the main doc
     let committedMergeChanges: Change[] = [];
     try {
-      [, committedMergeChanges] = await this.patchServer.commitChanges(sourceDocId, [flattenedChange]);
+      [, committedMergeChanges] = await this.patchesServer.commitChanges(sourceDocId, [flattenedChange]);
     } catch (error) {
       console.error(`Failed to merge branch ${branchId} into ${sourceDocId}:`, error);
       throw new Error(`Merge failed: ${error instanceof Error ? error.message : String(error)}`);

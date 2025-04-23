@@ -1,7 +1,7 @@
-import { PatchDoc } from '../client/PatchDoc.js';
 import { type Unsubscriber, signal } from '../event-signal.js';
 import type { PatchesStore } from '../persist/PatchesStore.js';
 import type { Change } from '../types.js';
+import { PatchesDoc } from './PatchesDoc.js';
 
 // Simplified options without sync-specific parameters
 export interface PatchesOptions {
@@ -13,13 +13,13 @@ export interface PatchesOptions {
 
 // Keep internal doc management structure
 interface ManagedDoc<T extends object> {
-  doc: PatchDoc<T>;
+  doc: PatchesDoc<T>;
   onChangeUnsubscriber: Unsubscriber;
 }
 
 /**
  * Main client-side entry point for the Patches library.
- * Manages document instances (`PatchDoc`) and persistence (`PatchStore`).
+ * Manages document instances (`PatchesDoc`) and persistence (`PatchesStore`).
  * Can be used standalone or with PatchesSync for network synchronization.
  */
 export class Patches {
@@ -60,7 +60,7 @@ export class Patches {
     docIds.forEach(this.trackedDocs.delete, this.trackedDocs);
     this.onUntrackDocs.emit(docIds);
 
-    // Close any open PatchDoc instances first
+    // Close any open PatchesDoc instances first
     const closedPromises = docIds.filter(id => this.docs.has(id)).map(id => this.closeDoc(id)); // closeDoc removes from this.docs map
     await Promise.all(closedPromises);
 
@@ -68,9 +68,12 @@ export class Patches {
     await this.store.untrackDocs(docIds);
   }
 
-  async openDoc<T extends object>(docId: string, opts: { metadata?: Record<string, any> } = {}): Promise<PatchDoc<T>> {
+  async openDoc<T extends object>(
+    docId: string,
+    opts: { metadata?: Record<string, any> } = {}
+  ): Promise<PatchesDoc<T>> {
     const existing = this.docs.get(docId);
-    if (existing) return existing.doc as PatchDoc<T>;
+    if (existing) return existing.doc as PatchesDoc<T>;
 
     // Ensure the doc is tracked before proceeding
     await this.trackDocs([docId]);
@@ -79,7 +82,7 @@ export class Patches {
     const snapshot = await this.store.getDoc(docId);
     const initialState = (snapshot?.state ?? {}) as T;
     const mergedMetadata = { ...this.options.metadata, ...opts.metadata };
-    const doc = new PatchDoc<T>(initialState, mergedMetadata);
+    const doc = new PatchesDoc<T>(initialState, mergedMetadata);
     doc.setId(docId);
     if (snapshot) {
       doc.import(snapshot);
@@ -161,7 +164,7 @@ export class Patches {
   }
 
   close(): void {
-    // Clean up local PatchDoc listeners
+    // Clean up local PatchesDoc listeners
     this.docs.forEach(managed => managed.onChangeUnsubscriber());
     this.docs.clear();
 
@@ -171,7 +174,7 @@ export class Patches {
 
   // --- Internal Handlers ---
 
-  protected _setupLocalDocListener(docId: string, doc: PatchDoc<any>): Unsubscriber {
+  protected _setupLocalDocListener(docId: string, doc: PatchesDoc<any>): Unsubscriber {
     return doc.onChange(async () => {
       const changes = doc.getUpdatesForServer();
       if (!changes.length) return;

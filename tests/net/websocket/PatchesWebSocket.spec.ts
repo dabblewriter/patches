@@ -4,7 +4,7 @@ import { JSONRPCClient } from '../../../src/net/protocol/JSONRPCClient.js';
 import type { ConnectionState, ListOptions } from '../../../src/net/protocol/types.js';
 import { PatchesWebSocket } from '../../../src/net/websocket/PatchesWebSocket.js';
 import { WebSocketTransport } from '../../../src/net/websocket/WebSocketTransport.js';
-import { Change, PatchSnapshot, VersionMetadata } from '../../../src/types.js';
+import { Change, PatchesSnapshot, VersionMetadata } from '../../../src/types.js';
 
 // Mock dependencies
 vi.mock('../../../src/net/websocket/WebSocketTransport.js');
@@ -136,7 +136,7 @@ describe('PatchesWebSocket', () => {
     });
 
     it('getDoc should call rpc.request with correct params', async () => {
-      const expectedSnapshot: PatchSnapshot = { rev: REV, state: 'content', changes: [] };
+      const expectedSnapshot: PatchesSnapshot = { rev: REV, state: 'content', changes: [] };
       mockRpcImplementation.request.mockResolvedValue(expectedSnapshot);
       const result = await patchesWs.getDoc(DOC_ID);
       expect(mockRpcImplementation.request).toHaveBeenCalledWith('getDoc', {
@@ -153,7 +153,7 @@ describe('PatchesWebSocket', () => {
       expect(result).toBe(expectedChanges);
     });
 
-    it('patchDoc should call rpc.request with correct params', async () => {
+    it('patchesDoc should call rpc.request with correct params', async () => {
       const committedChanges = [...CHANGES];
       mockRpcImplementation.request.mockResolvedValue(committedChanges);
       const result = await patchesWs.commitChanges(DOC_ID, CHANGES);
@@ -215,7 +215,7 @@ describe('PatchesWebSocket', () => {
     });
 
     it('getVersionState should call rpc.request with correct params', async () => {
-      const expectedSnapshot: PatchSnapshot = { rev: REV, state: 'version content', changes: [] };
+      const expectedSnapshot: PatchesSnapshot = { rev: REV, state: 'version content', changes: [] };
       mockRpcImplementation.request.mockResolvedValue(expectedSnapshot);
       const result = await patchesWs.getVersionState(DOC_ID, VERSION_ID);
       expect(mockRpcImplementation.request).toHaveBeenCalledWith('getVersionState', {

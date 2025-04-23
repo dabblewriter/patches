@@ -77,5 +77,5 @@ awareness.onUpdate(states => {
 ## See Also
 
 - [WebRTC Transport](./operational-transformation.md#webrtc)
-- [PatchDoc](./PatchDoc.md)
+- [PatchesDoc](./PatchesDoc.md)
 - [operational-transformation.md](./operational-transformation.md)

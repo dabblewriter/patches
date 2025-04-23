@@ -1,6 +1,6 @@
-# `HistoryManager`
+# `PatchesHistoryManager`
 
-The `HistoryManager` class provides an API for querying the historical data of a document managed by the Patches OT system. It interacts with the backend store to retrieve information about past versions (snapshots) and committed server changes.
+The `PatchesHistoryManager` class provides an API for querying the historical data of a document managed by the Patches OT system. It interacts with the backend store to retrieve information about past versions (snapshots) and committed server changes.
 
 **Table of Contents**
 
@@ -19,46 +19,46 @@ The `HistoryManager` class provides an API for querying the historical data of a
 
 ## Overview
 
-`HistoryManager` allows you to access the history created by `PatchServer`, enabling features such as:
+`PatchesHistoryManager` allows you to access the history created by `PatchesServer`, enabling features such as:
 
 - Displaying a version history UI.
 - Reverting a document to a previous state.
 - Auditing changes made over time.
 - Debugging synchronization issues by examining past states and changes.
 
-It operates by querying the data persisted by `PatchServer` via a `PatchStoreBackend` implementation.
+It operates by querying the data persisted by `PatchesServer` via a `PatchesStoreBackend` implementation.
 
 ## Initialization
 
-You instantiate `HistoryManager` by providing the specific `docId` you want to query and an implementation of the [`PatchStoreBackend`](./operational-transformation.md#patchstorebackend).
+You instantiate `PatchesHistoryManager` by providing the specific `docId` you want to query and an implementation of the [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend).
 
 ```typescript
 import {
-  HistoryManager,
-  PatchStoreBackend, // Your backend needs to implement this
+  PatchesHistoryManager,
+  PatchesStoreBackend, // Your backend needs to implement this
 } from '@dabble/patches';
 import { MyDatabaseStore } from './my-store'; // Your backend implementation
 
 const store = new MyDatabaseStore(/* ... */);
 const docIdToQuery = 'document-456';
 
-const historyManager = new HistoryManager(docIdToQuery, store);
+const historyManager = new PatchesHistoryManager(docIdToQuery, store);
 ```
 
 - **`docId`**: The ID of the document whose history you want to access.
-- **`store`**: An object implementing the `PatchStoreBackend` interface, used to fetch historical data.
+- **`store`**: An object implementing the `PatchesStoreBackend` interface, used to fetch historical data.
 
 ## Querying Versions
 
-Versions represent snapshots ([`VersionMetadata`](./types.ts)) of the document state, typically created automatically by [`PatchServer`](./PatchServer.md) based on time gaps or session boundaries (see [`PatchServer Versioning`](./PatchServer.md#versioning)).
+Versions represent snapshots ([`VersionMetadata`](./types.ts)) of the document state, typically created automatically by [`PatchesServer`](./PatchesServer.md) based on time gaps or session boundaries (see [`PatchesServer Versioning`](./PatchesServer.md#versioning)).
 
 ### `listVersions()`
 
-Retrieves a list of [`VersionMetadata`](./types.ts) objects for the document, supporting various filters defined in [`PatchStoreBackendListVersionsOptions`](./types.ts).
+Retrieves a list of [`VersionMetadata`](./types.ts) objects for the document, supporting various filters defined in [`PatchesStoreBackendListVersionsOptions`](./types.ts).
 
 ```typescript
 async listVersions(
-    options?: PatchStoreBackendListVersionsOptions
+    options?: PatchesStoreBackendListVersionsOptions
 ): Promise<VersionMetadata[]>;
 
 // Example: Get the 10 most recent versions (online or offline)
@@ -148,11 +148,11 @@ These methods deal with the raw, linear sequence of committed server changes ([`
 
 ### `listServerChanges()`
 
-Lists the committed server [`Change`](./types.ts) objects based on revision number ranges ([`PatchStoreBackendListChangesOptions`](./types.ts)).
+Lists the committed server [`Change`](./types.ts) objects based on revision number ranges ([`PatchesStoreBackendListChangesOptions`](./types.ts)).
 
 ```typescript
 async listServerChanges(
-    options?: PatchStoreBackendListChangesOptions
+    options?: PatchesStoreBackendListChangesOptions
 ): Promise<Change[]>;
 
 // Example: Get changes from revision 101 to 110
@@ -174,7 +174,7 @@ const lastFiveChanges = await historyManager.listServerChanges({
 
 ## Backend Store Dependency
 
-Like [`PatchServer`](./PatchServer.md), `HistoryManager` relies entirely on a provided [`PatchStoreBackend`](./operational-transformation.md#patchstorebackend) implementation to fetch the historical data.
+Like [`PatchesServer`](./PatchesServer.md), `PatchesHistoryManager` relies entirely on a provided [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) implementation to fetch the historical data.
 
 ## Example Usage
 
@@ -182,13 +182,13 @@ See the [example in this document](#example-usage) and the [main README examples
 
 ```typescript
 import {
-  HistoryManager,
+  PatchesHistoryManager,
   MyDatabaseStore, // Your implementation
 } from '@dabble/patches';
 
 const store = new MyDatabaseStore(/* ... */);
 const docId = 'my-collaborative-doc';
-const history = new HistoryManager(docId, store);
+const history = new PatchesHistoryManager(docId, store);
 
 async function displayVersionHistory() {
   try {

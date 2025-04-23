@@ -1,13 +1,13 @@
-import type { Change, PatchStoreBackend, VersionMetadata } from '../types.js'; // No change needed
+import type { Change, ListVersionsOptions, PatchesStoreBackend, VersionMetadata } from '../types.js'; // No change needed
 
 /**
  * Helps retrieve historical information (versions, changes) for a document
  * using the new versioning model based on IDs and metadata.
  */
-export class HistoryManager {
+export class PatchesHistoryManager {
   constructor(
     private readonly docId: string,
-    private readonly store: PatchStoreBackend
+    private readonly store: PatchesStoreBackend
   ) {}
 
   /**
@@ -15,32 +15,8 @@ export class HistoryManager {
    * @param options Filtering and sorting options (e.g., limit, reverse, origin, groupId, date range).
    * @returns A list of version metadata objects.
    */
-  async listVersions(
-    options: {
-      limit?: number;
-      reverse?: boolean; // Sort by startDate descending
-      origin?: 'online' | 'offline' | 'branch';
-      groupId?: string;
-      startDateAfter?: number;
-      endDateBefore?: number;
-      // Add pagination (e.g., startAfterVersionId) if needed
-    } = {}
-  ): Promise<VersionMetadata[]> {
+  async listVersions(options: ListVersionsOptions = {}): Promise<VersionMetadata[]> {
     return await this.store.listVersions(this.docId, options);
-  }
-
-  /**
-   * Loads the metadata for a specific version by its ID.
-   * @param versionId The unique ID of the version.
-   * @returns The VersionMetadata object or null if not found.
-   */
-  async getVersionMetadata(versionId: string): Promise<VersionMetadata | null> {
-    try {
-      return await this.store.loadVersionMetadata(this.docId, versionId);
-    } catch (error) {
-      console.warn(`Metadata for version ${versionId} not found for doc ${this.docId}.`, error);
-      return null;
-    }
   }
 
   /**
@@ -71,25 +47,6 @@ export class HistoryManager {
     } catch (error) {
       console.error(`Failed to load changes for version ${versionId} of doc ${this.docId}.`, error);
       throw new Error(`Could not load changes for version ${versionId}.`);
-    }
-  }
-
-  /**
-   * Convenience method to get the state of the parent version.
-   * Useful for client-side scrubbing, providing the state *before* a version's changes were applied.
-   * @param versionId - The ID of the version whose parent state is needed.
-   * @returns The state of the parent version, or undefined if it's the root version or parent not found.
-   */
-  async getParentState(versionId: string): Promise<any | undefined> {
-    const metadata = await this.getVersionMetadata(versionId);
-    if (!metadata?.parentId) {
-      return undefined; // Root version or metadata fetch failed
-    }
-    try {
-      return await this.getStateAtVersion(metadata.parentId);
-    } catch (error) {
-      console.warn(`Could not load parent state for version ${versionId} (parent ID: ${metadata.parentId}).`, error);
-      return undefined; // Parent exists but state load failed
     }
   }
 

@@ -1,4 +1,4 @@
-import type { Change, PatchSnapshot } from '../types.js';
+import type { Change, PatchesSnapshot } from '../types.js';
 /** Represents metadata for a document tracked by the store. */
 export interface TrackedDoc {
   docId: string;
@@ -31,7 +31,7 @@ export interface PatchesStore {
   listDocs(includeDeleted?: boolean): Promise<TrackedDoc[]>;
 
   // ─── Reconstruction helpers ────────────────────────────────────────
-  getDoc(docId: string): Promise<PatchSnapshot | undefined>;
+  getDoc(docId: string): Promise<PatchesSnapshot | undefined>;
   getPendingChanges(docId: string): Promise<Change[]>;
   getLastRevs(docId: string): Promise<[committedRev: number, pendingRev: number]>;
 

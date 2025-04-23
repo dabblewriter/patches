@@ -17,17 +17,17 @@ Patches is an unrelease project, in stealth mode, being iterated on until it is 
 
 - **Centralized OT:** Server is the single source of truth for document history and conflict resolution.
 - **Patches:** The main client-side interface, loading docs, syncing with the server, and storing data. Supported by PatchesSync and PatchesStore for implementation.
-- **PatchDoc:** Client-side document, manages local state, optimistic updates, and syncs with server.
-- **PatchServer:** Server-side authority, applies/commits changes, manages versions and persistence.
-- **HistoryManager:** Query document versions and change history.
-- **BranchManager:** Supports branching/merging workflows.
-- **Backend Store:** You must implement a storage backend (see `PatchStoreBackend`/`BranchingStoreBackend` interfaces).
+- **PatchesDoc:** Client-side document, manages local state, optimistic updates, and syncs with server.
+- **PatchesServer:** Server-side authority, applies/commits changes, manages versions and persistence.
+- **PatchesHistoryManager:** Query document versions and change history.
+- **PatchesBranchManager:** Supports branching/merging workflows.
+- **Backend Store:** You must implement a storage backend (see `PatchesStoreBackend`/`BranchingStoreBackend` interfaces).
 
 ## Directory Structure
 
 - `src/` — Main source code
-  - `client/` — Client-side OT implementation (PatchDoc)
-  - `server/` — Server-side OT implementation (PatchServer, HistoryManager, BranchManager)
+  - `client/` — Client-side OT implementation (PatchesDoc)
+  - `server/` — Server-side OT implementation (PatchesServer, PatchesHistoryManager, PatchesBranchManager)
   - `net/` — Network layer (WebSocket, protocol, providers)
   - `persist/` — Storage implementations
   - `json-patch/`, `utils/` — Supporting modules
@@ -70,10 +70,10 @@ can safely assume it is a `.ts` file and look it up accordingly with its `path/t
 
 - `README.md` — High-level intro, usage, and examples.
 - `docs/operational-transformation.md` — OT algorithm, client-server flow, backend interface.
-- `docs/PatchDoc.md` — Client-side API.
-- `docs/PatchServer.md` — Server-side API.
-- `docs/HistoryManager.md` — Version/history API.
-- `docs/BranchManager.md` — Branching/merging API.
+- `docs/PatchesDoc.md` — Client-side API.
+- `docs/PatchesServer.md` — Server-side API.
+- `docs/PatchesHistoryManager.md` — Version/history API.
+- `docs/PatchesBranchManager.md` — Branching/merging API.
 - `docs/json-patch.md` — JSON Patch/legacy features.
 - `docs/net.md` — Network layer: real-time sync, offline-first, WebSocket, protocol.
 - `docs/persist.md` — Storage implementations and offline support.

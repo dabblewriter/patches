@@ -47,7 +47,7 @@ ws.onChangesCommitted(params => {
 ### 5. Send Changes
 
 ```typescript
-// Use your PatchDoc to generate changes, then:
+// Use your PatchesDoc to generate changes, then:
 await ws.commitChanges('doc123', changesArray);
 ```
 
@@ -75,10 +75,10 @@ const snapshot = await ws.getVersionState('doc123', versionId);
 
 ## Example: Real-World Client Integration
 
-Below is a typical setup for a collaborative client using `PatchDoc` and `PatchesWebSocket` together. This pattern ensures robust, real-time sync with the server and other clients.
+Below is a typical setup for a collaborative client using `PatchesDoc` and `PatchesWebSocket` together. This pattern ensures robust, real-time sync with the server and other clients.
 
 ```typescript
-import { PatchDoc, PatchesWebSocket } from '@dabble/patches';
+import { PatchesDoc, PatchesWebSocket } from '@dabble/patches';
 
 // 1. Connect to the server and subscribe to a document
 const ws = new PatchesWebSocket('wss://your-server');
@@ -88,24 +88,24 @@ await ws.subscribe('doc123');
 // 2. Fetch the initial document state and revision from the server (pseudo-code)
 const { state: initialState, rev: initialRev } = await ws.getDoc('doc123');
 
-// 3. Create a PatchDoc instance with the initial state
-const patchDoc = new PatchDoc(initialState, {}); // Optionally pass metadata as 2nd arg
+// 3. Create a PatchesDoc instance with the initial state
+const patchesDoc = new PatchesDoc(initialState, {}); // Optionally pass metadata as 2nd arg
 
 // 4. Listen for document updates from the server (from other clients)
 ws.onChangesCommitted(({ docId, changes }) => {
   if (docId === 'doc123') {
-    patchDoc.applyExternalServerUpdate(changes);
+    patchesDoc.applyExternalServerUpdate(changes);
   }
 });
 
 // 5. Listen for local changes and send them to the server
-patchDoc.onChange(() => {
+patchesDoc.onChange(() => {
   // Only send if not already sending a batch
-  if (!patchDoc.isSending && patchDoc.hasPending) {
-    const changes = patchDoc.getUpdatesForServer();
+  if (!patchesDoc.isSending && patchesDoc.hasPending) {
+    const changes = patchesDoc.getUpdatesForServer();
     ws.commitChanges('doc123', changes)
       .then(serverCommit => {
-        patchDoc.applyServerConfirmation(serverCommit);
+        patchesDoc.applyServerConfirmation(serverCommit);
       })
       .catch(err => {
         // Handle network/server error (retry, revert, etc.)
@@ -115,14 +115,14 @@ patchDoc.onChange(() => {
 });
 
 // 8. Make local changes as usual
-patchDoc.change(draft => {
+patchesDoc.change(draft => {
   draft.title = 'New Title';
 });
 ```
 
 **Key Points:**
 
-- All document state and OT logic is managed by `PatchDoc`.
+- All document state and OT logic is managed by `PatchesDoc`.
 - All network sync and versioning is handled by `PatchesWebSocket`.
 - The sync loop is: local change → `onChange` → send to server → receive confirmation → `applyServerConfirmation`.
 - Incoming changes from other clients are applied via `applyExternalServerUpdate`.
@@ -132,12 +132,12 @@ patchDoc.change(draft => {
 ## Best Practices
 
 - Always handle connection state changes (reconnect on drop, show offline UI, etc.)
-- Use `PatchDoc` for local state and OT logic; use `PatchesWebSocket` for network sync
+- Use `PatchesDoc` for local state and OT logic; use `PatchesWebSocket` for network sync
 - Debounce or batch changes if your app generates many rapid edits
 - Use versioning to allow users to restore or view history
 
 ## See Also
 
 - [Awareness](./awareness.md) — How to use presence/cursor features
-- [PatchDoc](./PatchDoc.md) — Client-side OT logic
+- [PatchesDoc](./PatchesDoc.md) — Client-side OT logic
 - [operational-transformation.md](./operational-transformation.md) — Protocol details

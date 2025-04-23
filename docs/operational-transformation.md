@@ -16,11 +16,12 @@ This document provides an overview of how Operational Transformation (OT) is imp
   - [Client Receives Confirmation](#client-receives-confirmation)
   - [Client Receives External Changes](#client-receives-external-changes)
 - [Key Components](#key-components)
-  - [`PatchServer`](#patchserver)
-  - [`PatchDoc`](#patchdoc)
+  - [`Patches`](#patches)
+  - [`PatchesDoc`](#patchesdoc)
   - [`Change` Object](#change-object)
+  - [`PatchesServer`](#patchesserver)
 - [Backend Store Interface](#backend-store-interface)
-  - [`PatchStoreBackend`](#patchstorebackend)
+  - [`PatchesStoreBackend`](#patchstorebackend)
   - [`BranchingStoreBackend`](#branchingstorebackend)
 - [Transformation Logic](#transformation-logic)
   - [The `transformPatch` Function](#the-transformpatch-function)
@@ -33,7 +34,7 @@ Patches uses a specific flavor of OT designed for simplicity and robustness by l
 
 ### Centralized Authority
 
-Unlike some classic OT algorithms designed for peer-to-peer networks, Patches relies on a **central server** (`PatchServer`) to be the single source of truth for the order of operations. All clients send their changes to the server, and the server determines the definitive sequence in which these changes are applied to the document.
+Unlike some classic OT algorithms designed for peer-to-peer networks, Patches relies on a **central server** (`PatchesServer`) to be the single source of truth for the order of operations. All clients send their changes to the server, and the server determines the definitive sequence in which these changes are applied to the document.
 
 This approach significantly simplifies the implementation and reasoning about concurrent changes compared to distributed OT systems which must guarantee convergence regardless of message delivery order.
 
@@ -45,7 +46,7 @@ When a client has made local changes that haven't been confirmed by the server y
 
 Patches implements rebasing by transforming the client's pending and/or sending changes _over_ the incoming server changes. This ensures that the client's local changes are modified to apply correctly on top of the updated server state.
 
-The core function for this on the client-side (`PatchDoc`) is `rebaseChanges`, which utilizes the underlying `transformPatch` logic.
+The core function for this on the client-side (`PatchesDoc`) is `rebaseChanges`, which utilizes the underlying `transformPatch` logic.
 
 ### Linear History
 
@@ -70,12 +71,12 @@ The synchronization process follows these steps:
 
 1.  **Client Sends Changes:**
 
-    - The client (`PatchDoc`) makes local changes, applying them optimistically.
+    - The client (via `PatchesDoc`, obtained from `Patches`) makes local changes, applying them optimistically.
     - It calls `getUpdatesForServer()` which bundles pending changes.
     - Each change in the bundle is tagged with the client's current `committedRev` as its `baseRev`.
     - The client sends this bundle to the server.
 
-2.  **Server Processes Changes (`PatchServer.receiveChanges`):**
+2.  **Server Processes Changes (`PatchesServer.receiveChanges`):**
 
     - The server receives the client's `changes` and validates the `baseRev` against its current document revision.
     - If `baseRev` < server's current revision, the server retrieves all _historical_ server changes committed _after_ `baseRev`.
@@ -95,7 +96,7 @@ The synchronization process follows these steps:
       - The server sends an _empty array_ (`[]`) back to the originating client.
       - Nothing is broadcast to other clients.
 
-4.  **Client Receives Confirmation (`PatchDoc.applyServerConfirmation`):**
+4.  **Client Receives Confirmation (`PatchesDoc.applyServerConfirmation`):**
 
     - The originating client receives the response from the server.
     - If it receives a `Change` object:
@@ -109,7 +110,7 @@ The synchronization process follows these steps:
       - It does _not_ update its committed state or revision.
       - It recalculates its optimistic local state (which might change if new pending changes were rebased against nothing).
 
-5.  **Client Receives External Changes (`PatchDoc.applyExternalServerUpdate`):**
+5.  **Client Receives External Changes (`PatchesDoc.applyExternalServerUpdate`):**
     - When a client receives a broadcasted `Change` from the server (originated by _another_ client):
       - It validates the incoming change's `rev` against its own `committedRev`.
       - It applies the server change to its _committed_ state.
@@ -119,21 +120,22 @@ The synchronization process follows these steps:
 
 ## Key Components
 
-- **[`PatchServer`](./PatchServer.md)**: Server-side orchestrator. Handles `receiveChanges`, transformation, persistence, versioning.
-- **[`PatchDoc`](./PatchDoc.md)**: Client-side document representation. Manages optimistic updates, local buffering, sending/receiving changes, rebasing.
+- **[`PatchesServer`](./PatchesServer.md)**: Server-side orchestrator. Handles `receiveChanges`, transformation, persistence, versioning.
+- **[`Patches`](./Patches.md)**: Main client entry point. Manages document instances, persistence, and sync. Use `patches.openDoc(docId)` to obtain a `PatchesDoc` for editing and sync.
+- **[`PatchesDoc`](./PatchesDoc.md)**: Client-side document representation. Manages optimistic updates, local buffering, sending/receiving changes, rebasing.
 - **[`Change` Object](../src/types.ts)**: The data structure passed between client and server, containing ops and metadata (especially `baseRev` and `rev`).
 
 ## Backend Store Interface
 
 The OT system relies on a backend implementation provided by you.
 
-### `PatchStoreBackend`
+### `PatchesStoreBackend`
 
 (`src/types.ts`)
-This interface defines the essential methods needed by [`PatchServer`](./PatchServer.md) and [`HistoryManager`](./HistoryManager.md) for basic OT and versioning.
+This interface defines the essential methods needed by [`PatchesServer`](./PatchesServer.md) and [`PatchesHistoryManager`](./PatchesHistoryManager.md) for basic OT and versioning.
 
 ```typescript
-export interface PatchStoreBackend {
+export interface PatchesStoreBackend {
   // Get latest revision number (returns 0 if doc doesn't exist)
   getLatestRevision(docId: string): Promise<number>;
   // Get latest document state (returns undefined if doc doesn't exist)
@@ -144,12 +146,12 @@ export interface PatchStoreBackend {
   // Save a single committed server change
   saveChange(docId: string, change: Change): Promise<void>;
   // List committed server changes based on revision filters
-  listChanges(docId: string, options: PatchStoreBackendListChangesOptions): Promise<Change[]>;
+  listChanges(docId: string, options: PatchesStoreBackendListChangesOptions): Promise<Change[]>;
 
   // Save a version snapshot (metadata, state, original changes)
   saveVersion(docId: string, version: VersionMetadata): Promise<void>;
   // List version metadata based on filters
-  listVersions(docId: string, options: PatchStoreBackendListVersionsOptions): Promise<VersionMetadata[]>;
+  listVersions(docId: string, options: PatchesStoreBackendListVersionsOptions): Promise<VersionMetadata[]>;
   // Load metadata for a specific version ID
   loadVersionMetadata(docId: string, versionId: string): Promise<VersionMetadata | null>;
   // Load the state snapshot for a specific version ID
@@ -166,10 +168,10 @@ _(See [`src/types.ts`](../src/types.ts) for full details)_
 ### `BranchingStoreBackend`
 
 (`src/types.ts`)
-This interface extends `PatchStoreBackend` with methods required by [`BranchManager`](./BranchManager.md).
+This interface extends `PatchesStoreBackend` with methods required by [`PatchesBranchManager`](./PatchesBranchManager.md).
 
 ```typescript
-export interface BranchingStoreBackend extends PatchStoreBackend {
+export interface BranchingStoreBackend extends PatchesStoreBackend {
   // List metadata for branches originating from a document
   listBranches(docId: string): Promise<Branch[]>;
   // Load metadata for a specific branch

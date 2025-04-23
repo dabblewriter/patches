@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mocked } from 'vitest';
-import { PatchDoc } from '../../src/client/PatchDoc';
+import { Patches } from '../../src/client/Patches';
+import { PatchesDoc } from '../../src/client/PatchesDoc';
 import { signal } from '../../src/event-signal';
-import { Patches } from '../../src/net/Patches';
 import type { PatchesStore } from '../../src/persist/PatchesStore';
 import type { Change } from '../../src/types';
 
-// Mock PatchDoc before any test setup
-vi.mock('../../src/client/PatchDoc');
+// Mock PatchesDoc before any test setup
+vi.mock('../../src/client/PatchesDoc');
 
 // Define a type for the document state used in tests
 interface TestDocState {
@@ -16,7 +16,7 @@ interface TestDocState {
 
 describe('Patches', () => {
   let mockStore: Mocked<PatchesStore>;
-  let mockDocInstanceFactory: () => Mocked<PatchDoc<any>>;
+  let mockDocInstanceFactory: () => Mocked<PatchesDoc<any>>;
   let patches: Patches;
 
   const DOC_ID = 'test-doc-1';
@@ -39,7 +39,7 @@ describe('Patches', () => {
       onPendingChanges: signal(),
     } as unknown as Mocked<PatchesStore>;
 
-    // Setup mock PatchDoc factory
+    // Setup mock PatchesDoc factory
     mockDocInstanceFactory = () => {
       let _mockPendingChanges: Change[] = [];
       let _mockSendingChanges: Change[] = [];
@@ -90,7 +90,7 @@ describe('Patches', () => {
         _setMockUpdatesForServer: (updates: Change[]) => {
           _mockUpdatesForServer = updates;
         },
-      } as unknown as Mocked<PatchDoc<any>>;
+      } as unknown as Mocked<PatchesDoc<any>>;
 
       vi.spyOn(instance, 'getUpdatesForServer');
       vi.spyOn(instance, 'handleSendFailure');
@@ -101,9 +101,9 @@ describe('Patches', () => {
       return instance;
     };
 
-    // Mock PatchDoc constructor
-    const mockPatchDoc = vi.mocked(PatchDoc);
-    mockPatchDoc.mockImplementation(() => {
+    // Mock PatchesDoc constructor
+    const mockPatchesDoc = vi.mocked(PatchesDoc);
+    mockPatchesDoc.mockImplementation(() => {
       const instance = mockDocInstanceFactory();
       return instance;
     });

@@ -1,7 +1,7 @@
 import { createId } from 'crypto-id';
 import { signal } from '../event-signal.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
-import type { Change, PatchSnapshot } from '../types.js';
+import type { Change, PatchesSnapshot } from '../types.js';
 import { applyChanges, rebaseChanges } from '../utils.js';
 
 /**
@@ -9,7 +9,7 @@ import { applyChanges, rebaseChanges } from '../utils.js';
  * Manages committed state, pending (local-only) changes, and
  * changes currently being sent to the server.
  */
-export class PatchDoc<T extends object> {
+export class PatchesDoc<T extends object> {
   protected _id: string | null = null;
   protected _state: T;
   protected _committedState: T;
@@ -26,7 +26,7 @@ export class PatchDoc<T extends object> {
   readonly onUpdate = signal<(newState: T) => void>();
 
   /**
-   * Creates an instance of PatchDoc.
+   * Creates an instance of PatchesDoc.
    * @param initialState Optional initial state.
    * @param initialMetadata Optional metadata to add to generated changes.
    */
@@ -68,7 +68,7 @@ export class PatchDoc<T extends object> {
    * `changes` array alongside `pending` changes. On import, all changes
    * are treated as pending.
    */
-  export(): PatchSnapshot<T> {
+  export(): PatchesSnapshot<T> {
     return {
       state: this._committedState,
       rev: this._committedRev,
@@ -81,7 +81,7 @@ export class PatchDoc<T extends object> {
    * Imports previously exported document state.
    * Resets sending state and treats all imported changes as pending.
    */
-  import(snapshot: PatchSnapshot<T>) {
+  import(snapshot: PatchesSnapshot<T>) {
     this._committedState = structuredClone(snapshot.state); // Use structuredClone
     this._committedRev = snapshot.rev;
     this._pendingChanges = snapshot.changes ?? []; // All imported changes become pending
@@ -308,8 +308,8 @@ export class PatchDoc<T extends object> {
   /**
    * @deprecated Use export() - kept for backward compatibility if needed.
    */
-  toJSON(): PatchSnapshot<T> {
-    console.warn('PatchDoc.toJSON() is deprecated. Use export() instead.');
+  toJSON(): PatchesSnapshot<T> {
+    console.warn('PatchesDoc.toJSON() is deprecated. Use export() instead.');
     return this.export();
   }
 

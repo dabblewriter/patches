@@ -1,6 +1,6 @@
 import { signal } from '../event-signal.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
-import type { Change, PatchSnapshot } from '../types.js';
+import type { Change, PatchesSnapshot } from '../types.js';
 import { applyChanges } from '../utils.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
@@ -114,7 +114,7 @@ export class IndexedDBStore implements PatchesStore {
 
   /**
    * Rebuilds a document snapshot + pending queue *without* loading
-   * the full PatchDoc into memory.
+   * the full PatchesDoc into memory.
    *
    * 1. load the last snapshot (state + rev)
    * 2. load committedChanges[rev > snapshot.rev]
@@ -122,7 +122,7 @@ export class IndexedDBStore implements PatchesStore {
    * 4. apply committed changes, rebase pending
    * 5. return { state, rev, changes: pending }
    */
-  async getDoc(docId: string): Promise<PatchSnapshot | undefined> {
+  async getDoc(docId: string): Promise<PatchesSnapshot | undefined> {
     const [tx, docsStore, snapshots, committedChanges, pendingChanges] = await this.transaction(
       ['docs', 'snapshots', 'committedChanges', 'pendingChanges'],
       'readonly'
@@ -236,7 +236,7 @@ export class IndexedDBStore implements PatchesStore {
    * @param docId - The ID of the document to save the changes for
    * @param changes - The changes to save
    * @param sentPendingRange - The range of pending changes to remove, *must* be provided after receiving the changes
-   * from the server in response to a patchDoc request.
+   * from the server in response to a patchesDoc request.
    */
   async saveCommittedChanges(docId: string, changes: Change[], sentPendingRange?: [number, number]): Promise<void> {
     const [tx, committedChanges, pendingChanges, snapshots, docsStore] = await this.transaction(

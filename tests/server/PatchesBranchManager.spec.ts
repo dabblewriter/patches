@@ -1,7 +1,7 @@
 import { createId } from 'crypto-id';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { BranchManager } from '../../src/server/BranchManager';
-import { PatchServer } from '../../src/server/PatchServer';
+import { PatchesBranchManager } from '../../src/server/PatchesBranchManager';
+import { PatchesServer } from '../../src/server/PatchesServer';
 import type {
   Branch,
   BranchingStoreBackend,
@@ -18,7 +18,7 @@ vi.mock('crypto-id', () => ({
 }));
 
 /**
- * Mock implementation of BranchingStoreBackend for testing BranchManager
+ * Mock implementation of BranchingStoreBackend for testing PatchesBranchManager
  */
 class MockBranchingStoreBackend implements BranchingStoreBackend {
   private docs: Map<string, { state: any; rev: number; changes: Change[] }> = new Map();
@@ -222,23 +222,23 @@ class MockBranchingStoreBackend implements BranchingStoreBackend {
 
 // --- Tests ---
 
-describe('BranchManager', () => {
+describe('PatchesBranchManager', () => {
   let mockStore: MockBranchingStoreBackend;
-  let mockPatchServer: Partial<PatchServer>;
-  let branchManager: BranchManager;
+  let mockPatchesServer: Partial<PatchesServer>;
+  let branchManager: PatchesBranchManager;
   const mainDocId = 'doc-main';
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockStore = new MockBranchingStoreBackend();
 
-    // Mock PatchServer with just the methods BranchManager needs
-    mockPatchServer = {
+    // Mock PatchesServer with just the methods PatchesBranchManager needs
+    mockPatchesServer = {
       _getStateAtRevision: vi.fn().mockResolvedValue({ state: { value: 'test' }, rev: 10 }),
       commitChanges: vi.fn().mockResolvedValue([[], []]),
     };
 
-    branchManager = new BranchManager(mockStore as BranchingStoreBackend, mockPatchServer as PatchServer);
+    branchManager = new PatchesBranchManager(mockStore as BranchingStoreBackend, mockPatchesServer as PatchesServer);
 
     // Reset createId mock to be deterministic
     let idCounter = 0;
@@ -278,7 +278,7 @@ describe('BranchManager', () => {
       const stateAtRev = { value: 'test' };
 
       // Setup mock for _getStateAtRevision
-      (mockPatchServer._getStateAtRevision as Mock).mockResolvedValue({ state: stateAtRev, rev });
+      (mockPatchesServer._getStateAtRevision as Mock).mockResolvedValue({ state: stateAtRev, rev });
 
       // Create branch
       const branchId = await branchManager.createBranch(mainDocId, rev, branchName, metadata);
@@ -415,8 +415,8 @@ describe('BranchManager', () => {
       mockStore.loadVersionState.mockResolvedValue(state);
       mockStore.loadVersionChanges.mockResolvedValue(changes);
 
-      // Mock patchDoc to return a successful merge
-      (mockPatchServer.commitChanges as Mock).mockResolvedValue([
+      // Mock patchesDoc to return a successful merge
+      (mockPatchesServer.commitChanges as Mock).mockResolvedValue([
         [],
         [
           {
@@ -452,7 +452,7 @@ describe('BranchManager', () => {
 
       expect(result).toEqual([]);
       expect(mockStore.updateBranch).toHaveBeenCalledWith(branchDocId, { status: 'merged' });
-      expect(mockPatchServer.commitChanges).not.toHaveBeenCalled();
+      expect(mockPatchesServer.commitChanges).not.toHaveBeenCalled();
     });
 
     it('should copy branch versions to main doc and flatten changes', async () => {
@@ -475,7 +475,7 @@ describe('BranchManager', () => {
       );
 
       // Should create flattened change with all ops
-      expect(mockPatchServer.commitChanges).toHaveBeenCalledWith(mainDocId, [
+      expect(mockPatchesServer.commitChanges).toHaveBeenCalledWith(mainDocId, [
         expect.objectContaining({
           ops: expect.arrayContaining([
             { op: 'add', path: '/property1', value: 'value1' },
@@ -499,7 +499,7 @@ describe('BranchManager', () => {
 
     it('should handle merge failure', async () => {
       const error = new Error('Merge conflict');
-      (mockPatchServer.commitChanges as Mock).mockRejectedValue(error);
+      (mockPatchesServer.commitChanges as Mock).mockRejectedValue(error);
 
       await expect(branchManager.mergeBranch(branchDocId)).rejects.toThrow('Merge failed: Merge conflict');
 

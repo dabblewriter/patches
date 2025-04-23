@@ -1,7 +1,7 @@
+import { Patches } from '../client/Patches.js';
 import { signal } from '../event-signal.js';
 import type { PatchesStore, TrackedDoc } from '../persist/PatchesStore.js';
 import { breakIntoBatches } from '../utils/batching.js';
-import { Patches } from './Patches.js';
 import type { ConnectionState } from './protocol/types.js';
 import { PatchesWebSocket } from './websocket/PatchesWebSocket.js';
 import type { WebSocketOptions } from './websocket/WebSocketTransport.js';
@@ -48,7 +48,7 @@ export class PatchesSync {
     onlineState.onOnlineChange(this._handleOnlineChange);
     this.ws.onStateChange(this._handleConnectionChange);
     this.ws.onChangesCommitted(({ docId, changes }) => {
-      // Persist first, then notify Patches instance to update PatchDoc
+      // Persist first, then notify Patches instance to update PatchesDoc
       this.store
         .saveCommittedChanges(docId, changes)
         .then(() => this.patches.applyServerChanges(docId, changes))
@@ -186,8 +186,15 @@ export class PatchesSync {
   }
 
   async flushDoc(docId: string): Promise<void> {
-    if (!this.trackedDocs.has(docId) || this.isFlushing.has(docId)) return;
-    if (!this.state.connected) return;
+    if (!this.trackedDocs.has(docId)) {
+      throw new Error(`Document ${docId} is not tracked`);
+    }
+    if (this.isFlushing.has(docId)) {
+      throw new Error(`Document ${docId} is already being flushed`);
+    }
+    if (!this.state.connected) {
+      throw new Error('Not connected to server');
+    }
 
     this.isFlushing.add(docId);
     if (this.state.syncing !== 'updating') {
@@ -200,18 +207,23 @@ export class PatchesSync {
       if (!pending.length) {
         // Try to get from memory if available
         pending = this.patches.getDocChanges(docId);
-        if (!pending.length) return; // Nothing to flush
+        if (!pending.length) {
+          this.isFlushing.delete(docId);
+          return; // Nothing to flush
+        }
       }
 
       const batches = breakIntoBatches(pending, this.options.maxBatchSize);
 
       for (const batch of batches) {
-        if (!this.state.connected) throw new Error('Disconnected during flush');
+        if (!this.state.connected) {
+          throw new Error('Disconnected during flush');
+        }
         const range: [number, number] = [batch[0].rev, batch[batch.length - 1].rev];
         const committed = await this.ws.commitChanges(docId, batch);
         // Persist committed + remove pending in store
         await this.store.saveCommittedChanges(docId, committed, range);
-        // Notify Patches to update PatchDoc
+        // Notify Patches to update PatchesDoc
         this.patches.applyServerChanges(docId, committed);
         // Fetch remaining pending for next batch or check completion
         pending = await this.store.getPendingChanges(docId);

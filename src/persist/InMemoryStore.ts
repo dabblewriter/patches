@@ -1,6 +1,6 @@
 import { signal } from '../event-signal.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
-import type { Change, PatchSnapshot } from '../types.js';
+import type { Change, PatchesSnapshot } from '../types.js';
 import { applyChanges } from '../utils.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
@@ -12,7 +12,7 @@ interface DocBuffers {
 }
 
 /**
- * A trivial in‑memory implementation of OfflineStore (soon PatchStore).
+ * A trivial in‑memory implementation of OfflineStore (soon PatchesStore).
  * All data lives in JS objects – nothing survives a page reload.
  * Useful for unit tests or when you want the old 'stateless realtime' behaviour.
  */
@@ -23,7 +23,7 @@ export class InMemoryStore implements PatchesStore {
   readonly onPendingChanges = signal<(docId: string, changes: Change[]) => void>();
 
   // ─── Reconstruction ────────────────────────────────────────────────────
-  async getDoc(docId: string): Promise<PatchSnapshot | undefined> {
+  async getDoc(docId: string): Promise<PatchesSnapshot | undefined> {
     const buf = this.docs.get(docId);
     if (!buf || buf.deleted) return undefined;
 

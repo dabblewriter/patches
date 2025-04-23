@@ -22,7 +22,7 @@ export interface Change {
  * @property state - The state of the document.
  * @property rev - The revision number of the state.
  */
-export interface PatchState<T = any> {
+export interface PatchesState<T = any> {
   state: T;
   rev: number;
 }
@@ -33,7 +33,7 @@ export interface PatchState<T = any> {
  * @property rev - The revision number of the state.
  * @property changes - Any unapplied changes since `rev` that may be applied to the `state` to get the latest state.
  */
-export interface PatchSnapshot<T = any> extends PatchState<T> {
+export interface PatchesSnapshot<T = any> extends PatchesState<T> {
   changes: Change[];
 }
 
@@ -120,9 +120,9 @@ export interface ListVersionsOptions {
 
 /**
  * Interface for a backend storage system for patch synchronization.
- * Defines methods needed by PatchServer, HistoryManager, etc.
+ * Defines methods needed by PatchesServer, PatchesHistoryManager, etc.
  */
-export interface PatchStoreBackend {
+export interface PatchesStoreBackend {
   /** Adds a subscription for a client to one or more documents. */
   addSubscription(clientId: string, docIds: string[]): Promise<string[]>;
 
@@ -158,9 +158,9 @@ export interface PatchStoreBackend {
 }
 
 /**
- * Extends PatchStoreBackend with methods specifically for managing branches.
+ * Extends PatchesStoreBackend with methods specifically for managing branches.
  */
-export interface BranchingStoreBackend extends PatchStoreBackend {
+export interface BranchingStoreBackend extends PatchesStoreBackend {
   /** Lists metadata records for branches originating from a document. */
   listBranches(docId: string): Promise<Branch[]>;
 

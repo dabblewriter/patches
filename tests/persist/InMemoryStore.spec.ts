@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { InMemoryStore } from '../../src/persist/InMemoryStore';
-import type { Change, PatchSnapshot, TrackedDoc } from '../../src/types';
+import type { Change } from '../../src/types';
 
 describe('InMemoryStore', () => {
   let store: InMemoryStore;
@@ -31,7 +31,7 @@ describe('InMemoryStore', () => {
     it('should handle empty document state', async () => {
       const docId = 'empty-doc';
       const doc = await store.getDoc(docId);
-      
+
       expect(doc).toBeUndefined();
     });
 
@@ -48,7 +48,7 @@ describe('InMemoryStore', () => {
       await store.saveCommittedChanges(docId, [change]);
       await store.deleteDoc(docId);
       const doc = await store.getDoc(docId);
-      
+
       expect(doc).toBeUndefined();
     });
   });
@@ -116,7 +116,7 @@ describe('InMemoryStore', () => {
 
     it('should rebase pending changes when committed changes arrive', async () => {
       const docId = 'test-doc';
-      
+
       // First, save a committed change
       const committedChange: Change = {
         id: 'committed-1',
@@ -126,7 +126,7 @@ describe('InMemoryStore', () => {
         created: Date.now() - 1000,
       };
       await store.saveCommittedChanges(docId, [committedChange]);
-      
+
       // Then save a pending change based on the initial state
       const pendingChange: Change = {
         id: 'pending-1',
@@ -136,7 +136,7 @@ describe('InMemoryStore', () => {
         created: Date.now(),
       };
       await store.savePendingChanges(docId, [pendingChange]);
-      
+
       // Now save a new committed change that would conflict
       const newCommittedChange: Change = {
         id: 'committed-2',
@@ -146,10 +146,10 @@ describe('InMemoryStore', () => {
         created: Date.now() - 500,
       };
       await store.saveCommittedChanges(docId, [newCommittedChange]);
-      
+
       // Get the document - pending changes should be rebased
       const doc = await store.getDoc(docId);
-      
+
       expect(doc).toBeDefined();
       expect(doc?.state).toEqual({ content: 'server content' });
       expect(doc?.changes).toHaveLength(1); // The rebased pending change
@@ -161,34 +161,34 @@ describe('InMemoryStore', () => {
   describe('Document Tracking', () => {
     it('should track and list documents', async () => {
       const docIds = ['doc-1', 'doc-2', 'doc-3'];
-      
+
       await store.trackDocs(docIds);
       const docs = await store.listDocs();
-      
+
       expect(docs).toHaveLength(3);
       expect(docs.map(d => d.docId)).toEqual(expect.arrayContaining(docIds));
     });
 
     it('should untrack documents', async () => {
       const docIds = ['doc-1', 'doc-2', 'doc-3'];
-      
+
       await store.trackDocs(docIds);
       await store.untrackDocs(['doc-2']);
       const docs = await store.listDocs();
-      
+
       expect(docs).toHaveLength(2);
       expect(docs.map(d => d.docId)).toEqual(expect.arrayContaining(['doc-1', 'doc-3']));
     });
 
     it('should handle deleted documents in listing', async () => {
       const docIds = ['doc-1', 'doc-2', 'doc-3'];
-      
+
       await store.trackDocs(docIds);
       await store.deleteDoc('doc-2');
-      
+
       const activeDocs = await store.listDocs(false);
       const allDocs = await store.listDocs(true);
-      
+
       expect(activeDocs).toHaveLength(2);
       expect(allDocs).toHaveLength(3);
       expect(allDocs.find(d => d.docId === 'doc-2')?.deleted).toBe(true);

@@ -125,7 +125,7 @@ export class PatchesHistoryClient<T = any> {
     return data.changes!;
   }
 
-  /** Scrub to a specific change within a version */
+  /** Scrub to a specific change within a version where changeIndex is 1-based and 0 is the parent version */
   async scrubTo(versionId: string, changeIndex: number): Promise<void> {
     const version = this.versions.find(v => v.id === versionId);
 

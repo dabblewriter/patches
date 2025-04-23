@@ -1,4 +1,3 @@
-export { PatchesDoc } from './PatchesDoc.js';
-
-// Re-export types
-export type { Change, PatchesSnapshot as PatchSnapshot, VersionMetadata } from '../types.js';
+export * from './Patches.js';
+export * from './PatchesDoc.js';
+export * from './PatchesHistoryClient.js';

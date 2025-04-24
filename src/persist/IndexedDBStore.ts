@@ -1,7 +1,7 @@
 import { signal } from '../event-signal.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
-import type { Change, PatchesSnapshot } from '../types.js';
-import { applyChanges } from '../utils.js';
+import type { Change, Deferred, PatchesSnapshot } from '../types.js';
+import { applyChanges, deferred } from '../utils.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
 const DB_VERSION = 1;
@@ -31,49 +31,65 @@ interface StoredChange extends Change {
  */
 export class IndexedDBStore implements PatchesStore {
   private db: IDBDatabase | null = null;
-  private dbName: string;
-  private dbPromise: Promise<IDBDatabase>;
+  private dbName?: string;
+  private dbPromise: Deferred<IDBDatabase>;
 
   /** Subscribe to be notified after local state changes are saved to the database. */
   readonly onPendingChanges = signal<(docId: string, changes: Change[]) => void>();
 
-  constructor(dbName: string) {
+  constructor(dbName?: string) {
     this.dbName = dbName;
-    this.dbPromise = this.initDB();
+    this.dbPromise = deferred<IDBDatabase>();
+    if (this.dbName) {
+      this.initDB();
+    }
   }
 
-  private async initDB(): Promise<IDBDatabase> {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open(this.dbName, DB_VERSION);
+  private async initDB() {
+    if (!this.dbName) return;
+    const request = indexedDB.open(this.dbName, DB_VERSION);
 
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        this.db = request.result;
-        resolve(this.db);
-      };
+    request.onerror = () => this.dbPromise.reject(request.error);
+    request.onsuccess = () => {
+      this.db = request.result;
+      this.dbPromise.resolve(this.db);
+    };
 
-      request.onupgradeneeded = event => {
-        const db = (event.target as IDBOpenDBRequest).result;
+    request.onupgradeneeded = event => {
+      const db = (event.target as IDBOpenDBRequest).result;
 
-        // Create stores
-        if (!db.objectStoreNames.contains('snapshots')) {
-          db.createObjectStore('snapshots', { keyPath: 'docId' });
-        }
-        if (!db.objectStoreNames.contains('committedChanges')) {
-          db.createObjectStore('committedChanges', { keyPath: ['docId', 'rev'] });
-        }
-        if (!db.objectStoreNames.contains('pendingChanges')) {
-          db.createObjectStore('pendingChanges', { keyPath: ['docId', 'rev'] });
-        }
-        if (!db.objectStoreNames.contains('docs')) {
-          db.createObjectStore('docs', { keyPath: 'docId' });
-        }
-      };
-    });
+      // Create stores
+      if (!db.objectStoreNames.contains('snapshots')) {
+        db.createObjectStore('snapshots', { keyPath: 'docId' });
+      }
+      if (!db.objectStoreNames.contains('committedChanges')) {
+        db.createObjectStore('committedChanges', { keyPath: ['docId', 'rev'] });
+      }
+      if (!db.objectStoreNames.contains('pendingChanges')) {
+        db.createObjectStore('pendingChanges', { keyPath: ['docId', 'rev'] });
+      }
+      if (!db.objectStoreNames.contains('docs')) {
+        db.createObjectStore('docs', { keyPath: 'docId' });
+      }
+    };
   }
 
   private getDB(): Promise<IDBDatabase> {
-    return this.dbPromise;
+    return this.dbPromise.promise;
+  }
+
+  /**
+   * Set the name of the database, loads a new database connection.
+   * @param dbName - The new name of the database.
+   */
+  setName(dbName: string) {
+    this.dbName = dbName;
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+      this.dbPromise = deferred<IDBDatabase>();
+    }
+    this.initDB();
   }
 
   /**
@@ -82,18 +98,20 @@ export class IndexedDBStore implements PatchesStore {
    * the database.
    */
   async close(): Promise<void> {
-    await this.dbPromise;
+    await this.dbPromise.promise;
     if (this.db) {
       this.db.close();
       this.db = null;
-      this.dbPromise = Promise.resolve(null as any);
+      this.dbPromise = deferred();
+      this.dbPromise.resolve(null as any);
     }
   }
 
   async deleteDB(): Promise<void> {
+    if (!this.dbName) return;
     await this.close();
     await new Promise<void>((resolve, reject) => {
-      const request = indexedDB.deleteDatabase(this.dbName);
+      const request = indexedDB.deleteDatabase(this.dbName!);
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
       request.onblocked = () => reject(request.error);

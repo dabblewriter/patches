@@ -89,9 +89,23 @@ export function rebaseChanges(serverChanges: Change[], localChanges: Change[]): 
 export function deferred<T = void>(): Deferred<T> {
   let resolve!: (value: T) => void;
   let reject!: (reason?: any) => void;
+  let _status: 'pending' | 'fulfilled' | 'rejected' = 'pending';
   const promise = new Promise<T>((_resolve, _reject) => {
-    resolve = _resolve;
-    reject = _reject;
+    resolve = (value: T) => {
+      _resolve(value);
+      _status = 'fulfilled';
+    };
+    reject = (reason?: any) => {
+      _reject(reason);
+      _status = 'rejected';
+    };
   });
-  return { promise, resolve, reject };
+  return {
+    promise,
+    resolve,
+    reject,
+    get status() {
+      return _status;
+    },
+  };
 }

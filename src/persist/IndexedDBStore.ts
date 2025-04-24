@@ -223,14 +223,14 @@ export class IndexedDBStore implements PatchesStore {
     let docMeta = await docsStore.get<TrackedDoc>(docId);
     if (!docMeta) {
       docMeta = { docId, committedRev: 0 };
-      await docsStore.add(docMeta);
+      await docsStore.put(docMeta);
     } else if (docMeta.deleted) {
       delete docMeta.deleted;
       await docsStore.put(docMeta);
       console.warn(`Revived document ${docId} by saving pending changes.`);
     }
 
-    await Promise.all(changes.map(change => pendingChanges.add<StoredChange>({ ...change, docId })));
+    await Promise.all(changes.map(change => pendingChanges.put<StoredChange>({ ...change, docId })));
 
     this.onPendingChanges.emit(docId, changes);
     await tx.complete();
@@ -263,7 +263,7 @@ export class IndexedDBStore implements PatchesStore {
     );
 
     // Save committed changes
-    await Promise.all(changes.map(change => committedChanges.add<StoredChange>({ ...change, docId })));
+    await Promise.all(changes.map(change => committedChanges.put<StoredChange>({ ...change, docId })));
 
     // Remove pending changes if range provided
     if (sentPendingRange) {
@@ -287,7 +287,7 @@ export class IndexedDBStore implements PatchesStore {
       if (!firstPending?.baseRev || firstPending?.baseRev >= lastRev) {
         const state = applyChanges(snapshot?.state, committed);
         await Promise.all([
-          snapshots.add({
+          snapshots.put({
             docId,
             rev: lastRev,
             state,
@@ -331,7 +331,7 @@ export class IndexedDBStore implements PatchesStore {
           // Otherwise, it's already tracked and not deleted, do nothing
         } else {
           // If doesn't exist, add it
-          await docsStore.add({ docId, committedRev: 0 });
+          await docsStore.put({ docId, committedRev: 0 });
         }
       })
     );
@@ -429,9 +429,9 @@ class IDBStoreWrapper {
     });
   }
 
-  async add<T>(value: T): Promise<IDBValidKey> {
+  async put<T>(value: T): Promise<IDBValidKey> {
     return new Promise((resolve, reject) => {
-      const request = this.store.add(value);
+      const request = this.store.put(value);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -468,14 +468,6 @@ class IDBStoreWrapper {
     return new Promise((resolve, reject) => {
       const request = this.store.openCursor(this.createRange(lower, upper), 'prev');
       request.onsuccess = () => resolve(request.result?.value);
-      request.onerror = () => reject(request.error);
-    });
-  }
-
-  async put<T>(value: T): Promise<IDBValidKey> {
-    return new Promise((resolve, reject) => {
-      const request = this.store.put(value);
-      request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
   }

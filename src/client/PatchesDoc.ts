@@ -1,5 +1,5 @@
 import { createId } from 'crypto-id';
-import { signal } from '../event-signal.js';
+import { signal, type Unsubscriber } from '../event-signal.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { Change, PatchesSnapshot } from '../types.js';
@@ -48,6 +48,11 @@ export class PatchesDoc<T extends object = object> {
     return this._state;
   }
 
+  /** Alias for state. */
+  get value(): T {
+    return this._state;
+  }
+
   /** Last committed revision number from the server. */
   get committedRev(): number {
     return this._committedRev;
@@ -61,6 +66,13 @@ export class PatchesDoc<T extends object = object> {
   /** Are there local changes that haven't been sent yet? */
   get hasPending(): boolean {
     return this._pendingChanges.length > 0;
+  }
+
+  /** Subscribe to be notified whenever value changes. */
+  subscribe(onUpdate: (newValue: T) => void): Unsubscriber {
+    const unsub = this.onUpdate(onUpdate);
+    onUpdate(this._state);
+    return unsub;
   }
 
   /**

@@ -24,7 +24,7 @@ describe('IndexedDBStore', () => {
         reject(new Error('Database initialization timeout'));
       }, TEST_TIMEOUT);
 
-      (store as any).dbPromise
+      (store as any).dbPromise.promise
         .then(() => {
           clearTimeout(timeout);
           resolve();

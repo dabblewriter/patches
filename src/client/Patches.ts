@@ -75,9 +75,6 @@ export class Patches {
     const existing = this.docs.get(docId);
     if (existing) return existing.doc as PatchesDoc<T>;
 
-    // Ensure the doc is tracked before proceeding
-    await this.trackDocs([docId]);
-
     // Load initial state from store
     const snapshot = await this.store.getDoc(docId);
     const initialState = (snapshot?.state ?? {}) as T;
@@ -100,9 +97,6 @@ export class Patches {
     if (managed) {
       managed.onChangeUnsubscriber();
       this.docs.delete(docId);
-      // Note: We do NOT call untrackDocs here automatically.
-      // Closing a doc just removes it from memory; it remains tracked
-      // for background sync unless explicitly untracked.
     }
   }
 

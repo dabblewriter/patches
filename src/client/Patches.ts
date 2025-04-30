@@ -46,6 +46,12 @@ export class Patches {
 
   // --- Public API Methods ---
 
+  /**
+   * Tracks the given document IDs, adding them to the set of tracked documents and notifying listeners.
+   * Tracked docs are kept in sync with the server, even when not open locally.
+   * This allows for background syncing and updates of unopened documents.
+   * @param docIds - Array of document IDs to track.
+   */
   async trackDocs(docIds: string[]): Promise<void> {
     docIds = docIds.filter(id => !this.trackedDocs.has(id));
     if (!docIds.length) return;
@@ -54,6 +60,12 @@ export class Patches {
     await this.store.trackDocs(docIds);
   }
 
+  /**
+   * Untracks the given document IDs, removing them from the set of tracked documents and notifying listeners.
+   * Untracked docs will no longer be kept in sync with the server, even if not open locally.
+   * Closes any open docs and removes them from the store.
+   * @param docIds - Array of document IDs to untrack.
+   */
   async untrackDocs(docIds: string[]): Promise<void> {
     docIds = docIds.filter(id => this.trackedDocs.has(id));
     if (!docIds.length) return;
@@ -68,6 +80,13 @@ export class Patches {
     await this.store.untrackDocs(docIds);
   }
 
+  /**
+   * Opens a document by ID, loading its state from the store and setting up change listeners.
+   * If the doc is already open, returns the existing instance.
+   * @param docId - The document ID to open.
+   * @param opts - Optional metadata to merge with the doc's metadata.
+   * @returns The opened PatchesDoc instance.
+   */
   async openDoc<T extends object>(
     docId: string,
     opts: { metadata?: Record<string, any> } = {}
@@ -95,6 +114,11 @@ export class Patches {
     return doc;
   }
 
+  /**
+   * Closes an open document by ID, removing listeners and optionally untracking it.
+   * @param docId - The document ID to close.
+   * @param options - Optional: set untrack to true to also untrack the doc.
+   */
   async closeDoc(docId: string, { untrack = false }: { untrack?: boolean } = {}): Promise<void> {
     const managed = this.docs.get(docId);
     if (managed) {
@@ -106,6 +130,11 @@ export class Patches {
     }
   }
 
+  /**
+   * Deletes a document by ID, closing it if open, untracking it, and removing it from the store.
+   * Emits the onDeleteDoc signal.
+   * @param docId - The document ID to delete.
+   */
   async deleteDoc(docId: string): Promise<void> {
     // Close if open locally
     if (this.docs.has(docId)) {
@@ -121,16 +150,19 @@ export class Patches {
   }
 
   /**
-   * Gets all tracked document IDs that are currently open.
-   * Used by PatchesSync to check which docs need syncing.
+   * Gets all tracked document IDs that are currently open in memory.
+   * Used by PatchesSync to determine which docs need syncing.
+   * @returns Array of open document IDs.
    */
   getOpenDocIds(): string[] {
     return Array.from(this.docs.keys());
   }
 
   /**
-   * Retrieves changes for a document that should be sent to the server.
+   * Retrieves local changes for a document that should be sent to the server.
    * Used by PatchesSync during synchronization.
+   * @param docId - The document ID to get changes for.
+   * @returns Array of Change objects to send to the server.
    */
   getDocChanges(docId: string): Change[] {
     const doc = this.docs.get(docId)?.doc;
@@ -145,8 +177,9 @@ export class Patches {
   }
 
   /**
-   * Handles failure to send changes to the server.
+   * Handles a failure to send changes to the server for a given document.
    * Used by PatchesSync to requeue changes after failures.
+   * @param docId - The document ID for which sending failed.
    */
   handleSendFailure(docId: string): void {
     const doc = this.docs.get(docId)?.doc;
@@ -156,13 +189,19 @@ export class Patches {
   }
 
   /**
-   * Apply server changes to a document.
+   * Applies server-confirmed changes to a document.
    * Used by PatchesSync to update documents with server changes.
+   * @param docId - The document ID to apply changes to.
+   * @param changes - Array of Change objects from the server.
    */
   applyServerChanges(docId: string, changes: Change[]): void {
     this._handleServerCommit(docId, changes);
   }
 
+  /**
+   * Closes all open documents and cleans up listeners and store connections.
+   * Should be called when shutting down the client.
+   */
   close(): void {
     // Clean up local PatchesDoc listeners
     this.docs.forEach(managed => managed.onChangeUnsubscriber());
@@ -174,6 +213,12 @@ export class Patches {
 
   // --- Internal Handlers ---
 
+  /**
+   * Sets up a listener for local changes on a PatchesDoc, saving pending changes to the store.
+   * @param docId - The document ID being managed.
+   * @param doc - The PatchesDoc instance to listen to.
+   * @returns An Unsubscriber function to remove the listener.
+   */
   protected _setupLocalDocListener(docId: string, doc: PatchesDoc<any>): Unsubscriber {
     return doc.onChange(async () => {
       const changes = doc.getUpdatesForServer();
@@ -188,6 +233,11 @@ export class Patches {
     });
   }
 
+  /**
+   * Internal handler for applying server commits to a document and emitting errors if needed.
+   * @param docId - The document ID to update.
+   * @param changes - Array of Change objects from the server.
+   */
   private _handleServerCommit = (docId: string, changes: Change[]) => {
     const managedDoc = this.docs.get(docId);
     if (managedDoc) {

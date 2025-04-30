@@ -75,6 +75,9 @@ export class Patches {
     const existing = this.docs.get(docId);
     if (existing) return existing.doc as PatchesDoc<T>;
 
+    // Ensure the doc is tracked before proceeding
+    await this.trackDocs([docId]);
+
     // Load initial state from store
     const snapshot = await this.store.getDoc(docId);
     const initialState = (snapshot?.state ?? {}) as T;
@@ -92,11 +95,14 @@ export class Patches {
     return doc;
   }
 
-  async closeDoc(docId: string): Promise<void> {
+  async closeDoc(docId: string, { untrack = false }: { untrack?: boolean } = {}): Promise<void> {
     const managed = this.docs.get(docId);
     if (managed) {
       managed.onChangeUnsubscriber();
       this.docs.delete(docId);
+      if (untrack) {
+        await this.untrackDocs([docId]);
+      }
     }
   }
 

@@ -48,11 +48,6 @@ export class PatchesDoc<T extends object = object> {
     return this._state;
   }
 
-  /** Alias for state. */
-  get value(): T {
-    return this._state;
-  }
-
   /** Last committed revision number from the server. */
   get committedRev(): number {
     return this._committedRev;

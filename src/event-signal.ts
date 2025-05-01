@@ -40,14 +40,16 @@ export function signal<T extends SignalSubscriber = SignalSubscriber>(): Signal<
 
   signal.emit = async (...args: Args<T>) => {
     const listeners = args[0] instanceof Error ? errorListeners : subscribers;
-    Array.from(listeners).map(ref => {
-      const listener = ref.deref();
-      if (listener) {
-        listener(...args);
-      } else {
-        listeners.delete(ref);
-      }
-    });
+    await Promise.all(
+      Array.from(listeners).map(ref => {
+        const listener = ref.deref();
+        if (listener) {
+          return listener(...args);
+        } else {
+          listeners.delete(ref);
+        }
+      })
+    );
   };
   signal.error = (errorListener: ErrorSubscriber) => {
     errorListeners.add(new WeakRef(errorListener));

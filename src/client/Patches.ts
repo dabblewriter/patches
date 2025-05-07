@@ -1,7 +1,7 @@
 import { type Unsubscriber, signal } from '../event-signal.js';
 import type { PatchesStore } from '../persist/PatchesStore.js';
 import type { Change } from '../types.js';
-import { PatchesDoc } from './PatchesDoc.js';
+import { PatchesDoc, type PatchesDocOptions } from './PatchesDoc.js';
 
 // Simplified options without sync-specific parameters
 export interface PatchesOptions {
@@ -9,6 +9,8 @@ export interface PatchesOptions {
   store: PatchesStore;
   /** Initial metadata to attach to changes from this client (merged with per-doc metadata). */
   metadata?: Record<string, any>;
+  /** Document-level options to pass to each PatchesDoc instance */
+  docOptions?: PatchesDocOptions;
 }
 
 // Keep internal doc management structure
@@ -26,6 +28,7 @@ export class Patches {
   protected options: PatchesOptions;
   protected docs: Map<string, ManagedDoc<any>> = new Map();
 
+  readonly docOptions: PatchesDocOptions;
   readonly store: PatchesStore;
   readonly trackedDocs = new Set<string>();
 
@@ -39,6 +42,7 @@ export class Patches {
   constructor(opts: PatchesOptions) {
     this.options = opts;
     this.store = opts.store;
+    this.docOptions = opts.docOptions ?? {};
     this.store.listDocs().then(docs => {
       this.trackDocs(docs.map(({ docId }) => docId));
     });
@@ -101,7 +105,7 @@ export class Patches {
     const snapshot = await this.store.getDoc(docId);
     const initialState = (snapshot?.state ?? {}) as T;
     const mergedMetadata = { ...this.options.metadata, ...opts.metadata };
-    const doc = new PatchesDoc<T>(initialState, mergedMetadata);
+    const doc = new PatchesDoc<T>(initialState, mergedMetadata, this.docOptions);
     doc.setId(docId);
     if (snapshot) {
       doc.import(snapshot);
@@ -209,6 +213,14 @@ export class Patches {
 
     // Close store connection
     void this.store.close();
+  }
+
+  /**
+   * Updates document options that will be applied to all new documents
+   * @param options - Options to merge with current docOptions
+   */
+  updateDocOptions(options: Partial<PatchesDocOptions>): void {
+    Object.assign(this.docOptions, options);
   }
 
   // --- Internal Handlers ---

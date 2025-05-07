@@ -5,12 +5,13 @@
     "sourceMap": true,
     "esModuleInterop": true,
     "target": "es2021",
-    "lib": ["es2021"],
+    "lib": ["es2021", "dom"],
     "moduleResolution": "bundler",
     "module": "ESNext",
     "strict": true,
     "noImplicitAny": true,
     "types": ["vitest/globals"] // Add Vitest global types
   },
+  "exclude": ["node_modules", "dist"],
   "include": ["src/**/*.ts", "tests/**/*.ts"] // Also include test files
 }

@@ -1,15 +1,11 @@
 import { createId } from 'crypto-id';
 import type { Change } from '../types.js';
+import { breakChange } from './breakChange.js'; // Import from new file
+import { getJSONByteSize } from './getJSONByteSize.js'; // Import from new file
 
-/** Estimate JSON string byte size. */
-export function getJSONByteSize(data: any): number {
-  // Basic estimation, might not be perfectly accurate due to encoding nuances
-  return new TextEncoder().encode(JSON.stringify(data)).length;
-}
-
-/** Break changes into batches based on maxBatchSize. */
-export function breakIntoBatches(changes: Change[], maxSize?: number): Change[][] {
-  if (!maxSize || getJSONByteSize(changes) < maxSize) {
+/** Break changes into batches based on maxPayloadBytes. */
+export function breakIntoBatches(changes: Change[], maxPayloadBytes?: number): Change[][] {
+  if (!maxPayloadBytes || getJSONByteSize(changes) < maxPayloadBytes) {
     return [changes];
   }
 
@@ -21,25 +17,29 @@ export function breakIntoBatches(changes: Change[], maxSize?: number): Change[][
   for (const change of changes) {
     // Add batchId if breaking up
     const changeWithBatchId = { ...change, batchId };
-    const changeSize = getJSONByteSize(changeWithBatchId) + (currentBatch.length > 0 ? 1 : 0); // Add 1 for comma
+    const individualActualSize = getJSONByteSize(changeWithBatchId);
+    let itemsToProcess: Change[];
 
-    // If a single change is too big, we have an issue (should be rare)
-    if (changeSize > maxSize && currentBatch.length === 0) {
-      console.error(
-        `Single change ${change.id} (size ${changeSize}) exceeds maxBatchSize (${maxSize}). Sending as its own batch.`
-      );
-      batches.push([changeWithBatchId]); // Send it anyway
-      continue;
+    if (individualActualSize > maxPayloadBytes) {
+      itemsToProcess = breakChange(changeWithBatchId, maxPayloadBytes);
+    } else {
+      itemsToProcess = [changeWithBatchId];
     }
 
-    if (currentSize + changeSize > maxSize) {
-      batches.push(currentBatch);
-      currentBatch = [];
-      currentSize = 2;
-    }
+    for (const item of itemsToProcess) {
+      const itemActualSize = getJSONByteSize(item);
+      const itemSizeForBatching = itemActualSize + (currentBatch.length > 0 ? 1 : 0);
 
-    currentBatch.push(changeWithBatchId);
-    currentSize += changeSize;
+      if (currentBatch.length > 0 && currentSize + itemSizeForBatching > maxPayloadBytes) {
+        batches.push(currentBatch);
+        currentBatch = [];
+        currentSize = 2;
+      }
+
+      const actualItemContribution = itemActualSize + (currentBatch.length > 0 ? 1 : 0);
+      currentBatch.push(item);
+      currentSize += actualItemContribution;
+    }
   }
 
   if (currentBatch.length > 0) {

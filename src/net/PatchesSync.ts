@@ -8,8 +8,13 @@ import type { WebSocketOptions } from './websocket/WebSocketTransport.js';
 import { onlineState } from './websocket/onlineState.js';
 
 export interface PatchesSyncOptions {
+  /** WebSocket connection options */
   wsOptions?: WebSocketOptions;
-  maxBatchSize?: number;
+  /**
+   * Maximum size in bytes for a single payload (network message).
+   * Changes exceeding this will be automatically split.
+   */
+  maxPayloadBytes?: number;
 }
 
 export interface PatchesSyncState {
@@ -43,6 +48,11 @@ export class PatchesSync {
     this.ws = new PatchesWebSocket(url, options.wsOptions);
     this._state.online = onlineState.isOnline;
     this.trackedDocs = new Set(patches.trackedDocs);
+
+    // Set maxPayloadBytes on Patches docOptions if provided
+    if (options.maxPayloadBytes) {
+      patches.updateDocOptions({ maxPayloadBytes: options.maxPayloadBytes });
+    }
 
     // --- Event Listeners ---
     onlineState.onOnlineChange(this._handleOnlineChange);
@@ -213,7 +223,7 @@ export class PatchesSync {
         }
       }
 
-      const batches = breakIntoBatches(pending, this.options.maxBatchSize);
+      const batches = breakIntoBatches(pending, this.options.maxPayloadBytes);
 
       for (const batch of batches) {
         if (!this.state.connected) {

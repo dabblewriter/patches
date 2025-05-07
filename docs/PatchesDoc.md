@@ -35,6 +35,8 @@ The `PatchesDoc<T>` class represents a single collaborative document managed by 
   - [`onBeforeChange`](#onbeforechange)
 - [Example Usage](#example-usage)
 - [Advanced/Direct Usage](#advanceddirect-usage)
+- [Options](#options)
+- [Constructor](#constructor)
 
 ## Overview
 
@@ -426,3 +428,33 @@ console.log(doc.state); // { value: 3 }
 - You are responsible for calling `getUpdatesForServer` and `applyServerConfirmation` in the correct order.
 - All state is immutable; never mutate `doc.state` directly.
 - For branching/merging, see the server-side API and `PatchesBranchManager` docs.
+
+## Options
+
+When creating a `PatchesDoc` instance, you can pass the following options:
+
+```typescript
+interface PatchesDocOptions {
+  /**
+   * Maximum size in bytes for a single payload (network message).
+   * Changes exceeding this will be split into multiple smaller changes.
+   */
+  maxPayloadBytes?: number;
+}
+```
+
+- `maxPayloadBytes` - Controls the maximum size in bytes of a single payload (network message). Changes exceeding this limit will be automatically split into multiple smaller changes. This is especially useful for handling very large text inserts (e.g., copy-pasting a large document) or duplicating large sections of content. This aligns with WebSocket payload size limitations (such as Cloudflare's 1MB limit) and is used for both change splitting in PatchesDoc and batch splitting in PatchesSync.
+
+## Constructor
+
+```typescript
+constructor(
+  initialState: T = {} as T,
+  initialMetadata: Record<string, any> = {},
+  options: PatchesDocOptions = {}
+)
+```
+
+- `initialState` - The initial state of the document.
+- `initialMetadata` - Optional metadata to include with all changes.
+- `options` - Optional configuration options for the document.

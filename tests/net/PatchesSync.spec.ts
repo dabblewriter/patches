@@ -52,6 +52,20 @@ describe('PatchesSync', () => {
   let wsOnStateChangeCallback: (state: ConnectionState) => void;
   let onlineChangeCallback: (isOnline: boolean) => void;
 
+  // Define a holder for shared spies for PatchesWebSocket methods
+  let wsSpies: {
+    connect: Mocked<PatchesWebSocket['connect']>;
+    disconnect: Mocked<PatchesWebSocket['disconnect']>;
+    subscribe: Mocked<PatchesWebSocket['subscribe']>;
+    unsubscribe: Mocked<PatchesWebSocket['unsubscribe']>;
+    getDoc: Mocked<PatchesWebSocket['getDoc']>;
+    getChangesSince: Mocked<PatchesWebSocket['getChangesSince']>;
+    commitChanges: Mocked<PatchesWebSocket['commitChanges']>;
+    deleteDoc: Mocked<PatchesWebSocket['deleteDoc']>;
+    onStateChange: Mocked<PatchesWebSocket['onStateChange']>;
+    onChangesCommitted: Mocked<PatchesWebSocket['onChangesCommitted']>;
+  };
+
   const DOC_ID = 'test-doc-1';
   const MOCK_URL = 'ws://localhost:8080';
 
@@ -107,41 +121,69 @@ describe('PatchesSync', () => {
       applyServerChanges: vi.fn(),
     } as unknown as Mocked<Patches>;
 
-    // Setup mock PatchesWebSocket
-    const MockPatchesWebSocket = vi.mocked(PatchesWebSocket);
-    MockPatchesWebSocket.mockImplementation(() => {
-      const mockWsOnChangesCommitted = vi.fn((callback: any) => {
-        wsOnChangesCommittedCallback = callback;
-        return vi.fn();
-      });
-      const mockWsOnStateChange = vi.fn((callback: any) => {
-        wsOnStateChangeCallback = callback;
-        return vi.fn();
-      });
-      return {
-        connect: vi.fn().mockResolvedValue(undefined),
-        subscribe: vi.fn().mockResolvedValue(undefined),
-        unsubscribe: vi.fn().mockResolvedValue(undefined),
-        getDoc: vi.fn().mockResolvedValue({ state: { initial: true }, rev: 0, changes: [] }),
-        getChangesSince: vi.fn().mockResolvedValue([]),
-        commitChanges: vi.fn().mockResolvedValue([]),
-        deleteDoc: vi.fn().mockResolvedValue(undefined),
-        disconnect: vi.fn(),
-        onChangesCommitted: mockWsOnChangesCommitted,
-        onStateChange: mockWsOnStateChange,
-      } as unknown as Mocked<PatchesWebSocket>;
+    // Initialize shared spies for PatchesWebSocket methods
+    // For signals, we'll create a structure that satisfies Mocked<Signal<T>>
+    // by being a callable function (for subscription) and having mock emit/error/clear methods.
+    // This also preserves the wsOnStateChangeCallback/wsOnChangesCommittedCallback pattern for triggering.
+
+    const onStateChangeMock = vi.fn((listener: (state: ConnectionState) => void) => {
+      wsOnStateChangeCallback = listener;
+      return vi.fn(); // unsubscribe
     });
-    mockWsInstance = new MockPatchesWebSocket(MOCK_URL) as Mocked<PatchesWebSocket>;
+    (onStateChangeMock as any).emit = vi.fn((state: ConnectionState) => {
+      if (wsOnStateChangeCallback) wsOnStateChangeCallback(state);
+    });
+    (onStateChangeMock as any).error = vi.fn();
+    (onStateChangeMock as any).clear = vi.fn();
+
+    const onChangesCommittedMock = vi.fn((listener: (data: { docId: string; changes: Change[] }) => void) => {
+      wsOnChangesCommittedCallback = listener;
+      return vi.fn(); // unsubscribe
+    });
+    (onChangesCommittedMock as any).emit = vi.fn((data: { docId: string; changes: Change[] }) => {
+      if (wsOnChangesCommittedCallback) wsOnChangesCommittedCallback(data);
+    });
+    (onChangesCommittedMock as any).error = vi.fn();
+    (onChangesCommittedMock as any).clear = vi.fn();
+
+    wsSpies = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      subscribe: vi.fn().mockResolvedValue(undefined),
+      unsubscribe: vi.fn().mockResolvedValue(undefined),
+      getDoc: vi.fn().mockResolvedValue({ state: { initial: true }, rev: 0, changes: [] }),
+      getChangesSince: vi.fn().mockResolvedValue([]),
+      commitChanges: vi.fn().mockResolvedValue([]),
+      deleteDoc: vi.fn().mockResolvedValue(undefined),
+      onStateChange: onStateChangeMock as unknown as Mocked<PatchesWebSocket['onStateChange']>,
+      onChangesCommitted: onChangesCommittedMock as unknown as Mocked<PatchesWebSocket['onChangesCommitted']>,
+    };
+
+    // Setup mock PatchesWebSocket constructor to return the shared spies object
+    const MockPatchesWebSocket = vi.mocked(PatchesWebSocket);
+    MockPatchesWebSocket.mockImplementation(() => wsSpies as unknown as Mocked<PatchesWebSocket>);
+
+    // mockWsInstance will be the wsSpies object, useful for controlling behavior in other tests
+    mockWsInstance = new PatchesWebSocket(MOCK_URL) as Mocked<PatchesWebSocket>;
 
     // Setup online state mock
+    // onlineState.onOnlineChange is already a vi.fn() due to the module mock at the top.
+    // We further refine its implementation here to capture the callback.
     vi.mocked(onlineState.onOnlineChange).mockImplementation((callback: any) => {
       onlineChangeCallback = callback;
-      return vi.fn();
+      return vi.fn(); // Return mock unsubscribe function
     });
 
-    // Create PatchesSync instance
+    // Create PatchesSync instance. Its constructor will use a PatchesWebSocket
+    // instance that is effectively wsSpies, so its onStateChange/onChangesCommitted calls
+    // will hit our shared spies.
     patchesSync = new PatchesSync(MOCK_URL, mockPatches);
+
+    // Assign mockWsInstance (which is wsSpies) to patchesSync.ws.
+    // This ensures that subsequent interactions with patchesSync.ws in tests
+    // use the shared spies, consistent with the constructor's usage.
     (patchesSync as any).ws = mockWsInstance;
+
     // Initialize state to avoid undefined errors
     (patchesSync as any)._state = { connected: false, online: true, syncing: null };
 
@@ -165,10 +207,10 @@ describe('PatchesSync', () => {
 
     // This test is failing because the mocks are set up after the constructor runs
     // In a real scenario, these would be called
-    it.skip('should register event handlers', () => {
+    it('should register event handlers', () => {
       expect(onlineState.onOnlineChange).toHaveBeenCalled();
-      expect(mockWsInstance.onStateChange).toHaveBeenCalled();
-      expect(mockWsInstance.onChangesCommitted).toHaveBeenCalled();
+      expect(wsSpies.onStateChange).toHaveBeenCalled();
+      expect(wsSpies.onChangesCommitted).toHaveBeenCalled();
     });
   });
 

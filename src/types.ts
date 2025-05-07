@@ -11,10 +11,10 @@ export interface Change {
   baseRev?: number;
   /** Client-side timestamp when the change was created. */
   created: number;
-  /** Optional arbitrary metadata associated with the change. */
-  metadata?: Record<string, any>;
   /** Optional batch identifier for grouping changes that belong to the same client batch (for multi-batch offline/large edits). */
   batchId?: string;
+  /** Optional arbitrary metadata associated with the change. */
+  [metadata: string]: any;
 }
 
 /**
@@ -54,7 +54,7 @@ export interface Branch {
   /** Current status of the branch. */
   status: BranchStatus;
   /** Optional arbitrary metadata associated with the branch record. */
-  metadata?: Record<string, any>;
+  [metadata: string]: any;
 }
 
 /**
@@ -80,6 +80,8 @@ export interface VersionMetadata {
   rev: number;
   /** The revision number on the main timeline before the changes that created this version. If this is an offline/branch version, this is the revision number of the source document where the branch was created and not . */
   baseRev: number;
+  /** Optional arbitrary metadata associated with the version. */
+  [metadata: string]: any;
 }
 
 /**

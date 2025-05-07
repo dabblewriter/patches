@@ -1,6 +1,6 @@
 import { Delta } from '@dabble/delta';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { JSONPatch } from '../../src/json-patch/jsonPatch.js';
+import { JSONPatch } from '../../src/json-patch/JSONPatch.js';
 
 class JSONLikeObject {
   constructor(

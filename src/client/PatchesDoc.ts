@@ -4,6 +4,18 @@ import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { Change, PatchesSnapshot } from '../types.js';
 import { applyChanges, rebaseChanges } from '../utils.js';
+import { breakChange } from '../utils/breakChange.js';
+
+/**
+ * Options for creating a PatchesDoc instance
+ */
+export interface PatchesDocOptions {
+  /**
+   * Maximum size in bytes for a single payload (network message).
+   * Changes exceeding this will be split into multiple smaller changes.
+   */
+  maxPayloadBytes?: number;
+}
 
 /**
  * Represents a document synchronized using JSON patches.
@@ -18,6 +30,7 @@ export class PatchesDoc<T extends object = object> {
   protected _pendingChanges: Change[] = [];
   protected _sendingChanges: Change[] = [];
   protected _changeMetadata: Record<string, any> = {};
+  protected readonly _maxPayloadBytes?: number;
 
   /** Subscribe to be notified before local state changes. */
   readonly onBeforeChange = signal<(change: Change) => void>();
@@ -30,12 +43,14 @@ export class PatchesDoc<T extends object = object> {
    * Creates an instance of PatchesDoc.
    * @param initialState Optional initial state.
    * @param initialMetadata Optional metadata to add to generated changes.
+   * @param options Additional options for the document.
    */
-  constructor(initialState: T = {} as T, initialMetadata: Record<string, any> = {}) {
+  constructor(initialState: T = {} as T, initialMetadata: Record<string, any> = {}, options: PatchesDocOptions = {}) {
     this._committedState = structuredClone(initialState);
     this._state = structuredClone(initialState);
     this._committedRev = 0;
     this._changeMetadata = initialMetadata;
+    this._maxPayloadBytes = options.maxPayloadBytes;
   }
 
   /** The unique identifier for this document, once assigned. */
@@ -135,9 +150,21 @@ export class PatchesDoc<T extends object = object> {
 
     // Apply to local state immediately
     this._state = patch.apply(this._state);
-    this._pendingChanges.push(change);
 
-    this.onChange.emit(change);
+    if (this._maxPayloadBytes) {
+      // Check if the change needs to be split due to size
+      const changes = breakChange(change, this._maxPayloadBytes);
+
+      // Emit events for each change piece
+      for (const piece of changes) {
+        this._pendingChanges.push(piece);
+        this.onChange.emit(piece);
+      }
+    } else {
+      this._pendingChanges.push(change);
+      this.onChange.emit(change);
+    }
+
     this.onUpdate.emit(this._state);
 
     return change;

@@ -1,5 +1,5 @@
-import { JSONPatch } from './JSONPatch';
-import { createPatchProxy } from './patchProxy';
+import { JSONPatch } from './JSONPatch.js';
+import { createPatchProxy } from './patchProxy.js';
 
 /**
  * Creates a `JSONPatch` instance by tracking changes made to a proxy object within an updater function.

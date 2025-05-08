@@ -15,7 +15,7 @@ export const text: JSONPatchOpHandler = {
       return 'Invalid delta';
     }
 
-    let existingData: Op[] | Delta | { ops: Op[] } | undefined = get(state, path);
+    const existingData: Op[] | Delta | { ops: Op[] } | undefined = get(state, path);
 
     let doc: Delta | undefined;
     if (Array.isArray(existingData)) {

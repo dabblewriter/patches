@@ -10,8 +10,9 @@
     "module": "ESNext",
     "strict": true,
     "noImplicitAny": true,
-    "types": ["vitest/globals"] // Add Vitest global types
+    "types": ["vitest/globals"],
+    "verbatimModuleSyntax": true
   },
   "exclude": ["node_modules", "dist"],
-  "include": ["src/**/*.ts", "tests/**/*.ts"] // Also include test files
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
 }

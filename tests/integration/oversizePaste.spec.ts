@@ -3,9 +3,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { PatchesDoc } from '../../src/client/PatchesDoc.js';
 import { JSONPatch } from '../../src/json-patch/JSONPatch.js';
 
-// Default maximum size in bytes for a single Change object
-const DEFAULT_MAX_CHANGE_BYTES = 128 * 1024; // 128 KiB
-
 describe('Oversize change handling integration', () => {
   it('should split large text changes into multiple pieces', () => {
     // Create a document with a small max payload size to force splitting

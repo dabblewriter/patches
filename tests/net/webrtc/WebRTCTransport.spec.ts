@@ -7,7 +7,7 @@ import type { WebSocketTransport } from '../../../src/net/websocket/WebSocketTra
 // Mock dependencies
 vi.mock('simple-peer', () => {
   // Create a mock Peer implementation
-  const MockPeer = vi.fn().mockImplementation(({ initiator }) => {
+  const MockPeer = vi.fn().mockImplementation(() => {
     const events: Record<string, Array<(...args: any[]) => void>> = {};
 
     const peer = {
@@ -15,10 +15,10 @@ vi.mock('simple-peer', () => {
         events[event] = events[event] || [];
         events[event].push(handler);
       }),
-      signal: vi.fn(data => {
+      signal: vi.fn(_data => {
         // Simulate signal processing
       }),
-      send: vi.fn(data => {
+      send: vi.fn(_data => {
         // Simulate data sending
       }),
       destroy: vi.fn(() => {

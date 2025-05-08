@@ -41,7 +41,7 @@ describe('Patches', () => {
 
     // Setup mock PatchesDoc factory
     mockDocInstanceFactory = () => {
-      let _mockPendingChanges: Change[] = [];
+      const _mockPendingChanges: Change[] = [];
       let _mockSendingChanges: Change[] = [];
       let _id: string | null = null;
       let _mockUpdatesForServer: Change[] = [];
@@ -65,7 +65,7 @@ describe('Patches', () => {
           _id = docId;
         }),
         import: vi.fn(),
-        change: vi.fn((mutator: (draft: any) => void) => {
+        change: vi.fn((_mutator: (draft: any) => void) => {
           const newChange: Change = { id: `mock-${Math.random()}`, ops: [], rev: 0, baseRev: 0, created: Date.now() };
           _mockPendingChanges.push(newChange);
           instance.onChange.emit(newChange);

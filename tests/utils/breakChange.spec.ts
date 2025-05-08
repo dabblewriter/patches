@@ -5,7 +5,7 @@ import { breakChange } from '../../src/utils/breakChange.js';
 
 describe('breakChange', () => {
   // Helper to create a change for testing
-  function createTestChange(ops: any[] = [], size = 1): Change {
+  function createTestChange(ops: any[] = []): Change {
     return {
       id: 'test-id',
       rev: 100,

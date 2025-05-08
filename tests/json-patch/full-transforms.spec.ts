@@ -5,7 +5,7 @@ import { JSONPatch } from '../../src/json-patch/JSONPatch.js';
 describe('JSONPatch.transform', () => {
   // verbose(true)
 
-  let delta = new Delta();
+  const delta = new Delta();
   const arr = [{ zero: 0 }, { one: 1 }, { two: 2 }, { three: 3 }, { four: 4 }, { five: 5 }, { six: 6 }, { seven: 7 }];
   const obj = { x: [1, 2, 3, {}, 5, 6, 7, 8], y: 'foo' };
   let server: any;
@@ -16,7 +16,7 @@ describe('JSONPatch.transform', () => {
     return new JSONPatch();
   }
 
-  function testPatches(start: any, patch1: JSONPatch, patch2: JSONPatch, reverse: boolean) {
+  function testPatches(start: any, patch1: JSONPatch, patch2: JSONPatch, _reverse: boolean) {
     (client1 = start), (client2 = start), (server = start);
     // Patches applied on clients simultaneously
     client1 = patch1.apply(client1);

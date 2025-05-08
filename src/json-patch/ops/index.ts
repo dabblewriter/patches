@@ -9,7 +9,7 @@ import { replace } from './replace.js';
 import { test } from './test.js';
 import { text } from './text.js';
 
-export * from './bitmask.js';
+// Export all patch operations
 export { add, bit, copy, increment, move, remove, replace, test };
 
 export function getTypes(custom?: JSONPatchOpHandlerMap) {

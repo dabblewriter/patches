@@ -108,7 +108,7 @@ class MockBranchingStoreBackend implements BranchingStoreBackend {
   );
 
   listVersions = vi.fn(async (docId: string, options: ListVersionsOptions = {}): Promise<VersionMetadata[]> => {
-    let docVersions = this._getDocVersions(docId);
+    const docVersions = this._getDocVersions(docId);
     let versions = docVersions.map(v => v.metadata);
 
     if (options.origin) {

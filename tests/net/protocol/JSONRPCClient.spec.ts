@@ -114,7 +114,7 @@ describe('JSONRPCClient', () => {
 
   it('should ignore responses with unknown IDs', async () => {
     const transport = new MockTransport();
-    const client = new JSONRPCClient(transport);
+    new JSONRPCClient(transport);
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     transport.receive({ jsonrpc: '2.0', id: 999, result: 'ignored' });

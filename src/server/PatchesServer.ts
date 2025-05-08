@@ -138,7 +138,7 @@ export class PatchesServer {
     }
 
     // 3. Load committed changes *after* the client's baseRev for transformation and idempotency checks
-    let committedChanges = await this.store.listChanges(docId, {
+    const committedChanges = await this.store.listChanges(docId, {
       startAfter: baseRev,
       withoutBatchId: batchId,
     });

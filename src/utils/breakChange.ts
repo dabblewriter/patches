@@ -236,8 +236,6 @@ function breakLargeValueOp(origChange: Change, op: JSONPatchOp, maxBytes: number
     const numChunks = Math.ceil(text.length / targetChunkSize);
     const chunkSize = Math.ceil(text.length / numChunks);
 
-    let currentPath = op.path;
-
     for (let i = 0; i < text.length; i += chunkSize) {
       const chunk = text.slice(i, i + chunkSize);
       const newOp: any = { op: 'add' }; // Default to add?

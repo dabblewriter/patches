@@ -373,14 +373,7 @@ describe('PatchesServer', () => {
         ops: [{ op: 'replace', path: '/new', value: 2 }],
         created: Date.now(),
       };
-      const change3: Change = {
-        id: 'c3',
-        baseRev: 7,
-        rev: 8,
-        ops: [{ op: 'remove', path: '/new' }],
-        created: Date.now(),
-      };
-      await mockStore.listChanges.mockResolvedValueOnce([change1, change2]); // Mock loading changes up to rev 7
+      mockStore.listChanges.mockResolvedValueOnce([change1, change2]); // Mock loading changes up to rev 7
 
       const targetRev = 7;
       const snapshot = await patchesServer.getDoc(docId, targetRev);
@@ -523,13 +516,6 @@ describe('PatchesServer', () => {
 
       // Execute
       const [committedChanges, transformedChanges] = await patchesServer.commitChanges(docId, [incomingChange]);
-
-      // commitChanges returns committed + transformed changes.
-      // In this case, no committed changes after baseRev 1, so only transformed.
-      const expectedSavedChange = {
-        ...incomingChange,
-        rev: 2, // Assigned by mockStore._saveChangesInternal
-      };
 
       // Verify the result contains the change (it might be transformed, but mock is basic)
       expect(committedChanges).toHaveLength(0);
@@ -690,7 +676,7 @@ describe('PatchesServer', () => {
         .mockResolvedValue({ id: 'mock-version-id' });
 
       // Execute
-      const [committedChanges, transformedChanges] = await shortTimeoutServer.commitChanges(docId, [newChange]);
+      await shortTimeoutServer.commitChanges(docId, [newChange]);
 
       // Verify _createVersion was called (spy is on the server instance)
       expect(createVersionSpy).toHaveBeenCalled();
@@ -912,7 +898,7 @@ describe('PatchesServer', () => {
       const versionMetadata = {
         id: 'mock-version-id',
         name: 'v-main',
-        origin: 'main' as 'main',
+        origin: 'main' as const,
         startDate: initialChange.created,
         endDate: initialChange.created,
         rev: initialChange.rev,
@@ -1055,10 +1041,10 @@ describe('PatchesServer multi-batch offline/large edit support (batchId)', () =>
       batchId,
     };
     // First batch
-    let [, transformedChanges1] = await server.commitChanges(docId, [offlineChange1]);
+    const [, transformedChanges1] = await server.commitChanges(docId, [offlineChange1]);
     expect(transformedChanges1.some(c => c.id === 'offline-1')).toBe(true);
     // Second batch (should not be transformed over offlineChange1, only over concurrentChange)
-    let [, transformedChanges2] = await server.commitChanges(docId, [offlineChange2]);
+    const [, transformedChanges2] = await server.commitChanges(docId, [offlineChange2]);
     expect(transformedChanges2.some(c => c.id === 'offline-2')).toBe(true);
     // Both changes should have the same batchId and be grouped in versioning
     const versions = await store.listVersions(docId, { groupId: batchId });
@@ -1093,10 +1079,10 @@ describe('PatchesServer multi-batch offline/large edit support (batchId)', () =>
       created: Date.now() - 3599 * 1000,
     };
     // First batch
-    let [, transformedChanges1] = await server.commitChanges(docId, [offlineChange1]);
+    const [, transformedChanges1] = await server.commitChanges(docId, [offlineChange1]);
     expect(transformedChanges1.some(c => c.id === 'offline-1')).toBe(true);
     // Second batch (should be transformed over offlineChange1)
-    let [, transformedChanges2] = await server.commitChanges(docId, [offlineChange2]);
+    const [, transformedChanges2] = await server.commitChanges(docId, [offlineChange2]);
     expect(transformedChanges2.some(c => c.id === 'offline-2')).toBe(true);
     // No groupId in versioning
     const versions = await store.listVersions(docId, {});

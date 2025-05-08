@@ -45,23 +45,6 @@ class LRUCache<K, V> {
 }
 
 /**
- * Simple event signal for update notifications (like in PatchesDoc)
- */
-class Signal {
-  private listeners = new Set<() => void>();
-  subscribe(cb: () => void): () => void {
-    this.listeners.add(cb);
-    return () => this.listeners.delete(cb);
-  }
-  emit() {
-    for (const cb of this.listeners) cb();
-  }
-  clear() {
-    this.listeners.clear();
-  }
-}
-
-/**
  * Client-side history/scrubbing interface for a document.
  * Read-only: allows listing versions, loading states/changes, and scrubbing.
  */

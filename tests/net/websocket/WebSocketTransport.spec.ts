@@ -263,7 +263,7 @@ describe('WebSocketTransport', () => {
 
       // Should have scheduled a reconnect
       expect(mockTimers.size).toBe(1);
-      const [[timerId, timer]] = mockTimers.entries();
+      const [[, timer]] = mockTimers.entries();
       expect(timer.delay).toBe(1000); // Initial backoff
     });
 
@@ -288,7 +288,7 @@ describe('WebSocketTransport', () => {
 
     it('should increase backoff time on consecutive failures', async () => {
       // First attempt
-      let connectPromise = transport.connect();
+      const connectPromise = transport.connect();
       mockWs.simulateError(new Error('Test error'));
       mockWs.simulateClose();
 
@@ -300,7 +300,7 @@ describe('WebSocketTransport', () => {
 
       // Get first timer's delay
       expect(mockTimers.size).toBe(1);
-      let [[timerId, timer]] = mockTimers.entries();
+      let [[, timer]] = mockTimers.entries();
       const firstDelay = timer.delay;
 
       // Simulate timer firing and trigger reconnect
@@ -324,7 +324,7 @@ describe('WebSocketTransport', () => {
 
       // Check for increased backoff
       expect(mockTimers.size).toBe(1);
-      [[timerId, timer]] = mockTimers.entries();
+      [[, timer]] = mockTimers.entries();
       const secondDelay = timer.delay;
 
       // Second delay should be more than first delay
@@ -344,7 +344,7 @@ describe('WebSocketTransport', () => {
       }
 
       // Get first backoff timer
-      let [[timerId, timer]] = mockTimers.entries();
+      let [[, timer]] = mockTimers.entries();
       const callback = timer.callback;
       mockTimers.clear();
 
@@ -369,7 +369,7 @@ describe('WebSocketTransport', () => {
 
       // Check for reset backoff
       expect(mockTimers.size).toBe(1);
-      [[timerId, timer]] = mockTimers.entries();
+      [[, timer]] = mockTimers.entries();
 
       // Should have reset to initial backoff
       expect(timer.delay).toBe(1000);

@@ -9,7 +9,7 @@ vi.mock('../../src/utils/breakChange.js', () => ({
   breakChange: vi.fn(),
 }));
 vi.mock('crypto-id', () => ({
-  createId: vi.fn((...args: any[]) => 'mock-batch-id'),
+  createId: vi.fn(() => 'mock-batch-id'),
 }));
 
 // Import using correct relative paths

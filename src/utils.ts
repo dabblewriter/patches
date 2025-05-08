@@ -10,7 +10,7 @@ import type { Change, Deferred } from './types.js';
  * @param changes - Array of changes to split
  * @returns A tuple containing [changes before baseRev, changes with and after baseRev]
  */
-export function splitChanges<T>(changes: Change[]): [Change[], Change[]] {
+export function splitChanges(changes: Change[]): [Change[], Change[]] {
   const index = changes.findIndex(c => c.baseRev);
   return [changes.slice(0, index), changes.slice(index)];
 }

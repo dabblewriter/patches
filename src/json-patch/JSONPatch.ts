@@ -154,7 +154,7 @@ export class JSONPatch {
   addObjectsInPath(obj: any, path: PathLike) {
     path = checkPath(path as string);
     const parts = (path as string).split('/');
-    for (var i = 1; i < parts.length - 1; i++) {
+    for (let i = 1; i < parts.length - 1; i++) {
       const prop = parts[i];
       if (!obj || !obj[prop]) {
         this.add(parts.slice(0, i + 1).join('/'), {});

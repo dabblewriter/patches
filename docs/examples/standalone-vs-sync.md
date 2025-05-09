@@ -1,130 +1,165 @@
-# Using Patches: Standalone vs. with Sync
+# Patches: Do You Want Sprinkles With That? 🍦
 
-This document shows how to use the Patches library in both standalone mode (local-only) and with network synchronization.
+So you've got Patches, but you're wondering: "Do I need the sync stuff too?" Let's break it down! Patches can run in two delicious flavors: plain vanilla (standalone) or with sprinkles on top (networked sync)!
 
-## Standalone Mode (Local-Only)
+## Standalone Mode: Just You and Your Documents ✍️
 
-If you only need local document management without network synchronization, you can use the `Patches` class on its own:
+If you just want to manage documents locally without all the network jazz, this is for you! It's simple, clean, and perfect for single-user apps:
 
 ```typescript
 import { Patches } from '@dabble/patches';
 import { IndexedDBStore } from '@dabble/patches/persist';
 
-// Create a storage backend
-const store = new IndexedDBStore('my-local-docs');
+// Set up a local storage vault for your docs
+const store = new IndexedDBStore('my-private-docs');
 
-// Initialize Patches without a sync layer
+// Create your Patches instance (no sync, just local goodness)
 const patches = new Patches({
   store,
-  metadata: { user: 'local-user' },
+  metadata: { user: 'just-little-old-me' },
 });
 
-// Open and use documents
-async function example() {
-  // Open a document
-  const doc = await patches.openDoc('my-document-id');
+// Now let's actually use it!
+async function letsDoThis() {
+  // Open a document (creating it if it doesn't exist)
+  const doc = await patches.openDoc('my-secret-novel');
 
-  // Make changes
+  // Make some brilliant changes
   doc.change(draft => {
-    draft.title = 'New Title';
-    draft.content = 'Hello, world!';
+    draft.title = 'The Next Great American Novel';
+    draft.chapter1 = 'It was a dark and stormy night...';
+    draft.lastEdited = new Date().toISOString();
   });
 
-  // Changes are automatically persisted to the store
-  console.log(doc.state); // { title: 'New Title', content: 'Hello, world!' }
+  // Your changes are already saved locally! Magic!
+  console.log(doc.state.title); // "The Next Great American Novel"
 
-  // Close when done
-  await patches.closeDoc('my-document-id');
+  // When you're done with this document
+  await patches.closeDoc('my-secret-novel');
 
-  // Or completely shut down
+  // Or when you're completely done with everything
   patches.close();
 }
 ```
 
-## With Network Synchronization
+That's it! No servers, no network code, no sync drama - just you and your documents, living your best life. Everything gets stored in IndexedDB, so it persists across page reloads!
 
-When you need real-time collaboration or syncing across devices, add `PatchesSync`:
+## With Network Sync: Team Work Makes the Dream Work! 👯‍♀️
+
+Ready to collaborate? Let's add real-time sync so you can work with friends (or enemies, we don't judge):
 
 ```typescript
 import { Patches } from '@dabble/patches';
 import { PatchesSync } from '@dabble/patches/net';
 import { IndexedDBStore } from '@dabble/patches/persist';
 
-// Create a storage backend
-const store = new IndexedDBStore('my-synced-docs');
+// Local storage still needed for offline support
+const store = new IndexedDBStore('our-shared-docs');
 
-// 1. First initialize Patches
+// Step 1: Create your base Patches instance
 const patches = new Patches({
   store,
-  metadata: { user: 'alice@example.com' },
+  metadata: {
+    user: 'alice@example.com',
+    displayName: 'Alice',
+    color: '#FF5733', // for cursors and such
+  },
 });
 
-// 2. Then add synchronization
-const patchesSync = new PatchesSync('wss://your-server.example.com/patches', patches, {
+// Step 2: Add the sync layer! 🪄
+const sync = new PatchesSync('wss://collaboration-server.example.com', patches, {
+  // Optional auth headers
   wsOptions: {
     headers: {
-      Authorization: 'Bearer your-auth-token',
+      Authorization: 'Bearer your-super-secret-token',
     },
   },
+  // Tweak performance if needed
   maxBatchSize: 100,
 });
 
-// Subscribe to connection state changes
-patchesSync.onStateChange(state => {
-  console.log('Connection state:', state);
-  // { online: boolean, connected: boolean, syncing: 'initial' | 'updating' | null | Error }
+// Know when you're online/offline
+sync.onStateChange(state => {
+  if (state.connected) {
+    showGreenDot();
+    hideOfflineWarning();
+  } else {
+    showRedDot();
+    if (!state.online) {
+      showOfflineWarning("You're offline! Changes will sync when you reconnect.");
+    } else {
+      showReconnectingSpinner();
+    }
+  }
 });
 
-// Subscribe to errors
-patchesSync.onError((error, context) => {
-  console.error('Sync error:', error, context);
+// Handle any sync oopsies
+sync.onError((error, context) => {
+  console.error('Uh oh, sync trouble:', error);
+  showErrorToast('Something went wrong syncing ' + context.docId);
 });
 
-// Usage example
-async function example() {
-  // Connect to the server
-  await patchesSync.connect();
+// Now use it for ACTUAL collaboration!
+async function letsCollaborate() {
+  // Connect to the mothership
+  await sync.connect();
 
-  // Track documents you want to sync
-  await patchesSync.trackDocs(['doc1', 'doc2']);
+  // Tell the server which docs you care about
+  await sync.trackDocs(['team-roadmap', 'meeting-notes']);
 
-  // Open a document (works the same as before)
-  const doc = await patches.openDoc('doc1');
+  // Open a document (same API as before!)
+  const doc = await patches.openDoc('team-roadmap');
 
-  // Make changes (automatically synced when online)
+  // Make changes that everyone will see
   doc.change(draft => {
-    draft.title = 'Collaborative Document';
-    draft.content = 'This will be synced to the server';
+    draft.goals.push({
+      id: generateId(),
+      text: 'Ship v2 by December',
+      assignee: 'alice@example.com',
+    });
   });
 
-  // Manually trigger sync for a specific document if needed
-  await patchesSync.syncDoc('doc1');
+  // Changes automatically sync in the background!
+  // But you can force a sync if you're impatient
+  await sync.syncDoc('team-roadmap');
 
-  // Stop syncing a document (but keep it locally)
-  await patchesSync.untrackDocs(['doc2']);
+  // Not interested in a doc anymore?
+  await sync.untrackDocs(['meeting-notes']);
 
-  // Close when done
-  await patches.closeDoc('doc1');
-  patchesSync.disconnect();
+  // Clean up when you're done
+  await patches.closeDoc('team-roadmap');
+  sync.disconnect();
   patches.close();
 }
 ```
 
-## Benefits of Separation
+With this setup, you get the best of both worlds:
 
-This separation of concerns provides several benefits:
+- Changes sync automatically when online
+- Work continues offline (changes saved locally)
+- Everything syncs back up when you reconnect
+- Everyone sees each other's edits in real-time!
 
-1. **Modularity**: Use `Patches` on its own for local-only applications, or add `PatchesSync` when network features are needed.
-2. **Testing**: Easier to test components independently.
-3. **Code organization**: Clearer separation between document management and network synchronization.
-4. **Extensibility**: Create custom sync implementations for different network protocols without modifying core document logic.
+## Why We Split Things Up (It's Good For You!)
 
-## Migrating from Previous Versions
+You might wonder: "Why not just one class that does everything?" Good question! Here's why we built it this way:
 
-If you were using the previous combined API:
+1. **Eat What You Want**: Only use the parts you need! Making a single-user app? Skip the sync stuff and save bandwidth.
+
+2. **Testing Heaven**: Testing a complex sync system is HARD. With separate components, you can test each part independently.
+
+3. **Brain Organization**: It's easier to understand "this thing manages documents" and "this other thing handles network" than one mega-class that does everything.
+
+4. **Plug-and-Play**: Want a different sync strategy? Swap it out without touching your document logic!
+
+It's like keeping your chocolate separate from your peanut butter until you WANT a Reese's cup.
+
+## Migrating from the Old Ways
+
+If you're updating from a previous version that had everything bundled together:
 
 ```typescript
-// Old approach
+// How things used to be (so 2022...)
 const patches = new Patches({
   url: 'wss://example.com',
   store: new IndexedDBStore('my-docs'),
@@ -132,15 +167,33 @@ const patches = new Patches({
 await patches.connect();
 ```
 
-Convert it to:
+Here's how to update:
 
 ```typescript
-// New approach
+// The shiny new way (so fresh!)
 const patches = new Patches({
   store: new IndexedDBStore('my-docs'),
 });
-const patchesSync = new PatchesSync('wss://example.com', patches);
-await patchesSync.connect();
+const sync = new PatchesSync('wss://example.com', patches);
+await sync.connect();
 ```
 
-Most API methods have direct equivalents between the old and new approach, just moved to the appropriate class.
+Most methods are the same, just moved to the appropriate class. Network stuff → PatchesSync. Document stuff → Patches.
+
+## TL;DR: Which One Should I Use?
+
+**Use Standalone Mode When:**
+
+- Building a single-user app
+- Working with sensitive data that shouldn't leave the device
+- Creating an offline-only tool
+- Just getting started and want to keep things simple
+
+**Add Sync When:**
+
+- Building a collaborative app
+- Users need to access their documents across devices
+- You want real-time updates between users
+- You need version history or conflict resolution
+
+Whichever path you choose, Patches has got your back! 💪

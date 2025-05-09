@@ -6,3 +6,5 @@ node_modules/
 coverage/
 dist/
 .svelte-kit/
+
+**/.claude/settings.local.json

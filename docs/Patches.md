@@ -1,142 +1,289 @@
-# `Patches` — Main Client Entry Point
+# `Patches` — Your Collaboration Command Center 🎮
 
-The `Patches` class is the main entry point for building collaborative, real-time applications with the Patches library. It manages document instances (`PatchesDoc`), handles persistence, and integrates with real-time sync (`PatchesSync`). Most applications should use `Patches` to open and manage documents, rather than instantiating `PatchesDoc` directly.
+Meet `Patches` - the brains of your collaborative app operation! This class is where it all starts - your home base for managing documents, keeping everything in sync, and making the magic happen.
 
 **Table of Contents**
 
-- [Overview](#overview)
-- [Initialization](#initialization)
-- [Tracking and Managing Documents](#tracking-and-managing-documents)
-  - [openDoc](#opendoc)
-  - [trackDocs / untrackDocs](#trackdocs--untrackdocs)
-  - [closeDoc](#closedoc)
-- [Integration with Sync](#integration-with-sync)
-- [Event Signals](#event-signals)
-- [Example Usage](#example-usage)
-- [Related Docs](#related-docs)
+- [What Is It?](#what-is-it)
+- [Getting Started](#getting-started)
+- [Working with Documents](#working-with-documents)
+- [Plugging Into Real-Time Sync](#plugging-into-real-time-sync)
+- [Event Hooks](#event-hooks)
+- [See It in Action](#see-it-in-action)
+- [The Rest of the Family](#the-rest-of-the-family)
 
----
+## What Is It?
 
-## Overview
+`Patches` is like the quarterback of your collaborative app. It:
 
-- **Role:** `Patches` is the main client-side interface for collaborative apps. It manages the lifecycle of documents, persistence, and (optionally) real-time sync.
-- **Pattern:** You create a single `Patches` instance per app/session, then open and manage documents through it.
-- **Persistence:** Pluggable store (e.g., `InMemoryStore`, IndexedDB, custom backend).
-- **Sync:** Integrates with `PatchesSync` for real-time server communication.
+- **Manages Documents**: Opens, tracks, and closes your collaborative docs
+- **Handles Persistence**: Saves changes to whatever storage system you choose
+- **Coordinates Sync**: Works with `PatchesSync` to keep everything in real-time
+- **Emits Events**: Lets you know when important stuff happens
 
-## Initialization
+Here's the key: You create **one** `Patches` instance for your whole app, then use it to open as many documents as you need. Think of it as your document factory and manager.
 
-```typescript
-import { Patches } from '@dabble/patches';
-import { InMemoryStore } from '@dabble/patches/persist/InMemoryStore';
+## Getting Started
 
-const store = new InMemoryStore();
-const patches = new Patches({ store });
-```
-
-**Options:**
-
-- `store`: Required. Any implementation of `PatchesStore` (see [InMemoryStore](./InMemoryStore.md)).
-- `metadata`: Optional. Default metadata to attach to all changes from this client.
-
-## Tracking and Managing Documents
-
-### `openDoc`
-
-Open (or create) a collaborative document by ID. Returns a `PatchesDoc` instance for editing and subscribing to updates.
-
-```typescript
-const doc = await patches.openDoc<MyDoc>('my-doc-id');
-doc.onUpdate(newState => {
-  /* ... */
-});
-doc.change(draft => {
-  draft.title = 'Hello';
-});
-```
-
-### `trackDocs` / `untrackDocs`
-
-Track one or more document IDs for persistence and sync. You must track a doc before opening it.
-
-```typescript
-await patches.trackDocs(['my-doc-id']);
-// ...
-await patches.untrackDocs(['my-doc-id']);
-```
-
-### `closeDoc`
-
-Close a document instance and clean up listeners/resources.
-
-```typescript
-await patches.closeDoc('my-doc-id');
-```
-
-## Integration with Sync
-
-To enable real-time sync, use `PatchesSync`:
-
-```typescript
-import { PatchesSync } from '@dabble/patches/net/PatchesSync';
-const sync = new PatchesSync('wss://your-server-url', patches);
-await sync.connect();
-```
-
-- `PatchesSync` will automatically sync all tracked/open documents.
-- See [PatchesSync documentation](./net.md) for details.
-
-## Event Signals
-
-`Patches` provides several event signals for app-level hooks:
-
-- `onError`: `(error, context) => void` — Any error in doc/store/sync.
-- `onServerCommit`: `(docId, changes) => void` — When server confirms changes.
-- `onTrackDocs`: `(docIds) => void` — When docs are tracked.
-- `onUntrackDocs`: `(docIds) => void` — When docs are untracked.
-- `onDeleteDoc`: `(docId) => void` — When a doc is deleted.
-
-Example:
-
-```typescript
-patches.onError((err, ctx) => {
-  console.error('Patches error:', err, ctx);
-});
-```
-
-## Example Usage
-
-**Basic:**
+Starting with `Patches` is super simple:
 
 ```typescript
 import { Patches } from '@dabble/patches';
-import { InMemoryStore } from '@dabble/patches/persist/InMemoryStore';
+import { InMemoryStore } from '@dabble/patches/persist';
 
-const store = new InMemoryStore();
+// Create a store for persistence
+const store = new InMemoryStore(); // For testing - use IndexedDBStore for production!
+
+// Create your main Patches instance
 const patches = new Patches({ store });
-await patches.trackDocs(['doc1']);
-const doc = await patches.openDoc<{ text: string }>('doc1');
-doc.onUpdate(state => console.log('Updated:', state));
-doc.change(draft => {
-  draft.text = 'Hello!';
+
+// You're ready to rock! 🎸
+```
+
+### Configuration Options
+
+When creating your `Patches` instance, you can customize it:
+
+```typescript
+const patches = new Patches({
+  // REQUIRED: Where should changes be saved?
+  store: new IndexedDBStore('my-cool-app'),
+
+  // OPTIONAL: Default metadata for changes from this client
+  metadata: {
+    user: {
+      id: 'user-123',
+      name: 'Alice',
+      color: '#FF5733',
+    },
+    deviceId: 'mobile-ios-12345',
+  },
 });
 ```
 
-**With Sync:**
+The metadata is super handy for tracking who made what changes!
+
+## Working with Documents
+
+Now for the fun part - actually working with documents!
+
+### Opening a Document
 
 ```typescript
-import { PatchesSync } from '@dabble/patches/net/PatchesSync';
-const sync = new PatchesSync('wss://your-server-url', patches);
-await sync.connect();
+// Define your document type (TypeScript goodness!)
+interface MyDoc {
+  title: string;
+  items: Array<{ id: string; text: string; done: boolean }>;
+}
+
+// Open a document (creates it if it doesn't exist)
+const doc = await patches.openDoc<MyDoc>('shopping-list');
+
+// Now you can access the state
+console.log(`Shopping List: ${doc.state.title}`);
+console.log(`${doc.state.items.length} items`);
+
+// And make changes
+doc.change(draft => {
+  draft.title = 'Grocery Shopping';
+  draft.items.push({ id: Date.now().toString(), text: 'Milk', done: false });
+});
 ```
 
-## Related Docs
+The `openDoc` method:
 
-- [PatchesDoc](./PatchesDoc.md) — Document instance API
-- [PatchesSync](./net.md) — Real-time sync
-- [InMemoryStore](./persist.md) — Example store implementation
-- [Operational Transformation](./operational-transformation.md)
+- Returns a `PatchesDoc<T>` instance
+- Creates the document if it doesn't exist
+- Loads the latest state from your store
+- Sets up change tracking
 
----
+### Tracking Documents
 
-**Note:** Most applications should not instantiate `PatchesDoc` directly. Always use `patches.openDoc(docId)` to obtain a document instance.
+Before opening docs, you might want to tell Patches which ones you care about:
+
+```typescript
+// Start tracking a set of documents (loads metadata from store)
+await patches.trackDocs(['shopping-list', 'todo-list', 'workout-plan']);
+
+// Later, when you're done with some
+await patches.untrackDocs(['workout-plan']);
+```
+
+Tracking helps Patches be smart about loading and managing documents.
+
+### Closing Documents
+
+When you're done with a document, let Patches know:
+
+```typescript
+// Close a document (saves pending changes, removes from memory)
+await patches.closeDoc('shopping-list');
+
+// Or if you're done with it FOREVER:
+await patches.deleteDoc('old-shopping-list');
+```
+
+Closing docs helps free up memory and ensures everything is saved properly.
+
+## Plugging Into Real-Time Sync
+
+`Patches` works beautifully with `PatchesSync` for real-time collaboration:
+
+```typescript
+import { PatchesSync } from '@dabble/patches/net';
+
+// Create your sync connection
+const sync = new PatchesSync('wss://your-server.example.com', patches);
+
+// Connect to the server
+await sync.connect();
+
+// That's it! Changes now automatically sync to/from the server
+```
+
+The magic of this setup:
+
+- Local changes are sent to the server automatically
+- Server changes are applied to local documents
+- Everything stays in sync with no extra code
+
+## Event Hooks
+
+Listen for important events from the `Patches` system:
+
+```typescript
+// When a document is updated from the server
+patches.onServerCommit((docId, changes) => {
+  console.log(`Document ${docId} received ${changes.length} changes from server`);
+});
+
+// When there's a sync error
+patches.onError((error, context) => {
+  console.error(`Error in document ${context.docId}:`, error);
+  showErrorNotification('Something went wrong. Retrying...');
+});
+
+// When a document fails to open
+patches.onDocOpenFailed((docId, error) => {
+  console.error(`Failed to open document ${docId}:`, error);
+  showErrorNotification('Could not open document. Try again later.');
+});
+```
+
+## See It in Action
+
+Here's a complete example of using `Patches` in a real application:
+
+```typescript
+import { Patches } from '@dabble/patches';
+import { IndexedDBStore } from '@dabble/patches/persist';
+import { PatchesSync } from '@dabble/patches/net';
+
+class CollaborativeApp {
+  private patches: Patches;
+  private sync: PatchesSync;
+  private activeDocuments = new Map();
+
+  constructor() {
+    // Set up persistence
+    const store = new IndexedDBStore('my-collaborative-app');
+
+    // Create Patches instance with user info
+    this.patches = new Patches({
+      store,
+      metadata: {
+        user: this.getCurrentUser(),
+      },
+    });
+
+    // Set up error handling
+    this.patches.onError(this.handleError.bind(this));
+
+    // Set up sync
+    this.sync = new PatchesSync('wss://collab.example.com', this.patches);
+
+    // Handle connection state
+    this.sync.onConnectionStateChange(state => {
+      this.updateConnectionUI(state);
+    });
+  }
+
+  async initialize() {
+    // Track recently used documents
+    const recentDocs = this.getRecentDocIds();
+    await this.patches.trackDocs(recentDocs);
+
+    // Connect to server
+    await this.sync.connect();
+
+    console.log('Collaborative app ready!');
+  }
+
+  async openDocument(docId) {
+    // Open the document
+    const doc = await this.patches.openDoc(docId);
+
+    // Set up listeners
+    doc.onUpdate(state => {
+      this.updateDocumentUI(docId, state);
+    });
+
+    // Remember this document
+    this.activeDocuments.set(docId, doc);
+    this.addToRecentDocs(docId);
+
+    return doc;
+  }
+
+  makeChange(docId, changeFn) {
+    const doc = this.activeDocuments.get(docId);
+    if (doc) {
+      doc.change(changeFn);
+    }
+  }
+
+  // Helper methods
+  private getCurrentUser() {
+    /* ... */
+  }
+  private getRecentDocIds() {
+    /* ... */
+  }
+  private addToRecentDocs(docId) {
+    /* ... */
+  }
+  private updateDocumentUI(docId, state) {
+    /* ... */
+  }
+  private updateConnectionUI(state) {
+    /* ... */
+  }
+  private handleError(error, context) {
+    /* ... */
+  }
+}
+
+// Usage
+const app = new CollaborativeApp();
+await app.initialize();
+
+// Open a document
+const doc = await app.openDocument('project-notes');
+
+// Make changes
+app.makeChange('project-notes', draft => {
+  draft.title = 'Project X Planning';
+  draft.notes.push('Meeting scheduled for Friday');
+});
+```
+
+## The Rest of the Family
+
+The `Patches` class is just one piece of the puzzle. Check out these related components:
+
+- [`PatchesDoc`](./PatchesDoc.md) - Individual document instances that `Patches` creates for you
+- [`PatchesStore`](./persist.md) - The interface for document persistence
+- [`PatchesSync`](./websocket.md) - Real-time synchronization with a server
+- [`PatchesServer`](./PatchesServer.md) - The server-side component that handles collaboration
+
+Remember, `Patches` is your friendly neighborhood document manager. Let it handle the complex stuff while you focus on building an awesome collaborative experience! 🚀

@@ -1,460 +1,347 @@
-<!-- Placeholder for PatchesDoc documentation -->
-
 # `PatchesDoc<T>`
 
-The `PatchesDoc<T>` class represents a single collaborative document managed by the Patches OT system. In most applications, you do **not** instantiate `PatchesDoc` directly. Instead, you use the main `Patches` client interface to open and manage documents, which returns a `PatchesDoc` instance for you.
+Say hello to the star of the show! 🌟
+
+`PatchesDoc<T>` is your direct interface to a single collaborative document. It's where all the client-side magic happens - making changes, handling updates from the server, and keeping your UI in sync with everyone else's edits.
+
+**Here's a hot tip:** Don't create these yourself! Let the main `Patches` client create them for you with `patches.openDoc()`.
 
 **Table of Contents**
 
 - [Overview](#overview)
 - [Initialization](#initialization)
 - [State Management](#state-management)
-  - [Committed State](#committed-state)
-  - [Optimistic State](#optimistic-state)
-  - [Pending Changes](#pending-changes)
-  - [Sending Changes](#sending-changes)
 - [Making Local Changes](#making-local-changes)
-  - [`update()`](#update)
 - [Synchronization with Server](#synchronization-with-server)
-  - [`getUpdatesForServer()`](#getupdatesforserver)
-  - [`applyServerConfirmation()`](#applyserverconfirmation)
-  - [`applyExternalServerUpdate()`](#applyexternalserverupdate)
 - [Accessing State and Metadata](#accessing-state-and-metadata)
-  - [`id` (Getter)](#id-getter)
-  - [`state` (Getter)](#state-getter)
-  - [`committedRev` (Getter)](#committedrev-getter)
-  - [`isSending` (Getter)](#issending-getter)
-  - [`hasPending` (Getter)](#haspending-getter)
-  - [`export()`](#export)
-  - [`import()`](#import)
-  - [`setChangeMetadata()`](#setchangemetadata)
-  - [`setId()`](#setid)
-- [Event Emitters](#event-emitters)
-  - [`onUpdate`](#onupdate)
-  - [`onChange`](#onchange)
-  - [`onBeforeChange`](#onbeforechange)
+- [Event Hooks](#event-hooks)
 - [Example Usage](#example-usage)
-- [Advanced/Direct Usage](#advanceddirect-usage)
-- [Options](#options)
-- [Constructor](#constructor)
 
 ## Overview
 
-`PatchesDoc` acts as the client's local model for a document being edited collaboratively. Its primary responsibilities are:
+`PatchesDoc` is your document's local representation. Think of it as your personal view into a shared world. It does some seriously clever stuff:
 
-1.  **Maintaining State:** It keeps track of the last known server-confirmed state (`committedState`), any changes currently being sent to the server (`sendingChanges`), and any local changes not yet sent (`pendingChanges`). It computes the current _optimistic_ state (`state`) by layering these changes.
-2.  **Applying Local Edits:** Provides an `update` method (similar to Immer) to modify the local state. This generates JSON Patch operations and applies them optimistically.
-3.  **Client-Side OT:** Implements the necessary logic to send changes, receive confirmations, receive external changes, and rebase local changes accordingly.
+- **Optimistic Updates:** Apply your changes locally right away for super-responsive UI
+- **Change Tracking:** Keep track of what's pending, what's sending, and what's confirmed
+- **Operational Transformation:** Handle rebasing your local changes on top of server changes
+- **Immutable State:** Give you a clean, consistent state object that won't be accidentally mutated
 
 ## Initialization
 
-**Recommended: Use the `Patches` client to open documents**
+Remember, you almost never create a `PatchesDoc` directly. Let `Patches` do it for you:
 
 ```typescript
 import { Patches } from '@dabble/patches';
-import { InMemoryStore } from '@dabble/patches/persist/InMemoryStore';
+import { InMemoryStore } from '@dabble/patches/persist';
 
-interface MyDocument {
-  title: string;
-  content: {
-    /* ... */
-  };
-  counter: number;
-}
+// Create the main Patches client
+const patches = new Patches({ store: new InMemoryStore() });
 
-const store = new InMemoryStore();
-const patches = new Patches({ store });
-const docId = 'doc-abc';
-await patches.trackDocs([docId]);
-const doc = await patches.openDoc<MyDocument>(docId);
-
-console.log(doc.id); // 'doc-abc'
-console.log(doc.state); // Current state
-console.log(doc.committedRev); // Last confirmed revision
+// Get a PatchesDoc instance
+const doc = await patches.openDoc<MyDocType>('my-document-id');
 ```
 
-**Advanced/Direct Usage:**
-
-You may instantiate `PatchesDoc` directly for advanced scenarios, testing, or if you need to work with a document outside the `Patches` client. This is not recommended for most applications.
+If you really need to create one directly (rare!):
 
 ```typescript
-import { PatchesDoc } from '@dabble/patches';
+import { PatchesDoc } from '@dabble/patches/client';
 
-const initialServerState: MyDocument = /* ... fetched state ... */;
-const initialServerRev: number = /* ... fetched revision ... */;
-const clientMetadata = { userId: 'user-123', sessionId: 'session-xyz' };
-
-const doc = new PatchesDoc<MyDocument>(initialServerState, initialServerRev, clientMetadata);
-doc.setId('doc-abc');
+const doc = new PatchesDoc<MyDocType>({
+  initialState: {
+    /* initial state */
+  },
+  id: 'my-document-id', // Optional, can set later with setId()
+});
 ```
-
-- **`initialState`**: The starting state of the document.
-- **`initialMetadata`** (Optional): An object containing key-value pairs to be included in the `metadata` field of `Change` objects generated by this `PatchesDoc` instance.
 
 ## State Management
 
-`PatchesDoc` manages several internal states to handle optimistic updates and synchronization:
+`PatchesDoc` is a state management genius. It juggles three different versions of your document state:
 
 ### Committed State
 
-- Stored internally as `_committedState`.
-- Represents the last document state that has been acknowledged (committed) by the server.
-- This state is only updated when receiving confirmations (`applyServerConfirmation`) or external updates (`applyExternalServerUpdate`) from the server.
-- The revision number corresponding to this state is stored in `_committedRev` (accessible via the `committedRev` getter).
+This is the last confirmed state from the server - the ground truth that everyone agrees on. It's stored in `doc._committedState` and has a revision number in `doc.committedRev`.
 
 ### Optimistic State
 
-- Accessible via the `state` getter.
-- This is the state displayed to the user in the UI.
-- It is calculated by applying the `_sendingChanges` and then the `_pendingChanges` on top of the `_committedState`.
-- This provides immediate feedback to the user for their local actions.
+This is what you actually see and use via `doc.state`. It includes all confirmed changes PLUS your pending local changes. This makes your app feel super responsive since you see your changes immediately.
 
 ### Pending Changes
 
-- Stored internally as `_pendingChanges` (an array of `Change` objects).
-- These are changes generated locally via the `update()` method that have _not yet_ been sent to the server.
-- The `hasPending` getter returns `true` if this array is not empty.
+These are your local edits that haven't been confirmed by the server yet. They're in three possible states:
 
-### Sending Changes
-
-- Stored internally as `_sendingChanges` (an array of `Change` objects).
-- These are changes that have been retrieved using `getUpdatesForServer()` and are currently in flight to the server, awaiting confirmation.
-- The `isSending` getter returns `true` if this array is not empty.
-- `PatchesDoc` generally expects only one batch of changes to be in the `sending` state at a time to simplify state management.
+1. **Pending:** Changes waiting to be sent (`_pendingChanges`)
+2. **Sending:** Changes currently being sent to the server (`_sendingChanges`)
+3. **Confirmed:** Changes the server accepted (these become part of the committed state)
 
 ## Making Local Changes
 
-### `update()`
-
-This is the primary method for modifying the document state locally.
+Changing your document is dead simple:
 
 ```typescript
+// Make a change to your document
 doc.change(draft => {
-  draft.title = 'New Document Title';
+  draft.title = 'My Amazing Document';
+  draft.count = (draft.count || 0) + 1;
+
+  // You can do whatever you want to the draft object
+  if (draft.items) {
+    draft.items.push({ id: 'new-item', text: 'Hello world' });
+  } else {
+    draft.items = [{ id: 'new-item', text: 'Hello world' }];
+  }
 });
 ```
 
-- Uses Immer-like principles (proxies provided by [`createPatchProxy`](./json-patch.md#createpatchproxy-utility)) to track changes.
-- Generates [`JSONPatchOp`](../src/types.ts) operations.
-- Queues a [`Change`](./types.ts) object for sending.
+The `change` method:
+
+1. Takes your changes and applies them to a draft object
+2. Creates a new immutable state with those changes applied
+3. Generates a change record to send to the server
+4. Updates the local state immediately (optimistic update)
+5. Adds the change to the pending queue
+
+You get instant feedback while changes sync in the background!
 
 ## Synchronization with Server
 
-These methods manage the communication flow with the central [`PatchesServer`](./PatchesServer.md).
+`PatchesDoc` has three key methods for syncing with the server:
 
 ### `getUpdatesForServer()`
 
-Call this method to retrieve the changes that need to be sent to the server.
+```typescript
+const changesToSend = doc.getUpdatesForServer();
+```
 
-- Moves pending changes to the sending queue.
-- Ensures `baseRev` is set correctly based on [`committedRev`](#committedrev-getter).
+This moves pending changes to "sending" status and returns them so they can be sent to the server. Usually, your sync provider calls this for you.
 
 ### `applyServerConfirmation()`
 
-Call this method after receiving the server's response (usually a single [`Change`](./types.ts) object or `[]`) to a batch sent via `getUpdatesForServer()`.
+```typescript
+doc.applyServerConfirmation(serverCommittedChanges);
+```
 
-- Applies the confirmed change to the committed state.
-- Updates `committedRev`.
-- **Rebases** pending changes using [`rebaseChanges()`](./utils.ts).
+When the server confirms changes, this method:
+
+1. Updates the committed state and revision number
+2. Clears the corresponding sending changes
+3. Triggers update events for your UI
 
 ### `applyExternalServerUpdate()`
 
-Call this method when receiving changes from the server that originated from _other_ clients (broadcast by the [`PatchesServer`](./PatchesServer.md)).
+```typescript
+doc.applyExternalServerUpdate(changesFromOtherClients);
+```
 
-- Applies external changes to the committed state.
-- Updates `committedRev`.
-- **Rebases** both sending and pending changes using [`rebaseChanges()`](./utils.ts).
+When other clients make changes, this method:
+
+1. Updates the committed state with their changes
+2. Rebases any pending local changes on top using OT
+3. Updates the optimistic state
+4. Triggers update events for your UI
 
 ## Accessing State and Metadata
 
-### `id` (Getter)
+There are several ways to access your document's state and metadata:
 
-Returns the unique identifier for this document (`_id`), or `null` if it hasn't been set yet via `setId()`.
-
-```typescript
-const documentId = doc.id;
-if (documentId) {
-  console.log('Working on document:', documentId);
-}
-```
-
-### `state` (Getter)
-
-Returns the current optimistic local state ( `_committedState` + `_sendingChanges` + `_pendingChanges`). This is the state you should typically render in the UI.
+### `state` Getter
 
 ```typescript
 const currentState = doc.state;
-// Render UI based on currentState
 ```
 
-### `committedRev` (Getter)
+This gives you the optimistic state (committed + pending changes). This is what you use for rendering your UI.
 
-Returns the revision number (`_committedRev`) of the last state acknowledged by the server.
+### `committedRev` Getter
 
 ```typescript
-const revision = doc.committedRev;
+const serverRevision = doc.committedRev;
 ```
 
-### `isSending` (Getter)
+Get the current server revision number.
 
-Returns `true` if there is a batch of changes currently awaiting confirmation from the server (`_sendingChanges` is not empty).
+### Status Getters
 
 ```typescript
 if (doc.isSending) {
-  // Maybe show a "Saving..." indicator
+  // Show a "saving..." indicator
 }
-```
 
-### `hasPending` (Getter)
-
-Returns `true` if there are local changes that have not yet been sent to the server (`_pendingChanges` is not empty).
-
-```typescript
 if (doc.hasPending) {
-  // Maybe enable a "Send Changes" button
+  // Show an "unsaved changes" warning
 }
 ```
 
-### `export()`
-
-Exports the _committed_ state and revision. **Does not include pending or sending changes.** Useful for basic persistence, but be aware that importing this state will discard any unconfirmed local work.
+### Import/Export
 
 ```typescript
-const snapshot = doc.export();
-// { state: /* committed state */, rev: /* committed revision */ }
-// Save snapshot to localStorage, etc.
-```
+// Get the full document state with all changes
+const exportedDoc = doc.export();
 
-### `import()`
-
-Resets the `PatchesDoc` to a specific committed state and revision, discarding _all_ pending and sending changes. Use this to synchronize a client to a known server state, for example, after a forced resync.
-
-```typescript
-// Assume `snapshot` was previously exported or received from server
-doc.import(snapshot);
-// Now doc.state === snapshot.state and doc.committedRev === snapshot.rev
-// All local unconfirmed changes are gone.
-```
-
-### `setChangeMetadata()`
-
-Allows you to set or update the metadata object that will be included with subsequent `Change` objects generated by `doc.change()`.
-
-```typescript
-doc.setChangeMetadata({ userId: 'user-456', theme: 'dark' });
-
-doc.change(draft => {
-  draft.title = 'Metadata Test';
-});
-// The resulting Change object in _pendingChanges will have:
-// metadata: { userId: 'user-456', theme: 'dark' }
-```
-
-### `setId()`
-
-Assigns a unique identifier to the `PatchesDoc` instance. This is typically the ID used to reference the document on the server.
-
-**Important:** The ID can only be set once. Attempting to call `setId()` with a different ID after it has already been set will throw an error.
-
-```typescript
-const newDoc = new PatchesDoc<{ text: string }>({ text: '' });
-console.log(newDoc.id); // null
-
-newDoc.setId('document-xyz-123');
-console.log(newDoc.id); // 'document-xyz-123'
-
-try {
-  newDoc.setId('another-id'); // This will throw an error
-} catch (e) {
-  console.error(e.message); // "Document ID cannot be changed once set..."
-}
-
-// Calling setId with the *same* ID again is allowed (it's idempotent)
-newDoc.setId('document-xyz-123'); // OK
-```
-
-## Event Emitters
-
-`PatchesDoc` provides signals (using `easy-signal`) to subscribe to various events.
-
-### `onUpdate`
-
-Triggered whenever the optimistic `state` getter might have changed. This happens after:
-
-- A local `update()` successfully applies changes.
-- `applyServerConfirmation()` processes a server response.
-- `applyExternalServerUpdate()` processes changes from other clients.
-- `import()` loads a new state.
-
-```typescript
-const unsubscribe = doc.onUpdate((newState, theDocInstance) => {
-  console.log('Optimistic state updated:', newState);
-  // Update UI
-});
-
-// Later...
-unsubscribe();
-```
-
-### `onChange`
-
-Triggered immediately _after_ a local change generated by `update()` has been applied optimistically and added to the pending queue.
-
-```typescript
-doc.onChange((localChange, theDocInstance) => {
-  console.log('Local change applied optimistically:', localChange);
+// Import a document state (e.g., when initializing)
+doc.import({
+  state: {
+    /* ... */
+  },
+  committedRev: 42,
+  pendingChanges: [
+    /* ... */
+  ],
+  sendingChanges: [
+    /* ... */
+  ],
 });
 ```
 
-### `onBeforeChange`
+## Event Hooks
 
-Triggered immediately _before_ a local change generated by `update()` is applied optimistically.
+Listen to document events to update your UI:
 
 ```typescript
-doc.onBeforeChange((changeAboutToBeApplied, theDocInstance) => {
-  console.log('About to apply local change:', changeAboutToBeApplied);
+// Called whenever the document state changes
+doc.onUpdate((newState, oldState) => {
+  console.log('Document updated:', newState);
+  updateUI(newState);
+});
+
+// Called when a change is made locally
+doc.onChange(change => {
+  console.log('Local change made:', change);
+});
+
+// Called before applying a change (can be used for validation)
+doc.onBeforeChange((draftState, callback) => {
+  if (!isValid(draftState)) {
+    callback(new Error('Invalid change!'));
+    return;
+  }
+  callback(null);
+});
+
+// Called when the server confirms changes
+doc.onCommit(committedChanges => {
+  console.log('Changes committed by server:', committedChanges);
 });
 ```
 
 ## Example Usage
 
-See the [Simple Client Setup example in the main README.md](../README.md#simple-client-setup).
-Also see related server example: [Simple Server Setup example in the main README.md](../README.md#simple-server-setup).
-
-## Advanced/Direct Usage
-
-This section covers advanced and low-level usage patterns for `PatchesDoc`, including manual synchronization, offline workflows, custom metadata, error handling, and snapshotting. These patterns are useful for testing, custom integrations, or building your own sync logic.
-
-### Manual Synchronization
-
-You can use `PatchesDoc` without the higher-level `Patches` client or network sync. This is useful for custom sync protocols, testing, or offline-first apps.
+Here's a full example of using `PatchesDoc` with a React component:
 
 ```typescript
-import { PatchesDoc } from '@dabble/patches';
+import React, { useEffect, useState } from 'react';
+import { Patches } from '@dabble/patches';
+import { InMemoryStore } from '@dabble/patches/persist';
+import { PatchesSync } from '@dabble/patches/net';
 
-// Initial state and revision, e.g. fetched from your own backend
-const initialState = { title: 'Manual Doc', count: 0 };
-const initialRev = 5;
-const doc = new PatchesDoc(initialState, /* initialMetadata */ { userId: 'alice' });
-doc.setId('manual-doc');
-
-// Make local changes
-const change = doc.change(draft => {
-  draft.count++;
-});
-
-// Prepare changes to send to your server
-const changesToSend = doc.getUpdatesForServer();
-// ...send to server, await confirmation...
-
-// On server confirmation (array of Change objects):
-doc.applyServerConfirmation(serverCommit);
-
-// On receiving external changes from other clients:
-doc.applyExternalServerUpdate(externalChanges);
-```
-
-### Offline Usage & Snapshots
-
-You can persist and restore the full document state, including unconfirmed changes, for offline or background scenarios.
-
-```typescript
-// Export a snapshot (committed state + all local changes)
-const snapshot = doc.export();
-localStorage.setItem('mydoc', JSON.stringify(snapshot));
-
-// Later, or on another device:
-const loaded = JSON.parse(localStorage.getItem('mydoc')!);
-const doc2 = new PatchesDoc(loaded.state);
-doc2.setId('manual-doc');
-doc2.import(loaded); // Restores committed state and all pending changes
-```
-
-### Custom Metadata
-
-Attach custom metadata to all future changes (e.g., user info, device, etc):
-
-```typescript
-doc.setChangeMetadata({ userId: 'bob', device: 'mobile' });
-doc.change(draft => {
-  draft.title = 'Edited on mobile';
-});
-// The resulting Change will include the metadata
-```
-
-### Error Handling & Manual Retry
-
-If sending changes to the server fails (e.g., network error), you can requeue the changes for retry:
-
-```typescript
-try {
-  const changes = doc.getUpdatesForServer();
-  // ...send to server...
-} catch (err) {
-  // Already sending; wait for confirmation or call handleSendFailure on error
+interface TodoItem {
+  id: string;
+  text: string;
+  done: boolean;
 }
 
-// If the send fails (e.g., network error):
-doc.handleSendFailure(); // Moves sending changes back to pending
-```
+interface TodoDoc {
+  items: TodoItem[];
+}
 
-### Testing & Simulating Sync
+function TodoApp() {
+  const [doc, setDoc] = useState(null);
+  const [todos, setTodos] = useState<TodoItem[]>([]);
+  const [newTodo, setNewTodo] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
-You can use `PatchesDoc` in tests to simulate local and remote changes, rebasing, and state transitions:
+  // Set up Patches on component mount
+  useEffect(() => {
+    const setup = async () => {
+      const store = new InMemoryStore();
+      const patches = new Patches({ store });
 
-```typescript
-const doc = new PatchesDoc({ value: 1 });
-doc.setId('test');
+      // Connect to server
+      const sync = new PatchesSync('wss://your-server.example.com', patches);
+      await sync.connect();
 
-// Local change
-const c1 = doc.change(draft => {
-  draft.value = 2;
-});
+      // Open the todos document
+      const todoDoc = await patches.openDoc<TodoDoc>('my-todos');
 
-// Simulate server commit (e.g., after sending c1)
-doc.getUpdatesForServer();
-doc.applyServerConfirmation([{ ...c1, rev: 1 }]);
+      // Initialize if empty
+      if (!todoDoc.state.items) {
+        todoDoc.change(draft => {
+          draft.items = [];
+        });
+      }
 
-// Simulate external change from another client
-doc.applyExternalServerUpdate([
-  { id: 'ext', rev: 2, baseRev: 1, ops: [{ op: 'replace', path: '/value', value: 3 }], created: Date.now() },
-]);
+      // Listen for updates
+      todoDoc.onUpdate(newState => {
+        setTodos(newState.items || []);
+      });
 
-console.log(doc.state); // { value: 3 }
-```
+      // Track saving status
+      setInterval(() => {
+        setIsSaving(todoDoc.isSending || todoDoc.hasPending);
+      }, 100);
 
-### Notes
+      setDoc(todoDoc);
+    };
 
-- You are responsible for calling `getUpdatesForServer` and `applyServerConfirmation` in the correct order.
-- All state is immutable; never mutate `doc.state` directly.
-- For branching/merging, see the server-side API and `PatchesBranchManager` docs.
+    setup();
+  }, []);
 
-## Options
+  // Add a new todo
+  const addTodo = () => {
+    if (!newTodo.trim() || !doc) return;
 
-When creating a `PatchesDoc` instance, you can pass the following options:
+    doc.change(draft => {
+      draft.items.push({
+        id: `todo-${Date.now()}`,
+        text: newTodo,
+        done: false
+      });
+    });
 
-```typescript
-interface PatchesDocOptions {
-  /**
-   * Maximum size in bytes for a single payload (network message).
-   * Changes exceeding this will be split into multiple smaller changes.
-   */
-  maxPayloadBytes?: number;
+    setNewTodo('');
+  };
+
+  // Toggle a todo's completion status
+  const toggleTodo = (id: string) => {
+    if (!doc) return;
+
+    doc.change(draft => {
+      const todo = draft.items.find(item => item.id === id);
+      if (todo) {
+        todo.done = !todo.done;
+      }
+    });
+  };
+
+  return (
+    <div>
+      <h1>Collaborative Todo List</h1>
+      {isSaving && <div className="saving-indicator">Saving...</div>}
+
+      <div className="add-todo">
+        <input
+          value={newTodo}
+          onChange={e => setNewTodo(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && addTodo()}
+          placeholder="Add a new todo"
+        />
+        <button onClick={addTodo}>Add</button>
+      </div>
+
+      <ul className="todo-list">
+        {todos.map(todo => (
+          <li
+            key={todo.id}
+            className={todo.done ? 'done' : ''}
+            onClick={() => toggleTodo(todo.id)}
+          >
+            {todo.text}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 ```
 
-- `maxPayloadBytes` - Controls the maximum size in bytes of a single payload (network message). Changes exceeding this limit will be automatically split into multiple smaller changes. This is especially useful for handling very large text inserts (e.g., copy-pasting a large document) or duplicating large sections of content. This aligns with WebSocket payload size limitations (such as Cloudflare's 1MB limit) and is used for both change splitting in PatchesDoc and batch splitting in PatchesSync.
-
-## Constructor
-
-```typescript
-constructor(
-  initialState: T = {} as T,
-  initialMetadata: Record<string, any> = {},
-  options: PatchesDocOptions = {}
-)
-```
-
-- `initialState` - The initial state of the document.
-- `initialMetadata` - Optional metadata to include with all changes.
-- `options` - Optional configuration options for the document.
+That's it! Your todo list now has real-time collaboration. Multiple people can add and complete todos together, and everything stays in sync automagically. ✨

@@ -1,121 +1,261 @@
-# PatchesHistoryClient
+# PatchesHistoryClient: Your Document Time Machine! ⏰
 
-Client-side interface for browsing, scrubbing, and inspecting document version history in Patches.
+Ever wanted to peek into the past? See how a document evolved over time? Or maybe just watch that brilliant edit you made last week? Say hello to `PatchesHistoryClient` – your personal document time machine!
 
-## Overview
+## What's This All About? 🤔
 
-`PatchesHistoryClient` provides a read-only, event-driven API for listing document versions, loading historical states and changes, and scrubbing through changes for a given document. It is designed for use in collaborative UIs, version browsers, and audit tools.
+`PatchesHistoryClient` is your ticket to browsing, exploring, and even scrubbing through your document's history. It's like having DVR for your documents! You can:
 
-- **Read-only:** Does not modify document state on the server.
-- **Event-driven:** Uses signals for UI reactivity.
-- **Efficient:** Uses an LRU cache for version state and changes.
-- **Pluggable transport:** Works with any compatible transport (WebSocket, REST, etc.), but ships with WebSocket support.
+- 📋 Browse all versions of a document
+- ⏮️ Load up any past version to see how things looked
+- 🎬 Scrub through changes frame-by-frame (like video editing!)
+- 🔍 Inspect exactly what changed in each version
 
-## Relationship to Other Components
+The best part? It's totally read-only, so you can explore without fear of messing things up!
 
-- **PatchesHistoryManager:** The server-side authority for version history. `PatchesHistoryClient` mirrors its API for client-side consumption.
-- **PatchesWebSocket:** The default transport for fetching version data in real time.
-- **PatchesDoc:** Use `PatchesDoc` for editing and mutating documents; use `PatchesHistoryClient` for read-only history exploration.
+## How Does It Fit Into the Patches Family? 👪
 
-## API Reference
+- **PatchesHistoryManager** is the server-side history keeper
+- **PatchesHistoryClient** is the client-side explorer (that's this one!)
+- **PatchesDoc** is for making changes
+- **PatchesHistoryClient** is for exploring history
 
-### Constructor
+Think of it like this: Use `PatchesDoc` when you want to write, use `PatchesHistoryClient` when you want to read the past!
 
-```ts
-new PatchesHistoryClient<T = any>(docId: string, transport: HistoryTransport)
+## Let's Get This Party Started! 🎉
+
+### Setting Up Your Time Machine
+
+```typescript
+import { PatchesHistoryClient } from '@dabble/patches/client';
+import { PatchesWebSocket } from '@dabble/patches/net';
+
+// First, get your transport (the connection to the mothership)
+const ws = new PatchesWebSocket('wss://your-awesome-server.com');
+await ws.connect();
+
+// Then create your history client for a specific document
+const history = new PatchesHistoryClient('proposal-final', ws);
+
+// Now you're ready to start time traveling!
 ```
 
-- `docId`: The document ID to browse history for.
-- `transport`: An object implementing the `HistoryTransport` interface (e.g., a `PatchesWebSocket` instance).
-- `T`: (Optional) Type of the document state.
+### Browsing Your Document's Timeline
 
-### Properties
-
-- `id: string` — The document ID.
-- `versions: VersionMetadata[]` — The current list of loaded versions.
-- `state: T` — The current state (after scrubbing or loading a version).
-- `onVersionsChange` — Signal: subscribe to version list updates.
-- `onStateChange` — Signal: subscribe to state changes.
-
-### Methods
-
-- `listVersions(options?: ListVersionsOptions): Promise<VersionMetadata[]>`
-  - Fetch and cache the list of versions. Emits `onVersionsChange`.
-- `getStateAtVersion(versionId: string): Promise<T>`
-  - Loads the state for a specific version. Emits `onStateChange`.
-- `getChangesForVersion(versionId: string): Promise<Change[]>`
-  - Loads the changes for a specific version.
-- `scrubTo(versionId: string, changeIndex: number): Promise<void>`
-  - Loads the parent state and applies changes up to `changeIndex`. Emits `onStateChange`.
-- `clear(): void`
-  - Clears all caches and resets state/signals.
-
-## Usage Example
-
-```ts
-import { PatchesHistoryClient } from 'patches/client/PatchesHistoryClient';
-import { PatchesWebSocket } from 'patches/net/PatchesWebSocket';
-
-const ws = new PatchesWebSocket('wss://your-server');
-const history = new PatchesHistoryClient('doc-123', ws);
-
-// Listen for version list updates
-const unsubVersions = history.onVersionsChange(versions => {
-  console.log('Versions:', versions);
+```typescript
+// Get a list of all versions (newest first)
+const versions = await history.listVersions({
+  limit: 10, // Just the 10 most recent
+  reverse: true, // Newest first
 });
 
-// Listen for state changes (e.g., after scrubbing)
-const unsubState = history.onStateChange(state => {
-  console.log('Scrubbed state:', state);
+console.log(`Found ${versions.length} versions!`);
+
+// Each version has useful metadata:
+versions.forEach(version => {
+  console.log(`Version: ${version.name || 'Unnamed'}`);
+  console.log(`  Created: ${new Date(version.startDate).toLocaleString()}`);
+  console.log(`  Changes: ${version.changes.length}`);
+  console.log(`  Author: ${version.metadata?.author || 'Unknown'}`);
+});
+```
+
+### Loading a Specific Version
+
+```typescript
+// I want to see how the document looked last Tuesday!
+const tuesdayVersionId = 'version-abc-123';
+const tuesdayState = await history.getStateAtVersion(tuesdayVersionId);
+
+// Now you can display this state in your UI
+renderDocument(tuesdayState);
+```
+
+### Frame-by-Frame Scrubbing
+
+This is where things get SUPER cool! You can scrub through changes like a video editor:
+
+```typescript
+// Start with a version
+const versionId = 'version-xyz-789';
+
+// Get all the changes in this version
+const changes = await history.getChangesForVersion(versionId);
+console.log(`This version has ${changes.length} individual changes!`);
+
+// Now let's scrub through them one by one
+for (let i = 0; i < changes.length; i++) {
+  // This loads the parent state and applies changes up to index i
+  await history.scrubTo(versionId, i);
+
+  // Your UI will update with each step!
+  console.log(`Showing change ${i + 1} of ${changes.length}`);
+
+  // Maybe add a "next" button in your UI here
+}
+```
+
+### Listening for Updates
+
+For a reactive UI, use the built-in event signals:
+
+```typescript
+// Subscribe to version list changes
+history.onVersionsChange(versions => {
+  // Update your version list UI
+  updateVersionListUI(versions);
 });
 
-// List versions
-await history.listVersions({ limit: 10, reverse: true });
+// Subscribe to state changes (happens during scrubbing)
+history.onStateChange(state => {
+  // Update your document viewer
+  updateDocumentUI(state);
+});
+```
 
-// Scrub to the 3rd change in a version
-await history.scrubTo('version-abc', 3);
+### Cleaning Up
 
-// Clean up
-unsubVersions();
-unsubState();
+When you're done time traveling, clean up after yourself:
+
+```typescript
+// Clear all caches and reset state
 history.clear();
 ```
 
-## Caching
+## Cool Things You Should Know 🧠
 
-- Uses an LRU cache (default size: 5) for version state and changes.
-- Cache is cleared on `clear()`.
-- Frequently accessed versions remain in memory for fast scrubbing.
+### Smart Caching
 
-## Scrubbing
+`PatchesHistoryClient` isn't just fast - it's smart:
 
-- `scrubTo(versionId, changeIndex)` loads the parent state and applies changes up to the given index.
-- Uses the same OT logic as the main document engine (via `applyChanges`).
-- Emits `onStateChange` with the new state.
+- It uses an LRU cache to keep recently viewed versions in memory
+- Frequently accessed versions stay cached for super-fast scrubbing
+- The cache automatically drops the least recently used versions if memory gets tight
 
-## Integration & UI
+### Type Safety with TypeScript
 
-- Designed for integration with reactive UI frameworks (Svelte, React, etc.).
-- Use `onVersionsChange` and `onStateChange` to update UI components.
-- Can be used alongside `PatchesDoc` for editing and live collaboration.
+If you're using TypeScript (and you totally should!), you can get full type safety:
 
-## Error Handling
+```typescript
+interface MyDocType {
+  title: string;
+  content: string;
+  author: {
+    id: string;
+    name: string;
+  };
+  lastModified: string;
+}
 
-- Errors from the transport are thrown as rejected promises.
-- You can catch and handle errors in your UI as needed.
+// Pass your type as a generic parameter
+const history = new PatchesHistoryClient<MyDocType>('my-doc', ws);
 
-## TypeScript Generics
+// Now 'state' will be properly typed!
+history.onStateChange(state => {
+  console.log(state.title); // TypeScript knows this exists!
+});
+```
 
-- Pass a type parameter to `PatchesHistoryClient<T>` for strong typing of document state.
+## Real-World Example: Building a History Browser UI
 
-## Best Practices
+Here's how you might use `PatchesHistoryClient` in a real application:
 
-- Always call `clear()` when disposing of the client to avoid memory leaks.
-- Use the event signals for UI reactivity instead of polling.
-- Use version list options to limit and sort results for large histories.
+```typescript
+import { PatchesHistoryClient } from '@dabble/patches/client';
+import { PatchesWebSocket } from '@dabble/patches/net';
 
-## See Also
+class DocumentHistoryExplorer {
+  private history: PatchesHistoryClient;
+  private currentVersionId: string | null = null;
+  private scrubPosition: number = 0;
 
-- [PatchesHistoryManager](./PatchesHistoryManager.md)
-- [PatchesDoc](./PatchesDoc.md)
-- [PatchesWebSocket](./websocket.md)
+  constructor(docId: string, serverUrl: string) {
+    const ws = new PatchesWebSocket(serverUrl);
+    this.history = new PatchesHistoryClient(docId, ws);
+
+    // Set up event listeners
+    this.history.onVersionsChange(this.handleVersionsUpdate);
+    this.history.onStateChange(this.handleStateUpdate);
+  }
+
+  async initialize() {
+    // Connect to server
+    await this.ws.connect();
+
+    // Load version list
+    await this.history.listVersions({
+      limit: 20,
+      reverse: true,
+      orderBy: 'startDate',
+    });
+  }
+
+  async selectVersion(versionId: string) {
+    this.currentVersionId = versionId;
+    this.scrubPosition = 0;
+
+    // Load the full version state
+    await this.history.getStateAtVersion(versionId);
+
+    // Also load changes so we know how many we have
+    const changes = await this.history.getChangesForVersion(versionId);
+    this.updateScrubberUI(0, changes.length);
+  }
+
+  async scrubToPosition(position: number) {
+    if (!this.currentVersionId) return;
+
+    this.scrubPosition = position;
+    await this.history.scrubTo(this.currentVersionId, position);
+  }
+
+  // Event handlers
+  private handleVersionsUpdate = versions => {
+    this.renderVersionList(versions);
+  };
+
+  private handleStateUpdate = state => {
+    this.renderDocumentPreview(state);
+  };
+
+  // UI methods (to be implemented based on your framework)
+  private renderVersionList(versions) {
+    /* ... */
+  }
+  private renderDocumentPreview(state) {
+    /* ... */
+  }
+  private updateScrubberUI(position, total) {
+    /* ... */
+  }
+
+  // Cleanup
+  dispose() {
+    this.history.clear();
+  }
+}
+
+// Usage
+const explorer = new DocumentHistoryExplorer('important-doc', 'wss://server.example.com');
+await explorer.initialize();
+```
+
+## Best Practices for Time Travelers 🚀
+
+1. **Clean Up After Yourself**: Always call `clear()` when you're done to free up memory
+
+2. **Use Event Signals**: Don't poll for updates - use the `onVersionsChange` and `onStateChange` signals
+
+3. **Limit Your Results**: Use the options in `listVersions()` to paginate large histories
+
+4. **Cache Smart**: The LRU cache defaults to 5 entries - increase this if you're doing a lot of scrubbing
+
+5. **Error Handling**: Wrap your calls in try/catch to handle transport errors gracefully
+
+## Want to Learn More? 📚
+
+- [PatchesHistoryManager](./PatchesHistoryManager.md) - The server-side counterpart
+- [PatchesDoc](./PatchesDoc.md) - For when you want to edit documents
+- [PatchesWebSocket](./websocket.md) - Details on the transport layer
+
+Happy time traveling! ⏰🚀

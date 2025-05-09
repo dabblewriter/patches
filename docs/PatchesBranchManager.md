@@ -1,185 +1,306 @@
-# `PatchesBranchManager`
+# `PatchesBranchManager` - Document Branching Made Easy! 🌿
 
-The `PatchesBranchManager` class provides functionality for creating and managing document branches within the Patches OT system. Branching allows you to create a separate, editable copy of a document based on a specific point in its history, work on it independently, and potentially merge the changes back into the original document later.
+Ever wanted to experiment with big changes without wrecking your main document? Or have multiple people work on different features at once? That's what `PatchesBranchManager` is all about! Think of it as "git branching" for your collaborative documents.
 
 **Table of Contents**
 
-- [Overview](#overview)
-- [Initialization](#initialization)
-- [Core Methods](#core-methods)
-  - [`createBranch()`](#createbranch)
-  - [`listBranches()`](#listbranches)
-  - [`mergeBranch()`](#mergebranch)
-  - [`closeBranch()`](#closebranch)
-- [Backend Store Dependency](#backend-store-dependency)
-- [Example Usage](#example-usage)
+- [Why Branches Are Awesome](#why-branches-are-awesome)
+- [Getting Started](#getting-started)
+- [Core Operations](#core-operations)
+- [Behind the Scenes](#behind-the-scenes)
+- [Real-World Example](#real-world-example)
 
-## Overview
+## Why Branches Are Awesome
 
-Branching is useful for scenarios like:
+Branches give your collaborative workflow superpowers! Here's what you can do:
 
-- **Feature Development:** Work on a new feature in a document without affecting the main version until it's ready.
-- **Experimentation:** Try out significant changes without risk.
-- **Review Processes:** Create a branch for review and merge approved changes.
+- **Try Bold New Ideas** 💡 - Experiment with massive changes without fear
+- **Work in Parallel** 👥 - Have different teams working on separate features simultaneously
+- **Review Process** 🔍 - Create branches for approval workflows before merging to main
+- **Training Grounds** 🧪 - Let new users practice in a safe environment before touching the real thing
 
-`PatchesBranchManager` interacts with both the `PatchesServer` (for merging) and a `BranchingStoreBackend` (for storing branch metadata and versioned document data).
+Basically, anytime you want a "copy" of a document that can diverge and then potentially merge back later, branches are your friend!
 
-## Initialization
+## Getting Started
 
-You instantiate `PatchesBranchManager` by providing an implementation of the [`BranchingStoreBackend`](./operational-transformation.md#branchingstorebackend) and an instance of [`PatchesServer`](./PatchesServer.md).
+Setting up branching is super simple:
 
 ```typescript
 import { PatchesServer } from '@dabble/patches/server';
 import { PatchesBranchManager, BranchingStoreBackend } from '@dabble/patches/server';
 import { MyDatabaseStore } from './my-store'; // Your backend implementation
 
-const store = new MyDatabaseStore(/* ... */);
+// First, you need your store and server
+const store = new MyDatabaseStore(/* your connection details */);
 const server = new PatchesServer(store);
+
+// Then create the branch manager
 const branchManager = new PatchesBranchManager(store, server);
+
+// Now you're ready to branch and merge!
 ```
 
-- **`store`**: An object implementing the `BranchingStoreBackend` interface. This is where branch metadata and the branched document's data will be stored.
-- **`patchesServer`**: An instance of `PatchesServer`, used by `mergeBranch` to submit the branch's changes back to the source document's OT history.
+The `branchManager` needs both the store (to save branch metadata) and the server (to handle merging operations).
 
-## Core Methods
+## Core Operations
 
-### `createBranch()`
+Let's dive into the main things you can do with branches:
 
-Creates a new branch from an existing document.
+### Creating a Branch 🌱
 
 ```typescript
-async createBranch(
-    docId: string,          // ID of the source document
-    rev: number,            // Revision number on the source document to branch from
-    branchName?: string,    // Optional name for the branch
-    metadata?: Record<string, any> // Optional metadata for the branch
-): Promise<string>;         // Returns the new document ID for the branch
+// Create a branch from the main document at a specific revision
+const branchInfo = await branchManager.createBranch({
+  sourceDocId: 'main-proposal', // The document to branch from
+  branchId: 'experimental-draft', // ID for the new branch
+  baseRev: 42, // Which revision to branch from
+  name: 'Experimental Draft', // Human-readable name
+  metadata: {
+    // Any extra info you want to store
+    createdBy: 'alice@example.com',
+    purpose: 'Testing new layout',
+  },
+});
+
+console.log(`Created branch: ${branchInfo.name}`);
+console.log(`The branch document ID is: ${branchInfo.docId}`);
 ```
 
-**Steps:**
+What happens:
 
-1.  Retrieves the state of the source document (`docId`) at the specified `rev` using `store.getStateAtRevision()`.
-2.  Generates a new unique document ID (`branchDocId`) for the branch.
-3.  Creates an initial version (`VersionMetadata` with `origin: 'branch'`) for the new `branchDocId`. This version's state is the state retrieved in step 1, and its `baseRev` is the source `rev`.
-4.  Saves this initial version using `store.saveVersion()`.
-5.  Creates a `Branch` metadata record containing information about the source document, revision, name, status ('open'), etc.
-6.  Saves the `Branch` metadata using `store.createBranch()`.
-7.  Returns the `branchDocId`.
+1. A new document is created based on the state of the source at the specified revision
+2. This branch is tracked so you can merge it back later
+3. You get back info about the new branch, including its document ID
+4. You can now edit this branch independently from the main document!
 
-The newly created branch document (`branchDocId`) can now be edited independently using `PatchesDoc` and `PatchesServer`, just like any other document.
+### Listing Branches 📋
 
-### `listBranches()`
-
-Retrieves metadata for all branches associated with a specific source document.
+Need to see all branches for a document?
 
 ```typescript
-async listBranches(docId: string): Promise<Branch[]>;
+// List all branches for a document
+const branches = await branchManager.listBranches('main-proposal');
+
+console.log(`Document has ${branches.length} branches`);
+
+// Just get open branches (not merged or closed)
+const openBranches = await branchManager.listBranches('main-proposal', {
+  status: 'open',
+});
+
+// Or filter by who created them
+const myBranches = await branchManager.listBranches('main-proposal', {
+  metadata: { createdBy: 'alice@example.com' },
+});
 ```
 
-- Calls `store.listBranches(docId)` to fetch the `Branch` metadata records.
-- Useful for displaying available branches to the user.
+The branch list gives you all the metadata you need to display a nice branch management UI.
 
-### `mergeBranch()`
+### Merging a Branch 🔄
 
-Attempts to merge the changes made on a branch back into its original source document.
+When you're ready to bring those experimental changes back to the main document:
 
 ```typescript
-async mergeBranch(branchId: string): Promise<Change[]>;
+// Merge the branch back into the source document
+const mergeResult = await branchManager.mergeBranch({
+  sourceDocId: 'main-proposal',
+  branchId: 'experimental-draft',
+  name: 'Experimental Layout Integration', // Optional name for the merge commit
+  metadata: {
+    // Optional metadata
+    approvedBy: 'bob@example.com',
+  },
+});
+
+console.log(`Merged ${mergeResult.changeCount} changes back to main document`);
+console.log(`New revision after merge: ${mergeResult.rev}`);
 ```
 
-**Steps:**
+What happens:
 
-1.  **Load Branch Info:** Loads the `Branch` metadata for `branchId` using `store.loadBranch()`.
-2.  **Validation:** Checks if the branch exists and if its `status` is 'open'. Throws an error if not.
-3.  **Get Branch Changes:** Retrieves all committed server changes (`Change` objects) made to the _branch document_ (`branchId`) since it was created, using `store.listChanges()`.
-4.  **Handle No Changes:** If there are no changes on the branch, marks the branch as 'merged' and returns an empty array.
-5.  **Prepare Changes for Server:** Maps the retrieved `branchChanges`. **Crucially**, it sets the `baseRev` for these changes to the revision number where the branch originally started on the _source_ document (`branch.branchedRev`).
-6.  **Submit to PatchesServer:** Submits the prepared `branchChanges` to the source document (`branch.branchedFromId`) using `patchesServer.receiveChanges()`. The `PatchesServer` handles the necessary Operational Transformation to integrate these changes correctly based on their `baseRev`.
-7.  **Handle Merge Result:**
-    - If `patchesServer.receiveChanges()` succeeds, it returns the final `Change` object(s) committed to the source document.
-    - If it fails (e.g., due to complex conflicts during transformation), an error is thrown.
-8.  **Update Branch Status:** If the merge was successful, updates the branch's status to 'merged' using `store.updateBranch()`.
-9.  **Return Committed Changes:** Returns the array of `Change` objects that were actually committed to the source document by the `PatchesServer`.
+1. All changes made on the branch get transformed and applied to the main document
+2. The server handles any conflicts using OT magic
+3. The branch stays open (unless you specify `autoClose: true`) but is marked as merged
+4. The main document now includes all the branch's changes!
 
-**Important Note on Rebasing:** The current implementation assumes `PatchesServer.receiveChanges` handles all necessary rebasing based on the provided `baseRev`. A more sophisticated `mergeBranch` implementation _might_ pre-emptively fetch changes made to the source document since the branch point and manually rebase the branch changes _before_ submitting them to `PatchesServer`, potentially allowing for more granular conflict detection or resolution strategies if needed.
+### Closing a Branch ❌
 
-### `closeBranch()`
-
-Updates the status of a branch (e.g., to 'closed', 'archived', 'abandoned').
+Done with a branch and want to mark it as obsolete?
 
 ```typescript
-async closeBranch(branchId: string, status?: BranchStatus = 'closed'): Promise<void>;
+// Close a branch (mark it as no longer active)
+await branchManager.closeBranch('main-proposal', 'experimental-draft', {
+  status: 'abandoned', // 'merged', 'abandoned', or 'closed'
+  metadata: {
+    reason: 'Feature was deprioritized',
+  },
+});
+
+console.log('Branch marked as abandoned');
 ```
 
-- Calls `store.updateBranch(branchId, { status })` to persist the status change.
-- This is typically called after a successful merge or if a branch is being discarded.
+This doesn't delete anything - it just updates the branch's status so you know it's no longer active.
 
-## Backend Store Dependency
+## Behind the Scenes
 
-`PatchesBranchManager` requires a backend store implementation that conforms to the `BranchingStoreBackend` interface. This interface extends `PatchesStoreBackend` with methods specifically for managing branch metadata (`listBranches`, `loadBranch`, `createBranch`, `updateBranch`).
+`PatchesBranchManager` relies on your `BranchingStoreBackend` implementation to store all the branch metadata and relationships. This backend extends the regular `PatchesStoreBackend` with additional methods specifically for branch management.
 
-See [Backend Store Interface](./operational-transformation.md#backend-store-interface) for details.
+The key relationship is:
 
-## Example Usage
+- Each branch points to its source document
+- Each branch has its own document ID (so it's a real document in the system)
+- Branches track which revision they branched from
+- Branches have status (open, merged, abandoned, etc.)
+
+## Real-World Example
+
+Here's how you might implement a feature branching workflow in your app:
 
 ```typescript
-import {
-  PatchesServer,
-  PatchesBranchManager,
-  PatchesHistoryManager,
-  MyDatabaseStore, // Your implementation
-} from '@dabble/patches';
+import { PatchesServer } from '@dabble/patches/server';
+import { PatchesBranchManager } from '@dabble/patches/server';
+import { MyDatabaseStore } from './database-store';
 
-const store = new MyDatabaseStore(/* ... */);
-const server = new PatchesServer(store);
-const branchManager = new PatchesBranchManager(store, server);
-const historyManager = new PatchesHistoryManager(store); // History often uses the same store
+class DocumentWorkflow {
+  private server: PatchesServer;
+  private branchManager: PatchesBranchManager;
 
-const sourceDocId = 'main-document-123';
+  constructor() {
+    const store = new MyDatabaseStore();
+    this.server = new PatchesServer(store);
+    this.branchManager = new PatchesBranchManager(store, this.server);
+  }
 
-async function setupBranch() {
-  try {
-    // 1. Get the latest revision of the source document
-    const latestRev = await store.getLatestRevision(sourceDocId);
+  async createFeatureBranch(sourceDocId: string, featureName: string, user: User) {
+    // Get latest revision of the source doc
+    const { rev } = await this.server.getLatestDocumentStateAndRev(sourceDocId);
 
-    // 2. Create a new branch from the latest revision
-    const branchDocId = await branchManager.createBranch(sourceDocId, latestRev, 'feature-x-branch', {
-      createdBy: 'user-abc',
+    // Create a unique ID for the branch
+    const branchId = `feature-${Date.now()}-${featureName.toLowerCase().replace(/\s+/g, '-')}`;
+
+    // Create the branch
+    const branchInfo = await this.branchManager.createBranch({
+      sourceDocId,
+      branchId,
+      baseRev: rev,
+      name: `Feature: ${featureName}`,
+      metadata: {
+        createdBy: user.id,
+        createdAt: new Date().toISOString(),
+        status: 'draft',
+        feature: featureName,
+      },
     });
-    console.log(`Created branch with ID: ${branchDocId}`);
 
-    // 3. Now, clients can connect and edit the document with ID `branchDocId`
-    // using PatchesDoc and PatchesServer like any other document.
-  } catch (error) {
-    console.error('Error creating branch:', error);
+    // Return information about the new branch
+    return {
+      branchId: branchInfo.branchId,
+      docId: branchInfo.docId,
+      name: branchInfo.name,
+      url: `/documents/${branchInfo.docId}`, // URL for the branch document
+    };
+  }
+
+  async listFeatureBranches(sourceDocId: string) {
+    // Get all branches
+    const allBranches = await this.branchManager.listBranches(sourceDocId);
+
+    // Format them for display
+    return allBranches.map(branch => ({
+      id: branch.branchId,
+      name: branch.name,
+      status: branch.status,
+      createdBy: branch.metadata?.createdBy || 'Unknown',
+      createdAt: branch.metadata?.createdAt || 'Unknown date',
+      lastActivity: branch.updatedAt,
+      url: `/documents/${branch.docId}`,
+    }));
+  }
+
+  async submitForReview(sourceDocId: string, branchId: string, reviewer: User) {
+    // Update branch metadata to reflect review status
+    await this.branchManager.updateBranch(sourceDocId, branchId, {
+      metadata: {
+        status: 'in_review',
+        reviewRequestedAt: new Date().toISOString(),
+        reviewer: reviewer.id,
+      },
+    });
+
+    // Notify the reviewer (implementation depends on your app)
+    await this.notifyUser(reviewer.id, {
+      type: 'review_request',
+      sourceDocId,
+      branchId,
+      message: `You've been asked to review a document branch`,
+    });
+
+    return { success: true };
+  }
+
+  async approveBranch(sourceDocId: string, branchId: string, approver: User) {
+    // Merge the branch back to main
+    const mergeResult = await this.branchManager.mergeBranch({
+      sourceDocId,
+      branchId,
+      name: `Approved feature: ${branchId}`,
+      metadata: {
+        approvedBy: approver.id,
+        approvedAt: new Date().toISOString(),
+      },
+      autoClose: true, // Automatically close the branch after merging
+    });
+
+    // Notify the branch creator (implementation depends on your app)
+    const branch = await this.branchManager.getBranch(sourceDocId, branchId);
+    await this.notifyUser(branch.metadata?.createdBy, {
+      type: 'branch_approved',
+      sourceDocId,
+      branchId,
+      message: `Your branch has been approved and merged!`,
+    });
+
+    return {
+      success: true,
+      newRevision: mergeResult.rev,
+      changeCount: mergeResult.changeCount,
+    };
+  }
+
+  async rejectBranch(sourceDocId: string, branchId: string, rejector: User, reason: string) {
+    // Update branch metadata with rejection reason
+    await this.branchManager.updateBranch(sourceDocId, branchId, {
+      metadata: {
+        status: 'rejected',
+        rejectedBy: rejector.id,
+        rejectedAt: new Date().toISOString(),
+        rejectionReason: reason,
+      },
+    });
+
+    // Don't close the branch - allow for fixing and resubmitting
+
+    // Notify the branch creator
+    const branch = await this.branchManager.getBranch(sourceDocId, branchId);
+    await this.notifyUser(branch.metadata?.createdBy, {
+      type: 'branch_rejected',
+      sourceDocId,
+      branchId,
+      message: `Your branch was rejected: ${reason}`,
+    });
+
+    return { success: true };
+  }
+
+  // Helper method - implementation depends on your app
+  private async notifyUser(userId: string, notification: any) {
+    // Send in-app notification, email, etc.
   }
 }
-
-async function mergeFeatureBranch(branchDocId: string) {
-  try {
-    console.log(`Attempting to merge branch ${branchDocId}...`);
-    // 4. Merge the changes from the branch back to the source
-    const committedChanges = await branchManager.mergeBranch(branchDocId);
-
-    if (committedChanges.length > 0) {
-      console.log(`Successfully merged branch ${branchDocId}. Committed changes on source:`, committedChanges);
-      // Optionally broadcast these committedChanges to clients watching the source document
-    } else {
-      console.log(`Branch ${branchDocId} had no new changes to merge.`);
-    }
-  } catch (error) {
-    console.error(`Error merging branch ${branchDocId}:`, error);
-    // Handle merge conflicts or other errors
-  }
-}
-
-async function listMyBranches() {
-  const branches = await branchManager.listBranches(sourceDocId);
-  console.log(`Branches for ${sourceDocId}:`, branches);
-}
-
-// Example calls
-// setupBranch();
-// listMyBranches();
-// mergeFeatureBranch('branch-doc-id-xyz'); // Use the ID returned by createBranch
 ```
+
+This example shows how you can build a complete workflow with feature branches, review processes, approvals, and notifications!
+
+---
+
+Branches add a whole new dimension to collaborative editing. Instead of everyone always working on the same document, you can create sandboxes for experimentation and coordinate multiple workstreams with ease. Happy branching! 🌳

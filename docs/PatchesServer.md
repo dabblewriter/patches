@@ -1,43 +1,33 @@
 # `PatchesServer`
 
-The `PatchesServer` class is the central authority in the Patches OT system. It resides on the server and is responsible for receiving changes from clients, transforming them against concurrent edits, applying them to the authoritative document state, managing revisions, creating version snapshots, and persisting data via a backend store.
+Meet the boss of your OT system! 🏢
+
+`PatchesServer` is the central authority that keeps everything running smoothly. It's like the air traffic controller for your collaborative documents – directing traffic, preventing collisions, and making sure everyone sees the same thing.
 
 **Table of Contents**
 
 - [Overview](#overview)
 - [Initialization](#initialization)
 - [Core Method: `commitChanges()`](#core-method-commitchanges)
-  - [Input](#input)
-  - [Processing Steps](#processing-steps)
-  - [Output](#output)
-  - [Error Handling](#error-handling)
-  - [Multi-Batch Uploads and `batchId`](#multi-batch-uploads-and-batchid)
 - [Versioning](#versioning)
-  - [Offline Snapshots](#offline-snapshots)
-  - [Online Snapshots](#online-snapshots)
-  - [Configuration (`sessionTimeoutMinutes`)](#configuration-sessiontimeoutminutes)
 - [State and History Retrieval](#state-and-history-retrieval)
-  - [`getDoc()`](#getdoc)
-  - [`_getStateAtRevision()`](#_getstateatrevision)
-  - [`getVersionState()`](#getversionstate)
-  - [`listVersions()`](#listversions)
 - [Subscription Operations](#subscription-operations)
 - [Backend Store Dependency](#backend-store-dependency)
 - [Example Usage](#example-usage)
 
 ## Overview
 
-Key responsibilities of `PatchesServer`:
+`PatchesServer` does **all the important stuff**:
 
-1.  **Central Authority:** Defines the canonical order of operations.
-2.  **Transformation:** Ensures concurrent client changes converge correctly using OT.
-3.  **State Management:** Maintains the authoritative document state and revision number.
-4.  **Persistence:** Interacts with a `PatchesStoreBackend` to save/load document data, changes, and versions.
-5.  **Versioning:** Creates snapshots (`VersionMetadata`) of the document state, particularly useful for offline support and history features.
+1. **Central Authority:** It's the one source of truth that decides the correct order of operations
+2. **Transformation:** Takes client changes and transforms them against other clients' changes so everything works perfectly
+3. **State Management:** Keeps track of the real, authoritative document state and revision numbers
+4. **Persistence:** Works with your backend store to save everything important
+5. **Versioning:** Creates snapshots of document states at key moments (perfect for history features!)
 
 ## Initialization
 
-You instantiate `PatchesServer` by providing an implementation of the [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) (or [`BranchingStoreBackend`](./operational-transformation.md#branchingstorebackend) if using branching features) and optional configuration.
+Getting started is super easy. Just give `PatchesServer` a store that implements [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) and some optional config options:
 
 ```typescript
 import { PatchesServer, PatchesServerOptions } from '@dabble/patches/server';
@@ -57,7 +47,7 @@ const server = new PatchesServer(store, options);
 
 ## Core Method: `commitChanges()`
 
-This is the main entry point for processing changes submitted by clients.
+This is where the **magic happens**! When clients send changes, this method processes them, transforms them against concurrent changes, and makes sure everything stays in sync.
 
 ```typescript
 async commitChanges(docId: string, changes: Change[]): Promise<[Change[], Change[]]> {
@@ -65,107 +55,104 @@ async commitChanges(docId: string, changes: Change[]): Promise<[Change[], Change
 }
 ```
 
-### Input
+### What Goes In
 
-- **`docId`**: The unique identifier of the document being modified.
-- **`changes`**: An array of `Change` objects from a single client batch. Critically, each `Change` object _must_ include a `baseRev` property indicating the server revision the client based these changes upon.
+- **`docId`**: Which document are we changing?
+- **`changes`**: An array of `Change` objects from a client with a `baseRev` property telling us what server revision they were based on
 
-### Processing Steps
+### What Happens Inside
 
-1.  **Validation:**
-    - Checks if the `changes` array is empty (returns `[]` if so).
-    - Validates that all `changes` in the batch share the same, valid `baseRev`.
-    - Retrieves the server's current state and revision (`currentState` and `currentRev`) for the `docId` using `_getSnapshotAtRevision()`.
-    - Throws an error if `baseRev` is invalid (e.g., > `currentRev`), indicating the client needs to sync/rebase.
-2.  **Ensure Changes Integrity:**
-    - Ensures all changes' `created` timestamps are not in the future
-    - Updates each change's `rev` field to be sequential, starting from `baseRev + 1`
-    - Makes sure each change has the correct `baseRev` set
-3.  **Version Snapshot Check:**
-    - Checks if the last change was created more than a session ago (based on `sessionTimeoutMinutes`) and if so, creates a new version
-4.  **Check for Duplicates:**
-    - Fetches committed changes that occurred after `baseRev`
-    - Filters out any incoming changes that have already been committed (based on their `id`)
-5.  **Offline Session Handling:**
-    - Checks if the first incoming change was created longer than a session timeout ago
-    - If it's an offline session, groups changes into sessions based on time gaps
-    - Creates version snapshots for each offline session with `origin: 'offline'`
-    - Collapses offline changes into a single change for transformation
-6.  **Transformation:**
-    - Fetches the state at the client's `baseRev`
-    - Transforms the incoming changes' operations against the operations of changes committed since `baseRev` using `transformPatch`
-7.  **Return Result:**
-    - Returns the committed changes followed by successfully transformed incoming changes
+1. **Validation First!**
 
-### Output
+   - Is the changes array empty? (Returns `[]` if so)
+   - Do all changes have the same `baseRev`?
+   - Is the `baseRev` valid? (Not greater than the current server revision)
 
-- `Promise<[Change[], Change[]]>`: A promise that resolves to a tuple containing:
-  - `committedChanges`: An array of changes that were already committed to the server after the client's base revision. These changes are returned to help the client catch up with the server state.
-  - `transformedChanges`: An array of changes that have been transformed against any concurrent changes. These changes can be applied to the client's state to bring it up to date with the server.
+2. **Clean Up Changes**
+
+   - Make sure no timestamps are from the future
+   - Update each change's `rev` to be sequential (baseRev + 1, baseRev + 2, etc.)
+   - Set the correct `baseRev` on each change
+
+3. **Check for Version Snapshots**
+
+   - Were these changes made after a long idle period? Create a new version if so!
+
+4. **Filter Out Duplicates**
+
+   - Have we already seen any of these changes? (Checked using their `id`)
+
+5. **Handle Offline Work**
+
+   - Did the client make these changes offline? Group them by time gaps
+   - Create version snapshots for each offline session
+   - Collapse offline changes for transformation
+
+6. **Transform Against Concurrent Changes**
+
+   - Get any changes committed since `baseRev`
+   - Transform the incoming ops against already-committed ops
+   - This is where OT saves the day!
+
+7. **Return the Result**
+   - Send back both committed changes by others AND the transformed version of the client's changes
+
+### What Comes Out
+
+- `Promise<[Change[], Change[]]>`: A tuple containing:
+  - `committedChanges`: Changes already committed since the client's base revision
+  - `transformedChanges`: The client's changes after transformation
 
 ### Error Handling
 
-`commitChanges` throws errors in several situations:
+`commitChanges` might throw errors if:
 
-- **Invalid `baseRev`:** If the client's `baseRev` is missing, inconsistent within the batch, or ahead of the server's revision.
-- **Transformation Failure:** If the underlying `transformPatch` or specific operation transform handlers encounter an error.
-- **Application Failure:** If applying the changes fails.
-- **Store Errors:** If interactions with the backend store fail.
+- **Invalid `baseRev`:** Missing, inconsistent, or ahead of the server
+- **Transformation Failure:** Something went wrong during OT transformation
+- **Application Failure:** Couldn't apply the changes
+- **Store Errors:** Backend store issues
 
-Clients should handle these errors, typically by informing the user and potentially triggering a state resynchronization with the server.
-A `409 Conflict` HTTP status code is often appropriate for `baseRev` mismatches.
+If a client gets an error, they might need to resync with the server. Use `409 Conflict` for `baseRev` mismatches.
 
-### Multi-Batch Uploads and `batchId`
+### Multi-Batch Uploads
 
-When a client needs to submit a large set of changes (for example, after working offline or making a very large edit), it may split the changes into multiple batches for upload. To ensure correct operational transformation and versioning, all changes that belong to the same logical batch should include the same `batchId` property (a unique string, typically generated by the client at the start of the edit session).
-
-When `commitChanges` processes a batch potentially representing offline work (indicated by time gaps between `created` timestamps within the `changes` array exceeding `sessionTimeoutMinutes`), it generates one or more version snapshots to preserve the document state at key points in time.
-
-When `commitChanges` processes a new set of changes, it checks if `sessionTimeoutMinutes` has elapsed since the last change was created. If the timeout is exceeded, it creates a new version using the `_createVersion` method.
+Got a client submitting a ton of changes (maybe after being offline)? They can split them into multiple batches and include the same `batchId` in each batch. This helps with correct OT and versioning.
 
 ## Versioning
 
-`PatchesServer` automatically creates version snapshots ([`VersionMetadata`](./types.ts)) to facilitate history tracking and understanding offline edits.
-
-- See [`PatchesHistoryManager`](./PatchesHistoryManager.md) for querying versions.
+`PatchesServer` automatically creates version snapshots to make history tracking and offline work a breeze.
 
 ### Offline Snapshots
 
-When `commitChanges` processes a batch potentially representing offline work (indicated by time gaps between `created` timestamps within the `changes` array exceeding `sessionTimeoutMinutes`), it generates one or more version snapshots to preserve the document state at key points in time.
+When a client submits changes after working offline (detected by time gaps between `created` timestamps), the server generates snapshots to preserve the document state at key points in time.
 
 ### Online Snapshots
 
-When `commitChanges` processes a new set of changes, it checks if `sessionTimeoutMinutes` has elapsed since the last change was created. If the timeout is exceeded, it creates a new version using the `_createVersion` method.
-
-- It captures the current state and all changes since the last version
-- Assigns a unique `id` for the version
-- Sets the version metadata including `name` (if provided), `origin: 'main'`, and timestamps
-- Records the `rev` and `baseRev` values from the changes
-- Stores this version using the backend store
+Each time the server processes changes, it checks if enough time has passed since the last change (based on `sessionTimeoutMinutes`). If so, it creates a new version snapshot.
 
 ### Configuration (`sessionTimeoutMinutes`)
 
-The `sessionTimeoutMinutes` option passed during `PatchesServer` construction controls the threshold for creating both offline and online version snapshots. The default is 30 minutes.
+Defaults to 30 minutes. This setting controls when new version snapshots are created for both offline and online changes. Adjust it to balance storage usage vs. version granularity.
 
 ## State and History Retrieval
 
-`PatchesServer` provides methods (which typically delegate to the backend store) for retrieving document state and version information.
+Need to get document state or history? `PatchesServer` has you covered!
 
 ### `getDoc()`
 
-Gets the latest version of a document and changes since the last version.
+Get the latest version of a document and changes since the last version.
 
 ```typescript
 const { state, rev, changes } = await server.getDoc(docId);
-// Use this to initialize new clients
+// Perfect for initializing new clients!
 
-// You can also specify a revision to get the state at that revision:
+// Want a specific revision? No problem:
 const snapshot = await server.getDoc(docId, 50);
 ```
 
 ### `_getStateAtRevision()`
 
-Retrieves the document state as it was _after_ a specific historical revision `rev` was committed. This is an internal method used by other PatchesServer methods.
+Retrieves document state as it was after a specific revision.
 
 ```typescript
 const { state, rev } = await server._getStateAtRevision(docId, 50);
@@ -173,7 +160,7 @@ const { state, rev } = await server._getStateAtRevision(docId, 50);
 
 ### `getVersionState()`
 
-Gets the state snapshot for a specific version ID.
+Get a snapshot of a specific version.
 
 ```typescript
 const versionState = await server.getVersionState(docId, specificVersionId);
@@ -181,7 +168,7 @@ const versionState = await server.getVersionState(docId, specificVersionId);
 
 ### `listVersions()`
 
-Lists `VersionMetadata` objects, supporting various filtering and sorting options (limit, reverse, origin, date ranges, etc.).
+List version metadata with tons of filtering options.
 
 ```typescript
 // Get the last 10 offline version snapshots
@@ -195,35 +182,36 @@ const offlineVersions = await server.listVersions(docId, {
 
 ## Subscription Operations
 
-PatchesServer provides methods for managing client subscriptions to documents.
+Manage which clients are subscribed to which documents.
 
 ### `subscribe()`
 
-Subscribes a client to one or more documents.
+Sign a client up for updates on one or more documents.
 
 ```typescript
 const subscribedIds = await server.subscribe(clientId, docId);
-// or with multiple document IDs:
+// Or subscribe to multiple docs at once:
 const subscribedIds = await server.subscribe(clientId, [docId1, docId2]);
 ```
 
 ### `unsubscribe()`
 
-Unsubscribes a client from one or more documents.
+Remove a client's subscriptions.
 
 ```typescript
 const unsubscribedIds = await server.unsubscribe(clientId, docId);
-// or with multiple document IDs:
+// Or unsubscribe from multiple docs:
 const unsubscribedIds = await server.unsubscribe(clientId, [docId1, docId2]);
 ```
 
 ## Backend Store Dependency
 
-`PatchesServer` is entirely dependent on a functional implementation of the [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) interface provided during construction. It does not manage persistence itself but delegates all storage operations (saving/loading states, changes, versions) to the backend.
+`PatchesServer` relies 100% on your implementation of the [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) interface. It doesn't do its own storage – it delegates all that to your backend.
 
-See [Backend Store Interface](./operational-transformation.md#backend-store-interface) for details.
+Check out the [Backend Store Interface](./operational-transformation.md#backend-store-interface) for all the methods you need to implement.
 
 ## Example Usage
 
 See the [Simple Server Setup example in the main README.md](../README.md#simple-server-setup).
-Also see related client example: [Simple Client Setup example in the main README.md](../README.md#simple-client-setup).
+
+Also check the [Simple Client Setup example](../README.md#simple-client-setup) to see how clients interact with the server.

@@ -1,237 +1,245 @@
-# `PatchesHistoryManager`
+# `PatchesHistoryManager` - Your Doc's Time Machine! ⏰
 
-The `PatchesHistoryManager` class provides an API for querying the historical data of a document managed by the Patches OT system. It interacts with the backend store to retrieve information about past versions (snapshots) and committed server changes.
+Ever wanted to peek into your document's past? Time travel to see who added what and when? That's exactly what `PatchesHistoryManager` is for! This awesome little utility gives you a window into your document's history - from tiny edits to major milestones.
 
 **Table of Contents**
 
-- [Overview](#overview)
-- [Initialization](#initialization)
-- [Querying Versions](#querying-versions)
-  - [`listVersions()`](#listversions)
-  - [`getVersionMetadata()`](#getversionmetadata)
-  - [`getStateAtVersion()`](#getstateatversion)
-  - [`getChangesForVersion()`](#getchangesforversion)
-  - [`getParentState()`](#getparentstate)
-- [Querying Server Changes](#querying-server-changes)
-  - [`listServerChanges()`](#listserverchanges)
-- [Backend Store Dependency](#backend-store-dependency)
-- [Example Usage](#example-usage)
+- [The Basics](#the-basics)
+- [Getting Started](#getting-started)
+- [Digging Through History](#digging-through-history)
+- [Finding Specific Changes](#finding-specific-changes)
+- [Behind-the-Scenes Magic](#behind-the-scenes-magic)
+- [Example: Building a History Explorer](#example-building-a-history-explorer)
 
-## Overview
+## The Basics
 
-`PatchesHistoryManager` allows you to access the history created by `PatchesServer`, enabling features such as:
+`PatchesHistoryManager` is your backdoor into the past. It lets you:
 
-- Displaying a version history UI.
-- Reverting a document to a previous state.
-- Auditing changes made over time.
-- Debugging synchronization issues by examining past states and changes.
+- 📋 List all the versions of a document
+- 📝 See what a document looked like at any point in time
+- 🔍 Find out exactly what changes were made in each version
+- 🕵️ Track who changed what and when
+- ↩️ Get the data you need to restore previous versions
 
-It operates by querying the data persisted by `PatchesServer` via a `PatchesStoreBackend` implementation.
+This is perfect for creating features like:
 
-## Initialization
+- Version history browsers
+- "Restore previous version" buttons
+- Activity logs showing who did what
+- Debugging tools to diagnose sync problems
 
-You instantiate `PatchesHistoryManager` by providing the specific `docId` you want to query and an implementation of the [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend).
+## Getting Started
+
+Using `PatchesHistoryManager` is super easy:
 
 ```typescript
-import {
-  PatchesHistoryManager,
-  PatchesStoreBackend, // Your backend needs to implement this
-} from '@dabble/patches/server';
+import { PatchesHistoryManager } from '@dabble/patches/server';
 import { MyDatabaseStore } from './my-store'; // Your backend implementation
 
-const store = new MyDatabaseStore(/* ... */);
-const docIdToQuery = 'document-456';
+// Create your store
+const store = new MyDatabaseStore(/* connection details */);
 
-const historyManager = new PatchesHistoryManager(docIdToQuery, store);
+// Pick a document to explore
+const docId = 'project-proposal-final';
+
+// Create the history manager
+const historyManager = new PatchesHistoryManager(docId, store);
+
+// Now you're ready to start exploring the past!
 ```
 
-- **`docId`**: The ID of the document whose history you want to access.
-- **`store`**: An object implementing the `PatchesStoreBackend` interface, used to fetch historical data.
+That's it! Now you have a history manager that's laser-focused on one document.
 
-## Querying Versions
+## Digging Through History
 
-Versions represent snapshots ([`VersionMetadata`](./types.ts)) of the document state, typically created automatically by [`PatchesServer`](./PatchesServer.md) based on time gaps or session boundaries (see [`PatchesServer Versioning`](./PatchesServer.md#versioning)).
+Let's explore the different ways you can peek into the past:
 
-### `listVersions()`
+### Listing Document Versions
 
-Retrieves a list of [`VersionMetadata`](./types.ts) objects for the document, supporting various filters defined in [`PatchesStoreBackendListVersionsOptions`](./types.ts).
+Get a snapshot of all the document versions:
 
 ```typescript
-async listVersions(
-    options?: PatchesStoreBackendListVersionsOptions
-): Promise<VersionMetadata[]>;
-
-// Example: Get the 10 most recent versions (online or offline)
+// Get the 10 most recent versions
 const recentVersions = await historyManager.listVersions({
-    limit: 10,
-    reverse: true // Sort by date descending
+  limit: 10,
+  reverse: true, // Most recent first
 });
 
-// Example: Get all offline versions created after a specific timestamp
-const offlineSinceDate = await historyManager.listVersions({
-    origin: 'offline',
-    startDateAfter: timestampMillis
-});
-```
+console.log(`Found ${recentVersions.length} versions`);
 
-- Uses `store.listVersions()`.
-- Options allow filtering by `origin` (`'online'`, `'offline'`, `'branch'`), `groupId`, date ranges (`startDateAfter`, `endDateBefore`), and controlling the number (`limit`) and order (`reverse`) of results.
-- Returns an array of `VersionMetadata` objects, each containing information like `id`, `parentId`, `origin`, `startDate`, `endDate`, `baseRev`, and crucially, the _original_ `changes` included in that version and the final `state` snapshot.
-
-### `getVersionMetadata()`
-
-Loads the metadata ([`VersionMetadata`](./types.ts)) for a single, specific version by its unique ID.
-
-```typescript
-async getVersionMetadata(versionId: string): Promise<VersionMetadata | null>;
-
-const specificVersionInfo = await historyManager.getVersionMetadata(someVersionId);
-if (specificVersionInfo) {
-    console.log('Version Origin:', specificVersionInfo.origin);
-    console.log('Changes in version:', specificVersionInfo.changes);
-}
-```
-
-- Uses `store.loadVersionMetadata()`.
-- Returns the `VersionMetadata` object or `null` if the ID is not found.
-
-### `getStateAtVersion()`
-
-Loads the full document state snapshot associated with a specific version ID.
-
-```typescript
-async getStateAtVersion(versionId: string): Promise<any>;
-
-const stateSnapshot = await historyManager.getStateAtVersion(someVersionId);
-// Now you can display or use this historical state.
-```
-
-- Uses `store.loadVersionState()`.
-- Returns the document state as it was at the `endDate` of that version.
-- Throws an error if the version ID is not found or the state cannot be loaded.
-
-### `getChangesForVersion()`
-
-Loads the array of _original_ [`Change`](./types.ts) objects that were included in a specific version.
-
-```typescript
-async getChangesForVersion(versionId: string): Promise<Change[]>;
-
-const originalChanges = await historyManager.getChangesForVersion(someVersionId);
-// Useful for replaying the exact sequence of ops within an offline session, for example.
-```
-
-- Uses `store.loadVersionChanges()`.
-- Returns an array of `Change` objects.
-- Throws an error if the version ID is not found or changes cannot be loaded.
-
-### `getParentState()`
-
-A convenience method to get the state snapshot of the _parent_ of a given version. This is useful for visualizing the state _before_ a specific version's changes were applied.
-
-```typescript
-async getParentState(versionId: string): Promise<any | undefined>;
-
-const stateBeforeVersion = await historyManager.getParentState(someVersionId);
-if (stateBeforeVersion) {
-    // Display the state just before 'someVersionId' occurred.
-}
-```
-
-- First calls `getVersionMetadata()` to find the `parentId`.
-- If a `parentId` exists, it calls `getStateAtVersion()` with that parent ID.
-- Returns the parent state, or `undefined` if the version is the root version, has no parent, or if the parent state cannot be loaded.
-
-## Querying Server Changes
-
-These methods deal with the raw, linear sequence of committed server changes ([`Change`](./types.ts) objects), identified by their revision numbers.
-
-### `listServerChanges()`
-
-Lists the committed server [`Change`](./types.ts) objects based on revision number ranges ([`PatchesStoreBackendListChangesOptions`](./types.ts)).
-
-```typescript
-async listServerChanges(
-    options?: PatchesStoreBackendListChangesOptions
-): Promise<Change[]>;
-
-// Example: Get changes from revision 101 to 110
-const changesInRange = await historyManager.listServerChanges({
-    startAfterRev: 100,
-    endBeforeRev: 111
+// Versions from a specific time period
+const lastWeekVersions = await historyManager.listVersions({
+  startDate: lastWeek,
+  endDate: today,
+  orderBy: 'startDate',
 });
 
-// Example: Get the last 5 committed changes
-const lastFiveChanges = await historyManager.listServerChanges({
-    limit: 5,
-    reverse: true // Sort by rev descending
+// Versions with a specific origin
+const offlineVersions = await historyManager.listVersions({
+  origin: 'offline',
 });
 ```
 
-- Uses `store.listChanges()`.
-- Options allow filtering by revision ranges (`startAfterRev`, `endBeforeRev`) and controlling the limit and order (`reverse`).
-- Returns an array of committed `Change` objects, each containing the final applied `ops` and the server-assigned `rev`.
+Each version gives you metadata like:
 
-## Backend Store Dependency
+- When it was created
+- Who created it
+- What changes it contains
+- Version name (if assigned)
 
-Like [`PatchesServer`](./PatchesServer.md), `PatchesHistoryManager` relies entirely on a provided [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) implementation to fetch the historical data.
+### Getting a Specific Version
 
-## Example Usage
-
-See the [example in this document](#example-usage) and the [main README examples](../README.md#examples).
+Want to see exactly what the document looked like at a certain point?
 
 ```typescript
-import {
-  PatchesHistoryManager,
-  MyDatabaseStore, // Your implementation
-} from '@dabble/patches';
+// Get info about a specific version
+const metadata = await historyManager.getVersionMetadata(versionId);
+console.log(`Version "${metadata.name}" created ${new Date(metadata.startDate)}`);
 
-const store = new MyDatabaseStore(/* ... */);
-const docId = 'my-collaborative-doc';
-const history = new PatchesHistoryManager(docId, store);
+// Get the actual document state at that version
+const oldState = await historyManager.getStateAtVersion(versionId);
+console.log('The document looked like:', oldState);
 
-async function displayVersionHistory() {
-  try {
-    console.log(`Fetching history for ${docId}...`);
-    const versions = await history.listVersions({ limit: 20, reverse: true });
+// Get the changes that were made in this version
+const changes = await historyManager.getChangesForVersion(versionId);
+console.log(`This version includes ${changes.length} changes`);
+```
 
-    if (!versions.length) {
-      console.log('No versions found.');
-      return;
-    }
+### Finding a Version's Parent
 
-    console.log('Recent Versions:');
-    for (const version of versions) {
-      console.log(`- ID: ${version.id}`);
-      console.log(`  Origin: ${version.origin} ${version.groupId ? `(Group: ${version.groupId})` : ''}`);
-      console.log(
-        `  Date Range: ${new Date(version.startDate).toISOString()} - ${new Date(version.endDate).toISOString()}`
-      );
-      console.log(`  Base Revision: ${version.baseRev}`);
-      console.log(`  Num Changes: ${version.changes.length}`);
+Every version (except the first) has a parent version. This lets you trace the document's evolution:
 
-      // Optionally load full state for a specific version
-      // const state = await history.getStateAtVersion(version.id);
-      // console.log('  State Snapshot:', state);
-    }
-  } catch (error) {
-    console.error('Error fetching version history:', error);
+```typescript
+// Get the state of the version that came before this one
+const parentState = await historyManager.getParentState(versionId);
+console.log('Before those changes, the document was:', parentState);
+```
+
+## Finding Specific Changes
+
+Sometimes you don't care about versions - you just want to see specific changes based on their revision numbers:
+
+```typescript
+// Get all changes between revision 50 and 75
+const changes = await historyManager.listServerChanges({
+  startAfterRev: 50,
+  endAtRev: 75,
+});
+
+console.log(`Found ${changes.length} changes in that range`);
+
+// Or just get the 10 most recent changes
+const recentChanges = await historyManager.listServerChanges({
+  limit: 10,
+  reverse: true,
+});
+```
+
+This is super helpful for:
+
+- Syncing specific revision ranges
+- Auditing who made which edits
+- Debugging sync issues
+
+## Behind-the-Scenes Magic
+
+`PatchesHistoryManager` doesn't do the actual storage - it just knows how to ask your backend for the right information. That's why you need to give it a `PatchesStoreBackend` implementation.
+
+This design makes it flexible enough to work with any storage system - from in-memory (for testing) to massive distributed databases.
+
+## Example: Building a History Explorer
+
+Here's a simple example of building a document history UI:
+
+```typescript
+import { PatchesHistoryManager } from '@dabble/patches/server';
+import { MyDatabaseStore } from './my-store';
+
+class DocumentHistoryExplorer {
+  private historyManager: PatchesHistoryManager;
+
+  constructor(docId: string) {
+    const store = new MyDatabaseStore();
+    this.historyManager = new PatchesHistoryManager(docId, store);
   }
-}
 
-async function findChangesAroundRevision(targetRev: number) {
-  try {
-    const changes = await history.listServerChanges({
-      startAfterRev: targetRev - 3, // Get a few before
-      limit: 5, // Get a few after
+  async getVersionTimeline() {
+    // Get all versions, newest first
+    const versions = await this.historyManager.listVersions({
+      reverse: true,
+      orderBy: 'startDate',
     });
-    console.log(`Changes around revision ${targetRev}:`, changes);
-  } catch (error) {
-    console.error(`Error fetching changes around revision ${targetRev}:`, error);
+
+    // Format them for display
+    return versions.map(version => ({
+      id: version.id,
+      name: version.name || `Version at ${new Date(version.startDate).toLocaleString()}`,
+      date: new Date(version.startDate),
+      changeCount: version.changes.length,
+    }));
+  }
+
+  async viewVersion(versionId: string) {
+    // Get the version data
+    const state = await this.historyManager.getStateAtVersion(versionId);
+    const metadata = await this.historyManager.getVersionMetadata(versionId);
+    const changes = await this.historyManager.getChangesForVersion(versionId);
+
+    // If we want to compare with previous version
+    const parentState = await this.historyManager.getParentState(versionId);
+
+    return {
+      state,
+      metadata,
+      changes,
+      parentState,
+    };
+  }
+
+  async restoreVersion(versionId: string) {
+    // Get the state at this version
+    const state = await this.historyManager.getStateAtVersion(versionId);
+
+    // Then use your PatchesDoc to replace current state with this one
+    // (Implementation depends on your app structure)
+    await this.documentManager.replaceDocumentWithState(state);
+
+    return { success: true, restoredState: state };
+  }
+
+  async getChangeDetails(startRev: number, endRev: number) {
+    // Get specific changes by revision range
+    const changes = await this.historyManager.listServerChanges({
+      startAfterRev: startRev - 1,
+      endAtRev: endRev,
+    });
+
+    // Format changes for display
+    return changes.map(change => ({
+      id: change.id,
+      rev: change.rev,
+      date: new Date(change.created),
+      operations: change.ops.length,
+      // Extract author info if available
+      author: change.metadata?.user?.name || 'Unknown',
+    }));
   }
 }
 
-// Example calls
-// displayVersionHistory();
-// findChangesAroundRevision(150);
+// Usage
+const explorer = new DocumentHistoryExplorer('important-document');
+
+// Show version history
+const versions = await explorer.getVersionTimeline();
+renderVersionList(versions);
+
+// View a specific version
+const versionDetails = await explorer.viewVersion(selectedVersionId);
+renderVersionViewer(versionDetails);
+
+// Restore an old version
+await explorer.restoreVersion(versionToRestoreId);
+showNotification('Document restored to previous version!');
 ```
+
+And there you have it! With `PatchesHistoryManager`, you can give your users the power to explore and restore their document's past. Time travel made easy! ⏱️✨

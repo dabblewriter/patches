@@ -40,7 +40,7 @@ Key responsibilities of `PatchesServer`:
 You instantiate `PatchesServer` by providing an implementation of the [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) (or [`BranchingStoreBackend`](./operational-transformation.md#branchingstorebackend) if using branching features) and optional configuration.
 
 ```typescript
-import { PatchesServer, PatchesServerOptions } from '@dabble/patches';
+import { PatchesServer, PatchesServerOptions } from '@dabble/patches/server';
 import { MyDatabaseStore } from './my-store'; // Your backend implementation
 
 // Instantiate your backend store

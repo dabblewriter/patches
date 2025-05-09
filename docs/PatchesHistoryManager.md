@@ -36,7 +36,7 @@ You instantiate `PatchesHistoryManager` by providing the specific `docId` you wa
 import {
   PatchesHistoryManager,
   PatchesStoreBackend, // Your backend needs to implement this
-} from '@dabble/patches';
+} from '@dabble/patches/server';
 import { MyDatabaseStore } from './my-store'; // Your backend implementation
 
 const store = new MyDatabaseStore(/* ... */);

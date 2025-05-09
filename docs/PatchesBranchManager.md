@@ -29,11 +29,8 @@ Branching is useful for scenarios like:
 You instantiate `PatchesBranchManager` by providing an implementation of the [`BranchingStoreBackend`](./operational-transformation.md#branchingstorebackend) and an instance of [`PatchesServer`](./PatchesServer.md).
 
 ```typescript
-import {
-  PatchesServer,
-  PatchesBranchManager,
-  BranchingStoreBackend, // Your backend needs to implement this
-} from '@dabble/patches';
+import { PatchesServer } from '@dabble/patches/server';
+import { PatchesBranchManager, BranchingStoreBackend } from '@dabble/patches/server';
 import { MyDatabaseStore } from './my-store'; // Your backend implementation
 
 const store = new MyDatabaseStore(/* ... */);

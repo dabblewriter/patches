@@ -132,7 +132,7 @@ This outlines a basic Express server using `PatchesServer` with an in-memory sto
 
 ```typescript
 import express from 'express';
-import { PatchesServer, PatchesStoreBackend, Change } from '@dabble/patches';
+import { PatchesServer, PatchesStoreBackend, Change } from '@dabble/patches/server';
 
 // Server Setup
 const store = new InMemoryStore(); // Fictional in-memory backend, use a database
@@ -344,7 +344,7 @@ import {
   PatchesStoreBackend,
   Change,
   VersionMetadata, //... other types
-} from '@dabble/patches';
+} from '@dabble/patches/server';
 
 // --- Basic In-Memory Store (Replace with a real backend!) ---
 class InMemoryStore implements PatchesStoreBackend {

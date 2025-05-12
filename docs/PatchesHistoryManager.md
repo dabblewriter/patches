@@ -39,16 +39,13 @@ import { MyDatabaseStore } from './my-store'; // Your backend implementation
 // Create your store
 const store = new MyDatabaseStore(/* connection details */);
 
-// Pick a document to explore
-const docId = 'project-proposal-final';
-
 // Create the history manager
-const historyManager = new PatchesHistoryManager(docId, store);
+const historyManager = new PatchesHistoryManager(store);
 
 // Now you're ready to start exploring the past!
 ```
 
-That's it! Now you have a history manager that's laser-focused on one document.
+That's it! Now you have a history manager that can work with any document.
 
 ## Digging Through History
 
@@ -60,23 +57,25 @@ Get a snapshot of all the document versions:
 
 ```typescript
 // Get the 10 most recent versions
-const recentVersions = await historyManager.listVersions({
+const recentVersions = await historyManager.listVersions('project-proposal-final', {
   limit: 10,
   reverse: true, // Most recent first
+  orderBy: 'rev', // Sort by revision number
 });
 
 console.log(`Found ${recentVersions.length} versions`);
 
-// Versions from a specific time period
-const lastWeekVersions = await historyManager.listVersions({
-  startDate: lastWeek,
-  endDate: today,
-  orderBy: 'startDate',
+// Versions from a specific revision range
+const versionsInRange = await historyManager.listVersions('project-proposal-final', {
+  startAfter: 50, // List versions after revision 50
+  endBefore: 75, // List versions before revision 75
+  orderBy: 'rev', // Sort by revision number
 });
 
 // Versions with a specific origin
-const offlineVersions = await historyManager.listVersions({
-  origin: 'offline',
+const offlineVersions = await historyManager.listVersions('project-proposal-final', {
+  origin: 'offline', // Filter by origin type ('main', 'offline', or 'branch')
+  groupId: 'batch-123', // Optional: filter by group ID (for offline batches or branches)
 });
 ```
 
@@ -92,16 +91,14 @@ Each version gives you metadata like:
 Want to see exactly what the document looked like at a certain point?
 
 ```typescript
-// Get info about a specific version
-const metadata = await historyManager.getVersionMetadata(versionId);
-console.log(`Version "${metadata.name}" created ${new Date(metadata.startDate)}`);
+const docId = 'project-proposal-final';
 
 // Get the actual document state at that version
-const oldState = await historyManager.getStateAtVersion(versionId);
+const oldState = await historyManager.getStateAtVersion(docId, versionId);
 console.log('The document looked like:', oldState);
 
 // Get the changes that were made in this version
-const changes = await historyManager.getChangesForVersion(versionId);
+const changes = await historyManager.getChangesForVersion(docId, versionId);
 console.log(`This version includes ${changes.length} changes`);
 ```
 
@@ -111,7 +108,7 @@ Every version (except the first) has a parent version. This lets you trace the d
 
 ```typescript
 // Get the state of the version that came before this one
-const parentState = await historyManager.getParentState(versionId);
+const parentState = await historyManager.getParentState(docId, versionId);
 console.log('Before those changes, the document was:', parentState);
 ```
 
@@ -120,8 +117,10 @@ console.log('Before those changes, the document was:', parentState);
 Sometimes you don't care about versions - you just want to see specific changes based on their revision numbers:
 
 ```typescript
+const docId = 'project-proposal-final';
+
 // Get all changes between revision 50 and 75
-const changes = await historyManager.listServerChanges({
+const changes = await historyManager.listServerChanges(docId, {
   startAfterRev: 50,
   endAtRev: 75,
 });
@@ -129,7 +128,7 @@ const changes = await historyManager.listServerChanges({
 console.log(`Found ${changes.length} changes in that range`);
 
 // Or just get the 10 most recent changes
-const recentChanges = await historyManager.listServerChanges({
+const recentChanges = await historyManager.listServerChanges(docId, {
   limit: 10,
   reverse: true,
 });
@@ -157,15 +156,17 @@ import { MyDatabaseStore } from './my-store';
 
 class DocumentHistoryExplorer {
   private historyManager: PatchesHistoryManager;
+  private docId: string;
 
   constructor(docId: string) {
     const store = new MyDatabaseStore();
-    this.historyManager = new PatchesHistoryManager(docId, store);
+    this.historyManager = new PatchesHistoryManager(store);
+    this.docId = docId;
   }
 
   async getVersionTimeline() {
     // Get all versions, newest first
-    const versions = await this.historyManager.listVersions({
+    const versions = await this.historyManager.listVersions(this.docId, {
       reverse: true,
       orderBy: 'startDate',
     });
@@ -181,24 +182,18 @@ class DocumentHistoryExplorer {
 
   async viewVersion(versionId: string) {
     // Get the version data
-    const state = await this.historyManager.getStateAtVersion(versionId);
-    const metadata = await this.historyManager.getVersionMetadata(versionId);
-    const changes = await this.historyManager.getChangesForVersion(versionId);
-
-    // If we want to compare with previous version
-    const parentState = await this.historyManager.getParentState(versionId);
+    const state = await this.historyManager.getStateAtVersion(this.docId, versionId);
+    const changes = await this.historyManager.getChangesForVersion(this.docId, versionId);
 
     return {
       state,
-      metadata,
       changes,
-      parentState,
     };
   }
 
   async restoreVersion(versionId: string) {
     // Get the state at this version
-    const state = await this.historyManager.getStateAtVersion(versionId);
+    const state = await this.historyManager.getStateAtVersion(this.docId, versionId);
 
     // Then use your PatchesDoc to replace current state with this one
     // (Implementation depends on your app structure)
@@ -209,7 +204,7 @@ class DocumentHistoryExplorer {
 
   async getChangeDetails(startRev: number, endRev: number) {
     // Get specific changes by revision range
-    const changes = await this.historyManager.listServerChanges({
+    const changes = await this.historyManager.listServerChanges(this.docId, {
       startAfterRev: startRev - 1,
       endAtRev: endRev,
     });

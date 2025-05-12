@@ -1,15 +1,9 @@
 import { createId } from 'crypto-id';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
-import type {
-  Change,
-  ListVersionsOptions,
-  PatchesSnapshot,
-  PatchesState,
-  PatchesStoreBackend,
-  VersionMetadata,
-} from '../types.js';
+import type { Change, ListVersionsOptions, PatchesSnapshot, PatchesState, VersionMetadata } from '../types.js';
 import { applyChanges } from '../utils.js';
+import type { PatchesStoreBackend } from './types.js';
 
 /**
  * Configuration options for the PatchesServer.

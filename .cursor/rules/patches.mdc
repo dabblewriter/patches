@@ -57,6 +57,14 @@ can safely assume it is a `.ts` file and look it up accordingly with its `path/t
 - Use immutable data patterns (do not mutate state directly).
 - Organize new OT logic under `src/`.
 - Keep all public API changes documented in `README.md` and relevant `docs/*.md`.
+- Write beautiful code:
+  - Write for humans first, computers second
+  - Prefer simplicity over complexity
+  - Make your intentions clear through naming and structure
+  - Maintain consistency in style and patterns
+  - Embrace refactoring as a continuous practice
+  - Test thoroughly but purposefully
+  - Consider future maintenance in every decision
 
 ## Cursor-Specific Rules
 

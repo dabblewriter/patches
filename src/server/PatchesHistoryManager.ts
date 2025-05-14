@@ -1,4 +1,5 @@
 import type { Change, ListVersionsOptions, VersionMetadata } from '../types.js';
+import type { PatchesServer } from './PatchesServer.js';
 import type { PatchesStoreBackend } from './types.js';
 
 /**
@@ -6,7 +7,11 @@ import type { PatchesStoreBackend } from './types.js';
  * using the new versioning model based on IDs and metadata.
  */
 export class PatchesHistoryManager {
-  constructor(private readonly store: PatchesStoreBackend) {}
+  private readonly store: PatchesStoreBackend;
+
+  constructor(private readonly patches: PatchesServer) {
+    this.store = patches.store;
+  }
 
   /**
    * Lists version metadata for the document, supporting various filters.
@@ -15,7 +20,30 @@ export class PatchesHistoryManager {
    * @returns A list of version metadata objects.
    */
   async listVersions(docId: string, options: ListVersionsOptions = {}): Promise<VersionMetadata[]> {
+    if (!options.orderBy) {
+      options.orderBy = 'startDate';
+    }
     return await this.store.listVersions(docId, options);
+  }
+
+  /**
+   * Create a new named version snapshot of a document's current state.
+   * @param docId The document ID.
+   * @param name The name of the version.
+   * @returns The ID of the created version.
+   */
+  async createVersion(docId: string, name: string): Promise<string> {
+    return await this.patches.createVersion(docId, name);
+  }
+
+  /**
+   * Updates the name of a specific version.
+   * @param docId - The ID of the document.
+   * @param versionId - The ID of the version to update.
+   * @param name - The new name for the version.
+   */
+  async updateVersion(docId: string, versionId: string, updates: Pick<VersionMetadata, 'name'>) {
+    return this.store.updateVersion(docId, versionId, { name: updates.name });
   }
 
   /**

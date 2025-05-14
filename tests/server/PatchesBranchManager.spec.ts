@@ -2,9 +2,9 @@ import { createId } from 'crypto-id';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { PatchesBranchManager } from '../../src/server/PatchesBranchManager';
 import { PatchesServer } from '../../src/server/PatchesServer';
+import type { BranchingStoreBackend } from '../../src/server/types.js';
 import type {
   Branch,
-  BranchingStoreBackend,
   BranchStatus,
   Change,
   ListChangesOptions,
@@ -234,7 +234,7 @@ describe('PatchesBranchManager', () => {
 
     // Mock PatchesServer with just the methods PatchesBranchManager needs
     mockPatchesServer = {
-      _getStateAtRevision: vi.fn().mockResolvedValue({ state: { value: 'test' }, rev: 10 }),
+      getStateAtRevision: vi.fn().mockResolvedValue({ state: { value: 'test' }, rev: 10 }),
       commitChanges: vi.fn().mockResolvedValue([[], []]),
     };
 
@@ -277,8 +277,8 @@ describe('PatchesBranchManager', () => {
       const metadata = { author: 'User' };
       const stateAtRev = { value: 'test' };
 
-      // Setup mock for _getStateAtRevision
-      (mockPatchesServer._getStateAtRevision as Mock).mockResolvedValue({ state: stateAtRev, rev });
+      // Setup mock for getStateAtRevision
+      (mockPatchesServer.getStateAtRevision as unknown as Mock).mockResolvedValue({ state: stateAtRev, rev });
 
       // Create branch
       const branchId = await branchManager.createBranch(mainDocId, rev, branchName, metadata);

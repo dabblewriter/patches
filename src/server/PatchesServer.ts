@@ -1,7 +1,7 @@
 import { createId } from 'crypto-id';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
-import type { Change, ListVersionsOptions, PatchesSnapshot, PatchesState, VersionMetadata } from '../types.js';
+import type { Change, PatchesSnapshot, PatchesState, VersionMetadata } from '../types.js';
 import { applyChanges } from '../utils.js';
 import type { PatchesStoreBackend } from './types.js';
 
@@ -26,7 +26,7 @@ export class PatchesServer {
   private readonly sessionTimeoutMillis: number;
 
   constructor(
-    private readonly store: PatchesStoreBackend,
+    readonly store: PatchesStoreBackend,
     options: PatchesServerOptions = {}
   ) {
     this.sessionTimeoutMillis = (options.sessionTimeoutMinutes ?? 30) * 60 * 1000;
@@ -159,7 +159,7 @@ export class PatchesServer {
     // 5. Transform the *entire batch* of incoming (and potentially collapsed offline) changes
     //    against committed changes that happened *after* the client's baseRev.
     //    The state used for transformation should be the server state *at the client's baseRev*.
-    let stateAtBaseRev = (await this._getStateAtRevision(docId, baseRev)).state;
+    let stateAtBaseRev = (await this.getStateAtRevision(docId, baseRev)).state;
     const committedOps = committedChanges.flatMap(c => c.ops);
 
     // Apply transformation based on state at baseRev
@@ -216,46 +216,20 @@ export class PatchesServer {
   }
 
   /**
-   * Lists version metadata for a document, supporting various filters.
+   * Gets the state at a specific revision.
    * @param docId The document ID.
-   * @param options Filtering and sorting options.
-   * @returns A list of version metadata objects.
+   * @param rev The revision number. If not provided, the latest state and its revision is returned.
+   * @returns The state at the specified revision *and* its revision number.
    */
-  listVersions(docId: string, options: ListVersionsOptions): Promise<VersionMetadata[]> {
-    if (!options.orderBy) {
-      options.orderBy = 'startDate';
-    }
-    return this.store.listVersions(docId, options);
-  }
-
-  /**
-   * Get the state snapshot for a specific version ID.
-   * @param docId The document ID.
-   * @param versionId The ID of the version.
-   * @returns The state snapshot for the specified version.
-   */
-  getVersionState(docId: string, versionId: string): Promise<PatchesState> {
-    return this.store.loadVersionState(docId, versionId);
-  }
-
-  /**
-   * Get the original Change objects associated with a specific version ID.
-   * @param docId The document ID.
-   * @param versionId The ID of the version.
-   * @returns The original Change objects for the specified version.
-   */
-  getVersionChanges(docId: string, versionId: string): Promise<Change[]> {
-    return this.store.loadVersionChanges(docId, versionId);
-  }
-
-  /**
-   * Update the name of a specific version.
-   * @param docId The document ID.
-   * @param versionId The ID of the version.
-   * @param name The new name for the version.
-   */
-  updateVersion(docId: string, versionId: string, name: string): Promise<void> {
-    return this.store.updateVersion(docId, versionId, { name });
+  async getStateAtRevision(docId: string, rev?: number): Promise<PatchesState> {
+    // Note: _getSnapshotAtRevision now returns the state *of the version* and changes *since* it.
+    // We need to apply the changes to get the state *at* the target revision.
+    const { state: versionState, rev: snapshotRev, changes } = await this._getSnapshotAtRevision(docId, rev);
+    return {
+      // Ensure null is passed if versionState or versionState.state is null/undefined
+      state: applyChanges(versionState?.state ?? null, changes),
+      rev: changes.at(-1)?.rev ?? snapshotRev,
+    };
   }
 
   /**
@@ -288,23 +262,6 @@ export class PatchesServer {
       state: versionState, // State from the base version
       rev: versionRev, // Revision of the base version's state
       changes: changesSinceVersion, // Changes that occurred *after* the base version state
-    };
-  }
-
-  /**
-   * Gets the state at a specific revision.
-   * @param docId The document ID.
-   * @param rev The revision number. If not provided, the latest state and its revision is returned.
-   * @returns The state at the specified revision *and* its revision number.
-   */
-  protected async _getStateAtRevision(docId: string, rev?: number): Promise<PatchesState> {
-    // Note: _getSnapshotAtRevision now returns the state *of the version* and changes *since* it.
-    // We need to apply the changes to get the state *at* the target revision.
-    const { state: versionState, rev: snapshotRev, changes } = await this._getSnapshotAtRevision(docId, rev);
-    return {
-      // Ensure null is passed if versionState or versionState.state is null/undefined
-      state: applyChanges(versionState?.state ?? null, changes),
-      rev: changes.at(-1)?.rev ?? snapshotRev,
     };
   }
 
@@ -371,7 +328,7 @@ export class PatchesServer {
       parentId = lastVersion.id;
     } else {
       // First batch for this batchId: start at baseRev
-      offlineBaseState = (await this._getStateAtRevision(docId, baseRev)).state;
+      offlineBaseState = (await this.getStateAtRevision(docId, baseRev)).state;
     }
 
     let sessionStartIndex = 0;

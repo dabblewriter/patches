@@ -74,6 +74,22 @@ Under the hood, a WebSocket transport powers everything:
 
 It's like a digital mail carrier that never sleeps, constantly delivering changes back and forth!
 
+## Under the Hood: The JSON-RPC Sandwich 🥪
+
+At the center of Patches' networking sits a **tiny but mighty JSON-RPC 2.0 layer**. Think of it as the peanut-butter between the bread (your transport) and the jam (the OT logic):
+
+1. **ClientTransport / ServerTransport** – These minimal interfaces only care about _sending raw strings_ and _notifying when one arrives_. Nothing more. That means you can swap WebSockets for anything that talks bytes… WebRTC data channels, TCP sockets, even a `postMessage` shim for iframes.
+2. **JSONRPCClient / JSONRPCServer** – Give them a transport and they'll take care of framing your method calls, pairing requests with responses, and firing notifications. No duplicate-id headaches, no parsing boilerplate.
+3. **PatchesWebSocket & WebSocketServer** – Sweet convenience wrappers that pair the JSON-RPC layer with the built-in WebSocket transport and map every RPC method to a clean TypeScript API.
+
+Because the pieces are _decoupled_, you can:
+
+- Embed Patches in Electron and dial it over IPC.
+- Run a headless server that speaks plain TCP.
+- Unit-test your app with an in-memory mock transport.
+
+Swap the bread, keep the filling. 🥖✨
+
 ## The Protocol Speak 📡
 
 Our network layer uses a super clean JSON-RPC protocol:
@@ -84,7 +100,7 @@ Our network layer uses a super clean JSON-RPC protocol:
 {
   "jsonrpc": "2.0",
   "id": 123,
-  "method": "patch",
+  "method": "commitChanges",
   "params": {
     "docId": "doc123",
     "changes": [{ "op": "replace", "path": "/title", "value": "New Title" }]
@@ -109,7 +125,7 @@ Our network layer uses a super clean JSON-RPC protocol:
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "changes",
+  "method": "changesCommitted",
   "params": {
     "docId": "doc123",
     "changes": [{ "op": "replace", "path": "/title", "value": "Someone Else's Title", "rev": 43 }]
@@ -122,7 +138,7 @@ Our network layer uses a super clean JSON-RPC protocol:
 ### 1. Handle Connection Changes Like a Boss
 
 ```typescript
-provider.onConnectionStateChange(state => {
+provider.onStateChange(state => {
   if (state === 'connected') {
     hideOfflineWarning();
     showGreenStatus();
@@ -157,7 +173,7 @@ function trackChange(change) {
 // Send in batches
 function sendBatch() {
   if (pendingChanges.length) {
-    provider.sendChanges(docId, pendingChanges);
+    provider.commitChanges(docId, pendingChanges);
     pendingChanges = [];
   }
   syncScheduled = false;
@@ -215,5 +231,6 @@ Check out these related guides:
 - [persist.md](./persist.md) - Local storage for offline power
 - [awareness.md](./awareness.md) - Adding cursors and presence indicators
 - [websocket.md](./websocket.md) - Deeper dive into the WebSocket transport
+- [json-rpc.md](./json-rpc.md) - All about the tiny RPC layer that runs the show
 
 Happy syncing! 🚀

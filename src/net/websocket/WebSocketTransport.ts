@@ -1,7 +1,7 @@
-import type { Unsubscriber } from '../../event-signal.js';
+import { signal, type Unsubscriber } from '../../event-signal.js';
 import type { Deferred } from '../../types.js';
 import { deferred } from '../../utils.js';
-import { AbstractTransport } from '../AbstractTransport.js';
+import type { ClientTransport, ConnectionState } from '../protocol/types.js';
 import { onlineState } from './onlineState.js';
 
 /** WebSocket constructor options (subset) */
@@ -13,7 +13,8 @@ export interface WebSocketOptions {
  * WebSocket-based transport implementation that provides communication over the WebSocket protocol.
  * Includes automatic reconnection with exponential backoff.
  */
-export class WebSocketTransport extends AbstractTransport {
+export class WebSocketTransport implements ClientTransport {
+  private _state: ConnectionState = 'disconnected';
   private ws: WebSocket | null = null;
   private reconnectTimer: any = null;
   private backoff = 1000;
@@ -25,6 +26,18 @@ export class WebSocketTransport extends AbstractTransport {
   private shouldBeConnected = false;
 
   /**
+   * Signal that emits when the connection state changes.
+   * Subscribers will receive the new connection state as an argument.
+   */
+  public readonly onStateChange = signal<(state: ConnectionState) => void>();
+
+  /**
+   * Signal that emits when a message is received from the transport.
+   * Subscribers will receive the message data as a string.
+   */
+  public readonly onMessage = signal<(data: string) => void>();
+
+  /**
    * Creates a new WebSocket transport instance.
    * @param url - The WebSocket server URL to connect to
    * @param wsOptions - Optional configuration for the WebSocket connection
@@ -32,8 +45,25 @@ export class WebSocketTransport extends AbstractTransport {
   constructor(
     private url: string,
     private wsOptions?: WebSocketOptions
-  ) {
-    super();
+  ) {}
+
+  /**
+   * Gets the current connection state of the transport.
+   * @returns The current connection state ('connecting', 'connected', 'disconnected', or 'error')
+   */
+  get state(): ConnectionState {
+    return this._state;
+  }
+
+  /**
+   * Sets the connection state and emits a state change event.
+   * This method is protected and should only be called by subclasses.
+   * @param state - The new connection state
+   */
+  protected set state(state: ConnectionState) {
+    if (state === this._state) return;
+    this._state = state;
+    this.onStateChange.emit(state);
   }
 
   /**

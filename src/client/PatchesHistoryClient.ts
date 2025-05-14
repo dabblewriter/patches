@@ -1,15 +1,7 @@
 import { signal } from '../event-signal.js';
+import type { PatchesAPI } from '../net/protocol/types.js';
 import type { Change, ListVersionsOptions, VersionMetadata } from '../types.js';
 import { applyChanges } from '../utils.js';
-
-/**
- * Transport interface for fetching history data (WebSocket, REST, etc.)
- */
-export interface HistoryTransport {
-  listVersions(docId: string, options?: ListVersionsOptions): Promise<VersionMetadata[]>;
-  getVersionState(docId: string, versionId: string): Promise<any>;
-  getVersionChanges(docId: string, versionId: string): Promise<Change[]>;
-}
 
 /**
  * LRU cache for version state+changes objects
@@ -62,7 +54,7 @@ export class PatchesHistoryClient<T = any> {
 
   constructor(
     id: string,
-    private readonly transport: HistoryTransport
+    private readonly api: PatchesAPI
   ) {
     this.id = id;
   }
@@ -79,16 +71,29 @@ export class PatchesHistoryClient<T = any> {
 
   /** List version metadata for this document (with options) */
   async listVersions(options?: ListVersionsOptions): Promise<VersionMetadata[]> {
-    this._versions = await this.transport.listVersions(this.id, options);
+    this._versions = await this.api.listVersions(this.id, options);
     this.onVersionsChange.emit(this._versions);
     return this._versions;
+  }
+
+  /** Create a new named version snapshot of the document's current state. */
+  async createVersion(name: string): Promise<string> {
+    const versionId = await this.api.createVersion(this.id, name);
+    await this.listVersions(); // Refresh the list of versions
+    return versionId;
+  }
+
+  /** Update the name of a specific version. */
+  async updateVersion(versionId: string, updates: Pick<VersionMetadata, 'name'>): Promise<void> {
+    await this.api.updateVersion(this.id, versionId, updates);
+    await this.listVersions(); // Refresh the list of versions
   }
 
   /** Load the state for a specific version */
   async getStateAtVersion(versionId: string): Promise<any> {
     let data = this.cache.get(versionId);
     if (!data || data.state === undefined) {
-      const state = await this.transport.getVersionState(this.id, versionId);
+      const state = await this.api.getVersionState(this.id, versionId);
       data = { ...data, state };
       this.cache.set(versionId, data);
     }
@@ -101,7 +106,7 @@ export class PatchesHistoryClient<T = any> {
   async getChangesForVersion(versionId: string): Promise<Change[]> {
     let data = this.cache.get(versionId);
     if (!data || data.changes === undefined) {
-      const changes = await this.transport.getVersionChanges(this.id, versionId);
+      const changes = await this.api.getVersionChanges(this.id, versionId);
       data = { ...data, changes };
       this.cache.set(versionId, data);
     }

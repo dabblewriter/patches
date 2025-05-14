@@ -3,12 +3,12 @@ import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { applyPatch } from '../../src/json-patch/applyPatch.js';
 import * as transformPatchModule from '../../src/json-patch/transformPatch.js'; // Import the module
 import { PatchesServer } from '../../src/server/PatchesServer.js';
+import type { PatchesStoreBackend } from '../../src/server/types.js';
 import type {
   Change,
   ListChangesOptions,
   ListVersionsOptions,
   PatchesState,
-  PatchesStoreBackend,
   VersionMetadata,
 } from '../../src/types.js';
 
@@ -439,9 +439,9 @@ describe('PatchesServer', () => {
       };
       await mockStore.saveChange(docId, initialChange); // Server is now at rev 1
 
-      // Mock _getStateAtRevision to ensure it returns the correct current rev
+      // Mock getStateAtRevision to ensure it returns the correct current rev
       // Although saveChange updates the internal mock state, explicitly mocking helps isolate
-      vi.spyOn(patchesServer as any, '_getStateAtRevision').mockResolvedValue({ state: { data: 1 }, rev: 1 });
+      vi.spyOn(patchesServer as any, 'getStateAtRevision').mockResolvedValue({ state: { data: 1 }, rev: 1 });
 
       const changes: Change[] = [{ id: 'c1', rev: 0, baseRev: 2, ops: [], created: Date.now() }];
       await expect(patchesServer.commitChanges(docId, changes)).rejects.toThrow(
@@ -459,7 +459,7 @@ describe('PatchesServer', () => {
         created: Date.now() - 1000,
       };
       await mockStore.saveChange(docId, initialChange); // Server is now at rev 1
-      vi.spyOn(patchesServer as any, '_getStateAtRevision').mockResolvedValue({ state: { data: 1 }, rev: 1 });
+      vi.spyOn(patchesServer as any, 'getStateAtRevision').mockResolvedValue({ state: { data: 1 }, rev: 1 });
 
       const changes: Change[] = [{ id: 'c1', rev: 0, baseRev: 0, ops: [], created: Date.now() }];
       await expect(patchesServer.commitChanges(docId, changes)).rejects.toThrow(
@@ -701,7 +701,9 @@ describe('PatchesServer', () => {
         { id: 'off2', rev: 0, baseRev, ops: [{ op: 'add', path: '/offline2', value: true }], created: offlineCreated2 },
       ];
 
-      // Mock what PatchesServer._getSnapshotAtRevision sees
+      // Ensure store reflects current server revision at baseRev
+      mockStore.setInitialDocState(docId, initialState, baseRev);
+      // Mock what snapshot sees
       mockStore.listVersions.mockResolvedValue([]);
       mockStore.listChanges.mockResolvedValue([]); // No concurrent changes
 
@@ -714,11 +716,12 @@ describe('PatchesServer', () => {
         rev: baseRev,
         changes: [],
       };
-      vi.spyOn(server as any, '_getSnapshotAtRevision').mockResolvedValue(mockSnapshot);
-      vi.spyOn(server as any, '_getStateAtRevision').mockResolvedValue({
+      vi.spyOn(server as any, '_getSnapshotAtRevision').mockResolvedValue({
         state: initialState,
         rev: baseRev,
+        changes: [],
       });
+      vi.spyOn(server as any, 'getStateAtRevision').mockResolvedValue({ state: initialState, rev: baseRev });
 
       const [committedChanges, transformedChanges] = await server.commitChanges(docId, offlineChanges);
 
@@ -779,7 +782,9 @@ describe('PatchesServer', () => {
         { id: 'off4', rev: 0, baseRev, ops: [{ op: 'add', path: '/session2_2', value: 4 }], created: session2End },
       ];
 
-      // Mock what PatchesServer._getSnapshotAtRevision sees
+      // Ensure store reflects current server revision at baseRev
+      mockStore.setInitialDocState(docId, initialState, baseRev);
+      // Mock what snapshot sees
       mockStore.listVersions.mockResolvedValue([]);
       mockStore.listChanges.mockResolvedValue([]); // No concurrent changes
 
@@ -792,11 +797,12 @@ describe('PatchesServer', () => {
         rev: baseRev,
         changes: [],
       };
-      vi.spyOn(server as any, '_getSnapshotAtRevision').mockResolvedValue(mockSnapshot);
-      vi.spyOn(server as any, '_getStateAtRevision').mockResolvedValue({
+      vi.spyOn(server as any, '_getSnapshotAtRevision').mockResolvedValue({
         state: initialState,
         rev: baseRev,
+        changes: [],
       });
+      vi.spyOn(server as any, 'getStateAtRevision').mockResolvedValue({ state: initialState, rev: baseRev });
 
       const [committedChanges, transformedChanges] = await server.commitChanges(docId, offlineChanges);
 
@@ -892,7 +898,7 @@ describe('PatchesServer', () => {
         rev: 1,
         changes: [initialChange],
       };
-      vi.spyOn(patchesServer as any, '_getSnapshotAtRevision').mockResolvedValue(mockSnapshot);
+      vi.spyOn(patchesServer as any, 'getStateAtRevision').mockResolvedValue(mockSnapshot);
 
       // Mock _createVersion to bypass baseRev validation
       const versionMetadata = {
@@ -934,68 +940,6 @@ describe('PatchesServer', () => {
       await expect(patchesServer.createVersion(docId, 'Empty Version')).rejects.toThrow(
         /No changes to create a version/
       );
-    });
-  });
-
-  describe('listVersions', () => {
-    it('should call store.listVersions with provided options', async () => {
-      const options: ListVersionsOptions = { limit: 5, reverse: true, origin: 'offline' };
-      await patchesServer.listVersions(docId, options);
-      expect(mockStore.listVersions).toHaveBeenCalledWith(docId, options);
-    });
-  });
-
-  describe('getVersionState', () => {
-    it('should call store.loadVersionState', async () => {
-      // Setup version in mock store
-      const versionId = 'v123';
-      const versionMetadata: VersionMetadata = {
-        id: versionId,
-        origin: 'main',
-        baseRev: 0,
-        startDate: Date.now(),
-        endDate: Date.now(),
-        rev: 0,
-      };
-      mockStore.createVersion(docId, versionMetadata, {}, []);
-      await patchesServer.getVersionState(docId, versionId);
-      expect(mockStore.loadVersionState).toHaveBeenCalledWith(docId, versionId);
-    });
-  });
-
-  describe('getVersionChanges', () => {
-    it('should call store.loadVersionChanges', async () => {
-      // Setup version in mock store
-      const versionId = 'v456';
-      const versionMetadata: VersionMetadata = {
-        id: versionId,
-        origin: 'main',
-        baseRev: 0,
-        startDate: Date.now(),
-        endDate: Date.now(),
-        rev: 0,
-      };
-      mockStore.createVersion(docId, versionMetadata, {}, []);
-      await patchesServer.getVersionChanges(docId, versionId);
-      expect(mockStore.loadVersionChanges).toHaveBeenCalledWith(docId, versionId);
-    });
-  });
-
-  describe('updateVersion', () => {
-    it('should call store.updateVersion with name update', async () => {
-      // Setup version in mock store
-      const versionId = 'v789';
-      const versionMetadata: VersionMetadata = {
-        id: versionId,
-        origin: 'main',
-        baseRev: 0,
-        startDate: Date.now(),
-        endDate: Date.now(),
-        rev: 0,
-      };
-      mockStore.createVersion(docId, versionMetadata, {}, []);
-      await patchesServer.updateVersion(docId, versionId, 'update');
-      expect(mockStore.updateVersion).toHaveBeenCalledWith(docId, versionId, { name: 'update' });
     });
   });
 });

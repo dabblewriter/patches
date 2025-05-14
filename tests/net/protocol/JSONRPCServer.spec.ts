@@ -1,31 +1,32 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { JSONRPCServer } from '../../../src/net/protocol/JSONRPCServer.js';
-import type { Transport } from '../../../src/net/protocol/types.js';
+import type { ServerTransport } from '../../../src/net/protocol/types.js';
 
 // -----------------------------------------------------------------------------
 // Mock transport
 // -----------------------------------------------------------------------------
-class MockTransport implements Transport {
-  public sent: string[] = [];
-  private messageHandler: ((data: string) => void) | null = null;
-  private stateHandler: ((state: any) => void) | null = null;
+class MockServerTransport implements ServerTransport {
+  public sent: { to: string; raw: string }[] = [];
+  private handler: ((from: string, raw: string) => void) | null = null;
 
-  async connect(): Promise<void> {}
-  disconnect(): void {}
-  send(data: string): void {
-    this.sent.push(data);
-  }
-  onMessage(handler: (data: string) => void): void {
-    this.messageHandler = handler;
-  }
-  onStateChange(handler: (state: any) => void): void {
-    this.stateHandler = handler;
+  getConnectionIds(): string[] {
+    return ['client-1'];
   }
 
-  // Helper to trigger incoming messages
-  emitIncoming(data: string): void {
-    this.messageHandler?.(data);
+  send(to: string, raw: string): void {
+    this.sent.push({ to, raw });
+  }
+
+  onMessage(cb: (from: string, raw: string) => void): () => void {
+    this.handler = cb;
+    return () => {
+      this.handler = null;
+    };
+  }
+
+  emitIncoming(from: string, raw: string): void {
+    this.handler?.(from, raw);
   }
 }
 
@@ -33,68 +34,48 @@ class MockTransport implements Transport {
 // Tests
 // -----------------------------------------------------------------------------
 
-describe('JSONRPCServer', () => {
-  let transport: MockTransport;
-  let patches: any;
+describe('JSONRPCServer (generic dispatch)', () => {
+  let transport: MockServerTransport;
   let server: JSONRPCServer;
 
   beforeEach(() => {
-    transport = new MockTransport();
-    patches = {
-      subscribe: vi.fn().mockResolvedValue(['doc1']),
-      unsubscribe: vi.fn().mockResolvedValue(['doc1']),
-      getDoc: vi.fn().mockResolvedValue({ rev: 0, state: null, changes: [] }),
-      getChangesSince: vi.fn().mockResolvedValue([]),
-      commitChanges: vi.fn().mockResolvedValue([[], []]),
-      deleteDoc: vi.fn().mockResolvedValue(undefined),
-      createVersion: vi.fn().mockResolvedValue('version-1'),
-      listVersions: vi.fn().mockResolvedValue([]),
-      getVersionState: vi.fn().mockResolvedValue({ rev: 0, state: null }),
-      getVersionChanges: vi.fn().mockResolvedValue([]),
-      updateVersion: vi.fn().mockResolvedValue(undefined),
-    };
-
-    server = new JSONRPCServer(transport, patches, 'client-1');
+    transport = new MockServerTransport();
+    server = new JSONRPCServer(transport);
   });
 
-  it('should route "subscribe" request to patches server and send response', async () => {
+  it('routes requests to registered handler and returns response', async () => {
+    const sumHandler = vi.fn((_conn: string, params: { a: number; b: number }) => params.a + params.b);
+    server.registerMethod('sum', sumHandler);
+
     const request = {
       jsonrpc: '2.0',
-      id: 1,
-      method: 'subscribe',
-      params: { ids: 'doc1' },
+      id: 42,
+      method: 'sum',
+      params: { a: 2, b: 3 },
     };
 
-    transport.emitIncoming(JSON.stringify(request));
+    transport.emitIncoming('client-1', JSON.stringify(request));
 
     // wait for async handling
     await new Promise(resolve => setTimeout(resolve, 0));
 
-    expect(patches.subscribe).toHaveBeenCalledWith('client-1', 'doc1');
+    expect(sumHandler).toHaveBeenCalledWith('client-1', { a: 2, b: 3 });
+
     expect(transport.sent.length).toBe(1);
-    const response = JSON.parse(transport.sent[0]);
-    expect(response).toEqual({ jsonrpc: '2.0', id: 1, result: ['doc1'] });
+    const response = JSON.parse(transport.sent[0].raw);
+    expect(response).toEqual({ jsonrpc: '2.0', id: 42, result: 5 });
   });
 
-  it('should return transformed changes from commitChanges', async () => {
-    patches.commitChanges.mockResolvedValue([[], [{ id: 'c', ops: [], rev: 1, created: Date.now() }]]);
+  it('emits notification events via .on()', async () => {
+    const spy = vi.fn();
+    server.on('ping', spy);
 
-    const request = {
-      jsonrpc: '2.0',
-      id: 2,
-      method: 'commitChanges',
-      params: {
-        docId: 'doc1',
-        changes: [{ id: 'c', ops: [], rev: 0, created: Date.now() }],
-      },
-    };
+    const notification = { jsonrpc: '2.0', method: 'ping', params: { foo: 'bar' } };
+    transport.emitIncoming('client-1', JSON.stringify(notification));
 
-    transport.emitIncoming(JSON.stringify(request));
+    // allow async signal
     await new Promise(r => setTimeout(r, 0));
 
-    expect(patches.commitChanges).toHaveBeenCalled();
-    const response = JSON.parse(transport.sent.pop()!);
-    expect(response.id).toBe(2);
-    expect(response.result).toEqual([{ id: 'c', ops: [], rev: 1, created: expect.any(Number) }]);
+    expect(spy).toHaveBeenCalledWith('client-1', { foo: 'bar' });
   });
 });

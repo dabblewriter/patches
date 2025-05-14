@@ -1,4 +1,3 @@
-
 export function toArrayIndex(array: any[], str: string) {
   if (str === '-') {
     return array.length;

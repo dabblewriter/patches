@@ -1,7 +1,7 @@
 import Peer from 'simple-peer';
 import { signal, type Unsubscriber } from '../../event-signal.js';
 import { JSONRPCClient } from '../../net/protocol/JSONRPCClient.js';
-import { AbstractTransport } from '../AbstractTransport.js';
+import type { ClientTransport } from '../protocol/types.js';
 import type { WebSocketTransport } from '../websocket/WebSocketTransport.js';
 
 /**
@@ -21,7 +21,7 @@ interface PeerInfo {
  * Uses a WebSocket transport as a signaling channel to establish WebRTC connections.
  * Once connections are established, data flows directly between peers without going through a server.
  */
-export class WebRTCTransport extends AbstractTransport {
+export class WebRTCTransport implements ClientTransport {
   private rpc: JSONRPCClient;
   private peers = new Map<string, PeerInfo>();
   private _id: string | undefined;
@@ -56,7 +56,6 @@ export class WebRTCTransport extends AbstractTransport {
    * @param transport - The WebSocket transport to use for signaling
    */
   constructor(private transport: WebSocketTransport) {
-    super();
     this.rpc = new JSONRPCClient(transport);
 
     this.subscriptions = [

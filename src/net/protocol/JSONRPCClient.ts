@@ -1,5 +1,5 @@
 import { signal, type Signal, type SignalSubscriber, type Unsubscriber } from '../../event-signal.js';
-import type { Notification, Request, Response, Transport } from './types.js';
+import type { ClientTransport, Notification, Request, Response } from './types.js';
 
 /**
  * Implementation of a JSON-RPC 2.0 client that communicates over a provided transport layer.
@@ -16,7 +16,7 @@ export class JSONRPCClient {
    *
    * @param transport - The transport layer implementation that will be used for sending/receiving messages
    */
-  constructor(private transport: Transport) {
+  constructor(private transport: ClientTransport) {
     transport.onMessage(this.handleMessage.bind(this));
   }
 

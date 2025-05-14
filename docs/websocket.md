@@ -102,8 +102,7 @@ Here are the key methods that make `PatchesWebSocket` so handy:
 
 - `connect()` - Start the WebSocket connection
 - `disconnect()` - Close the connection gracefully
-- `isConnected` - Check if you're still online
-- `onConnectionStateChange` - React when connection status changes
+- `onStateChange` - React when connection status changes
 
 ### Document Subscriptions
 
@@ -148,7 +147,7 @@ class CollaborativeEditor {
     this.ws = new PatchesWebSocket('wss://your-server.example');
 
     // 3. Set up connection state handling
-    this.ws.onConnectionStateChange(state => {
+    this.ws.onStateChange(state => {
       if (state === 'connected') {
         this.showOnlineStatus();
       } else {
@@ -243,7 +242,7 @@ await editor.createVersion('my-novel', 'Chapter 1 Complete');
 ### 1. Handle Connection Drops Like a Pro
 
 ```typescript
-ws.onConnectionStateChange(state => {
+ws.onStateChange(state => {
   if (state === 'connecting') {
     showSpinner();
   } else if (state === 'connected') {
@@ -312,6 +311,45 @@ doc.onChange(change => {
 });
 ```
 
+## Running the Show on the Server 🛎️
+
+Patches gives you a ready-made **WebSocketServer** class that mirrors the client's niceties on the backend:
+
+```ts
+import { WebSocketServer } from '@dabble/patches/net';
+import { PatchesServer } from '@dabble/patches/server';
+import { MyWebSocketAdaptor } from './your-ws-lib';
+
+const transport = new MyWebSocketAdaptor(/* underlying ws library */);
+const core = new PatchesServer(myStoreBackend);
+const webSocketApi = new WebSocketServer({ transport, patches: core });
+
+// Need history or branching?  Just pass the managers as well:
+
+import { PatchesHistoryManager } from '@dabble/patches/server';
+import { PatchesBranchManager } from '@dabble/patches/server';
+
+const history = new PatchesHistoryManager(core);
+const branches = new PatchesBranchManager(myBranchingStore, core);
+
+const api = new WebSocketServer({
+  transport,
+  patches: core,
+  history, // ➜ adds listVersions, getVersionState, …
+  branches, // ➜ adds listBranches, mergeBranch, …
+});
+```
+
+Highlights:
+
+1. **Authorization hooks** – Pass an `auth` object to decide, per call, whether a connection may _read_ or _write_ a given doc. Need ACLs? Multi-tenant rules? Just implement the `AuthorizationProvider` interface.
+2. **Automatic fan-out** – When one client commits changes, `WebSocketServer` fires a `changesCommitted` notification to everyone else who's subscribed.
+3. **Pluggable managers** – Hand over a `PatchesHistoryManager` or `PatchesBranchManager` and the corresponding RPC methods instantly become available.
+   • `history` option wires in **seven** extra methods: `listVersions`, `createVersion`, `updateVersion`, `getVersionState`, `getVersionChanges`, `listServerChanges`, plus the server-side helper for incremental change dumps.
+   • `branches` option wires in **four** methods: `listBranches`, `createBranch`, `closeBranch`, `mergeBranch`.
+
+   The client side (using `PatchesWebSocket`) gains those calls automatically—no extra code needed.
+
 ## Why WebSockets Rock for Real-Time Apps
 
 Using WebSockets for your collaborative app gives you:
@@ -327,5 +365,6 @@ Using WebSockets for your collaborative app gives you:
 - [Awareness](./awareness.md) - Add collaborative cursors and presence
 - [PatchesDoc](./PatchesDoc.md) - How to work with document state locally
 - [operational-transformation.md](./operational-transformation.md) - The magic under the hood
+- [json-rpc.md](./json-rpc.md) - The tiny RPC layer that glues client & server
 
 Now go forth and build amazing collaborative experiences! 🚀

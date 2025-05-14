@@ -1,4 +1,5 @@
-import type { Change, PatchesSnapshot, PatchesState, VersionMetadata } from '../../types';
+import type { Unsubscriber } from '../../event-signal.js';
+import type { Change, ListVersionsOptions, PatchesSnapshot, PatchesState, VersionMetadata } from '../../types';
 
 /**
  * Represents the possible states of a network transport connection.
@@ -10,39 +11,40 @@ import type { Change, PatchesSnapshot, PatchesState, VersionMetadata } from '../
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 
 /**
- * Interface defining the core functionality of a transport layer.
- * Transport implementations provide a communication channel between client and server,
- * abstracting the underlying protocol details (WebSocket, WebRTC, etc.).
+ * Minimal contract that the JSON-RPC layer (and therefore Patches core) relies on.
+ * A transport only needs the ability to **send** raw strings and **deliver** raw
+ * strings it receives from the other side.
+ *
+ * Anything beyond that (connect/disconnect lifecycle, connection state, etc.) is
+ * not needed or handled by Patches and so is not defined here.
  */
-export interface Transport {
+export interface ClientTransport {
   /**
-   * Establishes the connection for this transport.
-   * @returns A promise that resolves when the connection is established
+   * Sends a raw, already-encoded message over the wire.
    */
-  connect(): Promise<void>;
+  send(raw: string): void | Promise<void>;
 
   /**
-   * Terminates the connection for this transport.
+   * Subscribes to incoming raw messages. Returns an {@link Unsubscriber} so the
+   * caller can remove the handler if it no longer cares about incoming data.
    */
-  disconnect(): void;
+  onMessage(cb: (raw: string) => void): Unsubscriber;
+}
 
-  /**
-   * Sends data through this transport.
-   * @param data - The string data to send
-   */
-  send(data: string): void;
+/**
+ * Minimal contract for server-side transports that can have **multiple** logical peers.
+ * Each message must indicate the **from / to** connection. Any additional lifecycle
+ * management (upgrade, close, etc.) stays inside the concrete adapter.
+ */
+export interface ServerTransport {
+  /** Get a list of all active connection IDs */
+  getConnectionIds(): string[];
 
-  /**
-   * Registers a handler for incoming messages.
-   * @param handler - Function that will be called when a message is received
-   */
-  onMessage(handler: (data: string) => void): void;
+  /** Send a raw JSON-RPC string to a specific connection */
+  send(toConnectionId: string, raw: string): void | Promise<void>;
 
-  /**
-   * Registers a handler for connection state changes.
-   * @param handler - Function that will be called when the connection state changes
-   */
-  onStateChange(handler: (state: ConnectionState) => void): void;
+  /** Subscribe to incoming raw frames from any client */
+  onMessage(cb: (fromConnectionId: string, raw: string) => void): Unsubscriber;
 }
 
 /**
@@ -139,7 +141,7 @@ export interface PatchesAPI {
   createVersion(docId: string, name: string): Promise<string>; // Returns versionId
 
   /** List metadata for saved versions of a document. */
-  listVersions(docId: string, options: ListOptions): Promise<VersionMetadata[]>;
+  listVersions(docId: string, options?: ListVersionsOptions): Promise<VersionMetadata[]>;
 
   /** Get the state snapshot for a specific version ID. */
   getVersionState(docId: string, versionId: string): Promise<PatchesState>;
@@ -148,7 +150,7 @@ export interface PatchesAPI {
   getVersionChanges(docId: string, versionId: string): Promise<Change[]>;
 
   /** Update the name of a specific version. */
-  updateVersion(docId: string, versionId: string, name: string): Promise<void>;
+  updateVersion(docId: string, versionId: string, updates: Pick<VersionMetadata, 'name'>): Promise<void>;
 }
 
 // Also define the expected parameters for notifications the server might send:

@@ -1,4 +1,3 @@
-
 function esc(m: string) {
   return m === '~0' ? '~' : '/';
 }

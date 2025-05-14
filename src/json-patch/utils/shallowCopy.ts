@@ -1,4 +1,3 @@
-
 export function shallowCopy(obj: any) {
   if (!obj || typeof obj !== 'object') {
     return obj;

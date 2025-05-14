@@ -1,18 +1,7 @@
 import { signal, type Signal } from '../../event-signal.js';
-import type {
-  // Types imported directly from OT definitions
-  Change,
-  PatchesSnapshot,
-  VersionMetadata,
-} from '../../types.js';
+import type { Change, ListVersionsOptions, PatchesSnapshot, VersionMetadata } from '../../types.js';
 import { JSONRPCClient } from '../protocol/JSONRPCClient.js';
-import type {
-  // Types specific to the transport/protocol layer
-  ConnectionState,
-  ListOptions,
-  PatchesAPI,
-  PatchesNotificationParams,
-} from '../protocol/types.js';
+import type { ConnectionState, PatchesAPI, PatchesNotificationParams } from '../protocol/types.js';
 import { WebSocketTransport, type WebSocketOptions } from './WebSocketTransport.js';
 
 /**
@@ -146,7 +135,7 @@ export class PatchesWebSocket implements PatchesAPI {
    * @param options - Options for filtering or pagination (e.g., limit, offset).
    * @returns A promise resolving with an array of version metadata objects.
    */
-  async listVersions(docId: string, options: ListOptions = {}): Promise<VersionMetadata[]> {
+  async listVersions(docId: string, options?: ListVersionsOptions): Promise<VersionMetadata[]> {
     return this.rpc.request('listVersions', { docId, options });
   }
 
@@ -177,7 +166,7 @@ export class PatchesWebSocket implements PatchesAPI {
    * @param name - The new name for the version.
    * @returns A promise resolving when the update is confirmed.
    */
-  async updateVersion(docId: string, versionId: string, name: string): Promise<void> {
-    return this.rpc.request('updateVersion', { docId, versionId, name });
+  async updateVersion(docId: string, versionId: string, updates: Pick<VersionMetadata, 'name'>): Promise<void> {
+    return this.rpc.request('updateVersion', { docId, versionId, updates });
   }
 }

@@ -1,9 +1,9 @@
 import { signal, type Signal, type Unsubscriber } from '../../event-signal.js';
 import { PatchesServer } from '../../server/PatchesServer.js';
-import type { Change, ListVersionsOptions } from '../../types.js';
-import type { Message, Notification, Request, Response, Transport } from './types.js';
+import type { Message, Notification, Request, Response, ServerTransport } from './types.js';
 
 export type ConnectionSignalSubscriber = (connectionId: string, ...args: any[]) => any;
+export type MessageHandler<P = any, R = any> = (connectionId: string, params: P) => Promise<R> | R;
 
 /**
  * Lightweight JSON-RPC 2.0 server adapter for {@link PatchesServer}.
@@ -22,11 +22,31 @@ export type ConnectionSignalSubscriber = (connectionId: string, ...args: any[]) 
  *     to the host application.
  */
 export class JSONRPCServer {
+  /** Map of fully-qualified JSON-RPC method → handler function */
+  private readonly handlers = new Map<string, MessageHandler>();
   /** Allow external callers to emit server-initiated notifications. */
   private readonly notificationSignals = new Map<string, Signal>();
-  public readonly onSend = signal<(connectionId: string, msg: string) => void>();
 
-  constructor(private readonly patches: PatchesServer) {}
+  constructor(protected transport: ServerTransport) {
+    transport.onMessage(this._onMessage.bind(this));
+  }
+
+  // -------------------------------------------------------------------------
+  // Registration API
+  // -------------------------------------------------------------------------
+
+  /**
+   * Registers a JSON-RPC method.
+   *
+   * @param method   Fully-qualified method name (e.g. "patches.subscribe").
+   * @param handler  Function that performs the work and returns the result.
+   */
+  registerMethod<TParams = any, TResult = any>(method: string, handler: MessageHandler<TParams, TResult>): void {
+    if (this.handlers.has(method)) {
+      throw new Error(`A handler for method '${method}' is already registered.`);
+    }
+    this.handlers.set(method, handler as any);
+  }
 
   // -------------------------------------------------------------------------
   // Public helpers
@@ -56,7 +76,7 @@ export class JSONRPCServer {
   notify(connectionIds: string[], method: string, params?: any): void {
     const msg: Notification = { jsonrpc: '2.0', method, params };
     const msgStr = JSON.stringify(msg);
-    connectionIds.forEach(id => this.onSend.emit(id, msgStr));
+    connectionIds.forEach(id => this.transport.send(id, msgStr));
   }
 
   /**
@@ -64,7 +84,7 @@ export class JSONRPCServer {
    * @param connectionId - The WebSocket transport object.
    * @param raw - The raw message string.
    */
-  async onMessage(connectionId: string, raw: string): Promise<void> {
+  protected async _onMessage(connectionId: string, raw: string): Promise<void> {
     let message: Message;
     try {
       message = JSON.parse(raw);
@@ -95,7 +115,7 @@ export class JSONRPCServer {
     try {
       const result = await this._dispatch(connectionId, req.method, req.params);
       const response: Response = { jsonrpc: '2.0', id: req.id as number, result };
-      this.onSend.emit(connectionId, JSON.stringify(response));
+      this.transport.send(connectionId, JSON.stringify(response));
     } catch (err: any) {
       this._sendError(connectionId, req.id as number, -32000, err?.message ?? 'Server error', err?.stack);
     }
@@ -121,54 +141,14 @@ export class JSONRPCServer {
    * @returns The result of the {@link PatchesServer} call.
    */
   protected async _dispatch(connectionId: string, method: string, params: any): Promise<any> {
-    switch (method) {
-      // ---------------------------------------------------------------------
-      // Subscription operations
-      // ---------------------------------------------------------------------
-      case 'subscribe': {
-        const ids = params?.ids ?? params;
-        return this.patches.subscribe(connectionId, ids);
-      }
-      case 'unsubscribe': {
-        const ids = params?.ids ?? params;
-        return this.patches.unsubscribe(connectionId, ids);
-      }
-
-      // ---------------------------------------------------------------------
-      // Document operations
-      // ---------------------------------------------------------------------
-      case 'getDoc':
-        return this.patches.getDoc(params.docId, params.atRev);
-      case 'getChangesSince':
-        return this.patches.getChangesSince(params.docId, params.rev);
-      case 'commitChanges': {
-        const [, /* committed */ transformed] = await this.patches.commitChanges(
-          params.docId,
-          params.changes as Change[]
-        );
-        return transformed;
-      }
-      case 'deleteDoc':
-        return this.patches.deleteDoc(params.docId);
-
-      // ---------------------------------------------------------------------
-      // Version operations
-      // ---------------------------------------------------------------------
-      case 'createVersion':
-        return this.patches.createVersion(params.docId, params.name);
-      case 'listVersions':
-        return this.patches.listVersions(params.docId, params.options as ListVersionsOptions);
-      case 'getVersionState':
-        return this.patches.getVersionState(params.docId, params.versionId);
-      case 'getVersionChanges':
-        return this.patches.getVersionChanges(params.docId, params.versionId);
-      case 'updateVersion':
-        return this.patches.updateVersion(params.docId, params.versionId, params.name);
-
-      // ---------------------------------------------------------------------
-      default:
-        throw new Error(`Unknown method '${method}'.`);
+    const handler = this.handlers.get(method);
+    if (!handler) {
+      throw new Error(`Unknown method '${method}'.`);
     }
+    if (!params || typeof params !== 'object' || Array.isArray(params)) {
+      throw new Error(`Invalid parameters for method '${method}'.`);
+    }
+    return handler(connectionId, params);
   }
 
   /**
@@ -180,6 +160,6 @@ export class JSONRPCServer {
       id: id as any,
       error: { code, message, data },
     } as Response; // type cast because TS cannot narrow when error present
-    this.onSend.emit(connectionId, JSON.stringify(errorObj));
+    this.transport.send(connectionId, JSON.stringify(errorObj));
   }
 }

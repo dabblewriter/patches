@@ -93,7 +93,7 @@ export class PatchesHistoryClient<T = any> {
   async getStateAtVersion(versionId: string): Promise<any> {
     let data = this.cache.get(versionId);
     if (!data || data.state === undefined) {
-      const state = await this.api.getVersionState(this.id, versionId);
+      const { state } = await this.api.getVersionState(this.id, versionId);
       data = { ...data, state };
       this.cache.set(versionId, data);
     }

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { PatchesHistoryClient } from '../../src/client/PatchesHistoryClient';
 import type { JSONPatchOp } from '../../src/json-patch';
 import type { PatchesAPI } from '../../src/net/protocol/types.js';
@@ -159,20 +159,20 @@ describe('PatchesHistoryClient', () => {
     const versionChanges: Change[] = [
       {
         id: 'c1_v3',
-        ops: [{ op: 'add', path: '/content', value: ' change 1' } as JSONPatchOp],
+        ops: [{ op: 'replace', path: '/content', value: 'change 1' } as JSONPatchOp],
         rev: 3,
         created: Date.now(),
         baseRev: 2,
       },
       {
         id: 'c2_v3',
-        ops: [{ op: 'add', path: '/content', value: ' change 2' } as JSONPatchOp],
+        ops: [{ op: 'replace', path: '/content', value: 'change 2' } as JSONPatchOp],
         rev: 3,
         created: Date.now(),
         baseRev: 2,
       },
     ];
-    const expectedState = { content: 'version 2 state change 1' }; // Note: applyChanges logic not tested here, just flow
+    const expectedState = { content: 'change 1' }; // Note: applyChanges logic not tested here, just flow
 
     mockApi.getVersionState.mockResolvedValue({ state: parentDocState, rev: parentVersion!.rev }); // For parent v2
     mockApi.getVersionChanges.mockResolvedValue(versionChanges); // For v3

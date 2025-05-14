@@ -1,10 +1,15 @@
 import { beforeEach, describe, expect, it, vi, type Mocked } from 'vitest';
 import { signal, type Signal } from '../../../src/event-signal.js';
 import { JSONRPCClient } from '../../../src/net/protocol/JSONRPCClient.js';
-import type { ConnectionState, ListOptions } from '../../../src/net/protocol/types.js';
+import type { ConnectionState } from '../../../src/net/protocol/types.js';
 import { PatchesWebSocket } from '../../../src/net/websocket/PatchesWebSocket.js';
 import { WebSocketTransport } from '../../../src/net/websocket/WebSocketTransport.js';
-import { Change, PatchesSnapshot, VersionMetadata } from '../../../src/types.js';
+import {
+  type Change,
+  type ListVersionsOptions,
+  type PatchesSnapshot,
+  type VersionMetadata,
+} from '../../../src/types.js';
 
 // Mock dependencies
 vi.mock('../../../src/net/websocket/WebSocketTransport.js');
@@ -97,7 +102,7 @@ describe('PatchesWebSocket', () => {
     const CHANGES: Change[] = [{ id: 'change-1', ops: [], rev: 11, created: Date.now() }];
     const VERSION_NAME = 'v1.0';
     const VERSION_ID = 'version-abc';
-    const LIST_OPTIONS: ListOptions = { limit: 10 };
+    const LIST_OPTIONS: ListVersionsOptions = { limit: 10 };
 
     it('subscribe(id) should call rpc.request with correct params', async () => {
       const expectedResult = [DOC_ID];
@@ -209,7 +214,6 @@ describe('PatchesWebSocket', () => {
       const result = await patchesWs.listVersions(DOC_ID);
       expect(mockRpcImplementation.request).toHaveBeenCalledWith('listVersions', {
         docId: DOC_ID,
-        options: {},
       });
       expect(result).toBe(expectedMetadata);
     });
@@ -239,11 +243,11 @@ describe('PatchesWebSocket', () => {
     it('updateVersion should call rpc.request with correct params', async () => {
       const newName = 'v1.1';
       mockRpcImplementation.request.mockResolvedValue(undefined);
-      await patchesWs.updateVersion(DOC_ID, VERSION_ID, newName);
+      await patchesWs.updateVersion(DOC_ID, VERSION_ID, { name: newName });
       expect(mockRpcImplementation.request).toHaveBeenCalledWith('updateVersion', {
         docId: DOC_ID,
         versionId: VERSION_ID,
-        name: newName,
+        updates: { name: newName },
       });
     });
   });

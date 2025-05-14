@@ -9,7 +9,6 @@ export default defineConfig({
         index: resolve(__dirname, 'src/index.ts'),
         'net/index': resolve(__dirname, 'src/net/index.ts'),
         'server/index': resolve(__dirname, 'src/server/index.ts'),
-        'persist/index': resolve(__dirname, 'src/persist/index.ts'),
         'client/index': resolve(__dirname, 'src/client/index.ts'),
       },
       formats: ['es'],

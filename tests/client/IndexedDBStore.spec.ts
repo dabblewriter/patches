@@ -1,9 +1,9 @@
 import { IDBFactory } from 'fake-indexeddb';
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { JSONPatchOp } from '../../src/json-patch/types';
-import { IndexedDBStore } from '../../src/persist/IndexedDBStore';
-import { Change } from '../../src/types';
+import { IndexedDBStore } from '../../src/client/IndexedDBStore';
+import type { JSONPatchOp } from '../../src/json-patch/types';
+import type { Change } from '../../src/types';
 
 const TEST_DB_NAME = 'test-db';
 const TEST_TIMEOUT = 1000; // Increased timeout

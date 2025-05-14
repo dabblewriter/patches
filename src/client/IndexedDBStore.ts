@@ -1,8 +1,8 @@
+import type { PatchesStore, TrackedDoc } from '../client/types.js';
 import { signal } from '../event-signal.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
 import type { Change, Deferred, PatchesSnapshot } from '../types.js';
 import { applyChanges, deferred } from '../utils.js';
-import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
 const DB_VERSION = 1;
 const SNAPSHOT_INTERVAL = 200;

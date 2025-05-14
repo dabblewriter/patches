@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mocked } from 'vitest';
 import { Patches } from '../../src/client/Patches';
+import type { PatchesStore, TrackedDoc } from '../../src/client/types';
 import { signal, type Signal } from '../../src/event-signal';
 import { PatchesSync } from '../../src/net/PatchesSync';
 import type { ConnectionState } from '../../src/net/protocol/types';
 import { PatchesWebSocket } from '../../src/net/websocket/PatchesWebSocket';
 import { onlineState } from '../../src/net/websocket/onlineState';
-import type { PatchesStore, TrackedDoc } from '../../src/persist/PatchesStore';
 import type { Change } from '../../src/types';
 
 // --- Mocks ---

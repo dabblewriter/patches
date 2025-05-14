@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { InMemoryStore } from '../../src/persist/InMemoryStore';
+import { InMemoryStore } from '../../src/client/InMemoryStore';
 import type { Change } from '../../src/types';
 
 describe('InMemoryStore', () => {

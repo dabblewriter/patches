@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mocked } from 'vitest';
 import { Patches } from '../../src/client/Patches';
 import { PatchesDoc } from '../../src/client/PatchesDoc';
+import type { PatchesStore } from '../../src/client/types';
 import { signal } from '../../src/event-signal';
-import type { PatchesStore } from '../../src/persist/PatchesStore';
 import type { Change } from '../../src/types';
 
 // Mock PatchesDoc before any test setup

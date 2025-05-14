@@ -1,6 +1,6 @@
 import { Patches } from '../client/Patches.js';
+import type { PatchesStore, TrackedDoc } from '../client/types.js';
 import { signal } from '../event-signal.js';
-import type { PatchesStore, TrackedDoc } from '../persist/PatchesStore.js';
 import { breakIntoBatches } from '../utils/batching.js';
 import type { ConnectionState } from './protocol/types.js';
 import { PatchesWebSocket } from './websocket/PatchesWebSocket.js';

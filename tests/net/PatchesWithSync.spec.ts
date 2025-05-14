@@ -1,11 +1,11 @@
 import type { Mock } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { InMemoryStore } from '../../src/client/InMemoryStore';
 import { Patches } from '../../src/client/Patches';
 import { PatchesDoc } from '../../src/client/PatchesDoc';
 import { PatchesSync } from '../../src/net/PatchesSync';
 import { PatchesWebSocket } from '../../src/net/websocket/PatchesWebSocket';
-import { InMemoryStore } from '../../src/persist/InMemoryStore';
-import { Change } from '../../src/types';
+import type { Change } from '../../src/types';
 
 interface MockWebSocket {
   connect: Mock;

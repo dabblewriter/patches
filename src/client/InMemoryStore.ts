@@ -1,8 +1,8 @@
+import type { PatchesStore, TrackedDoc } from '../client/types.js';
 import { signal } from '../event-signal.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
 import type { Change, PatchesSnapshot } from '../types.js';
 import { applyChanges } from '../utils.js';
-import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
 interface DocBuffers {
   snapshot?: { state: any; rev: number };

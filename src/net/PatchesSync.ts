@@ -1,5 +1,5 @@
 import { Patches } from '../client/Patches.js';
-import type { PatchesStore, TrackedDoc } from '../client/types.js';
+import type { PatchesStore, TrackedDoc } from '../client/PatchesStore.js';
 import { signal } from '../event-signal.js';
 import { breakIntoBatches } from '../utils/batching.js';
 import type { ConnectionState } from './protocol/types.js';

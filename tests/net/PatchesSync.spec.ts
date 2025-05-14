@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mocked } from 'vitest';
 import { Patches } from '../../src/client/Patches';
-import type { PatchesStore, TrackedDoc } from '../../src/client/types';
+import type { PatchesStore, TrackedDoc } from '../../src/client/PatchesStore';
 import { signal, type Signal } from '../../src/event-signal';
 import { PatchesSync } from '../../src/net/PatchesSync';
 import type { ConnectionState } from '../../src/net/protocol/types';

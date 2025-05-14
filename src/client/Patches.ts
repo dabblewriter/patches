@@ -1,7 +1,7 @@
 import { type Unsubscriber, signal } from '../event-signal.js';
 import type { Change } from '../types.js';
 import { PatchesDoc, type PatchesDocOptions } from './PatchesDoc.js';
-import type { PatchesStore } from './types.js';
+import type { PatchesStore } from './PatchesStore.js';
 
 // Simplified options without sync-specific parameters
 export interface PatchesOptions {

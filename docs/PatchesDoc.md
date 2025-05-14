@@ -31,8 +31,7 @@ Say hello to the star of the show! 🌟
 Remember, you almost never create a `PatchesDoc` directly. Let `Patches` do it for you:
 
 ```typescript
-import { Patches } from '@dabble/patches';
-import { InMemoryStore } from '@dabble/patches/persist';
+import { Patches, InMemoryStore } from '@dabble/patches';
 
 // Create the main Patches client
 const patches = new Patches({ store: new InMemoryStore() });
@@ -230,8 +229,7 @@ Here's a full example of using `PatchesDoc` with a React component:
 
 ```typescript
 import React, { useEffect, useState } from 'react';
-import { Patches } from '@dabble/patches';
-import { InMemoryStore } from '@dabble/patches/persist';
+import { Patches, InMemoryStore } from '@dabble/patches';
 import { PatchesSync } from '@dabble/patches/net';
 
 interface TodoItem {

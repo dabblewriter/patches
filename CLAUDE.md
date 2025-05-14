@@ -17,11 +17,10 @@ Patches is a TypeScript library for building real-time collaborative application
 ### Import Paths
 
 The library uses subpath exports. Use these import paths:
-- Core client: `@dabble/patches`
-- Client components: `@dabble/patches/client`
+
+- Client client: `@dabble/patches`
 - Server components: `@dabble/patches/server`
 - Networking: `@dabble/patches/net`
-- Persistence: `@dabble/patches/persist`
 
 ### Key Features
 
@@ -53,7 +52,7 @@ The codebase is divided into client-side and server-side components:
 
 ### Networking & Persistence
 
-1. **Transport Layer**: 
+1. **Transport Layer**:
    - **WebSocketTransport**: Server-mediated communication
    - **WebRTCTransport**: Peer-to-peer communication
 2. **Persistence Layer**:
@@ -71,31 +70,33 @@ The system uses JSON Patch operations (RFC 6902) with custom OT transformations 
 - `/src/server`: Server-side implementation
 - `/src/json-patch`: JSON Patch operations and transformations
 - `/src/net`: Networking and transport layer
-- `/src/persist`: Storage interfaces and implementations
 - `/tests`: Test files matching the source structure
 
 ## Important Implementation Details
 
 1. **Change Processing Flow**:
+
    - Client makes a change → optimistically applied locally
    - Change sent to server with baseRev (server revision it was based on)
    - Server transforms against concurrent changes, assigns new revision
    - Transformed change is broadcast to all clients
 
 2. **Versioning**:
+
    - System creates snapshots after 30 minutes of inactivity
    - Each version may represent one or many changes
    - Allows efficient loading of large documents with many changes
 
 3. **State Handling**:
+
    - Document state is immutable
    - Changes are made through proxy in `doc.change(state => state.prop = 'new value')`
 
 4. **Usage Example**:
+
    ```typescript
    // Client-side
-   import { Patches } from '@dabble/patches';
-   import { InMemoryStore } from '@dabble/patches/persist';
+   import { Patches, InMemoryStore } from '@dabble/patches';
    import { PatchesSync } from '@dabble/patches/net';
 
    // Server-side
@@ -107,11 +108,13 @@ The system uses JSON Patch operations (RFC 6902) with custom OT transformations 
 Tests are written using Vitest and follow a structure mirroring the source code. Most tests use mocking to isolate components.
 
 To run a single test file:
+
 ```bash
 npm run test -- tests/path/to/file.spec.ts
 ```
 
 To run tests with a specific pattern:
+
 ```bash
 npm run test -- -t "test description pattern"
 ```

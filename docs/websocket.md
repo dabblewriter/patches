@@ -129,9 +129,8 @@ Here are the key methods that make `PatchesWebSocket` so handy:
 Here's how to wire everything up for a robust collaborative app:
 
 ```typescript
-import { Patches, PatchesDoc } from '@dabble/patches';
+import { Patches, PatchesDoc, IndexedDBStore } from '@dabble/patches';
 import { PatchesWebSocket } from '@dabble/patches/net';
-import { IndexedDBStore } from '@dabble/patches/persist';
 
 class CollaborativeEditor {
   private patches: Patches;

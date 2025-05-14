@@ -29,7 +29,6 @@ Patches is an unrelease project, in stealth mode, being iterated on until it is 
   - `client/` — Client-side OT implementation (PatchesDoc)
   - `server/` — Server-side OT implementation (PatchesServer, PatchesHistoryManager, PatchesBranchManager)
   - `net/` — Network layer (WebSocket, protocol, providers)
-  - `persist/` — Storage implementations
   - `json-patch/`, `utils/` — Supporting modules
 - `docs/` — In-depth documentation for each core component
 - `tests/` — Vitest-based test suite (unit/integration)
@@ -83,7 +82,7 @@ can safely assume it is a `.ts` file and look it up accordingly with its `path/t
 - `docs/PatchesHistoryManager.md` — Version/history API.
 - `docs/PatchesBranchManager.md` — Branching/merging API.
 - `docs/json-patch.md` — JSON Patch/legacy features.
-- `docs/net.md` — Network layer: real-time sync, offline-first, WebSocket, protocol.
+- `docs/net.md` — Network layer (WebSocket, protocol, providers)
 - `docs/persist.md` — Storage implementations and offline support.
 - `docs/awareness.md` — Awareness (presence, cursors, etc.) via WebRTC.
 

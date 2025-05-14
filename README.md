@@ -92,8 +92,7 @@ Let's set up a basic client and server. (These examples are simplified – real-
 Here's how to get rolling with Patches on the client:
 
 ```typescript
-import { Patches } from '@dabble/patches';
-import { InMemoryStore } from '@dabble/patches/persist';
+import { Patches, InMemoryStore } from '@dabble/patches';
 import { PatchesSync } from '@dabble/patches/net';
 
 interface MyDoc {
@@ -294,8 +293,7 @@ Check the [Awareness documentation](./docs/awareness.md) for how to build collab
 ### Simple Client Setup
 
 ```typescript
-import { Patches } from '@dabble/patches';
-import { InMemoryStore } from '@dabble/patches/persist';
+import { Patches, InMemoryStore } from '@dabble/patches';
 
 interface MyDoc {
   text: string;

@@ -28,8 +28,7 @@ Here's the key: You create **one** `Patches` instance for your whole app, then u
 Starting with `Patches` is super simple:
 
 ```typescript
-import { Patches } from '@dabble/patches';
-import { InMemoryStore } from '@dabble/patches/persist';
+import { Patches, InMemoryStore } from '@dabble/patches';
 
 // Create a store for persistence
 const store = new InMemoryStore(); // For testing - use IndexedDBStore for production!
@@ -175,8 +174,7 @@ patches.onDocOpenFailed((docId, error) => {
 Here's a complete example of using `Patches` in a real application:
 
 ```typescript
-import { Patches } from '@dabble/patches';
-import { IndexedDBStore } from '@dabble/patches/persist';
+import { Patches, IndexedDBStore } from '@dabble/patches';
 import { PatchesSync } from '@dabble/patches/net';
 
 class CollaborativeApp {

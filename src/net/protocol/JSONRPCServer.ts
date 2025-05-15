@@ -73,10 +73,11 @@ export class JSONRPCServer {
    * Sends a JSON-RPC notification (no `id`, therefore no response expected) to
    * the connected client.
    */
-  notify(connectionIds: string[], method: string, params?: any): void {
+  async notify(method: string, params?: any, exceptConnectionId?: string): Promise<void> {
     const msg: Notification = { jsonrpc: '2.0', method, params };
     const msgStr = JSON.stringify(msg);
-    connectionIds.forEach(id => this.transport.send(id, msgStr));
+    const connectionIds = this.transport.getConnectionIds();
+    await Promise.all(connectionIds.map(id => exceptConnectionId !== id && this.transport.send(id, msgStr)));
   }
 
   /**

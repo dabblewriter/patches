@@ -171,27 +171,27 @@ export class WebSocketServer {
   // === Document Operations ===
   /**
    * Gets the latest state (content and revision) of a document.
-   * @param _connectionId - The ID of the connection making the request
+   * @param connectionId - The ID of the connection making the request
    * @param params - The document parameters
    * @param params.docId - The ID of the document
    * @param params.atRev - Optional revision number to get document state at
    */
-  async getDoc(_connectionId: string, params: { docId: string; atRev?: number }) {
+  async getDoc(connectionId: string, params: { docId: string; atRev?: number }) {
     const { docId, atRev } = params;
-    await this.assertRead(_connectionId, docId, 'getDoc', params);
+    await this.assertRead(connectionId, docId, 'getDoc', params);
     return this.patches.getDoc(docId, atRev);
   }
 
   /**
    * Gets changes that occurred for a document after a specific revision number.
-   * @param _connectionId - The ID of the connection making the request
+   * @param connectionId - The ID of the connection making the request
    * @param params - The change request parameters
    * @param params.docId - The ID of the document
    * @param params.rev - The revision number after which to fetch changes
    */
-  async getChangesSince(_connectionId: string, params: { docId: string; rev: number }) {
+  async getChangesSince(connectionId: string, params: { docId: string; rev: number }) {
     const { docId, rev } = params;
-    await this.assertRead(_connectionId, docId, 'getChangesSince', params);
+    await this.assertRead(connectionId, docId, 'getChangesSince', params);
     return this.patches.getChangesSince(docId, rev);
   }
 
@@ -208,10 +208,7 @@ export class WebSocketServer {
     const [priorChanges, newChanges] = await this.patches.commitChanges(docId, changes);
 
     // Notify other clients that the new changes have been committed
-    const connectionIds = this.transport.getConnectionIds().filter(id => id !== connectionId);
-    if (connectionIds.length > 0) {
-      this.rpc.notify(connectionIds, 'changesCommitted', { docId, changes: newChanges });
-    }
+    this.rpc.notify('changesCommitted', { docId, changes: newChanges }, connectionId);
 
     return [...priorChanges, ...newChanges];
   }
@@ -228,10 +225,7 @@ export class WebSocketServer {
     await this.patches.deleteDoc(docId);
 
     // Notify other clients that the document has been deleted
-    const connectionIds = this.transport.getConnectionIds().filter(id => id !== connectionId);
-    if (connectionIds.length > 0) {
-      this.rpc.notify(connectionIds, 'docDeleted', { docId });
-    }
+    this.rpc.notify('docDeleted', { docId }, connectionId);
   }
 
   // ---------------------------------------------------------------------------

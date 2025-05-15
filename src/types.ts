@@ -57,6 +57,8 @@ export interface Branch {
   [metadata: string]: any;
 }
 
+export type EditableBranchMetadata = Disallowed<Branch, 'id' | 'branchedFromId' | 'branchedRev' | 'created' | 'status'>;
+
 /**
  * Metadata, state snapshot, and included changes for a specific version.
  */
@@ -83,6 +85,15 @@ export interface VersionMetadata {
   /** Optional arbitrary metadata associated with the version. */
   [metadata: string]: any;
 }
+
+type Disallowed<T, K extends keyof T> = Pick<T, Exclude<keyof T, K>> & {
+  [P in K]?: never;
+};
+
+export type EditableVersionMetadata = Disallowed<
+  VersionMetadata,
+  'id' | 'parentId' | 'groupId' | 'origin' | 'branchName' | 'startDate' | 'endDate' | 'rev' | 'baseRev'
+>;
 
 /**
  * Options for listing committed server changes. *Always* ordered by revision number.

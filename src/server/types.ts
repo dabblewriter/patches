@@ -1,4 +1,11 @@
-import type { Branch, Change, ListChangesOptions, ListVersionsOptions, VersionMetadata } from '../types';
+import type {
+  Branch,
+  Change,
+  EditableVersionMetadata,
+  ListChangesOptions,
+  ListVersionsOptions,
+  VersionMetadata,
+} from '../types';
 
 /**
  * Interface for a backend storage system for patch synchronization.
@@ -24,7 +31,7 @@ export interface PatchesStoreBackend {
   createVersion(docId: string, metadata: VersionMetadata, state: any, changes: Change[]): Promise<void>;
 
   /** Update a version's metadata. */
-  updateVersion(docId: string, versionId: string, metadata: Partial<VersionMetadata>): Promise<void>;
+  updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void>;
 
   /** Lists version metadata based on filtering/sorting options. */
   listVersions(docId: string, options: ListVersionsOptions): Promise<VersionMetadata[]>;

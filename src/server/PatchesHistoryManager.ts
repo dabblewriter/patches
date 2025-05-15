@@ -1,5 +1,11 @@
-import type { Change, ListChangesOptions, ListVersionsOptions, VersionMetadata } from '../types.js';
-import type { PatchesServer } from './PatchesServer.js';
+import type {
+  Change,
+  EditableVersionMetadata,
+  ListChangesOptions,
+  ListVersionsOptions,
+  VersionMetadata,
+} from '../types.js';
+import { assertVersionMetadata, type PatchesServer } from './PatchesServer.js';
 import type { PatchesStoreBackend } from './types.js';
 
 /**
@@ -32,8 +38,9 @@ export class PatchesHistoryManager {
    * @param name The name of the version.
    * @returns The ID of the created version.
    */
-  async createVersion(docId: string, name: string): Promise<string> {
-    return await this.patches.createVersion(docId, name);
+  async createVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string> {
+    assertVersionMetadata(metadata);
+    return await this.patches.createVersion(docId, metadata);
   }
 
   /**
@@ -42,8 +49,9 @@ export class PatchesHistoryManager {
    * @param versionId - The ID of the version to update.
    * @param name - The new name for the version.
    */
-  async updateVersion(docId: string, versionId: string, updates: Pick<VersionMetadata, 'name'>) {
-    return this.store.updateVersion(docId, versionId, { name: updates.name });
+  async updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata) {
+    assertVersionMetadata(metadata);
+    return this.store.updateVersion(docId, versionId, metadata);
   }
 
   /**

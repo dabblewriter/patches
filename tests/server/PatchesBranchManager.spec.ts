@@ -7,6 +7,7 @@ import type {
   Branch,
   BranchStatus,
   Change,
+  EditableVersionMetadata,
   ListChangesOptions,
   ListVersionsOptions,
   VersionMetadata,
@@ -172,7 +173,7 @@ class MockBranchingStoreBackend implements BranchingStoreBackend {
     return version.changes;
   });
 
-  updateVersion = vi.fn(async (docId: string, versionId: string, updates: Partial<VersionMetadata>): Promise<void> => {
+  updateVersion = vi.fn(async (docId: string, versionId: string, updates: EditableVersionMetadata): Promise<void> => {
     const version = this._getDocVersions(docId).find(v => v.metadata.id === versionId);
     if (version) {
       Object.assign(version.metadata, updates);
@@ -274,14 +275,14 @@ describe('PatchesBranchManager', () => {
     it('should create a branch with initial version at the branch point', async () => {
       const rev = 10;
       const branchName = 'Test Branch';
-      const metadata = { author: 'User' };
+      const metadata = { name: branchName, author: 'User' };
       const stateAtRev = { value: 'test' };
 
       // Setup mock for getStateAtRevision
       (mockPatchesServer.getStateAtRevision as unknown as Mock).mockResolvedValue({ state: stateAtRev, rev });
 
       // Create branch
-      const branchId = await branchManager.createBranch(mainDocId, rev, branchName, metadata);
+      const branchId = await branchManager.createBranch(mainDocId, rev, metadata);
 
       // Verify createVersion was called correctly
       expect(mockStore.createVersion).toHaveBeenCalledTimes(1);
@@ -313,7 +314,7 @@ describe('PatchesBranchManager', () => {
       expect(branch.branchedRev).toBe(rev);
       expect(branch.name).toBe(branchName);
       expect(branch.status).toBe('open');
-      expect(branch.metadata).toBe(metadata);
+      expect(branch.author).toBe(metadata.author);
     });
 
     it('should throw error if trying to branch off a branch', async () => {

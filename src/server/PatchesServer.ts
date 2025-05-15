@@ -1,7 +1,7 @@
 import { createId } from 'crypto-id';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
-import type { Change, PatchesSnapshot, PatchesState, VersionMetadata } from '../types.js';
+import type { Change, EditableVersionMetadata, PatchesSnapshot, PatchesState, VersionMetadata } from '../types.js';
 import { applyChanges } from '../utils.js';
 import type { PatchesStoreBackend } from './types.js';
 
@@ -205,10 +205,11 @@ export class PatchesServer {
    * @param name The name of the version.
    * @returns The ID of the created version.
    */
-  async createVersion(docId: string, name: string): Promise<string> {
+  async createVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string> {
+    assertVersionMetadata(metadata);
     let { state, changes } = await this._getSnapshotAtRevision(docId);
     state = applyChanges(state, changes);
-    const version = await this._createVersion(docId, state, changes, name);
+    const version = await this._createVersion(docId, state, changes, metadata);
     if (!version) {
       throw new Error(`No changes to create a version for doc ${docId}.`);
     }
@@ -270,10 +271,10 @@ export class PatchesServer {
    * @param docId The document ID.
    * @param state The document state at the time of the version.
    * @param changes The changes since the last version that created the state (the last change's rev is the state's rev and will be the version's rev).
-   * @param name The name of the version.
+   * @param metadata The metadata of the version.
    * @returns The ID of the created version.
    */
-  protected async _createVersion(docId: string, state: any, changes: Change[], name?: string) {
+  protected async _createVersion(docId: string, state: any, changes: Change[], metadata?: EditableVersionMetadata) {
     if (changes.length === 0) return;
     const baseRev = changes[0].baseRev;
     if (baseRev === undefined) {
@@ -282,12 +283,12 @@ export class PatchesServer {
     const versionId = createId();
     const sessionMetadata: VersionMetadata = {
       id: versionId,
-      name,
       origin: 'main',
       startDate: changes[0].created,
       endDate: changes[changes.length - 1].created,
       rev: changes[changes.length - 1].rev,
       baseRev,
+      ...metadata,
     };
     await this.store.createVersion(docId, sessionMetadata, state, changes);
     return sessionMetadata;
@@ -381,5 +382,26 @@ export class PatchesServer {
         return firstChange;
       }),
     ];
+  }
+}
+
+const nonModifiableMetadataFields = new Set([
+  'id',
+  'parentId',
+  'groupId',
+  'origin',
+  'branchName',
+  'startDate',
+  'endDate',
+  'rev',
+  'baseRev',
+]);
+
+export function assertVersionMetadata(metadata?: EditableVersionMetadata) {
+  if (!metadata) return;
+  for (const key in metadata) {
+    if (nonModifiableMetadataFields.has(key)) {
+      throw new Error(`Cannot modify version field ${key}`);
+    }
   }
 }

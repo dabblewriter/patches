@@ -6,6 +6,7 @@ import { PatchesServer } from '../../src/server/PatchesServer.js';
 import type { PatchesStoreBackend } from '../../src/server/types.js';
 import type {
   Change,
+  EditableVersionMetadata,
   ListChangesOptions,
   ListVersionsOptions,
   PatchesState,
@@ -179,7 +180,7 @@ class MockPatchesStoreBackend implements PatchesStoreBackend {
     return version.changes;
   });
 
-  updateVersion = vi.fn(async (docId: string, versionId: string, updates: Partial<VersionMetadata>): Promise<void> => {
+  updateVersion = vi.fn(async (docId: string, versionId: string, updates: EditableVersionMetadata): Promise<void> => {
     const version = this._getDocVersions(docId).find(v => v.metadata.id === versionId);
     if (!version) throw new Error(`Version ${versionId} not found for doc ${docId}`);
     Object.assign(version.metadata, updates);
@@ -927,7 +928,7 @@ describe('PatchesServer', () => {
       });
 
       const versionName = 'v-main';
-      const versionId = await patchesServer.createVersion(docId, versionName);
+      const versionId = await patchesServer.createVersion(docId, { name: versionName });
       expect(typeof versionId).toBe('string');
       expect(mockStore.createVersion).toHaveBeenCalled();
     });
@@ -937,7 +938,7 @@ describe('PatchesServer', () => {
       mockStore.listVersions.mockResolvedValueOnce([]);
       mockStore.listChanges.mockResolvedValueOnce([]); // No changes
 
-      await expect(patchesServer.createVersion(docId, 'Empty Version')).rejects.toThrow(
+      await expect(patchesServer.createVersion(docId, { name: 'Empty Version' })).rejects.toThrow(
         /No changes to create a version/
       );
     });

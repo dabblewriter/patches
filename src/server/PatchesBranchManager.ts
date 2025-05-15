@@ -1,5 +1,5 @@
 import { createId } from 'crypto-id';
-import type { Branch, BranchStatus, Change, VersionMetadata } from '../types.js';
+import type { Branch, BranchStatus, Change, EditableBranchMetadata, VersionMetadata } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
 import type { BranchingStoreBackend } from './types.js';
 
@@ -31,7 +31,7 @@ export class PatchesBranchManager {
    * @param metadata - Additional optional metadata to store with the branch.
    * @returns The ID of the new branch document.
    */
-  async createBranch(docId: string, rev: number, branchName?: string, metadata?: Record<string, any>): Promise<string> {
+  async createBranch(docId: string, rev: number, metadata?: EditableBranchMetadata): Promise<string> {
     // Prevent branching off a branch
     const maybeBranch = await this.store.loadBranch(docId);
     if (maybeBranch) {
@@ -49,23 +49,32 @@ export class PatchesBranchManager {
       endDate: now,
       rev,
       baseRev: rev,
-      name: branchName,
+      name: metadata?.name,
       groupId: branchDocId,
-      branchName,
+      branchName: metadata?.name,
     };
     await this.store.createVersion(branchDocId, initialVersionMetadata, stateAtRev, []);
     // 2. Create the branch metadata record
     const branch: Branch = {
+      ...metadata,
       id: branchDocId,
       branchedFromId: docId,
       branchedRev: rev,
       created: now,
-      name: branchName,
       status: 'open',
-      ...(metadata && { metadata }),
     };
     await this.store.createBranch(branch);
     return branchDocId;
+  }
+
+  /**
+   * Updates a branch's metadata.
+   * @param branchId - The ID of the branch to update.
+   * @param metadata - The metadata to update.
+   */
+  async updateBranch(branchId: string, metadata: EditableBranchMetadata): Promise<void> {
+    assertBranchMetadata(metadata);
+    await this.store.updateBranch(branchId, metadata);
   }
 
   /**
@@ -141,5 +150,16 @@ export class PatchesBranchManager {
     // 7. Merge succeeded. Update the branch status.
     await this.closeBranch(branchId, 'merged');
     return committedMergeChanges;
+  }
+}
+
+const nonModifiableMetadataFields = new Set(['id', 'branchedFromId', 'branchedRev', 'created', 'status']);
+
+export function assertBranchMetadata(metadata?: EditableBranchMetadata) {
+  if (!metadata) return;
+  for (const key in metadata) {
+    if (nonModifiableMetadataFields.has(key)) {
+      throw new Error(`Cannot modify branch field ${key}`);
+    }
   }
 }

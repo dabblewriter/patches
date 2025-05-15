@@ -218,14 +218,20 @@ export class WebSocketServer {
 
   /**
    * Deletes a document on the server.
-   * @param _connectionId - The ID of the connection making the request
+   * @param connectionId - The ID of the connection making the request
    * @param params - The deletion parameters
    * @param params.docId - The ID of the document to delete
    */
-  async deleteDoc(_connectionId: string, params: { docId: string }) {
+  async deleteDoc(connectionId: string, params: { docId: string }) {
     const { docId } = params;
-    await this.assertWrite(_connectionId, docId, 'deleteDoc', params);
-    return this.patches.deleteDoc(docId);
+    await this.assertWrite(connectionId, docId, 'deleteDoc', params);
+    await this.patches.deleteDoc(docId);
+
+    // Notify other clients that the document has been deleted
+    const connectionIds = this.transport.getConnectionIds().filter(id => id !== connectionId);
+    if (connectionIds.length > 0) {
+      this.rpc.notify(connectionIds, 'docDeleted', { docId });
+    }
   }
 
   // ---------------------------------------------------------------------------

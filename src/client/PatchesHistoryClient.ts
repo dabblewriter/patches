@@ -1,6 +1,6 @@
 import { signal } from '../event-signal.js';
 import type { PatchesAPI } from '../net/protocol/types.js';
-import type { Change, ListVersionsOptions, VersionMetadata } from '../types.js';
+import type { Change, EditableVersionMetadata, ListVersionsOptions, VersionMetadata } from '../types.js';
 import { applyChanges } from '../utils.js';
 
 /**
@@ -77,15 +77,15 @@ export class PatchesHistoryClient<T = any> {
   }
 
   /** Create a new named version snapshot of the document's current state. */
-  async createVersion(name: string): Promise<string> {
-    const versionId = await this.api.createVersion(this.id, name);
+  async createVersion(metadata: EditableVersionMetadata): Promise<string> {
+    const versionId = await this.api.createVersion(this.id, metadata);
     await this.listVersions(); // Refresh the list of versions
     return versionId;
   }
 
   /** Update the name of a specific version. */
-  async updateVersion(versionId: string, updates: Pick<VersionMetadata, 'name'>): Promise<void> {
-    await this.api.updateVersion(this.id, versionId, updates);
+  async updateVersion(versionId: string, metadata: EditableVersionMetadata): Promise<void> {
+    await this.api.updateVersion(this.id, versionId, metadata);
     await this.listVersions(); // Refresh the list of versions
   }
 

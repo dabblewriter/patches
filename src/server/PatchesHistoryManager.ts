@@ -1,4 +1,4 @@
-import type { Change, ListVersionsOptions, VersionMetadata } from '../types.js';
+import type { Change, ListChangesOptions, ListVersionsOptions, VersionMetadata } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
 import type { PatchesStoreBackend } from './types.js';
 
@@ -86,16 +86,7 @@ export class PatchesHistoryManager {
    * @param options - Options like start/end revision, limit.
    * @returns The list of committed Change objects.
    */
-  async listServerChanges(
-    docId: string,
-    options: {
-      limit?: number;
-      startAfterRev?: number;
-      endBeforeRev?: number;
-      reverse?: boolean;
-    } = {}
-  ): Promise<Change[]> {
-    // Added return type
+  async listServerChanges(docId: string, options: ListChangesOptions = {}): Promise<Change[]> {
     return await this.store.listChanges(docId, options);
   }
 }

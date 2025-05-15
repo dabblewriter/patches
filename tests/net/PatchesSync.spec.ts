@@ -78,7 +78,7 @@ describe('PatchesSync', () => {
       getPendingChanges: vi.fn().mockResolvedValue([]),
       getLastRevs: vi.fn().mockResolvedValue([0, 0]),
       listDocs: vi.fn().mockResolvedValue([]),
-      savePendingChanges: vi.fn().mockResolvedValue(undefined),
+      savePendingChange: vi.fn().mockResolvedValue(undefined),
       saveCommittedChanges: vi.fn().mockResolvedValue(undefined),
       trackDocs: vi.fn().mockResolvedValue(undefined),
       untrackDocs: vi.fn().mockResolvedValue(undefined),

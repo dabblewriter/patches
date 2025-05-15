@@ -12,12 +12,6 @@ import type {
  * Defines methods needed by PatchesServer, PatchesHistoryManager, etc.
  */
 export interface PatchesStoreBackend {
-  /** Adds a subscription for a client to one or more documents. */
-  addSubscription(clientId: string, docIds: string[]): Promise<string[]>;
-
-  /** Removes a subscription for a client from one or more documents. */
-  removeSubscription(clientId: string, docIds: string[]): Promise<string[]>;
-
   /** Saves a batch of committed server changes. */
   saveChanges(docId: string, changes: Change[]): Promise<void>;
 

@@ -52,6 +52,15 @@ export interface ServerTransport {
 
   /** Subscribe to incoming raw frames from any client */
   onMessage(cb: (fromConnectionId: string, raw: string) => void): Unsubscriber;
+
+  /** Lists all subscriptions for a document. */
+  listSubscriptions(docId: string): Promise<string[]>;
+
+  /** Adds a subscription for a client to one or more documents. */
+  addSubscription(clientId: string, docIds: string[]): Promise<string[]>;
+
+  /** Removes a subscription for a client from one or more documents. */
+  removeSubscription(clientId: string, docIds: string[]): Promise<string[]>;
 }
 
 /**

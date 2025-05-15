@@ -253,25 +253,6 @@ describe('PatchesServer', () => {
     expect((server as any).sessionTimeoutMillis).toBe(10 * 60 * 1000);
   });
 
-  // === Subscription Operations ===
-
-  describe('subscribe/unsubscribe', () => {
-    it('should add subscriptions', async () => {
-      const ids = [docId, 'doc-2'];
-      const result = await patchesServer.subscribe(clientId, ids);
-      expect(result).toEqual(ids);
-      expect(mockStore.addSubscription).toHaveBeenCalledWith(clientId, ids);
-    });
-
-    it('should remove subscriptions', async () => {
-      const ids = [docId];
-      await patchesServer.subscribe(clientId, [docId, 'doc-2']); // Add first
-      const result = await patchesServer.unsubscribe(clientId, ids);
-      expect(result).toEqual(ids);
-      expect(mockStore.removeSubscription).toHaveBeenCalledWith(clientId, ids);
-    });
-  });
-
   // === Document Operations ===
 
   describe('getDoc', () => {

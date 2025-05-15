@@ -1,9 +1,9 @@
 import { signal, type Signal, type Unsubscriber } from '../../event-signal.js';
-import { PatchesServer } from '../../server/PatchesServer.js';
-import type { Message, Notification, Request, Response, ServerTransport } from './types.js';
+import type { AuthContext } from '../websocket/AuthorizationProvider.js';
+import type { Message, Notification, Request, Response } from './types.js';
 
-export type ConnectionSignalSubscriber = (connectionId: string, ...args: any[]) => any;
-export type MessageHandler<P = any, R = any> = (connectionId: string, params: P) => Promise<R> | R;
+export type ConnectionSignalSubscriber = (params: any, clientId?: string) => any;
+export type MessageHandler<P = any, R = any> = (params: P, ctx?: AuthContext) => Promise<R> | R;
 
 /**
  * Lightweight JSON-RPC 2.0 server adapter for {@link PatchesServer}.
@@ -25,11 +25,10 @@ export class JSONRPCServer {
   /** Map of fully-qualified JSON-RPC method → handler function */
   private readonly handlers = new Map<string, MessageHandler>();
   /** Allow external callers to emit server-initiated notifications. */
-  private readonly notificationSignals = new Map<string, Signal>();
+  private readonly notificationSignals = new Map<string, Signal<ConnectionSignalSubscriber>>();
 
-  constructor(protected transport: ServerTransport) {
-    transport.onMessage(this._onMessage.bind(this));
-  }
+  /** Allow external callers to emit server-initiated notifications. */
+  public readonly onNotify = signal<(msg: Notification, exceptConnectionId?: string) => void>();
 
   // -------------------------------------------------------------------------
   // Registration API
@@ -75,62 +74,55 @@ export class JSONRPCServer {
    */
   async notify(method: string, params?: any, exceptConnectionId?: string): Promise<void> {
     const msg: Notification = { jsonrpc: '2.0', method, params };
-    const msgStr = JSON.stringify(msg);
-    const connectionIds = this.transport.getConnectionIds();
-    await Promise.all(connectionIds.map(id => exceptConnectionId !== id && this.transport.send(id, msgStr)));
+    this.onNotify.emit(msg, exceptConnectionId);
   }
 
   /**
-   * Handles incoming messages from the client.
-   * @param connectionId - The WebSocket transport object.
-   * @param raw - The raw message string.
+   * Synchronously processes a raw JSON-RPC frame from a client and returns the
+   * encoded response frame – or `undefined` when the message is a notification
+   * (no response expected).
+   *
+   * This helper makes the RPC engine usable for stateless transports such as
+   * HTTP: the host simply passes the request body and sends back the returned
+   * string (if any).
+   *
+   * WebSocket and other bidirectional transports delegate to the same logic
+   * internally; the returned string is forwarded over the socket.
    */
-  protected async _onMessage(connectionId: string, raw: string): Promise<void> {
+  public async processMessage(raw: string, ctx?: AuthContext): Promise<string | undefined> {
     let message: Message;
+
+    // --- Parse & basic validation ------------------------------------------------
     try {
       message = JSON.parse(raw);
     } catch (err) {
-      this._sendError(connectionId, null, -32700, 'Parse error', err);
-      return;
+      return rpcError(-32700, 'Parse error', err);
     }
 
-    if (message && typeof message === 'object' && 'method' in message) {
-      // Notification or request either way--delegate.
-      if ('id' in message && message.id !== undefined) {
-        await this._handleRequest(connectionId, message as Request);
-      } else {
-        await this._handleNotification(connectionId, message as Notification);
+    // Ensure it looks like a JSON-RPC call (must have a method field)
+    if (!message || typeof message !== 'object' || !('method' in message)) {
+      const invalidId: number | null = (message as any)?.id ?? null;
+      return rpcError(-32600, 'Invalid Request', invalidId);
+    }
+
+    // --- Distinguish request vs. notification -----------------------------------
+    if ('id' in message && message.id !== undefined) {
+      // -> Request ----------------------------------------------------------------
+      try {
+        const result = await this._dispatch(message.method, (message as Request).params, ctx);
+        const response: Response = { jsonrpc: '2.0', id: message.id as number, result };
+        return JSON.stringify(response);
+      } catch (err: any) {
+        return rpcError(err?.code ?? -32000, err?.message ?? 'Server error', err?.stack);
       }
     } else {
-      // Client sent something we do not understand.
-      this._sendError(connectionId, (message as any)?.id ?? null, -32600, 'Invalid Request');
-    }
-  }
-
-  /**
-   * Handles incoming JSON-RPC requests from the client.
-   * @param connectionId - The WebSocket transport object.
-   * @param req - The JSON-RPC request object.
-   */
-  protected async _handleRequest(connectionId: string, req: Request): Promise<void> {
-    try {
-      const result = await this._dispatch(connectionId, req.method, req.params);
-      const response: Response = { jsonrpc: '2.0', id: req.id as number, result };
-      this.transport.send(connectionId, JSON.stringify(response));
-    } catch (err: any) {
-      this._sendError(connectionId, req.id as number, -32000, err?.message ?? 'Server error', err?.stack);
-    }
-  }
-
-  /**
-   * Handles incoming JSON-RPC notifications from the client.
-   * @param connectionId - The WebSocket transport object.
-   * @param note - The JSON-RPC notification object.
-   */
-  protected async _handleNotification(connectionId: string, note: Notification): Promise<void> {
-    const thisSignal = this.notificationSignals.get(note.method);
-    if (thisSignal) {
-      thisSignal.emit(connectionId, note.params);
+      // -> Notification -----------------------------------------------------------
+      // Forward the notification to any listeners and return nothing.
+      const thisSignal = this.notificationSignals.get(message.method);
+      if (thisSignal) {
+        thisSignal.emit(message.params, ctx?.clientId);
+      }
+      return undefined;
     }
   }
 
@@ -141,7 +133,7 @@ export class JSONRPCServer {
    * @param params - The JSON-RPC parameters.
    * @returns The result of the {@link PatchesServer} call.
    */
-  protected async _dispatch(connectionId: string, method: string, params: any): Promise<any> {
+  protected async _dispatch(method: string, params: any, ctx?: AuthContext): Promise<any> {
     const handler = this.handlers.get(method);
     if (!handler) {
       throw new Error(`Unknown method '${method}'.`);
@@ -149,18 +141,10 @@ export class JSONRPCServer {
     if (!params || typeof params !== 'object' || Array.isArray(params)) {
       throw new Error(`Invalid parameters for method '${method}'.`);
     }
-    return handler(connectionId, params);
+    return handler(params, ctx);
   }
+}
 
-  /**
-   * Sends a JSON-RPC error object back to the client.
-   */
-  private _sendError(connectionId: string, id: number | null, code: number, message: string, data?: any): void {
-    const errorObj: Response = {
-      jsonrpc: '2.0',
-      id: id as any,
-      error: { code, message, data },
-    } as Response; // type cast because TS cannot narrow when error present
-    this.transport.send(connectionId, JSON.stringify(errorObj));
-  }
+function rpcError(code: number, message: string, data?: any): string {
+  return JSON.stringify({ jsonrpc: '2.0', id: null as any, error: { code, message, data } });
 }

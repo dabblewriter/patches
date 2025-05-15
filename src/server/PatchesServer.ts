@@ -1,4 +1,5 @@
 import { createId } from 'crypto-id';
+import { signal } from '../event-signal.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
 import type { Change, EditableVersionMetadata, PatchesSnapshot, PatchesState, VersionMetadata } from '../types.js';
@@ -25,37 +26,18 @@ export interface PatchesServerOptions {
 export class PatchesServer {
   private readonly sessionTimeoutMillis: number;
 
+  /** Notifies listeners whenever a batch of changes is *successfully* committed. */
+  public readonly onChangesCommitted = signal<(docId: string, changes: Change[], originClientId?: string) => void>();
+
+  /** Notifies listeners when a document is deleted. */
+  public readonly onDocDeleted = signal<(docId: string, originClientId?: string) => void>();
+
   constructor(
     readonly store: PatchesStoreBackend,
     options: PatchesServerOptions = {}
   ) {
     this.sessionTimeoutMillis = (options.sessionTimeoutMinutes ?? 30) * 60 * 1000;
   }
-
-  // --- Patches API Methods ---
-
-  // === Subscription Operations ===
-  /**
-   * Subscribes the connected client to one or more documents.
-   * @param clientId - The ID of the client.
-   * @param ids Document ID(s) to subscribe to.
-   * @returns A list of document IDs the client is now successfully subscribed to.
-   */
-  subscribe(clientId: string, ids: string | string[]): Promise<string[]> {
-    return this.store.addSubscription(clientId, Array.isArray(ids) ? ids : [ids]);
-  }
-
-  /**
-   * Unsubscribes the connected client from one or more documents.
-   * @param clientId - The ID of the client.
-   * @param ids Document ID(s) to unsubscribe from.
-   * @returns A list of document IDs the client is now successfully unsubscribed from.
-   */
-  unsubscribe(clientId: string, ids: string | string[]): Promise<string[]> {
-    return this.store.removeSubscription(clientId, Array.isArray(ids) ? ids : [ids]);
-  }
-
-  // === Document Operations ===
 
   /**
    * Get the latest version of a document and changes since the last version.
@@ -80,11 +62,12 @@ export class PatchesServer {
    * Commits a set of changes to a document, applying operational transformation as needed.
    * @param docId - The ID of the document.
    * @param changes - The changes to commit.
+   * @param originClientId - The ID of the client that initiated the commit.
    * @returns A tuple of [committedChanges, transformedChanges] where:
    *   - committedChanges: Changes that were already committed to the server after the client's base revision
    *   - transformedChanges: The client's changes after being transformed against concurrent changes
    */
-  async commitChanges(docId: string, changes: Change[]): Promise<[Change[], Change[]]> {
+  async commitChanges(docId: string, changes: Change[], originClientId?: string): Promise<[Change[], Change[]]> {
     if (changes.length === 0) {
       return [[], []];
     }
@@ -185,6 +168,12 @@ export class PatchesServer {
     if (transformedChanges.length > 0) {
       await this.store.saveChanges(docId, transformedChanges);
     }
+
+    // Fire event for realtime transports (WebSocket, etc.)
+    if (transformedChanges.length > 0) {
+      await this.onChangesCommitted.emit(docId, transformedChanges, originClientId);
+    }
+
     // Return committed changes and newly transformed changes separately
     return [committedChanges, transformedChanges];
   }
@@ -192,9 +181,11 @@ export class PatchesServer {
   /**
    * Deletes a document.
    * @param docId The document ID.
+   * @param originClientId - The ID of the client that initiated the delete operation.
    */
-  deleteDoc(docId: string): Promise<void> {
-    return this.store.deleteDoc(docId);
+  async deleteDoc(docId: string, originClientId?: string): Promise<void> {
+    await this.store.deleteDoc(docId);
+    await this.onDocDeleted.emit(docId, originClientId);
   }
 
   // === Version Operations ===

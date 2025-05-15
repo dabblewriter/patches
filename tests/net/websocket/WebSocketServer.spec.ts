@@ -71,13 +71,13 @@ describe('WebSocketServer – history, branching & auth integration', () => {
   });
 
   it('createVersion delegates to history manager & enforces WRITE access', async () => {
-    const versionId = await server.createVersion('conn1', { docId: 'doc-1', name: 'My Version' });
+    const versionId = await server.createVersion('conn1', { docId: 'doc-1', metadata: { name: 'My Version' } });
 
     expect(versionId).toBe('version-id');
-    expect(history.createVersion).toHaveBeenCalledWith('doc-1', 'My Version');
+    expect(history.createVersion).toHaveBeenCalledWith('doc-1', { name: 'My Version' });
     expect(auth.canAccess).toHaveBeenCalledWith('conn1', 'doc-1', 'write', 'createVersion', {
       docId: 'doc-1',
-      name: 'My Version',
+      metadata: { name: 'My Version' },
     });
   });
 
@@ -95,19 +95,17 @@ describe('WebSocketServer – history, branching & auth integration', () => {
   });
 
   it('createBranch delegates to branch manager & enforces WRITE access', async () => {
-    const metadata = { purpose: 'testing' };
+    const metadata = { name: 'feature-x', purpose: 'testing' };
     await server.createBranch('conn1', {
       docId: 'doc-1',
       rev: 5,
-      branchName: 'feature-x',
       metadata,
     });
 
-    expect(branches.createBranch).toHaveBeenCalledWith('doc-1', 5, 'feature-x', metadata);
+    expect(branches.createBranch).toHaveBeenCalledWith('doc-1', 5, metadata);
     expect(auth.canAccess).toHaveBeenCalledWith('conn1', 'doc-1', 'write', 'createBranch', {
       docId: 'doc-1',
       rev: 5,
-      branchName: 'feature-x',
       metadata,
     });
   });

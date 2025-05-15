@@ -1,5 +1,12 @@
 import type { Unsubscriber } from '../../event-signal.js';
-import type { Change, ListVersionsOptions, PatchesSnapshot, PatchesState, VersionMetadata } from '../../types';
+import type {
+  Change,
+  EditableVersionMetadata,
+  ListVersionsOptions,
+  PatchesSnapshot,
+  PatchesState,
+  VersionMetadata,
+} from '../../types';
 
 /**
  * Represents the possible states of a network transport connection.
@@ -138,7 +145,7 @@ export interface PatchesAPI {
 
   // === Version Operations ===
   /** Create a new named version snapshot of a document's current state. */
-  createVersion(docId: string, name: string): Promise<string>; // Returns versionId
+  createVersion(docId: string, metadata: EditableVersionMetadata): Promise<string>; // Returns versionId
 
   /** List metadata for saved versions of a document. */
   listVersions(docId: string, options?: ListVersionsOptions): Promise<VersionMetadata[]>;
@@ -149,8 +156,8 @@ export interface PatchesAPI {
   /** Get the original Change objects associated with a specific version ID. */
   getVersionChanges(docId: string, versionId: string): Promise<Change[]>;
 
-  /** Update the name of a specific version. */
-  updateVersion(docId: string, versionId: string, updates: Pick<VersionMetadata, 'name'>): Promise<void>;
+  /** Update the name and other metadata of a specific version. */
+  updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void>;
 }
 
 // Also define the expected parameters for notifications the server might send:

@@ -1,7 +1,7 @@
 import type { PatchesBranchManager } from '../../server/PatchesBranchManager.js';
 import type { PatchesHistoryManager } from '../../server/PatchesHistoryManager.js';
 import type { PatchesServer } from '../../server/PatchesServer.js';
-import type { Change, ListVersionsOptions, VersionMetadata } from '../../types.js';
+import type { Change, EditableVersionMetadata, ListVersionsOptions } from '../../types.js';
 import { JSONRPCServer } from '../protocol/JSONRPCServer.js';
 import type { ServerTransport } from '../protocol/types.js';
 import type { AuthorizationProvider } from './AuthorizationProvider.js';
@@ -105,6 +105,18 @@ export class WebSocketServer {
     params?: Record<string, any>
   ): Promise<void> {
     return this.assertAccess(connectionId, docId, 'write', method, params);
+  }
+
+  protected assertHistoryEnabled() {
+    if (!this.history) {
+      throw new Error('History is not enabled');
+    }
+  }
+
+  protected assertBranchingEnabled() {
+    if (!this.branches) {
+      throw new Error('Branching is not enabled');
+    }
   }
 
   // --- Patches API Methods ---
@@ -221,33 +233,38 @@ export class WebSocketServer {
   // ---------------------------------------------------------------------------
 
   async listVersions(connectionId: string, params: { docId: string; options?: ListVersionsOptions }) {
+    this.assertHistoryEnabled();
     const { docId, options } = params;
     await this.assertRead(connectionId, docId, 'listVersions', params);
     return this.history!.listVersions(docId, options ?? {});
   }
 
-  async createVersion(connectionId: string, params: { docId: string; name: string }) {
-    const { docId, name } = params;
+  async createVersion(connectionId: string, params: { docId: string; metadata: EditableVersionMetadata }) {
+    this.assertHistoryEnabled();
+    const { docId, metadata } = params;
     await this.assertWrite(connectionId, docId, 'createVersion', params);
-    return this.history!.createVersion(docId, name);
+    return this.history!.createVersion(docId, metadata);
   }
 
   async updateVersion(
     connectionId: string,
-    params: { docId: string; versionId: string; updates: Pick<VersionMetadata, 'name'> }
+    params: { docId: string; versionId: string; metadata: EditableVersionMetadata }
   ) {
-    const { docId, versionId, updates } = params;
+    this.assertHistoryEnabled();
+    const { docId, versionId, metadata } = params;
     await this.assertWrite(connectionId, docId, 'updateVersion', params);
-    return this.history!.updateVersion(docId, versionId, updates);
+    return this.history!.updateVersion(docId, versionId, metadata);
   }
 
   async getStateAtVersion(connectionId: string, params: { docId: string; versionId: string }) {
+    this.assertHistoryEnabled();
     const { docId, versionId } = params;
     await this.assertRead(connectionId, docId, 'getStateAtVersion', params);
     return this.history!.getStateAtVersion(docId, versionId);
   }
 
   async getChangesForVersion(connectionId: string, params: { docId: string; versionId: string }) {
+    this.assertHistoryEnabled();
     const { docId, versionId } = params;
     await this.assertRead(connectionId, docId, 'getChangesForVersion', params);
     return this.history!.getChangesForVersion(docId, versionId);
@@ -260,6 +277,7 @@ export class WebSocketServer {
       options?: { limit?: number; startAfterRev?: number; endBeforeRev?: number; reverse?: boolean };
     }
   ) {
+    this.assertHistoryEnabled();
     const { docId, options } = params;
     await this.assertRead(connectionId, docId, 'listServerChanges', params);
     return this.history!.listServerChanges(docId, options ?? {});
@@ -270,27 +288,28 @@ export class WebSocketServer {
   // ---------------------------------------------------------------------------
 
   async listBranches(connectionId: string, params: { docId: string }) {
+    this.assertBranchingEnabled();
     const { docId } = params;
     await this.assertRead(connectionId, docId, 'listBranches', params);
     return this.branches!.listBranches(docId);
   }
 
-  async createBranch(
-    connectionId: string,
-    params: { docId: string; rev: number; branchName?: string; metadata?: Record<string, any> }
-  ) {
-    const { docId } = params;
+  async createBranch(connectionId: string, params: { docId: string; rev: number; metadata?: EditableVersionMetadata }) {
+    this.assertBranchingEnabled();
+    const { docId, rev, metadata } = params;
     await this.assertWrite(connectionId, docId, 'createBranch', params);
-    return this.branches!.createBranch(docId, params.rev, params.branchName, params.metadata);
+    return this.branches!.createBranch(docId, rev, metadata);
   }
 
-  async closeBranch(connectionId: string, params: { branchId: string; status?: 'merged' | 'closed' }) {
+  async closeBranch(connectionId: string, params: { branchId: string }) {
+    this.assertBranchingEnabled();
     const { branchId } = params;
     await this.assertWrite(connectionId, branchId, 'closeBranch', params);
-    return this.branches!.closeBranch(branchId, params.status ?? 'closed');
+    return this.branches!.closeBranch(branchId, 'closed');
   }
 
   async mergeBranch(connectionId: string, params: { branchId: string }) {
+    this.assertBranchingEnabled();
     const { branchId } = params;
     await this.assertWrite(connectionId, branchId, 'mergeBranch', params);
     return this.branches!.mergeBranch(branchId);

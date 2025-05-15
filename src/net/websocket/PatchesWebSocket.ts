@@ -1,5 +1,11 @@
 import { signal, type Signal } from '../../event-signal.js';
-import type { Change, ListVersionsOptions, PatchesSnapshot, VersionMetadata } from '../../types.js';
+import type {
+  Change,
+  EditableVersionMetadata,
+  ListVersionsOptions,
+  PatchesSnapshot,
+  VersionMetadata,
+} from '../../types.js';
 import { JSONRPCClient } from '../protocol/JSONRPCClient.js';
 import type { ConnectionState, PatchesAPI, PatchesNotificationParams } from '../protocol/types.js';
 import { WebSocketTransport, type WebSocketOptions } from './WebSocketTransport.js';
@@ -125,8 +131,8 @@ export class PatchesWebSocket implements PatchesAPI {
    * @param name - A descriptive name for the version.
    * @returns A promise resolving with the unique ID of the newly created version.
    */
-  async createVersion(docId: string, name: string): Promise<string> {
-    return this.rpc.request('createVersion', { docId, name });
+  async createVersion(docId: string, metadata: EditableVersionMetadata): Promise<string> {
+    return this.rpc.request('createVersion', { docId, metadata });
   }
 
   /**
@@ -166,7 +172,47 @@ export class PatchesWebSocket implements PatchesAPI {
    * @param name - The new name for the version.
    * @returns A promise resolving when the update is confirmed.
    */
-  async updateVersion(docId: string, versionId: string, updates: Pick<VersionMetadata, 'name'>): Promise<void> {
-    return this.rpc.request('updateVersion', { docId, versionId, updates });
+  async updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void> {
+    return this.rpc.request('updateVersion', { docId, versionId, metadata });
+  }
+
+  // === Branch Operations ===
+
+  /**
+   * Lists all branches for a document.
+   * @param docId - The ID of the document.
+   * @returns A promise resolving with an array of branch metadata objects.
+   */
+  async listBranches(docId: string): Promise<VersionMetadata[]> {
+    return this.rpc.request('listBranches', { docId });
+  }
+
+  /**
+   * Creates a new branch for a document.
+   * @param docId - The ID of the document.
+   * @param rev - The revision number to base the new branch on.
+   * @param metadata - Optional metadata for the new branch.
+   * @returns A promise resolving with the unique ID of the newly created branch.
+   */
+  async createBranch(docId: string, rev: number, metadata?: EditableVersionMetadata): Promise<string> {
+    return this.rpc.request('createBranch', { docId, rev, metadata });
+  }
+
+  /**
+   * Closes a branch on the server.
+   * @param branchId - The ID of the branch to close.
+   * @returns A promise resolving when the branch is closed.
+   */
+  async closeBranch(branchId: string): Promise<void> {
+    return this.rpc.request('closeBranch', { branchId });
+  }
+
+  /**
+   * Merges a branch on the server.
+   * @param branchId - The ID of the branch to merge.
+   * @returns A promise resolving when the merge is confirmed.
+   */
+  async mergeBranch(branchId: string): Promise<void> {
+    return this.rpc.request('mergeBranch', { branchId });
   }
 }

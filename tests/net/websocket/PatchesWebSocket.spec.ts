@@ -180,10 +180,10 @@ describe('PatchesWebSocket', () => {
     it('createVersion should call rpc.request with correct params', async () => {
       const expectedVersionId = VERSION_ID;
       mockRpcImplementation.request.mockResolvedValue(expectedVersionId);
-      const result = await patchesWs.createVersion(DOC_ID, VERSION_NAME);
+      const result = await patchesWs.createVersion(DOC_ID, { name: VERSION_NAME });
       expect(mockRpcImplementation.request).toHaveBeenCalledWith('createVersion', {
         docId: DOC_ID,
-        name: VERSION_NAME,
+        metadata: { name: VERSION_NAME },
       });
       expect(result).toBe(expectedVersionId);
     });
@@ -247,7 +247,7 @@ describe('PatchesWebSocket', () => {
       expect(mockRpcImplementation.request).toHaveBeenCalledWith('updateVersion', {
         docId: DOC_ID,
         versionId: VERSION_ID,
-        updates: { name: newName },
+        metadata: { name: newName },
       });
     });
   });

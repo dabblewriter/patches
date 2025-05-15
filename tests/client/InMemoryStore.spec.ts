@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { InMemoryStore } from '../../src/client/InMemoryStore';
 import type { Change } from '../../src/types';
 
@@ -64,7 +64,7 @@ describe('InMemoryStore', () => {
         created: Date.now(),
       };
 
-      await store.savePendingChanges(docId, [change]);
+      await store.savePendingChange(docId, change);
       const pendingChanges = await store.getPendingChanges(docId);
 
       expect(pendingChanges).toHaveLength(1);
@@ -81,7 +81,7 @@ describe('InMemoryStore', () => {
         created: Date.now(),
       };
 
-      await store.savePendingChanges(docId, [pendingChange]);
+      await store.savePendingChange(docId, pendingChange);
       await store.saveCommittedChanges(docId, [pendingChange], [1, 1]);
       const pendingChanges = await store.getPendingChanges(docId);
 
@@ -135,7 +135,7 @@ describe('InMemoryStore', () => {
         baseRev: 1,
         created: Date.now(),
       };
-      await store.savePendingChanges(docId, [pendingChange]);
+      await store.savePendingChange(docId, pendingChange);
 
       // Now save a new committed change that would conflict
       const newCommittedChange: Change = {
@@ -192,26 +192,6 @@ describe('InMemoryStore', () => {
       expect(activeDocs).toHaveLength(2);
       expect(allDocs).toHaveLength(3);
       expect(allDocs.find(d => d.docId === 'doc-2')?.deleted).toBe(true);
-    });
-  });
-
-  describe('Event Handling', () => {
-    it('should emit events when pending changes are saved', async () => {
-      const docId = 'test-doc';
-      const change: Change = {
-        id: 'change-1',
-        ops: [{ op: 'add', path: '/content', value: 'test content' }],
-        rev: 1,
-        baseRev: 0,
-        created: Date.now(),
-      };
-
-      const handler = vi.fn();
-      store.onPendingChanges(handler);
-
-      await store.savePendingChanges(docId, [change]);
-
-      expect(handler).toHaveBeenCalledWith(docId, [change]);
     });
   });
 

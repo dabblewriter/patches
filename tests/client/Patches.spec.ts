@@ -30,7 +30,7 @@ describe('Patches', () => {
       getPendingChanges: vi.fn().mockResolvedValue([]),
       getLastRevs: vi.fn().mockResolvedValue([0, 0]),
       listDocs: vi.fn().mockResolvedValue([]),
-      savePendingChanges: vi.fn().mockResolvedValue(undefined),
+      savePendingChange: vi.fn().mockResolvedValue(undefined),
       saveCommittedChanges: vi.fn().mockResolvedValue(undefined),
       trackDocs: vi.fn().mockResolvedValue(undefined),
       untrackDocs: vi.fn().mockResolvedValue(undefined),
@@ -146,8 +146,7 @@ describe('Patches', () => {
 
       await new Promise(resolve => setTimeout(resolve, 0));
 
-      expect(doc.getUpdatesForServer).toHaveBeenCalled();
-      expect(mockStore.savePendingChanges).toHaveBeenCalledWith(DOC_ID, [testChange]);
+      expect(mockStore.savePendingChange).toHaveBeenCalledWith(DOC_ID, testChange);
     });
 
     it('should return existing doc if already open', async () => {
@@ -202,7 +201,7 @@ describe('Patches', () => {
       ]);
 
       const saveError = new Error('Failed to save pending changes');
-      mockStore.savePendingChanges.mockRejectedValue(saveError);
+      mockStore.savePendingChange.mockRejectedValue(saveError);
 
       // Setup doc
       (patches as any).docs.set(DOC_ID, {

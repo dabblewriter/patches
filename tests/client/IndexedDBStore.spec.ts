@@ -1,6 +1,6 @@
 import { IDBFactory } from 'fake-indexeddb';
 import 'fake-indexeddb/auto';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { IndexedDBStore } from '../../src/client/IndexedDBStore';
 import type { JSONPatchOp } from '../../src/json-patch/types';
 import type { Change } from '../../src/types';
@@ -99,7 +99,7 @@ describe('IndexedDBStore', () => {
         metadata: {},
       };
 
-      await store.savePendingChanges(docId, [change]);
+      await store.savePendingChange(docId, change);
       const changes = await store.getPendingChanges(docId);
 
       expect(changes).toHaveLength(1);
@@ -119,7 +119,7 @@ describe('IndexedDBStore', () => {
         metadata: {},
       };
 
-      await store.savePendingChanges(docId, [change]);
+      await store.savePendingChange(docId, change);
       await store.saveCommittedChanges(docId, [change], [1, 1]);
       const pending = await store.getPendingChanges(docId);
 
@@ -147,53 +147,12 @@ describe('IndexedDBStore', () => {
         },
       ];
 
-      await store.savePendingChanges(docId, [changes[0]]);
-      await store.savePendingChanges(docId, [changes[1]]);
+      await store.savePendingChange(docId, changes[0]);
+      await store.savePendingChange(docId, changes[1]);
       await store.saveCommittedChanges(docId, changes, [1, 2]);
 
       const pending = await store.getPendingChanges(docId);
       expect(pending).toHaveLength(0);
-    });
-  });
-
-  describe('Event Handling', () => {
-    it('should emit events when pending changes are saved', async () => {
-      const docId = 'test-doc';
-      const change: Change = {
-        id: 'change-1',
-        ops: [{ op: 'add', path: '/content', value: 'new content' } as JSONPatchOp],
-        rev: 1,
-        baseRev: 0,
-        created: Date.now(),
-        metadata: {},
-      };
-
-      const handler = vi.fn();
-      store.onPendingChanges(handler);
-
-      await store.savePendingChanges(docId, [change]);
-
-      // Wait for event to be processed
-      await new Promise(resolve => setTimeout(resolve, 0));
-
-      expect(handler).toHaveBeenCalledWith(docId, [change]);
-      expect(handler).toHaveBeenCalledTimes(1);
-
-      // Test multiple changes
-      const change2: Change = {
-        id: 'change-2',
-        ops: [{ op: 'replace', path: '/content', value: 'updated content' } as JSONPatchOp],
-        rev: 2,
-        baseRev: 1,
-        created: Date.now(),
-        metadata: {},
-      };
-
-      await store.savePendingChanges(docId, [change2]);
-      await new Promise(resolve => setTimeout(resolve, 0));
-
-      expect(handler).toHaveBeenCalledWith(docId, [change2]);
-      expect(handler).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -284,7 +243,7 @@ describe('IndexedDBStore', () => {
       };
 
       await store.saveCommittedChanges(docId, [committedChange]);
-      await store.savePendingChanges(docId, [pendingChange]);
+      await store.savePendingChange(docId, pendingChange);
 
       const [committedRev, pendingRev] = await store.getLastRevs(docId);
 

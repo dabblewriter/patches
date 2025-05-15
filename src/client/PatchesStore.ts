@@ -36,7 +36,7 @@ export interface PatchesStore {
   getLastRevs(docId: string): Promise<[committedRev: number, pendingRev: number]>;
 
   // ─── Writes ────────────────────────────────────────────────────────
-  savePendingChanges(docId: string, changes: Change[]): Promise<void>;
+  savePendingChange(docId: string, change: Change): Promise<void>;
   saveCommittedChanges(docId: string, changes: Change[], sentPendingRange?: [number, number]): Promise<void>;
 
   // ─── Lifecycle ──────────────────────────────────────────────────────

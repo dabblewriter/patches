@@ -232,11 +232,9 @@ export class Patches {
    * @returns An Unsubscriber function to remove the listener.
    */
   protected _setupLocalDocListener(docId: string, doc: PatchesDoc<any>): Unsubscriber {
-    return doc.onChange(async () => {
-      const changes = doc.getUpdatesForServer();
-      if (!changes.length) return;
+    return doc.onChange(async change => {
       try {
-        await this.store.savePendingChanges(docId, changes);
+        await this.store.savePendingChange(docId, change);
         // Note: When used with PatchesSync, it will handle flushing the changes
       } catch (err) {
         console.error(`Error saving pending changes for doc ${docId}:`, err);

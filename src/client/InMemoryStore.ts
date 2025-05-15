@@ -1,4 +1,3 @@
-import { signal } from '../event-signal.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
 import type { Change, PatchesSnapshot } from '../types.js';
 import { applyChanges } from '../utils.js';
@@ -18,9 +17,6 @@ interface DocBuffers {
  */
 export class InMemoryStore implements PatchesStore {
   private docs: Map<string, DocBuffers> = new Map();
-
-  /** Signal emitted when pending changes are added (mirrors IndexedDBStore API) */
-  readonly onPendingChanges = signal<(docId: string, changes: Change[]) => void>();
 
   // ─── Reconstruction ────────────────────────────────────────────────────
   async getDoc(docId: string): Promise<PatchesSnapshot | undefined> {
@@ -70,11 +66,10 @@ export class InMemoryStore implements PatchesStore {
   }
 
   // ─── Writes ────────────────────────────────────────────────────────────
-  async savePendingChanges(docId: string, changes: Change[]): Promise<void> {
+  async savePendingChange(docId: string, change: Change): Promise<void> {
     const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
     if (!this.docs.has(docId)) this.docs.set(docId, buf);
-    buf.pending.push(...changes);
-    this.onPendingChanges.emit(docId, changes);
+    buf.pending.push(change);
   }
 
   async saveCommittedChanges(docId: string, changes: Change[], sentPendingRange?: [number, number]): Promise<void> {

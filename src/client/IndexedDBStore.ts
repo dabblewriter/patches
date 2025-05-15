@@ -1,4 +1,3 @@
-import { signal } from '../event-signal.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
 import type { Change, Deferred, PatchesSnapshot } from '../types.js';
 import { applyChanges, deferred } from '../utils.js';
@@ -33,9 +32,6 @@ export class IndexedDBStore implements PatchesStore {
   private db: IDBDatabase | null = null;
   private dbName?: string;
   private dbPromise: Deferred<IDBDatabase>;
-
-  /** Subscribe to be notified after local state changes are saved to the database. */
-  readonly onPendingChanges = signal<(docId: string, changes: Change[]) => void>();
 
   constructor(dbName?: string) {
     this.dbName = dbName;
@@ -217,7 +213,7 @@ export class IndexedDBStore implements PatchesStore {
    * Append an array of local changes to the pending queue.
    * Called *before* you attempt to send them to the server.
    */
-  async savePendingChanges(docId: string, changes: Change[]): Promise<void> {
+  async savePendingChange(docId: string, change: Change): Promise<void> {
     const [tx, pendingChanges, docsStore] = await this.transaction(['pendingChanges', 'docs'], 'readwrite');
 
     let docMeta = await docsStore.get<TrackedDoc>(docId);
@@ -230,9 +226,7 @@ export class IndexedDBStore implements PatchesStore {
       console.warn(`Revived document ${docId} by saving pending changes.`);
     }
 
-    await Promise.all(changes.map(change => pendingChanges.put<StoredChange>({ ...change, docId })));
-
-    this.onPendingChanges.emit(docId, changes);
+    await pendingChanges.put<StoredChange>({ ...change, docId });
     await tx.complete();
   }
 

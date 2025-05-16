@@ -55,11 +55,11 @@
   },
   "dependencies": {
     "alphacounter": "^2.x",
-    "crypto-id": "^0.2.3",
-    "simple-peer": "^9.11.1"
+    "crypto-id": "^0.2.3"
   },
   "peerDependencies": {
-    "@dabble/delta": "^1.2.4"
+    "@dabble/delta": "^1.2.4",
+    "simple-peer": "^9.11.1"
   },
   "devDependencies": {
     "@sveltejs/package": "^2.3.11",

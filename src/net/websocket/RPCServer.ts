@@ -3,7 +3,6 @@ import type { PatchesHistoryManager } from '../../server/PatchesHistoryManager.j
 import type { PatchesServer } from '../../server/PatchesServer.js';
 import type { Change, EditableVersionMetadata, ListChangesOptions, ListVersionsOptions } from '../../types.js';
 import { JSONRPCServer } from '../protocol/JSONRPCServer.js';
-import type { ServerTransport } from '../protocol/types.js';
 import type { AuthContext, AuthorizationProvider } from './AuthorizationProvider.js';
 import { allowAll } from './AuthorizationProvider.js';
 
@@ -13,7 +12,6 @@ import { allowAll } from './AuthorizationProvider.js';
  * versioning, and other OT-specific functionality over a JSON RPC interface.
  */
 export interface RPCServerOptions {
-  transport: ServerTransport;
   patches: PatchesServer;
   history?: PatchesHistoryManager;
   branches?: PatchesBranchManager;
@@ -229,16 +227,11 @@ export class RPCServer {
     }
   }
 
-  protected assertRead(
-    ctx: AuthContext | undefined,
-    docId: string,
-    method: string,
-    params?: Record<string, any>
-  ): Promise<void> {
+  assertRead(ctx: AuthContext | undefined, docId: string, method: string, params?: Record<string, any>): Promise<void> {
     return this.assertAccess(ctx, docId, 'read', method, params);
   }
 
-  protected assertWrite(
+  assertWrite(
     ctx: AuthContext | undefined,
     docId: string,
     method: string,

@@ -4,6 +4,7 @@ import type {
   EditableVersionMetadata,
   ListChangesOptions,
   ListVersionsOptions,
+  PatchesState,
   VersionMetadata,
 } from '../types';
 
@@ -17,6 +18,12 @@ export interface PatchesStoreBackend {
 
   /** Lists committed server changes based on revision numbers. */
   listChanges(docId: string, options: ListChangesOptions): Promise<Change[]>;
+
+  /** Loads the last version state for a document. Optional method for performance. */
+  loadLastVersionState?: (docId: string) => Promise<PatchesState | undefined>;
+
+  /** Saves the last version state for a document. Optional method for performance. */
+  saveLastVersionState?: (docId: string, rev: number, state: any) => Promise<void>;
 
   /**
    * Saves version metadata, its state snapshot, and the original changes that constitute it.

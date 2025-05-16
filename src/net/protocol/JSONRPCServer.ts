@@ -89,20 +89,27 @@ export class JSONRPCServer {
    * WebSocket and other bidirectional transports delegate to the same logic
    * internally; the returned string is forwarded over the socket.
    */
-  public async processMessage(raw: string, ctx?: AuthContext): Promise<string | undefined> {
+  public async processMessage(raw: string, ctx?: AuthContext): Promise<string | undefined>;
+  public async processMessage(message: Message, ctx?: AuthContext): Promise<Response | undefined>;
+  public async processMessage(raw: string | Message, ctx?: AuthContext): Promise<string | Response | undefined> {
     let message: Message;
+    const respond = typeof raw === 'string' ? JSON.stringify : (r: Response) => r;
 
     // --- Parse & basic validation ------------------------------------------------
-    try {
-      message = JSON.parse(raw);
-    } catch (err) {
-      return rpcError(-32700, 'Parse error', err);
+    if (typeof raw === 'string') {
+      try {
+        message = JSON.parse(raw);
+      } catch (err) {
+        return respond(rpcError(-32700, 'Parse error', err));
+      }
+    } else {
+      message = raw;
     }
 
     // Ensure it looks like a JSON-RPC call (must have a method field)
     if (!message || typeof message !== 'object' || !('method' in message)) {
       const invalidId: number | null = (message as any)?.id ?? null;
-      return rpcError(-32600, 'Invalid Request', invalidId);
+      return respond(rpcError(-32600, 'Invalid Request', invalidId));
     }
 
     // --- Distinguish request vs. notification -----------------------------------
@@ -111,9 +118,9 @@ export class JSONRPCServer {
       try {
         const result = await this._dispatch(message.method, (message as Request).params, ctx);
         const response: Response = { jsonrpc: '2.0', id: message.id as number, result };
-        return JSON.stringify(response);
+        return respond(response);
       } catch (err: any) {
-        return rpcError(err?.code ?? -32000, err?.message ?? 'Server error', err?.stack);
+        return respond(rpcError(err?.code ?? -32000, err?.message ?? 'Server error', err?.stack));
       }
     } else {
       // -> Notification -----------------------------------------------------------
@@ -145,6 +152,6 @@ export class JSONRPCServer {
   }
 }
 
-function rpcError(code: number, message: string, data?: any): string {
-  return JSON.stringify({ jsonrpc: '2.0', id: null as any, error: { code, message, data } });
+function rpcError(code: number, message: string, data?: any): Response {
+  return { jsonrpc: '2.0', id: null as any, error: { code, message, data } };
 }

@@ -1,5 +1,3 @@
-import { TextEncoder } from 'util'; // Node.js TextEncoder
-
 /** Estimate JSON string byte size. */
 export function getJSONByteSize(data: any): number {
   // Basic estimation, might not be perfectly accurate due to encoding nuances

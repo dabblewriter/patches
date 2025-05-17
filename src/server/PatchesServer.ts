@@ -81,7 +81,7 @@ export class PatchesServer {
 
     // Add check for inconsistent baseRev within the batch if needed
     if (changes.some(c => c.baseRev !== baseRev)) {
-      throw new Error(`Client changes must have consistent baseRev for doc ${docId}.`);
+      throw new Error(`Client changes must have consistent baseRev in all changes for doc ${docId}.`);
     }
 
     // 1. Load server state details (assuming store methods exist)
@@ -97,14 +97,14 @@ export class PatchesServer {
     }
 
     const partOfInitialBatch = batchId && changes[0].rev > 1;
-    if (baseRev === 0 && currentRev > 0 && !partOfInitialBatch) {
+    if (baseRev === 0 && currentRev > 0 && !partOfInitialBatch && changes[0].ops[0].path === '') {
       throw new Error(
         `Client baseRev is 0 but server has already been created for doc ${docId}. Client needs to load the existing document.`
       );
     }
 
     // Ensure all new changes' `created` field is in the past, that each `rev` is correct, and that `baseRev` is set
-    let rev = baseRev + 1;
+    let rev = currentRev + 1;
     changes.forEach(c => {
       c.created = Math.min(c.created, Date.now());
       c.rev = rev++;
@@ -154,7 +154,12 @@ export class PatchesServer {
           return null; // Change is obsolete after transformation
         }
         try {
+          const previous = stateAtBaseRev;
           stateAtBaseRev = applyPatch(stateAtBaseRev, change.ops, { strict: true });
+          if (previous === stateAtBaseRev) {
+            // Changes were no-ops, we can skip this change
+            return null;
+          }
         } catch (error) {
           console.error(`Error applying change ${change.id} to state:`, error);
           return null;

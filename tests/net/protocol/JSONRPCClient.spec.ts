@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { JSONRPCClient } from '../../../src/net/protocol/JSONRPCClient.js';
-import type { ConnectionState, Transport } from '../../../src/net/protocol/types.js';
+import type { ClientTransport, ConnectionState } from '../../../src/net/protocol/types.js';
 
 // Mock Transport implementation
-class MockTransport implements Transport {
+class MockTransport implements ClientTransport {
   messageHandler: ((data: string) => void) | null = null;
   stateHandler: ((state: ConnectionState) => void) | null = null;
   sentData: string[] = [];
@@ -14,8 +14,9 @@ class MockTransport implements Transport {
     this.sentData.push(data);
   });
 
-  onMessage(handler: (data: string) => void): void {
+  onMessage(handler: (data: string) => void) {
     this.messageHandler = handler;
+    return () => {};
   }
   onStateChange(handler: (state: ConnectionState) => void): void {
     this.stateHandler = handler;

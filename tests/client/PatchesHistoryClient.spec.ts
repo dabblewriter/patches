@@ -110,9 +110,9 @@ describe('PatchesHistoryClient', () => {
     mockApi.createVersion.mockResolvedValue(newVersionId);
     mockApi.listVersions.mockResolvedValue(updatedMockVersions);
 
-    const versionId = await client.createVersion(newVersionName);
+    const versionId = await client.createVersion({ name: newVersionName });
 
-    expect(mockApi.createVersion).toHaveBeenCalledWith('doc1', newVersionName);
+    expect(mockApi.createVersion).toHaveBeenCalledWith('doc1', { name: newVersionName });
     expect(versionId).toBe(newVersionId);
     expect(mockApi.listVersions).toHaveBeenCalledWith('doc1', undefined);
     expect(client.versions).toEqual(updatedMockVersions);

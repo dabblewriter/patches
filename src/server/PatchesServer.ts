@@ -1,6 +1,8 @@
 import { createId } from 'crypto-id';
 import { signal } from '../event-signal.js';
+import type { JSONPatch } from '../json-patch/JSONPatch.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
+import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
 import type { Change, EditableVersionMetadata, PatchesSnapshot, PatchesState, VersionMetadata } from '../types.js';
 import { applyChanges } from '../utils.js';
@@ -181,6 +183,38 @@ export class PatchesServer {
 
     // Return committed changes and newly transformed changes separately
     return [committedChanges, transformedChanges];
+  }
+
+  /**
+   * Make a server-side change to a document.
+   * @param mutator
+   * @returns
+   */
+  async change<T = Record<string, any>>(
+    docId: string,
+    mutator: (draft: T, patch: JSONPatch) => void,
+    metadata?: Record<string, any>
+  ): Promise<Change | null> {
+    const { state, rev } = await this.getDoc(docId);
+    const patch = createJSONPatch(state as T, mutator);
+    if (patch.ops.length === 0) {
+      return null;
+    }
+
+    // It's the baseRev that matters for sending.
+    const change: Change = {
+      id: createId(),
+      ops: patch.ops,
+      baseRev: rev,
+      rev: rev + 1,
+      created: Date.now(),
+      ...metadata,
+    };
+
+    // Apply to local state to ensure no errors are thrown
+    patch.apply(state);
+    await this.commitChanges(docId, [change]);
+    return change;
   }
 
   /**

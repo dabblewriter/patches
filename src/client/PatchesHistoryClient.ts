@@ -90,7 +90,7 @@ export class PatchesHistoryClient<T = any> {
   }
 
   /** Load the state for a specific version */
-  async getStateAtVersion(versionId: string): Promise<any> {
+  async getVersionState(versionId: string): Promise<any> {
     let data = this.cache.get(versionId);
     if (!data || data.state === undefined) {
       const { state } = await this.api.getVersionState(this.id, versionId);
@@ -103,7 +103,7 @@ export class PatchesHistoryClient<T = any> {
   }
 
   /** Load the changes for a specific version */
-  async getChangesForVersion(versionId: string): Promise<Change[]> {
+  async getVersionChanges(versionId: string): Promise<Change[]> {
     let data = this.cache.get(versionId);
     if (!data || data.changes === undefined) {
       const changes = await this.api.getVersionChanges(this.id, versionId);
@@ -119,8 +119,8 @@ export class PatchesHistoryClient<T = any> {
 
     // Load state and changes for the version
     const [state, changes] = await Promise.all([
-      version?.parentId ? this.getStateAtVersion(version.parentId) : undefined,
-      this.getChangesForVersion(versionId),
+      version?.parentId ? this.getVersionState(version.parentId) : undefined,
+      this.getVersionChanges(versionId),
     ]);
     // Apply changes up to changeIndex to the state (if needed)
     if (changeIndex > 0) {

@@ -145,13 +145,13 @@ describe('PatchesHistoryClient', () => {
     const versionData = currentMockVersions.find(v => v.id === versionId)!;
     mockApi.getVersionState.mockResolvedValue({ state: docState, rev: versionData.rev });
 
-    const result = await client.getStateAtVersion(versionId);
+    const result = await client.getVersionState(versionId);
     expect(result).toEqual(docState);
     expect(mockApi.getVersionState).toHaveBeenCalledWith('doc1', versionId);
     expect(client.state).toEqual(docState);
     expect(onStateChangeHandler).toHaveBeenCalledWith(docState);
 
-    await client.getStateAtVersion(versionId);
+    await client.getVersionState(versionId);
     const parentVersion = currentMockVersions.find(v => v.id === 'v2');
     expect(parentVersion).toBeDefined();
 
@@ -222,7 +222,7 @@ describe('PatchesHistoryClient', () => {
     const v1DocState = { content: 'v1 state' };
     const v1VersionData = currentMockVersions.find(v => v.id === 'v1')!;
     mockApi.getVersionState.mockResolvedValue({ state: v1DocState, rev: v1VersionData.rev });
-    await client.getStateAtVersion('v1');
+    await client.getVersionState('v1');
     const getVersionStateCallCountBeforeClear = mockApi.getVersionState.mock.calls.length;
 
     onVersionsChangeHandler.mockClear();
@@ -236,7 +236,7 @@ describe('PatchesHistoryClient', () => {
     expect(onStateChangeHandler).toHaveBeenCalledWith(null);
 
     mockApi.getVersionState.mockResolvedValue({ state: v1DocState, rev: v1VersionData.rev });
-    await client.getStateAtVersion('v1');
+    await client.getVersionState('v1');
     // Should be called one more time than before clear, as cache is gone
     expect(mockApi.getVersionState.mock.calls.length).toBe(getVersionStateCallCountBeforeClear + 1);
   });

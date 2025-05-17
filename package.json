@@ -1,6 +1,6 @@
 {
   "name": "@dabble/patches",
-  "version": "0.2.28",
+  "version": "0.2.30",
   "description": "Immutable JSON Patch implementation based on RFC 6902 supporting operational transformation and last-writer-wins",
   "author": "Jacob Wright <jacwright@gmail.com>",
   "bugs": {
@@ -54,12 +54,17 @@
     "tdd": "vitest"
   },
   "dependencies": {
+    "@dabble/delta": "^1.2.4",
     "alphacounter": "^2.x",
     "crypto-id": "^0.2.3"
   },
   "peerDependencies": {
-    "@dabble/delta": "^1.2.4",
     "simple-peer": "^9.11.1"
+  },
+  "peerDependenciesMeta": {
+    "simple-peer": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@sveltejs/package": "^2.3.11",

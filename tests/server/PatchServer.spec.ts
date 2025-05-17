@@ -260,7 +260,6 @@ describe('PatchesServer', () => {
       const snapshot = await patchesServer.getDoc(docId);
       expect(snapshot.state).toBeNull();
       expect(snapshot.rev).toBe(0);
-      expect(snapshot.changes).toEqual([]);
       expect(mockStore.listVersions).toHaveBeenCalledWith(docId, {
         limit: 1,
         reverse: true,
@@ -314,13 +313,13 @@ describe('PatchesServer', () => {
       });
       expect(mockStore.loadVersionState).toHaveBeenCalledWith(docId, versionId);
       expect(mockStore.listChanges).toHaveBeenCalledWith(docId, {
-        startAfter: versionRev,
-        endBefore: undefined,
-      }); // Should fetch up to baseRev + 1? No, should fetch all
+        startAfter: versionRev, // Changes after the version's baseRev
+        endBefore: undefined, // Up to latest
+      });
 
-      expect(snapshot.state.state).toEqual(versionState); // State is from the version
-      expect(snapshot.rev).toBe(versionRev); // Rev is of the base state
-      expect(snapshot.changes).toEqual([change1, change2]); // Changes are since the version
+      const expectedLatestState = { content: 'version 1', new: 2 };
+      expect(snapshot.state).toEqual(expectedLatestState);
+      expect(snapshot.rev).toBe(7); // Latest rev after changes
     });
 
     it('should return state and changes at a specific revision', async () => {
@@ -355,12 +354,17 @@ describe('PatchesServer', () => {
         ops: [{ op: 'replace', path: '/new', value: 2 }],
         created: Date.now(),
       };
-      mockStore.listChanges.mockResolvedValueOnce([change1, change2]); // Mock loading changes up to rev 7
+      // For getDoc(docId, 7), we expect changes between baseRev 5 and targetRev 7+1.
+      // So, listChanges should be mocked to return changes up to rev 7.
+      mockStore.listChanges.mockResolvedValueOnce([change1, change2]);
 
       const targetRev = 7;
       const snapshot = await patchesServer.getDoc(docId, targetRev);
 
-      // Should find the version before or at rev 7+1
+      // Should find the version *before or at* targetRev + 1 (i.e., the version that is the base for targetRev)
+      // The PatchesServer.getDoc logic will try to find the latest version *older* than or equal to targetRev.
+      // If targetRev is 7, and a version exists at rev 5, it loads version 5.
+      // Then it loads changes from rev 5 up to targetRev (7).
       expect(mockStore.listVersions).toHaveBeenCalledWith(docId, {
         limit: 1,
         reverse: true,
@@ -375,9 +379,9 @@ describe('PatchesServer', () => {
         endBefore: targetRev + 1,
       });
 
-      expect(snapshot.state.state).toEqual(versionState);
-      expect(snapshot.rev).toBe(versionRev); // Rev is of the base state (rev 5)
-      expect(snapshot.changes).toEqual([change1, change2]); // Only changes up to rev 7
+      const expectedStateAtRev7 = { content: 'version 1', new: 2 };
+      expect(snapshot.state).toEqual(expectedStateAtRev7);
+      expect(snapshot.rev).toBe(targetRev); // Rev is of the state at targetRev (rev 7)
     });
   });
 
@@ -397,7 +401,9 @@ describe('PatchesServer', () => {
 
     it('rejects changes without baseRev', async () => {
       const changes = [{ id: '1', ops: [], rev: 1, created: Date.now() }];
-      await expect(patchesServer.commitChanges(docId, changes)).rejects.toThrow('Client changes must include baseRev');
+      await expect(patchesServer.commitChanges(docId, changes as any)).rejects.toThrow(
+        'Client changes must include baseRev'
+      );
     });
 
     it('rejects changes with inconsistent baseRev', async () => {
@@ -443,7 +449,15 @@ describe('PatchesServer', () => {
       await mockStore.saveChange(docId, initialChange); // Server is now at rev 1
       vi.spyOn(patchesServer as any, 'getStateAtRevision').mockResolvedValue({ state: { data: 1 }, rev: 1 });
 
-      const changes: Change[] = [{ id: 'c1', rev: 0, baseRev: 0, ops: [], created: Date.now() }];
+      const changes: Change[] = [
+        {
+          id: 'c1',
+          rev: 0,
+          baseRev: 0,
+          ops: [{ op: 'add', path: '', value: { text: 'hello' } }], // Provide an op to satisfy the condition
+          created: Date.now(),
+        },
+      ];
       await expect(patchesServer.commitChanges(docId, changes)).rejects.toThrow(
         /Client baseRev is 0 but server has already been created for doc test-doc-1. Client needs to load the existing document./
       );

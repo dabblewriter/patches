@@ -8,7 +8,7 @@ export interface Change {
   /** The revision number assigned on the client to the optimistic revision and updated by the server after commit. */
   rev: number;
   /** The server revision this change was based on. Required for client->server changes. */
-  baseRev?: number;
+  baseRev: number;
   /** Client-side timestamp when the change was created. */
   created: number;
   /** Optional batch identifier for grouping changes that belong to the same client batch (for multi-batch offline/large edits). */

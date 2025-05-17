@@ -40,12 +40,13 @@ export class PatchesServer {
   }
 
   /**
-   * Get the latest version of a document and changes since the last version.
+   * Get the state of a document at a specific revision (or the latest state if no revision is provided).
    * @param docId - The ID of the document.
-   * @returns The latest version of the document and changes since the last version.
+   * @param rev - The revision number.
+   * @returns The state of the document at the specified revision.
    */
-  async getDoc(docId: string, atRev?: number): Promise<PatchesSnapshot> {
-    return this._getSnapshotAtRevision(docId, atRev);
+  async getDoc(docId: string, atRev?: number): Promise<PatchesState> {
+    return this.getStateAtRevision(docId, atRev);
   }
 
   /**
@@ -104,10 +105,8 @@ export class PatchesServer {
     }
 
     // Ensure all new changes' `created` field is in the past, that each `rev` is correct, and that `baseRev` is set
-    let rev = currentRev + 1;
     changes.forEach(c => {
       c.created = Math.min(c.created, Date.now());
-      c.rev = rev++;
       c.baseRev = baseRev;
     });
 
@@ -143,6 +142,7 @@ export class PatchesServer {
     //    against committed changes that happened *after* the client's baseRev.
     //    The state used for transformation should be the server state *at the client's baseRev*.
     let stateAtBaseRev = (await this.getStateAtRevision(docId, baseRev)).state;
+    let rev = currentRev + 1;
     const committedOps = committedChanges.flatMap(c => c.ops);
 
     // Apply transformation based on state at baseRev
@@ -165,7 +165,7 @@ export class PatchesServer {
           return null;
         }
         // Return a new change object with transformed ops and original metadata
-        return { ...change, ops: transformedOps };
+        return { ...change, rev: rev++, ops: transformedOps };
       })
       .filter(Boolean) as Change[];
 

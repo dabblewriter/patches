@@ -120,7 +120,9 @@ export class JSONRPCServer {
         const response: Response = { jsonrpc: '2.0', id: message.id as number, result };
         return respond(response);
       } catch (err: any) {
-        return respond(rpcError(err?.code ?? -32000, err?.message ?? 'Server error', err?.stack));
+        return respond(
+          rpcError(err?.code ?? -32000, err?.message ?? 'Server error', err?.code ? undefined : err?.stack)
+        );
       }
     } else {
       // -> Notification -----------------------------------------------------------

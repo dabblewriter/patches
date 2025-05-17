@@ -2,6 +2,7 @@ import type { PatchesBranchManager } from '../../server/PatchesBranchManager.js'
 import type { PatchesHistoryManager } from '../../server/PatchesHistoryManager.js';
 import type { PatchesServer } from '../../server/PatchesServer.js';
 import type { Change, EditableVersionMetadata, ListChangesOptions, ListVersionsOptions } from '../../types.js';
+import { StatusError } from '../error.js';
 import { JSONRPCServer } from '../protocol/JSONRPCServer.js';
 import type { AuthContext, AuthorizationProvider } from './AuthorizationProvider.js';
 import { allowAll } from './AuthorizationProvider.js';
@@ -50,8 +51,8 @@ export class RPCServer {
       this.rpc.registerMethod('listVersions', this.listVersions.bind(this));
       this.rpc.registerMethod('createVersion', this.createVersion.bind(this));
       this.rpc.registerMethod('updateVersion', this.updateVersion.bind(this));
-      this.rpc.registerMethod('getVersionState', this.getStateAtVersion.bind(this));
-      this.rpc.registerMethod('getVersionChanges', this.getChangesForVersion.bind(this));
+      this.rpc.registerMethod('getVersionState', this.getVersionState.bind(this));
+      this.rpc.registerMethod('getVersionChanges', this.getVersionChanges.bind(this));
       this.rpc.registerMethod('listServerChanges', this.listServerChanges.bind(this));
     }
 
@@ -157,14 +158,14 @@ export class RPCServer {
     return this.history!.updateVersion(docId, versionId, metadata);
   }
 
-  async getStateAtVersion(params: { docId: string; versionId: string }, ctx?: AuthContext) {
+  async getVersionState(params: { docId: string; versionId: string }, ctx?: AuthContext) {
     this.assertHistoryEnabled();
     const { docId, versionId } = params;
     await this.assertRead(ctx, docId, 'getStateAtVersion', params);
     return this.history!.getStateAtVersion(docId, versionId);
   }
 
-  async getChangesForVersion(params: { docId: string; versionId: string }, ctx?: AuthContext) {
+  async getVersionChanges(params: { docId: string; versionId: string }, ctx?: AuthContext) {
     this.assertHistoryEnabled();
     const { docId, versionId } = params;
     await this.assertRead(ctx, docId, 'getChangesForVersion', params);
@@ -223,7 +224,7 @@ export class RPCServer {
   ): Promise<void> {
     const ok = await this.auth.canAccess(ctx, docId, kind, method, params);
     if (!ok) {
-      throw new Error(`${kind.toUpperCase()}_FORBIDDEN:${docId}`);
+      throw new StatusError(401, `${kind.toUpperCase()}_FORBIDDEN:${docId}`);
     }
   }
 
@@ -242,13 +243,13 @@ export class RPCServer {
 
   protected assertHistoryEnabled() {
     if (!this.history) {
-      throw new Error('History is not enabled');
+      throw new StatusError(404, 'History is not enabled');
     }
   }
 
   protected assertBranchingEnabled() {
     if (!this.branches) {
-      throw new Error('Branching is not enabled');
+      throw new StatusError(404, 'Branching is not enabled');
     }
   }
 }

@@ -3,19 +3,6 @@ import { JSONPatch } from './json-patch/JSONPatch.js';
 import type { Change, Deferred } from './types.js';
 
 /**
- * Splits an array of changes into two arrays based on the presence of a baseRev.
- * The first array contains changes before the first change with a baseRev,
- * and the second array contains the change with baseRev and all subsequent changes.
- *
- * @param changes - Array of changes to split
- * @returns A tuple containing [changes before baseRev, changes with and after baseRev]
- */
-export function splitChanges(changes: Change[]): [Change[], Change[]] {
-  const index = changes.findIndex(c => c.baseRev);
-  return [changes.slice(0, index), changes.slice(index)];
-}
-
-/**
  * Applies a sequence of changes to a state object.
  * Each change is applied in sequence using the applyPatch function.
  *

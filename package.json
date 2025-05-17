@@ -25,6 +25,10 @@
     "./net": {
       "import": "./dist/net/index.js",
       "types": "./dist/net/index.d.ts"
+    },
+    "./webrtc": {
+      "import": "./dist/net/webrtc/index.js",
+      "types": "./dist/net/webrtc/index.d.ts"
     }
   },
   "files": [
@@ -56,15 +60,8 @@
   "dependencies": {
     "@dabble/delta": "^1.2.4",
     "alphacounter": "^2.x",
-    "crypto-id": "^0.2.3"
-  },
-  "peerDependencies": {
+    "crypto-id": "^0.2.3",
     "simple-peer": "^9.11.1"
-  },
-  "peerDependenciesMeta": {
-    "simple-peer": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "@sveltejs/package": "^2.3.11",

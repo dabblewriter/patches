@@ -182,10 +182,15 @@ export class PatchesSync {
       } else {
         // No pending, just check for server changes
         const [committedRev] = await this.store.getLastRevs(docId);
-        const serverChanges = await this.ws.getChangesSince(docId, committedRev);
-        if (serverChanges.length > 0) {
-          await this.store.saveCommittedChanges(docId, serverChanges);
-          this.patches.applyServerChanges(docId, serverChanges);
+        if (committedRev) {
+          const serverChanges = await this.ws.getChangesSince(docId, committedRev);
+          if (serverChanges.length > 0) {
+            await this.store.saveCommittedChanges(docId, serverChanges);
+            this.patches.applyServerChanges(docId, serverChanges);
+          }
+        } else {
+          const snapshot = await this.ws.getDoc(docId);
+          await this.store.saveDoc(docId, snapshot);
         }
       }
     } catch (err) {

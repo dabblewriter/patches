@@ -1,5 +1,5 @@
 import { transformPatch } from '../json-patch/transformPatch.js';
-import type { Change, Deferred, PatchesSnapshot } from '../types.js';
+import type { Change, Deferred, PatchesSnapshot, PatchesState } from '../types.js';
 import { applyChanges, deferred } from '../utils.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
@@ -208,6 +208,24 @@ export class IndexedDBStore implements PatchesStore {
   }
 
   // ─── Pending Changes ────────────────────────────────────────────────────────
+
+  async saveDoc(docId: string, docState: PatchesState): Promise<void> {
+    const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.transaction(
+      ['snapshots', 'committedChanges', 'pendingChanges', 'docs'],
+      'readwrite'
+    );
+
+    const { rev, state } = docState;
+
+    await Promise.all([
+      docsStore.put<TrackedDoc>({ docId, committedRev: rev }),
+      snapshots.put<Snapshot>({ docId, state, rev }),
+      committedChanges.delete([docId, 0], [docId, Infinity]),
+      pendingChanges.delete([docId, 0], [docId, Infinity]),
+    ]);
+
+    await tx.complete();
+  }
 
   /**
    * Append an array of local changes to the pending queue.

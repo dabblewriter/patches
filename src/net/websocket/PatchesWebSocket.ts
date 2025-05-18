@@ -4,6 +4,7 @@ import type {
   EditableVersionMetadata,
   ListVersionsOptions,
   PatchesSnapshot,
+  PatchesState,
   VersionMetadata,
 } from '../../types.js';
 import { JSONRPCClient } from '../protocol/JSONRPCClient.js';
@@ -91,8 +92,8 @@ export class PatchesWebSocket implements PatchesAPI {
    * @param docId - The ID of the document.
    * @returns A promise resolving with the document snapshot.
    */
-  async getDoc(docId: string): Promise<PatchesSnapshot> {
-    return this.rpc.request('getDoc', { docId });
+  async getDoc(docId: string, atRev?: number): Promise<PatchesState> {
+    return this.rpc.request('getDoc', { docId, atRev });
   }
 
   /**

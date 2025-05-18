@@ -30,30 +30,21 @@ export type Signal<T extends SignalSubscriber = SignalSubscriber> = {
  * onLoad.clear();
  */
 export function signal<T extends SignalSubscriber = SignalSubscriber>(): Signal<T> {
-  const subscribers = new Set<WeakRef<SignalSubscriber>>();
-  const errorListeners = new Set<WeakRef<ErrorSubscriber>>();
+  const subscribers = new Set<SignalSubscriber>();
+  const errorListeners = new Set<ErrorSubscriber>();
 
   function signal(subscriber: T | ErrorSubscriber): Unsubscriber {
-    subscribers.add(new WeakRef(subscriber));
-    return () => subscribers.delete(new WeakRef(subscriber));
+    subscribers.add(subscriber);
+    return () => subscribers.delete(subscriber);
   }
 
   signal.emit = async (...args: Args<T>) => {
     const listeners = args[0] instanceof Error ? errorListeners : subscribers;
-    await Promise.all(
-      Array.from(listeners).map(ref => {
-        const listener = ref.deref();
-        if (listener) {
-          return listener(...args);
-        } else {
-          listeners.delete(ref);
-        }
-      })
-    );
+    await Promise.all(Array.from(listeners).map(listener => listener(...args)));
   };
   signal.error = (errorListener: ErrorSubscriber) => {
-    errorListeners.add(new WeakRef(errorListener));
-    return () => errorListeners.delete(new WeakRef(errorListener));
+    errorListeners.add(errorListener);
+    return () => errorListeners.delete(errorListener);
   };
   signal.clear = () => {
     subscribers.clear();

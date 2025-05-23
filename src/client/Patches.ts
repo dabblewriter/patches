@@ -27,6 +27,7 @@ interface ManagedDoc<T extends object> {
 export class Patches {
   protected options: PatchesOptions;
   protected docs: Map<string, ManagedDoc<any>> = new Map();
+  protected pendingDocs: Map<string, Promise<PatchesDoc<any>>> = new Map();
 
   readonly docOptions: PatchesDocOptions;
   readonly store: PatchesStore;
@@ -98,6 +99,26 @@ export class Patches {
     const existing = this.docs.get(docId);
     if (existing) return existing.doc as PatchesDoc<T>;
 
+    // Check if document creation is already in progress
+    const pending = this.pendingDocs.get(docId);
+    if (pending) return pending as Promise<PatchesDoc<T>>;
+
+    // Create promise for document creation to prevent race conditions
+    const docPromise = this._createDoc<T>(docId, opts);
+    this.pendingDocs.set(docId, docPromise);
+
+    try {
+      const doc = await docPromise;
+      return doc;
+    } finally {
+      this.pendingDocs.delete(docId);
+    }
+  }
+
+  private async _createDoc<T extends object>(
+    docId: string,
+    opts: { metadata?: Record<string, any> } = {}
+  ): Promise<PatchesDoc<T>> {
     // Ensure the doc is tracked before proceeding
     await this.trackDocs([docId]);
 

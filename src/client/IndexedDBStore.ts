@@ -306,6 +306,28 @@ export class IndexedDBStore implements PatchesStore {
           }),
           committedChanges.delete([docId, 0], [docId, lastRev]),
         ]);
+      } else {
+        // Warning: snapshot creation skipped due to old pending changes
+        console.warn(
+          `Snapshot creation skipped for doc ${docId}: pending change baseRev ${firstPending.baseRev} < lastRev ${lastRev}. ` +
+          `Committed changes count: ${count}. This may lead to memory growth.`
+        );
+        
+        // Force snapshot creation if too many committed changes accumulate
+        if (count >= SNAPSHOT_INTERVAL * 3) {
+          console.warn(
+            `Force creating snapshot for doc ${docId} due to ${count} accumulated committed changes`
+          );
+          const state = applyChanges(snapshot?.state, committed);
+          await Promise.all([
+            snapshots.put({
+              docId,
+              rev: lastRev,
+              state,
+            }),
+            committedChanges.delete([docId, 0], [docId, lastRev]),
+          ]);
+        }
       }
     }
 

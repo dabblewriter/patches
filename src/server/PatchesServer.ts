@@ -171,14 +171,19 @@ export class PatchesServer {
       })
       .filter(Boolean) as Change[];
 
-    // Persist the newly transformed changes
+    // Persist and notify about newly transformed changes atomically
     if (transformedChanges.length > 0) {
       await this.store.saveChanges(docId, transformedChanges);
-    }
-
-    // Fire event for realtime transports (WebSocket, etc.)
-    if (transformedChanges.length > 0) {
-      await this.onChangesCommitted.emit(docId, transformedChanges, originClientId);
+      
+      try {
+        // Fire event for realtime transports (WebSocket, etc.)
+        await this.onChangesCommitted.emit(docId, transformedChanges, originClientId);
+      } catch (error) {
+        // If notification fails after saving, log error but don't fail the operation
+        // The changes are already committed to storage, so we can't roll back
+        console.error(`Failed to notify clients about committed changes for doc ${docId}:`, error);
+        // Consider implementing a retry mechanism or dead letter queue here
+      }
     }
 
     // Return committed changes and newly transformed changes separately

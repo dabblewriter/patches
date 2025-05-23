@@ -5,7 +5,7 @@ import type { Change, EditableVersionMetadata, ListChangesOptions, ListVersionsO
 import { StatusError } from '../error.js';
 import { JSONRPCServer } from '../protocol/JSONRPCServer.js';
 import type { AuthContext, AuthorizationProvider } from './AuthorizationProvider.js';
-import { allowAll } from './AuthorizationProvider.js';
+import { denyAll } from './AuthorizationProvider.js';
 
 /**
  * High-level client for the Patches real-time collaboration service.
@@ -31,9 +31,9 @@ export class RPCServer {
    * @param patches - The patches server instance to handle document operations
    * @param history - (Optional) History manager instance to handle versioning operations
    * @param branches - (Optional) Branch manager instance to handle branching operations
-   * @param auth - (Optional) Authorization provider implementation. Defaults to a permissive provider.
+   * @param auth - (Optional) Authorization provider implementation. Defaults to deny-all for security.
    */
-  constructor({ patches, history, branches, auth = allowAll }: RPCServerOptions) {
+  constructor({ patches, history, branches, auth = denyAll }: RPCServerOptions) {
     this.rpc = new JSONRPCServer();
     this.patches = patches;
     this.history = history;

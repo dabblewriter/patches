@@ -1,6 +1,6 @@
 import type { ServerTransport } from '../protocol/types.js';
 import type { AuthContext, AuthorizationProvider } from './AuthorizationProvider.js';
-import { allowAll } from './AuthorizationProvider.js';
+import { denyAll } from './AuthorizationProvider.js';
 import type { RPCServer } from './RPCServer.js';
 
 /**
@@ -20,7 +20,7 @@ export class WebSocketServer {
   constructor(transport: ServerTransport, rpcServer: RPCServer) {
     this.transport = transport;
     const { rpc, auth } = rpcServer;
-    this.auth = auth || allowAll;
+    this.auth = auth || denyAll;
 
     // Subscription operations
     rpc.registerMethod('subscribe', this.subscribe.bind(this));

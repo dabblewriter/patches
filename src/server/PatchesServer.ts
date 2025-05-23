@@ -157,7 +157,7 @@ export class PatchesServer {
         }
         try {
           const previous = stateAtBaseRev;
-          stateAtBaseRev = applyPatch(stateAtBaseRev, change.ops, { strict: true });
+          stateAtBaseRev = applyPatch(stateAtBaseRev, transformedOps, { strict: true });
           if (previous === stateAtBaseRev) {
             // Changes were no-ops, we can skip this change
             return null;

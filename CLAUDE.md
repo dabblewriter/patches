@@ -118,3 +118,93 @@ To run tests with a specific pattern:
 ```bash
 npm run test -- -t "test description pattern"
 ```
+
+## Architecture Analysis and Critical Issues
+
+### Architectural Insights
+
+1. **Three-Layer Architecture**:
+   - **Application Layer**: Client-side state management with optimistic updates
+   - **Transformation Layer**: JSON Patch-based OT implementation
+   - **Transport Layer**: Pluggable networking (WebSocket/WebRTC)
+
+2. **State Management Approach**:
+   - Immutable state with proxy-based change tracking
+   - Optimistic client updates with server reconciliation
+   - Linear history with snapshot-based versioning
+
+3. **Concurrency Model**:
+   - Centralized server arbitrates operation order
+   - Client-side rebasing for pending changes
+   - Event-driven architecture with signal patterns
+
+### Critical Logical Errors Found
+
+#### Client-Side Issues
+
+1. **Race Condition in Document Creation** (`Patches.ts:94-119`):
+   - Multiple concurrent `openDoc()` calls can create duplicate document instances
+   - Missing atomic check-and-create operation
+
+2. **Memory Leaks** (`Patches.ts:115-117`, `PatchesHistoryClient.ts:47-50`):
+   - Event listeners not cleaned up on error paths
+   - Long-lived instances accumulate listeners without cleanup
+
+3. **State Divergence During Import/Export** (`PatchesDoc.ts:94-101`):
+   - Export combines sending and pending changes
+   - Import loses distinction, marking all as pending
+   - Can cause duplicate operations on reconnection
+
+4. **Silent Data Loss Risk** (`IndexedDBStore.ts:296-309`):
+   - Snapshot creation can fail silently
+   - Unbounded accumulation of committed changes possible
+
+#### Server-Side Issues
+
+1. **Critical Transformation Bug** (`PatchesServer.ts:146-172`):
+   - Applies original ops instead of transformed ops to state
+   - Causes server state to diverge from client expectations
+
+2. **Missing Atomicity** (`PatchesServer.ts:175-182`):
+   - State saved but clients not notified if emit fails
+   - Breaks consistency guarantees
+
+3. **Branch Merge Revision Calculation** (`PatchesBranchManager.ts:137-139`):
+   - Incorrect revision calculation for merged changes
+   - Can cause revision conflicts
+
+#### JSON Patch Implementation Issues
+
+1. **Array Index Parser Bug** (`toArrayIndex.ts:7-9`):
+   - Returns `Infinity` for non-numeric indices
+   - Can cause unexpected behavior in array operations
+
+2. **Path Handling Vulnerability**:
+   - Inconsistent handling of `-` in array paths
+   - Fragile string replacement logic
+
+3. **Memory Leak in State Cache** (`state.ts`):
+   - Cache grows unboundedly during large patch operations
+
+#### Networking Layer Issues
+
+1. **Message Loss During Reconnection** (`PatchesSync.ts:232-245`):
+   - Partial batch sends possible during disconnection
+   - No retry mechanism for failed batches
+
+2. **Security Vulnerability** (`AuthorizationProvider.ts:55-57`):
+   - Default provider allows all operations
+   - Easy to accidentally deploy with open permissions
+
+3. **OnlineState Logic Error** (`onlineState.ts:9-10`):
+   - Offline handler always evaluates to true due to `||` operator
+
+### Recommendations for Fixes
+
+1. **Add Distributed Locking**: Implement proper locking for critical sections
+2. **Improve Error Recovery**: Add transaction-like semantics for multi-step operations
+3. **Fix Memory Management**: Implement proper cleanup in all error paths
+4. **Add Input Validation**: Validate all inputs, especially array indices and paths
+5. **Implement Retry Logic**: Add exponential backoff with jitter for network operations
+6. **Security Hardening**: Make authorization fail-closed by default
+7. **Add Monitoring**: Implement health checks and metrics for production debugging

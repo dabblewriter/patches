@@ -113,7 +113,14 @@ export class Patches {
 
     // Set up local listener -> store
     const unsub = this._setupLocalDocListener(docId, doc);
-    this.docs.set(docId, { doc, onChangeUnsubscriber: unsub });
+    
+    try {
+      this.docs.set(docId, { doc, onChangeUnsubscriber: unsub });
+    } catch (error) {
+      // Clean up listener if adding to docs map fails
+      unsub();
+      throw error;
+    }
 
     return doc;
   }
@@ -210,6 +217,13 @@ export class Patches {
     // Clean up local PatchesDoc listeners
     this.docs.forEach(managed => managed.onChangeUnsubscriber());
     this.docs.clear();
+
+    // Clear all event signal subscribers
+    this.onError.clear();
+    this.onServerCommit.clear();
+    this.onTrackDocs.clear();
+    this.onUntrackDocs.clear();
+    this.onDeleteDoc.clear();
 
     // Close store connection
     void this.store.close();

@@ -17,7 +17,7 @@ export const remove: JSONPatchOpHandler = {
 
     if (Array.isArray(target)) {
       const index = toArrayIndex(target, lastKey);
-      if (target.length <= index) {
+      if (index < 0 || target.length <= index) {
         return '[op:remove] invalid array index: ' + path;
       }
       pluckWithShallowCopy(state, keys).splice(index, 1);

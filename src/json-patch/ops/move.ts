@@ -23,7 +23,7 @@ export const move: JSONPatchOpHandler = {
 
     if (Array.isArray(target)) {
       const index = toArrayIndex(target, lastKey);
-      if (target.length <= index) {
+      if (index < 0 || target.length <= index) {
         return `[op:move] invalid array index: ${path}`;
       }
       value = target[index];

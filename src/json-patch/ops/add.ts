@@ -27,7 +27,7 @@ export const add: JSONPatchOpHandler = {
 
     if (Array.isArray(target)) {
       const index = toArrayIndex(target, lastKey);
-      if (target.length < index) {
+      if (index < 0 || target.length < index) {
         return `[op:add] invalid array index: ${path}`;
       }
       pluckWithShallowCopy(state, keys, true).splice(index, 0, value);

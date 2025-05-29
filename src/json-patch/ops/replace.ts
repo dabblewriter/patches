@@ -21,7 +21,7 @@ export const replace: JSONPatchOpHandler = {
 
     if (Array.isArray(target)) {
       const index = toArrayIndex(target, lastKey);
-      if (target.length <= index) {
+      if (index < 0 || target.length <= index) {
         return `[op:replace] invalid array index: ${path}`;
       }
       if (!deepEqual(target[index], value)) {

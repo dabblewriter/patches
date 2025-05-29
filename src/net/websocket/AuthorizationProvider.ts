@@ -49,9 +49,22 @@ export interface AuthorizationProvider<T extends AuthContext = AuthContext> {
 }
 
 /**
- * A permissive provider that authorises every action.  Used as the default so
- * existing callers that don't care about auth continue to work unchanged.
+ * A permissive provider that authorises every action. 
+ * WARNING: This should only be used for development/testing purposes.
+ * Never use this in production as it allows unrestricted access.
  */
 export const allowAll: AuthorizationProvider = {
   canAccess: () => true,
+};
+
+/**
+ * A secure default provider that denies all access.
+ * This forces developers to explicitly implement proper authorization.
+ * Use this as the default to ensure security by default.
+ */
+export const denyAll: AuthorizationProvider = {
+  canAccess: () => {
+    console.warn('Authorization check failed: No authorization provider configured. Access denied.');
+    return false;
+  },
 };

@@ -87,6 +87,12 @@ export class InMemoryStore implements PatchesStore {
     }
   }
 
+  async replacePendingChanges(docId: string, changes: Change[]): Promise<void> {
+    const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
+    if (!this.docs.has(docId)) this.docs.set(docId, buf);
+    buf.pending = [...changes];
+  }
+
   // ─── Metadata / Tracking ───────────────────────────────────────────
   async trackDocs(docIds: string[]): Promise<void> {
     for (const docId of docIds) {

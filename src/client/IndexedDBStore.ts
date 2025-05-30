@@ -256,6 +256,28 @@ export class IndexedDBStore implements PatchesStore {
     return result;
   }
 
+  /** Replace all pending changes for a document (used after rebasing). */
+  async replacePendingChanges(docId: string, changes: Change[]): Promise<void> {
+    const [tx, pendingChanges, docsStore] = await this.transaction(['pendingChanges', 'docs'], 'readwrite');
+
+    // Ensure the document is tracked
+    let docMeta = await docsStore.get<TrackedDoc>(docId);
+    if (!docMeta) {
+      docMeta = { docId, committedRev: 0 };
+      await docsStore.put(docMeta);
+    } else if (docMeta.deleted) {
+      delete docMeta.deleted;
+      await docsStore.put(docMeta);
+      console.warn(`Revived document ${docId} by replacing pending changes.`);
+    }
+
+    // Remove all existing pending changes and add the new ones
+    await pendingChanges.delete([docId, 0], [docId, Infinity]);
+    await Promise.all(changes.map(change => pendingChanges.put<StoredChange>({ ...change, docId })));
+
+    await tx.complete();
+  }
+
   // ─── Committed Changes ─────────────────────────────────────────────────────
 
   /**

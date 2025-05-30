@@ -39,6 +39,7 @@ export interface PatchesStore {
   saveDoc(docId: string, docState: PatchesState): Promise<void>;
   savePendingChange(docId: string, change: Change): Promise<void>;
   saveCommittedChanges(docId: string, changes: Change[], sentPendingRange?: [number, number]): Promise<void>;
+  replacePendingChanges(docId: string, changes: Change[]): Promise<void>;
 
   // ─── Lifecycle ──────────────────────────────────────────────────────
   /** Permanently delete document (writes tombstone so server delete happens later). */

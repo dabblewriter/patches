@@ -61,14 +61,14 @@ export function rebaseChanges(serverChanges: Change[], localChanges: Change[]): 
   );
 
   // Rebase local changes against server changes
-  const base = lastChange.rev;
+  const baseRev = lastChange.rev;
   let rev = lastChange.rev;
   return filteredLocalChanges
     .map(change => {
       rev++;
       const ops = transformPatch.transform(change.ops).ops;
       if (!ops.length) return null;
-      return { ...change, base, rev, ops };
+      return { ...change, baseRev, rev, ops };
     })
     .filter(Boolean) as Change[];
 }

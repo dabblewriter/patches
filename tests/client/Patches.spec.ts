@@ -87,6 +87,7 @@ describe('Patches', () => {
         onChange: signal<(change: Change) => void>(),
         onBeforeChange: signal(),
         onUpdate: signal(),
+        onRebasedChanges: signal(),
         _setMockUpdatesForServer: (updates: Change[]) => {
           _mockUpdatesForServer = updates;
         },
@@ -206,7 +207,7 @@ describe('Patches', () => {
       // Setup doc
       (patches as any).docs.set(DOC_ID, {
         doc: mockDoc,
-        onChangeUnsubscriber: (patches as any)._setupLocalDocListener(DOC_ID, mockDoc),
+        onChangeUnsubscriber: (patches as any)._setupLocalDocListeners(DOC_ID, mockDoc),
       });
 
       // Spy on error signal

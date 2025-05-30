@@ -38,6 +38,8 @@ export class PatchesDoc<T extends object = object> {
   readonly onChange = signal<(change: Change) => void>();
   /** Subscribe to be notified whenever state changes from any source. */
   readonly onUpdate = signal<(newState: T) => void>();
+  /** Subscribe to be notified when pending changes are rebased. */
+  readonly onRebasedChanges = signal<(rebasedChanges: Change[]) => void | Promise<void>>();
 
   /**
    * Creates an instance of PatchesDoc.
@@ -301,11 +303,20 @@ export class PatchesDoc<T extends object = object> {
     if (this.hasPending) {
       this._pendingChanges = rebaseChanges(externalServerChanges, this._pendingChanges);
     }
+    const pendingWereRebased = this.isSending || this.hasPending;
 
     // 4. Recalculate local state
     this._recalculateLocalState();
 
-    // 5. Notify listeners
+    // 5. Save rebased pending changes back to store if available
+    if (pendingWereRebased) {
+      // Fire and forget - don't block the update process
+      this.onRebasedChanges.emit([...this._sendingChanges, ...this._pendingChanges]).catch(error => {
+        console.error('Failed to save rebased pending changes:', error);
+      });
+    }
+
+    // 6. Notify listeners
     this.onUpdate.emit(this._state);
   }
 

@@ -112,7 +112,7 @@ export class Patches {
     }
 
     // Set up local listener -> store
-    const unsub = this._setupLocalDocListener(docId, doc);
+    const unsub = this._setupLocalDocListeners(docId, doc);
     this.docs.set(docId, { doc, onChangeUnsubscriber: unsub });
 
     return doc;
@@ -198,8 +198,8 @@ export class Patches {
    * @param docId - The document ID to apply changes to.
    * @param changes - Array of Change objects from the server.
    */
-  applyServerChanges(docId: string, changes: Change[]): void {
-    this._handleServerCommit(docId, changes);
+  async applyServerChanges(docId: string, changes: Change[]): Promise<void> {
+    await this._handleServerCommit(docId, changes);
   }
 
   /**
@@ -231,16 +231,12 @@ export class Patches {
    * @param doc - The PatchesDoc instance to listen to.
    * @returns An Unsubscriber function to remove the listener.
    */
-  protected _setupLocalDocListener(docId: string, doc: PatchesDoc<any>): Unsubscriber {
-    return doc.onChange(async change => {
-      try {
-        await this.store.savePendingChange(docId, change);
-        // Note: When used with PatchesSync, it will handle flushing the changes
-      } catch (err) {
-        console.error(`Error saving pending changes for doc ${docId}:`, err);
-        this.onError.emit(err as Error, { docId });
-      }
-    });
+  protected _setupLocalDocListeners(docId: string, doc: PatchesDoc<any>): Unsubscriber {
+    const unsubs = [
+      doc.onChange(change => this._savePendingChange(docId, change)),
+      doc.onRebasedChanges(rebasedChanges => this._saveRebasedChanges(docId, rebasedChanges)),
+    ];
+    return () => unsubs.forEach(unsub => unsub());
   }
 
   /**
@@ -248,7 +244,7 @@ export class Patches {
    * @param docId - The document ID to update.
    * @param changes - Array of Change objects from the server.
    */
-  private _handleServerCommit = (docId: string, changes: Change[]) => {
+  protected _handleServerCommit = async (docId: string, changes: Change[]) => {
     const managedDoc = this.docs.get(docId);
     if (managedDoc) {
       try {
@@ -261,4 +257,32 @@ export class Patches {
     }
     // If doc isn't open locally, changes were already saved to store by PatchesSync
   };
+
+  /**
+   * Internal handler for saving a pending change to the store.
+   * @param docId - The document ID to save the change for.
+   * @param change - The change to save.
+   */
+  protected async _savePendingChange(docId: string, change: Change): Promise<void> {
+    try {
+      await this.store.savePendingChange(docId, change);
+      // Note: When used with PatchesSync, it will handle flushing the changes
+    } catch (err) {
+      console.error(`Error saving pending changes for doc ${docId}:`, err);
+      this.onError.emit(err as Error, { docId });
+    }
+  }
+
+  /**
+   * Internal handler for saving rebased pending changes back to the store.
+   * Called by PatchesDoc when external server updates cause pending changes to be rebased.
+   */
+  protected async _saveRebasedChanges(docId: string, rebasedChanges: Change[]): Promise<void> {
+    try {
+      await this.store.replacePendingChanges(docId, rebasedChanges);
+    } catch (err) {
+      console.error(`Error saving rebased changes for doc ${docId}:`, err);
+      this.onError.emit(err as Error, { docId });
+    }
+  }
 }

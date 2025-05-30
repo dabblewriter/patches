@@ -1,11 +1,12 @@
 import { createId } from 'crypto-id';
 import { createChange } from '../data/change.js';
+import { createVersion } from '../data/version.js';
 import { signal } from '../event-signal.js';
 import type { JSONPatch } from '../json-patch/JSONPatch.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
-import type { Change, EditableVersionMetadata, PatchesSnapshot, PatchesState, VersionMetadata } from '../types.js';
+import type { Change, EditableVersionMetadata, PatchesSnapshot, PatchesState } from '../types.js';
 import { applyChanges } from '../utils.js';
 import type { PatchesStoreBackend } from './types.js';
 
@@ -309,16 +310,16 @@ export class PatchesServer {
     if (baseRev === undefined) {
       throw new Error(`Client changes must include baseRev for doc ${docId}.`);
     }
-    const versionId = createId();
-    const sessionMetadata: VersionMetadata = {
-      id: versionId,
+
+    const sessionMetadata = createVersion({
       origin: 'main',
       startDate: changes[0].created,
       endDate: changes[changes.length - 1].created,
       rev: changes[changes.length - 1].rev,
       baseRev,
       ...metadata,
-    };
+    });
+
     await this.store.createVersion(docId, sessionMetadata, state, changes);
     return sessionMetadata;
   }
@@ -385,9 +386,8 @@ export class PatchesServer {
           } else {
             // Create a new version for this session
             offlineBaseState = applyChanges(offlineBaseState, sessionChanges);
-            const versionId = createId();
-            const sessionMetadata: VersionMetadata = {
-              id: versionId,
+
+            const sessionMetadata = createVersion({
               parentId,
               groupId,
               origin: 'offline',
@@ -395,9 +395,9 @@ export class PatchesServer {
               endDate: sessionChanges[sessionChanges.length - 1].created,
               rev: sessionChanges[sessionChanges.length - 1].rev,
               baseRev,
-            };
+            });
             await this.store.createVersion(docId, sessionMetadata, offlineBaseState, sessionChanges);
-            parentId = versionId;
+            parentId = sessionMetadata.id;
           }
           sessionStartIndex = i;
         }

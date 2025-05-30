@@ -1,6 +1,7 @@
 import { createId } from 'crypto-id';
 import { createChange } from '../data/change.js';
-import type { Branch, BranchStatus, Change, EditableBranchMetadata, VersionMetadata } from '../types.js';
+import { createVersion } from '../data/version.js';
+import type { Branch, BranchStatus, Change, EditableBranchMetadata } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
 import type { BranchingStoreBackend } from './types.js';
 
@@ -43,8 +44,7 @@ export class PatchesBranchManager {
     const branchDocId = createId();
     const now = Date.now();
     // Create an initial version at the branch point rev (for snapshotting/large docs)
-    const initialVersionMetadata: VersionMetadata = {
-      id: createId(),
+    const initialVersionMetadata = createVersion({
       origin: 'main', // Branch doc versions are 'main' until merged
       startDate: now,
       endDate: now,
@@ -53,7 +53,7 @@ export class PatchesBranchManager {
       name: metadata?.name,
       groupId: branchDocId,
       branchName: metadata?.name,
-    };
+    });
     await this.store.createVersion(branchDocId, initialVersionMetadata, stateAtRev, []);
     // 2. Create the branch metadata record
     const branch: Branch = {
@@ -116,20 +116,18 @@ export class PatchesBranchManager {
     // 4. For each version, create a corresponding version in the main doc with updated fields
     let lastVersionId: string | undefined;
     for (const v of branchVersions) {
-      const newVersionId = createId();
-      const newVersionMetadata: VersionMetadata = {
+      const newVersionMetadata = createVersion({
         ...v,
-        id: newVersionId,
         origin: 'branch',
         baseRev: branchStartRevOnSource,
         groupId: branchId,
         branchName: branch.name,
         parentId: lastVersionId,
-      };
+      });
       const state = await this.store.loadVersionState(branchId, v.id);
       const changes = await this.store.loadVersionChanges(branchId, v.id);
       await this.store.createVersion(sourceDocId, newVersionMetadata, state, changes);
-      lastVersionId = newVersionId;
+      lastVersionId = newVersionMetadata.id;
     }
     // 5. Flatten all branch changes into a single change for the main doc
     const rev = branchStartRevOnSource + branchChanges.length;

@@ -1,4 +1,5 @@
 import { createId } from 'crypto-id';
+import { createChange } from '../data/change.js';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata, VersionMetadata } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
 import type { BranchingStoreBackend } from './types.js';
@@ -131,14 +132,12 @@ export class PatchesBranchManager {
       lastVersionId = newVersionId;
     }
     // 5. Flatten all branch changes into a single change for the main doc
-    const now = Date.now();
-    const flattenedChange: Change = {
-      id: createId(12),
-      ops: branchChanges.flatMap(c => c.ops),
-      rev: branchStartRevOnSource + branchChanges.length,
-      baseRev: branchStartRevOnSource,
-      created: now,
-    };
+    const rev = branchStartRevOnSource + branchChanges.length;
+    const flattenedChange = createChange(
+      branchStartRevOnSource,
+      rev,
+      branchChanges.flatMap(c => c.ops)
+    );
     // 6. Commit the flattened change to the main doc
     let committedMergeChanges: Change[] = [];
     try {

@@ -105,7 +105,7 @@ describe('Oversize change handling integration', () => {
     expect(pendingChanges.length).toBeGreaterThan(1);
 
     for (const change of pendingChanges) {
-      expect(change.metadata).toEqual(metadata);
+      expect(change).toMatchObject(metadata);
     }
   });
 

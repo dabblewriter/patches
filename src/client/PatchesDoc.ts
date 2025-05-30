@@ -1,4 +1,4 @@
-import { createId } from 'crypto-id';
+import { createChange } from '../data/change.js';
 import { signal, type Unsubscriber } from '../event-signal.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { JSONPatch } from '../json-patch/JSONPatch.js';
@@ -137,16 +137,10 @@ export class PatchesDoc<T extends object = object> {
     const lastPendingRev = this._pendingChanges[this._pendingChanges.length - 1]?.rev;
     const lastSendingRev = this._sendingChanges[this._sendingChanges.length - 1]?.rev;
     const latestLocalRev = Math.max(this._committedRev, lastPendingRev ?? 0, lastSendingRev ?? 0);
+    const rev = latestLocalRev + 1; // Optimistic rev for local sorting
 
     // It's the baseRev that matters for sending.
-    const change: Change = {
-      rev: latestLocalRev + 1, // Tentative rev for local sorting
-      id: createId(),
-      ops: patch.ops,
-      baseRev: this._committedRev,
-      created: Date.now(),
-      ...(Object.keys(this._changeMetadata).length > 0 && { metadata: { ...this._changeMetadata } }),
-    };
+    const change = createChange(this._committedRev, rev, patch.ops, this._changeMetadata);
 
     this.onBeforeChange.emit(change);
 

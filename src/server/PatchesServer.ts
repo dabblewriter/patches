@@ -1,4 +1,5 @@
 import { createId } from 'crypto-id';
+import { createChange } from '../data/change.js';
 import { signal } from '../event-signal.js';
 import type { JSONPatch } from '../json-patch/JSONPatch.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
@@ -174,7 +175,7 @@ export class PatchesServer {
     // Persist and notify about newly transformed changes atomically
     if (transformedChanges.length > 0) {
       await this.store.saveChanges(docId, transformedChanges);
-      
+
       try {
         // Fire event for realtime transports (WebSocket, etc.)
         await this.onChangesCommitted.emit(docId, transformedChanges, originClientId);
@@ -207,14 +208,7 @@ export class PatchesServer {
     }
 
     // It's the baseRev that matters for sending.
-    const change: Change = {
-      id: createId(),
-      ops: patch.ops,
-      baseRev: rev,
-      rev: rev + 1,
-      created: Date.now(),
-      ...metadata,
-    };
+    const change = createChange(rev, rev + 1, patch.ops, metadata);
 
     // Apply to local state to ensure no errors are thrown
     patch.apply(state);

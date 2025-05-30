@@ -59,8 +59,8 @@
   },
   "dependencies": {
     "@dabble/delta": "^1.2.4",
-    "alphacounter": "^2.x",
-    "crypto-id": "^0.2.3",
+    "alphacounter": "^2.1.1",
+    "crypto-id": "^0.3.0",
     "simple-peer": "^9.11.1"
   },
   "devDependencies": {

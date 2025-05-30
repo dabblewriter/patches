@@ -1,8 +1,8 @@
 import { Op } from '@dabble/delta';
-import { createId } from 'crypto-id';
+import { createChange } from '../data/change.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change } from '../types.js';
-import { getJSONByteSize } from './getJSONByteSize.js'; // Import from new location
+import { getJSONByteSize } from './getJSONByteSize.js';
 
 /**
  * Break a single Change into multiple Changes so that
@@ -22,13 +22,7 @@ export function breakChange(orig: Change, maxBytes: number): Change[] {
 
   const flush = () => {
     if (!group.length) return;
-    byOps.push({
-      ...orig,
-      id: createId(),
-      rev: rev++,
-      ops: group,
-      created: Date.now(),
-    });
+    byOps.push(deriveNewChange(orig, rev++, group));
     group = [];
   };
 
@@ -112,13 +106,7 @@ function breakTextOp(origChange: Change, textOp: JSONPatchOp, maxBytes: number, 
       value: currentOps,
     };
 
-    results.push({
-      ...origChange,
-      id: createId(),
-      rev: rev++,
-      ops: [newOp],
-      created: Date.now(),
-    });
+    results.push(deriveNewChange(origChange, rev++, [newOp]));
 
     currentOps = [];
   };
@@ -257,13 +245,7 @@ function breakLargeValueOp(origChange: Change, op: JSONPatchOp, maxBytes: number
         newOp.appendString = chunk;
       }
 
-      results.push({
-        ...origChange,
-        id: createId(),
-        rev: rev++,
-        ops: [newOp],
-        created: Date.now(),
-      });
+      results.push(deriveNewChange(origChange, rev++, [newOp]));
     }
 
     return results;
@@ -293,13 +275,7 @@ function breakLargeValueOp(origChange: Change, op: JSONPatchOp, maxBytes: number
           chunkOp.path = op.path;
           chunkOp.appendArray = currentChunk;
         }
-        results.push({
-          ...origChange,
-          id: createId(),
-          rev: rev++,
-          ops: [chunkOp],
-          created: Date.now(),
-        });
+        results.push(deriveNewChange(origChange, rev++, [chunkOp]));
         currentChunk = [item]; // Start new chunk with current item
         chunkStartIndex = i;
       } else {
@@ -319,13 +295,7 @@ function breakLargeValueOp(origChange: Change, op: JSONPatchOp, maxBytes: number
         chunkOp.path = op.path;
         chunkOp.appendArray = currentChunk;
       }
-      results.push({
-        ...origChange,
-        id: createId(),
-        rev: rev++,
-        ops: [chunkOp],
-        created: Date.now(),
-      });
+      results.push(deriveNewChange(origChange, rev++, [chunkOp]));
     }
 
     return results;
@@ -333,4 +303,8 @@ function breakLargeValueOp(origChange: Change, op: JSONPatchOp, maxBytes: number
 
   // If we can't split it, throw an error
   throw new Error(`Single operation of type ${op.op} (path: ${op.path}) exceeds maxBytes and can't be split further.`);
+}
+
+function deriveNewChange(origChange: Change, rev: number, ops: JSONPatchOp[]) {
+  return createChange(origChange.baseRev, rev, ops, origChange);
 }

@@ -1,5 +1,6 @@
 import { type Unsubscriber, signal } from '../event-signal.js';
 import type { Change } from '../types.js';
+import { oneResult } from '../utils/concurrency.js';
 import { PatchesDoc, type PatchesDocOptions } from './PatchesDoc.js';
 import type { PatchesStore } from './PatchesStore.js';
 
@@ -16,7 +17,7 @@ export interface PatchesOptions {
 // Keep internal doc management structure
 interface ManagedDoc<T extends object> {
   doc: PatchesDoc<T>;
-  onChangeUnsubscriber: Unsubscriber;
+  unsubscribe: Unsubscriber;
 }
 
 /**
@@ -91,6 +92,7 @@ export class Patches {
    * @param opts - Optional metadata to merge with the doc's metadata.
    * @returns The opened PatchesDoc instance.
    */
+  @oneResult(true) // ensure a second call to openDoc with the same docId returns the same promise while opening
   async openDoc<T extends object>(
     docId: string,
     opts: { metadata?: Record<string, any> } = {}
@@ -112,8 +114,8 @@ export class Patches {
     }
 
     // Set up local listener -> store
-    const unsub = this._setupLocalDocListeners(docId, doc);
-    this.docs.set(docId, { doc, onChangeUnsubscriber: unsub });
+    const unsubscribe = this._setupLocalDocListeners(docId, doc);
+    this.docs.set(docId, { doc, unsubscribe });
 
     return doc;
   }
@@ -126,7 +128,7 @@ export class Patches {
   async closeDoc(docId: string, { untrack = false }: { untrack?: boolean } = {}): Promise<void> {
     const managed = this.docs.get(docId);
     if (managed) {
-      managed.onChangeUnsubscriber();
+      managed.unsubscribe();
       this.docs.delete(docId);
       if (untrack) {
         await this.untrackDocs([docId]);
@@ -208,11 +210,11 @@ export class Patches {
    */
   close(): void {
     // Clean up local PatchesDoc listeners
-    this.docs.forEach(managed => managed.onChangeUnsubscriber());
+    this.docs.forEach(managed => managed.unsubscribe());
     this.docs.clear();
 
     // Close store connection
-    void this.store.close();
+    this.store.close();
   }
 
   /**

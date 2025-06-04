@@ -1,0 +1,25 @@
+import type { PatchesStoreBackend } from '../../server';
+import type { PatchesState } from '../../types';
+import { applyChanges } from '../shared/applyChanges';
+import { getSnapshotAtRevision } from './getSnapshotAtRevision';
+
+/**
+ * Gets the state at a specific revision.
+ * @param docId The document ID.
+ * @param rev The revision number. If not provided, the latest state and its revision is returned.
+ * @returns The state at the specified revision *and* its revision number.
+ */
+export async function getStateAtRevision(
+  store: PatchesStoreBackend,
+  docId: string,
+  rev?: number
+): Promise<PatchesState> {
+  // Note: _getSnapshotAtRevision now returns the state *of the version* and changes *since* it.
+  // We need to apply the changes to get the state *at* the target revision.
+  const { state: versionState, rev: snapshotRev, changes } = await getSnapshotAtRevision(store, docId, rev);
+  return {
+    // Ensure null is passed if versionState or versionState.state is null/undefined
+    state: applyChanges(versionState?.state ?? null, changes),
+    rev: changes.at(-1)?.rev ?? snapshotRev,
+  };
+}

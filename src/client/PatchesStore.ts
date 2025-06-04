@@ -37,7 +37,7 @@ export interface PatchesStore {
 
   // ─── Writes ────────────────────────────────────────────────────────
   saveDoc(docId: string, docState: PatchesState): Promise<void>;
-  savePendingChange(docId: string, change: Change): Promise<void>;
+  savePendingChanges(docId: string, changes: Change[]): Promise<void>;
   saveCommittedChanges(docId: string, changes: Change[], sentPendingRange?: [number, number]): Promise<void>;
   replacePendingChanges(docId: string, changes: Change[]): Promise<void>;
 

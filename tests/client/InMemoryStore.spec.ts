@@ -64,7 +64,7 @@ describe('InMemoryStore', () => {
         created: Date.now(),
       };
 
-      await store.savePendingChange(docId, change);
+      await store.savePendingChanges(docId, [change]);
       const pendingChanges = await store.getPendingChanges(docId);
 
       expect(pendingChanges).toHaveLength(1);
@@ -81,7 +81,7 @@ describe('InMemoryStore', () => {
         created: Date.now(),
       };
 
-      await store.savePendingChange(docId, pendingChange);
+      await store.savePendingChanges(docId, [pendingChange]);
       await store.saveCommittedChanges(docId, [pendingChange], [1, 1]);
       const pendingChanges = await store.getPendingChanges(docId);
 
@@ -135,7 +135,7 @@ describe('InMemoryStore', () => {
         baseRev: 1,
         created: Date.now(),
       };
-      await store.savePendingChange(docId, pendingChange);
+      await store.savePendingChanges(docId, [pendingChange]);
 
       // Now save a new committed change that would conflict
       const newCommittedChange: Change = {

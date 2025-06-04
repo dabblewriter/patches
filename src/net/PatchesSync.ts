@@ -1,26 +1,20 @@
+import { isEqual } from '@dabble/delta';
+import { applyCommittedChanges } from '../algorithms/client/applyCommittedChanges.js';
+import { breakIntoBatches } from '../algorithms/client/batching.js';
 import { Patches } from '../client/Patches.js';
 import type { PatchesStore, TrackedDoc } from '../client/PatchesStore.js';
 import { signal } from '../event-signal.js';
-import { breakIntoBatches } from '../utils/batching.js';
+import type { Change, SyncingState } from '../types.js';
+import { blockable } from '../utils/concurrency.js';
 import type { ConnectionState } from './protocol/types.js';
 import { PatchesWebSocket } from './websocket/PatchesWebSocket.js';
 import type { WebSocketOptions } from './websocket/WebSocketTransport.js';
 import { onlineState } from './websocket/onlineState.js';
 
-export interface PatchesSyncOptions {
-  /** WebSocket connection options */
-  wsOptions?: WebSocketOptions;
-  /**
-   * Maximum size in bytes for a single payload (network message).
-   * Changes exceeding this will be automatically split.
-   */
-  maxPayloadBytes?: number;
-}
-
 export interface PatchesSyncState {
   online: boolean;
   connected: boolean;
-  syncing: 'initial' | 'updating' | null | Error;
+  syncing: SyncingState;
 }
 
 /**
@@ -31,96 +25,85 @@ export class PatchesSync {
   private ws: PatchesWebSocket;
   private patches: Patches;
   private store: PatchesStore;
-  private options: PatchesSyncOptions;
+  private maxPayloadBytes?: number;
   private trackedDocs: Set<string>;
-  private isFlushing = new Set<string>();
-  private globalSyncTimeout: ReturnType<typeof setTimeout> | null = null;
   private _state: PatchesSyncState = { online: false, connected: false, syncing: null };
 
-  // Signals
+  /**
+   * Signal emitted when the sync state changes.
+   */
   readonly onStateChange = signal<(state: PatchesSyncState) => void>();
+  /**
+   * Signal emitted when an error occurs.
+   */
   readonly onError = signal<(error: Error, context?: { docId?: string }) => void>();
 
-  constructor(url: string, patches: Patches, options: PatchesSyncOptions = {}) {
+  constructor(patches: Patches, url: string, wsOptions?: WebSocketOptions) {
     this.patches = patches;
     this.store = patches.store;
-    this.options = options;
-    this.ws = new PatchesWebSocket(url, options.wsOptions);
+    this.maxPayloadBytes = patches.docOptions?.maxPayloadBytes;
+    this.ws = new PatchesWebSocket(url, wsOptions);
     this._state.online = onlineState.isOnline;
     this.trackedDocs = new Set(patches.trackedDocs);
 
-    // Set maxPayloadBytes on Patches docOptions if provided
-    if (options.maxPayloadBytes) {
-      patches.updateDocOptions({ maxPayloadBytes: options.maxPayloadBytes });
-    }
-
     // --- Event Listeners ---
-    onlineState.onOnlineChange(this._handleOnlineChange);
-    this.ws.onStateChange(this._handleConnectionChange);
-    this.ws.onChangesCommitted(({ docId, changes }) => {
-      // Persist first, then notify Patches instance to update PatchesDoc
-      this.store
-        .saveCommittedChanges(docId, changes)
-        .then(() => this.patches.applyServerChanges(docId, changes))
-        .catch((err: Error) => this.onError.emit(err, { docId }));
-    });
-
-    // Forward errors to Patches error signal
-    this.onError((err, context) => {
-      patches.onError.emit(err, context);
-    });
+    onlineState.onOnlineChange(online => this.updateState({ online }));
+    this.ws.onStateChange(this._handleConnectionChange.bind(this));
+    this.ws.onChangesCommitted(this._receiveCommittedChanges.bind(this));
 
     // Listen to Patches for tracking changes
-    patches.onTrackDocs(this._handleDocsTracked);
-    patches.onUntrackDocs(this._handleDocsUntracked);
-    patches.onDeleteDoc(this._handleDocDeleted);
+    patches.onTrackDocs(this._handleDocsTracked.bind(this));
+    patches.onUntrackDocs(this._handleDocsUntracked.bind(this));
+    patches.onDeleteDoc(this._handleDocDeleted.bind(this));
   }
 
+  /**
+   * Gets the current sync state.
+   */
   get state(): PatchesSyncState {
     return this._state;
   }
 
-  private setState(update: Partial<PatchesSyncState>) {
+  /**
+   * Updates the sync state.
+   * @param update - The partial state to update.
+   */
+  protected updateState(update: Partial<PatchesSyncState>) {
     const newState = { ...this._state, ...update };
-    if (JSON.stringify(this._state) !== JSON.stringify(newState)) {
+    if (!isEqual(this._state, newState)) {
       this._state = newState;
       this.onStateChange.emit(this._state);
     }
   }
 
-  // --- Connection & Lifecycle ---
+  /**
+   * Connects to the WebSocket server and starts syncing if online. If not online, it will wait for online state.
+   */
   async connect(): Promise<void> {
     try {
       await this.ws.connect();
-      // _handleConnectionChange handles state update and sync trigger
     } catch (err) {
       console.error('PatchesSync connection failed:', err);
-      this.setState({ connected: false, syncing: err instanceof Error ? err : new Error(String(err)) });
+      this.updateState({ connected: false, syncing: err instanceof Error ? err : new Error(String(err)) });
       this.onError.emit(err as Error);
       throw err;
     }
   }
 
+  /**
+   * Disconnects from the WebSocket server and stops syncing.
+   */
   disconnect(): void {
-    if (this.globalSyncTimeout) clearTimeout(this.globalSyncTimeout);
     this.ws.disconnect();
-    this.setState({ connected: false, syncing: null });
+    this.updateState({ connected: false, syncing: null });
   }
 
-  // --- Doc Tracking & Subscription (Now handled via signals) ---
-
-  // --- Syncing Logic ---
-  private scheduleGlobalSync() {
-    if (this.globalSyncTimeout) clearTimeout(this.globalSyncTimeout);
-    this.globalSyncTimeout = setTimeout(() => {
-      this.globalSyncTimeout = null;
-      void this.syncAllKnownDocs();
-    }, 300);
-  }
-
-  async syncAllKnownDocs(): Promise<void> {
+  /**
+   * Syncs all known docs when initially connected.
+   */
+  protected async syncAllKnownDocs(): Promise<void> {
     if (!this.state.connected) return;
-    this.setState({ syncing: 'updating' });
+    this.updateState({ syncing: 'updating' });
 
     try {
       const tracked = await this.store.listDocs(true); // Include deleted docs
@@ -163,18 +146,26 @@ export class PatchesSync {
       // Wait for all sync and delete operations
       await Promise.all([...activeSyncPromises, ...deletePromises]);
 
-      this.setState({ syncing: null });
+      this.updateState({ syncing: null });
     } catch (error) {
       console.error('Error during global sync:', error);
-      this.setState({ syncing: error instanceof Error ? error : new Error(String(error)) });
+      this.updateState({ syncing: error instanceof Error ? error : new Error(String(error)) });
       this.onError.emit(error as Error);
     }
   }
 
-  async syncDoc(docId: string): Promise<void> {
-    if (this.isFlushing.has(docId)) return; // Already flushing
+  /**
+   * Syncs a single document.
+   * @param docId The ID of the document to sync.
+   */
+  @blockable
+  protected async syncDoc(docId: string): Promise<void> {
     if (!this.state.connected) return;
 
+    const doc = this.patches.getOpenDoc(docId);
+    if (doc) {
+      doc.updateSyncing('updating');
+    }
     try {
       const pending = await this.store.getPendingChanges(docId);
       if (pending.length > 0) {
@@ -185,50 +176,46 @@ export class PatchesSync {
         if (committedRev) {
           const serverChanges = await this.ws.getChangesSince(docId, committedRev);
           if (serverChanges.length > 0) {
-            await this.store.saveCommittedChanges(docId, serverChanges);
-            this.patches.applyServerChanges(docId, serverChanges);
+            // Apply server changes with proper rebasing
+            await this._applyServerChangesToDoc(docId, serverChanges);
           }
         } else {
           const snapshot = await this.ws.getDoc(docId);
           await this.store.saveDoc(docId, snapshot);
         }
       }
+      if (doc) {
+        doc.updateSyncing(null);
+      }
     } catch (err) {
       console.error(`Error syncing doc ${docId}:`, err);
       this.onError.emit(err as Error, { docId });
-      // Don't let one doc failure stop others in global sync
+      if (doc) {
+        doc.updateSyncing(err instanceof Error ? err : new Error(String(err)));
+      }
     }
   }
 
-  async flushDoc(docId: string): Promise<void> {
+  /**
+   * Flushes a document to the server.
+   * @param docId The ID of the document to flush.
+   */
+  protected async flushDoc(docId: string): Promise<void> {
     if (!this.trackedDocs.has(docId)) {
       throw new Error(`Document ${docId} is not tracked`);
-    }
-    if (this.isFlushing.has(docId)) {
-      throw new Error(`Document ${docId} is already being flushed`);
     }
     if (!this.state.connected) {
       throw new Error('Not connected to server');
     }
 
-    this.isFlushing.add(docId);
-    if (this.state.syncing !== 'updating') {
-      this.setState({ syncing: 'updating' });
-    }
-
     try {
-      // Get changes from Patches for this doc
+      // Get changes from store or memory
       let pending = await this.store.getPendingChanges(docId);
       if (!pending.length) {
-        // Try to get from memory if available
-        pending = this.patches.getDocChanges(docId);
-        if (!pending.length) {
-          this.isFlushing.delete(docId);
-          return; // Nothing to flush
-        }
+        return; // Nothing to flush
       }
 
-      const batches = breakIntoBatches(pending, this.options.maxPayloadBytes);
+      const batches = breakIntoBatches(pending, this.maxPayloadBytes);
 
       for (const batch of batches) {
         if (!this.state.connected) {
@@ -236,35 +223,85 @@ export class PatchesSync {
         }
         const range: [number, number] = [batch[0].rev, batch[batch.length - 1].rev];
         const committed = await this.ws.commitChanges(docId, batch);
-        // Persist committed + remove pending in store
-        await this.store.saveCommittedChanges(docId, committed, range);
-        // Notify Patches to update PatchesDoc
-        this.patches.applyServerChanges(docId, committed);
+
+        // Apply the committed changes using the sync algorithm (already saved to store)
+        await this._applyServerChangesToDoc(docId, committed, range);
+
         // Fetch remaining pending for next batch or check completion
         pending = await this.store.getPendingChanges(docId);
       }
     } catch (err) {
       console.error(`Flush failed for doc ${docId}:`, err);
       this.onError.emit(err as Error, { docId });
-      // Let Patches know about the failure
-      this.patches.handleSendFailure(docId);
-      // Don't clear flushing flag, let next sync attempt retry
       throw err; // Re-throw so caller (like syncAll) knows it failed
-    } finally {
-      this.isFlushing.delete(docId);
-      // Update global sync state if nothing else is flushing
-      if (this.isFlushing.size === 0 && this.state.syncing === 'updating') {
-        this.setState({ syncing: null });
-      }
     }
   }
 
-  // --- Server Operations ---
+  /**
+   * Receives committed changes from the server and applies them to the document. This is a blockable function, so it
+   * is separate from applyServerChangesToDoc, which is called by other blockable functions. Ensuring this is blockable
+   * ensures that while a doc is sending changes to the server, it isn't receiving changes from the server which could
+   * cause a race condition.
+   */
+  @blockable
+  protected async _receiveCommittedChanges(docId: string, serverChanges: Change[]): Promise<void> {
+    try {
+      await this._applyServerChangesToDoc(docId, serverChanges);
+    } catch (err) {
+      this.onError.emit(err as Error, { docId });
+    }
+  }
+
+  /**
+   * Applies server changes to a document using the centralized sync algorithm.
+   * This ensures consistent OT behavior regardless of whether the doc is open in memory.
+   */
+  protected async _applyServerChangesToDoc(
+    docId: string,
+    serverChanges: Change[],
+    sentPendingRange?: [number, number]
+  ): Promise<void> {
+    // 1. Get current document snapshot from store
+    const currentSnapshot = await this.store.getDoc(docId);
+    if (!currentSnapshot) {
+      console.warn(`Cannot apply server changes to non-existent doc: ${docId}`);
+      return;
+    }
+    const doc = this.patches.getOpenDoc(docId);
+    if (doc) {
+      // Ensure we have all the changes, stored and in-memory (newly created but not yet persisted)
+      const inMemoryPendingChanges = doc?.getPendingChanges();
+      const latestRev = currentSnapshot.changes[currentSnapshot.changes.length - 1]?.rev || currentSnapshot.rev;
+      const newChanges = inMemoryPendingChanges.filter(change => change.rev > latestRev);
+      currentSnapshot.changes.push(...newChanges);
+    }
+
+    // 2. Use the pure algorithm to calculate the new state
+    const { state, rev, changes: rebasedPendingChanges } = applyCommittedChanges(currentSnapshot, serverChanges);
+
+    // 3. If the doc is open in memory, update it with the new state
+    if (doc) {
+      if (doc.committedRev === serverChanges[0].rev - 1) {
+        // We can update the doc's snapshot
+        doc.applyCommittedChanges(serverChanges, rebasedPendingChanges);
+      } else {
+        // We have to do a full state update
+        doc.import({ state, rev, changes: rebasedPendingChanges });
+      }
+    }
+
+    // 4. Save changes to store (if not already saved)
+    await Promise.all([
+      this.store.saveCommittedChanges(docId, serverChanges, sentPendingRange),
+      this.store.replacePendingChanges(docId, rebasedPendingChanges),
+    ]);
+  }
+
   /**
    * Initiates the deletion process for a document both locally and on the server.
    * This now delegates the local tombstone marking to Patches.
    */
-  async _handleDocDeleted(docId: string): Promise<void> {
+  protected async _handleDocDeleted(docId: string): Promise<void> {
     // Attempt server delete if online
     if (this.state.connected) {
       try {
@@ -280,15 +317,7 @@ export class PatchesSync {
     }
   }
 
-  // --- Event Handlers ---
-  private _handleOnlineChange = (isOnline: boolean) => {
-    this.setState({ online: isOnline });
-    if (isOnline && this.state.connected) {
-      this.scheduleGlobalSync();
-    }
-  };
-
-  private _handleConnectionChange = (connectionState: ConnectionState) => {
+  protected _handleConnectionChange(connectionState: ConnectionState) {
     const isConnected = connectionState === 'connected';
     const isConnecting = connectionState === 'connecting';
 
@@ -300,15 +329,15 @@ export class PatchesSync {
         ? this._state.syncing // Preserve during connecting phase too
         : null; // Reset
 
-    this.setState({ connected: isConnected, syncing: newSyncingState });
+    this.updateState({ connected: isConnected, syncing: newSyncingState });
 
     if (isConnected) {
       // Sync everything on connect/reconnect
       void this.syncAllKnownDocs();
     }
-  };
+  }
 
-  private _handleDocsTracked = async (docIds: string[]) => {
+  protected async _handleDocsTracked(docIds: string[]) {
     const newIds = docIds.filter(id => !this.trackedDocs.has(id));
     if (!newIds.length) return;
 
@@ -322,12 +351,11 @@ export class PatchesSync {
       } catch (err) {
         console.warn(`Failed to subscribe/sync newly tracked docs: ${newIds.join(', ')}`, err);
         this.onError.emit(err as Error);
-        // State remains tracked locally, will retry on next sync
       }
     }
-  };
+  }
 
-  private _handleDocsUntracked = async (docIds: string[]) => {
+  protected async _handleDocsUntracked(docIds: string[]) {
     const existingIds = docIds.filter(id => this.trackedDocs.has(id));
     if (!existingIds.length) return;
 
@@ -337,8 +365,7 @@ export class PatchesSync {
         await this.ws.unsubscribe(existingIds);
       } catch (err) {
         console.warn(`Failed to unsubscribe docs: ${existingIds.join(', ')}`, err);
-        // Continue with local untrack
       }
     }
-  };
+  }
 }

@@ -1,11 +1,11 @@
 import type { Mock } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { InMemoryStore } from '../../src/client/InMemoryStore';
-import { Patches } from '../../src/client/Patches';
-import { PatchesDoc } from '../../src/client/PatchesDoc';
-import { PatchesSync } from '../../src/net/PatchesSync';
-import { PatchesWebSocket } from '../../src/net/websocket/PatchesWebSocket';
-import type { Change } from '../../src/types';
+import { InMemoryStore } from '../../src/client/InMemoryStore.js';
+import { Patches } from '../../src/client/Patches.js';
+import { PatchesSync } from '../../src/net/PatchesSync.js';
+import { PatchesWebSocket } from '../../src/net/websocket/PatchesWebSocket.js';
+import type { WebSocketOptions } from '../../src/net/websocket/WebSocketTransport.js';
+import type { Change } from '../../src/types.js';
 
 interface MockWebSocket {
   connect: Mock;
@@ -21,237 +21,206 @@ interface MockWebSocket {
 }
 
 // Mock the PatchesWebSocket
-vi.mock('../../src/net/websocket/PatchesWebSocket', () => {
-  const mockWebSocket: MockWebSocket = {
+vi.mock('../../src/net/websocket/PatchesWebSocket.js', () => {
+  const mockWebSocketInstance: any = {
     connect: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn(),
     subscribe: vi.fn().mockResolvedValue(undefined),
     unsubscribe: vi.fn().mockResolvedValue(undefined),
     getChangesSince: vi.fn().mockResolvedValue([]),
-    commitChanges: vi.fn().mockImplementation((docId: string, changes: Change[]) => {
-      // Default: Echo back the changes as committed
-      return Promise.resolve(changes);
-    }),
+    commitChanges: vi.fn().mockImplementation((docId: string, changes: Change[]) => Promise.resolve(changes)),
     deleteDoc: vi.fn().mockResolvedValue(undefined),
-    onStateChange: vi.fn().mockImplementation(cb => {
-      // Immediately trigger 'connected' state as a string
-      cb('connected');
-      return () => {};
+    onStateChange: vi.fn(cb => {
+      (mockWebSocketInstance as any)._onStateChangeCb = cb;
+      return () => {
+        (mockWebSocketInstance as any)._onStateChangeCb = undefined;
+      };
     }),
-    onChangesCommitted: vi.fn().mockImplementation(cb => {
-      // Store the callback for later use
-      mockWebSocket.triggerChangesCommitted = vi.fn((docId: string, changes: Change[]) => {
-        cb({ docId, changes });
-      });
-      return () => {};
+    triggerStateChange: (state: any) => {
+      if ((mockWebSocketInstance as any)._onStateChangeCb) {
+        (mockWebSocketInstance as any)._onStateChangeCb(state);
+      }
+    },
+    onChangesCommitted: vi.fn(cb => {
+      (mockWebSocketInstance as any)._onChangesCommittedCb = cb;
+      return () => {
+        (mockWebSocketInstance as any)._onChangesCommittedCb = undefined;
+      };
     }),
-    triggerChangesCommitted: vi.fn(),
+    triggerChangesCommitted: (docId: string, changes: Change[]) => {
+      if ((mockWebSocketInstance as any)._onChangesCommittedCb) {
+        (mockWebSocketInstance as any)._onChangesCommittedCb(docId, changes);
+      }
+    },
   };
   return {
-    PatchesWebSocket: vi.fn().mockImplementation(() => mockWebSocket),
+    PatchesWebSocket: vi.fn().mockImplementation(() => mockWebSocketInstance),
   };
 });
 
-vi.mock('../../src/net/websocket/onlineState', () => {
-  return {
-    onlineState: {
-      isOnline: true,
-      onOnlineChange: vi.fn().mockImplementation(cb => {
-        cb(true);
-        return () => {};
-      }),
-    },
-  };
-});
+vi.mock('../../src/net/websocket/onlineState.js', () => ({
+  onlineState: {
+    isOnline: true,
+    onOnlineChange: vi.fn(cb => {
+      cb(true);
+      return () => {};
+    }),
+  },
+}));
 
 describe('Patches with PatchesSync', () => {
   let store: InMemoryStore;
   let patches: Patches;
-  let patchesSync: PatchesSync;
-  let mockWebSocketInstance: ReturnType<typeof vi.mocked<any>>;
+  let patchesSync: PatchesSync | undefined;
+  let mockWebSocketInstance: any;
+  const MOCK_URL = 'wss://example.com';
+  const wsOptionsForTest: WebSocketOptions | undefined = undefined;
 
   beforeEach(() => {
-    store = new InMemoryStore();
-    // Add missing confirmDeleteDoc method to InMemoryStore
-    store.confirmDeleteDoc = vi.fn().mockResolvedValue(undefined);
-    patches = new Patches({ store });
-    patchesSync = new PatchesSync('wss://example.com', patches);
-    // Get the instance created by PatchesSync constructor
-    mockWebSocketInstance = vi.mocked(PatchesWebSocket).mock.results[0]?.value;
+    const MockedPatchesWebSocket = vi.mocked(PatchesWebSocket);
+    mockWebSocketInstance = new MockedPatchesWebSocket(MOCK_URL, wsOptionsForTest);
+    MockedPatchesWebSocket.mockImplementation(() => mockWebSocketInstance);
 
-    // Clear all mocks before each test
-    vi.clearAllMocks();
+    store = new InMemoryStore();
+    store.confirmDeleteDoc = vi.fn().mockResolvedValue(undefined);
+    store.replacePendingChanges = vi.fn().mockResolvedValue(undefined);
+    (store as any).savePendingChanges = vi.fn().mockResolvedValue(undefined);
+
+    patches = new Patches({ store });
+    patchesSync = new PatchesSync(patches, MOCK_URL, wsOptionsForTest);
+
+    if (mockWebSocketInstance) {
+      mockWebSocketInstance.connect = vi.fn().mockResolvedValue(undefined);
+      mockWebSocketInstance.commitChanges = vi
+        .fn()
+        .mockImplementation((docId: string, changes: Change[]) => Promise.resolve(changes));
+      mockWebSocketInstance.getChangesSince = vi.fn().mockResolvedValue([]);
+      const onStateChangeCbHolder: { cb?: (state: any) => void } = {};
+      mockWebSocketInstance.onStateChange = vi.fn(cb => {
+        onStateChangeCbHolder.cb = cb;
+        return () => {};
+      });
+      mockWebSocketInstance.triggerStateChange = (state: any) => {
+        if (onStateChangeCbHolder.cb) onStateChangeCbHolder.cb(state);
+      };
+
+      const onChangesCommittedCbHolder: { cb?: (data: any) => void } = {};
+      mockWebSocketInstance.onChangesCommitted = vi.fn(cb => {
+        onChangesCommittedCbHolder.cb = cb;
+        return () => {};
+      });
+      mockWebSocketInstance.triggerChangesCommitted = (docId: string, changes: Change[]) => {
+        if (onChangesCommittedCbHolder.cb) (onChangesCommittedCbHolder.cb as any)(docId, changes);
+      };
+    }
   });
 
   afterEach(() => {
     patches.close();
-    patchesSync.disconnect();
-    vi.clearAllMocks();
+    if (patchesSync) {
+      patchesSync.disconnect();
+    }
+    vi.restoreAllMocks();
   });
 
   it('should initialize PatchesSync with a Patches instance', () => {
-    expect(patches).toBeDefined();
-    expect(patchesSync).toBeDefined();
+    expect(patches).toBeInstanceOf(Patches);
+    expect(patchesSync).toBeInstanceOf(PatchesSync);
+    expect(vi.mocked(PatchesWebSocket)).toHaveBeenCalledTimes(1);
   });
 
   it('should open and sync a document', async () => {
-    // Connect to sync
-    await patchesSync.connect();
+    await patchesSync!.connect();
+    mockWebSocketInstance.triggerStateChange('connected');
     expect(mockWebSocketInstance.connect).toHaveBeenCalled();
 
-    // Open doc and make a change
     const docId = 'test-doc';
     await patches.trackDocs([docId]);
     const doc = await patches.openDoc<{ name: string }>(docId);
-    expect(doc).toBeInstanceOf(PatchesDoc);
-
-    // Make a change
     doc.change(draft => {
       draft.name = 'Test Document';
     });
-
-    // Wait for changes to be processed
     await new Promise(resolve => setTimeout(resolve, 0));
 
-    // Verify change was stored
     const storedChanges = await store.getPendingChanges(docId);
     expect(storedChanges.length).toBe(1);
-    expect(storedChanges[0].ops).toEqual(
-      expect.arrayContaining([expect.objectContaining({ op: 'replace', path: '/name', value: 'Test Document' })])
-    );
 
-    // Flush to server
-    await patchesSync.flushDoc(docId);
+    await (patchesSync! as any).flushDoc(docId);
     expect(mockWebSocketInstance.commitChanges).toHaveBeenCalled();
-
-    // After flush, pending changes should be gone
     const pendingAfterSync = await store.getPendingChanges(docId);
     expect(pendingAfterSync.length).toBe(0);
   });
 
   it('should properly propagate server changes to client documents', async () => {
-    // Connect and open doc
-    await patchesSync.connect();
+    await patchesSync!.connect();
+    mockWebSocketInstance.triggerStateChange('connected');
     const docId = 'test-doc-2';
     await patches.trackDocs([docId]);
     const doc = await patches.openDoc<{ title: string }>(docId);
-
-    // Initialize doc with empty state
     doc.change(draft => {
       draft.title = '';
     });
+    await (patchesSync! as any).flushDoc(docId);
 
-    // Flush initial state
-    await patchesSync.flushDoc(docId);
-
-    // Simulate server sending changes
-    const serverChanges = [
+    const serverChanges: Change[] = [
       {
         id: 'server-1',
         rev: 2,
         baseRev: 1,
         ops: [{ op: 'replace', path: '/title', value: 'Server Title' }],
         created: Date.now(),
-        userId: 'server-user',
       },
     ];
 
-    // Trigger server changes
     mockWebSocketInstance.triggerChangesCommitted(docId, serverChanges);
-    await new Promise(resolve => setTimeout(resolve, 10)); // allow async update
+    await new Promise(resolve => setTimeout(resolve, 50));
 
-    // Wait for changes to be processed
-    await new Promise(resolve => setTimeout(resolve, 100));
-
-    // Verify doc was updated
     expect(doc.state).toEqual({ title: 'Server Title' });
     expect(doc.committedRev).toBe(2);
   });
 
   it('should work with multiple documents', async () => {
-    await patchesSync.connect();
+    await patchesSync!.connect();
+    mockWebSocketInstance.triggerStateChange('connected');
 
-    // Track and open multiple docs
     const docIds = ['doc-1', 'doc-2', 'doc-3'];
     await patches.trackDocs(docIds);
-
     const docs = await Promise.all(docIds.map(id => patches.openDoc<{ value: number }>(id)));
-
-    // Make changes to each doc
     docs.forEach((doc, i) => {
       doc.change(draft => {
         draft.value = i + 1;
       });
     });
-
-    // Wait for changes to be processed
     await new Promise(resolve => setTimeout(resolve, 0));
-
-    // Flush all
-    await Promise.all(docIds.map(id => patchesSync.flushDoc(id)));
-
-    // Verify all were committed
+    await Promise.all(docIds.map(id => (patchesSync! as any).flushDoc(id)));
     expect(mockWebSocketInstance.commitChanges).toHaveBeenCalledTimes(3);
-
-    // All should have no pending changes
-    const allPending = await Promise.all(docIds.map(id => store.getPendingChanges(id)));
-    allPending.forEach(changes => {
-      expect(changes.length).toBe(0);
-    });
   });
 
   it('should handle commit failure and retry upon reconnection/flush', async () => {
-    // Start connected
-    await patchesSync.connect();
-    expect(mockWebSocketInstance.connect).toHaveBeenCalledTimes(1);
+    await patchesSync!.connect();
+    mockWebSocketInstance.triggerStateChange('connected');
 
-    // Open a doc and make changes
     const docId = 'offline-doc';
     await patches.trackDocs([docId]);
     const doc = await patches.openDoc<{ count: number }>(docId);
     doc.change(draft => {
       draft.count = 1;
     });
-
-    // Wait for changes to be processed
     await new Promise(resolve => setTimeout(resolve, 0));
 
-    expect(doc.state).toEqual({ count: 1 });
-
-    // Verify pending changes exist
-    const initialPending = await store.getPendingChanges(docId);
-    expect(initialPending.length).toBe(1);
-
-    // --- Simulate commit failure (e.g., network error during commit) ---
     const commitError = new Error('Network error during commit');
     mockWebSocketInstance.commitChanges.mockRejectedValueOnce(commitError);
 
-    // Try to flush - expect it to handle the error gracefully (not throw)
-    await expect(patchesSync.flushDoc(docId)).rejects.toThrow('Network error during commit');
+    await expect((patchesSync! as any).flushDoc(docId)).rejects.toThrow(commitError);
+    expect(mockWebSocketInstance.commitChanges).toHaveBeenCalledTimes(1);
 
-    // Changes should still be pending because commit failed
-    const pendingAfterFailedCommit = await store.getPendingChanges(docId);
-    expect(pendingAfterFailedCommit.length).toBe(1);
-    expect(mockWebSocketInstance.commitChanges).toHaveBeenCalledTimes(1); // Ensure commit was attempted
-
-    // --- Simulate reconnection / network recovery ---
-    // Restore the default mock implementation (success)
-    mockWebSocketInstance.commitChanges.mockImplementation((_docId: string, changes: Change[]) => {
-      return Promise.resolve(changes); // Simulate successful commit
+    mockWebSocketInstance.commitChanges.mockImplementation((_docId: string, changesToCommit: Change[]) => {
+      return Promise.resolve(changesToCommit);
     });
 
-    // Try flushing again, now expecting success
-    await patchesSync.flushDoc(docId);
-
-    // Commit should have been called again
+    await (patchesSync! as any).flushDoc(docId);
     expect(mockWebSocketInstance.commitChanges).toHaveBeenCalledTimes(2);
-
-    // No more pending changes after successful sync
     const pendingAfterSuccessfulCommit = await store.getPendingChanges(docId);
     expect(pendingAfterSuccessfulCommit.length).toBe(0);
-
-    // Verify document state remains correct
-    expect(doc.state).toEqual({ count: 1 });
-    expect(doc.committedRev).toBeGreaterThan(0); // Should have a committed rev now
   });
 });

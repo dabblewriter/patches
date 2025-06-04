@@ -98,12 +98,9 @@ describe('IndexedDBStore', () => {
         created: Date.now(),
         metadata: {},
       };
-
-      await store.savePendingChange(docId, change);
+      await store.savePendingChanges(docId, [change]);
       const changes = await store.getPendingChanges(docId);
-
       expect(changes).toHaveLength(1);
-      // Remove docId from the returned change for comparison
       const { docId: _, ...returnedChange } = changes[0] as any;
       expect(returnedChange).toEqual(change);
     });
@@ -118,11 +115,9 @@ describe('IndexedDBStore', () => {
         created: Date.now(),
         metadata: {},
       };
-
-      await store.savePendingChange(docId, change);
+      await store.savePendingChanges(docId, [change]);
       await store.saveCommittedChanges(docId, [change], [1, 1]);
       const pending = await store.getPendingChanges(docId);
-
       expect(pending).toHaveLength(0);
     });
 
@@ -146,11 +141,9 @@ describe('IndexedDBStore', () => {
           metadata: {},
         },
       ];
-
-      await store.savePendingChange(docId, changes[0]);
-      await store.savePendingChange(docId, changes[1]);
+      await store.savePendingChanges(docId, [changes[0]]);
+      await store.savePendingChanges(docId, [changes[1]]);
       await store.saveCommittedChanges(docId, changes, [1, 2]);
-
       const pending = await store.getPendingChanges(docId);
       expect(pending).toHaveLength(0);
     });
@@ -197,56 +190,22 @@ describe('IndexedDBStore', () => {
     it('should return correct revision numbers', async () => {
       const docId = 'test-doc';
       const changes: Change[] = [
-        {
-          id: 'change-1',
-          ops: [{ op: 'add', path: '/content', value: 'content 1' } as JSONPatchOp],
-          rev: 1,
-          baseRev: 0,
-          created: Date.now(),
-          metadata: {},
-        },
-        {
-          id: 'change-2',
-          ops: [{ op: 'replace', path: '/content', value: 'content 2' } as JSONPatchOp],
-          rev: 2,
-          baseRev: 1,
-          created: Date.now(),
-          metadata: {},
-        },
+        { id: 'change-1', ops: [], rev: 1, baseRev: 0, created: Date.now() },
+        { id: 'change-2', ops: [], rev: 2, baseRev: 1, created: Date.now() },
       ];
-
       await store.saveCommittedChanges(docId, changes);
       const [committedRev, pendingRev] = await store.getLastRevs(docId);
-
       expect(committedRev).toBe(2);
       expect(pendingRev).toBe(2);
     });
 
     it('should track pending revisions separately', async () => {
       const docId = 'test-doc';
-      const committedChange: Change = {
-        id: 'change-1',
-        ops: [{ op: 'add', path: '/content', value: 'content 1' } as JSONPatchOp],
-        rev: 1,
-        baseRev: 0,
-        created: Date.now(),
-        metadata: {},
-      };
-
-      const pendingChange: Change = {
-        id: 'change-2',
-        ops: [{ op: 'replace', path: '/content', value: 'content 2' } as JSONPatchOp],
-        rev: 2,
-        baseRev: 1,
-        created: Date.now(),
-        metadata: {},
-      };
-
+      const committedChange: Change = { id: 'c1', ops: [], rev: 1, baseRev: 0, created: Date.now() };
+      const pendingChange: Change = { id: 'p2', ops: [], rev: 2, baseRev: 1, created: Date.now() };
       await store.saveCommittedChanges(docId, [committedChange]);
-      await store.savePendingChange(docId, pendingChange);
-
+      await store.savePendingChanges(docId, [pendingChange]);
       const [committedRev, pendingRev] = await store.getLastRevs(docId);
-
       expect(committedRev).toBe(1);
       expect(pendingRev).toBe(2);
     });

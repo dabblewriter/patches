@@ -37,6 +37,15 @@ export interface PatchesSnapshot<T = any> extends PatchesState<T> {
   changes: Change[];
 }
 
+/**
+ * Represents the syncing state of a document.
+ * @property initial - The document is not syncing.
+ * @property updating - The document is syncing.
+ * @property null - The document is not syncing.
+ * @property Error - The document is syncing with an error.
+ */
+export type SyncingState = 'initial' | 'updating' | null | Error;
+
 /** Status options for a branch */
 export type BranchStatus = 'open' | 'closed' | 'merged' | 'archived' | 'abandoned';
 
@@ -129,11 +138,4 @@ export interface ListVersionsOptions {
   origin?: 'main' | 'offline' | 'branch';
   /** Filter by the group ID (branch ID or offline batch ID). */
   groupId?: string;
-}
-
-export interface Deferred<T = void> {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-  reject: (reason?: any) => void;
-  status: 'pending' | 'fulfilled' | 'rejected';
 }

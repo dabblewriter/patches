@@ -1,7 +1,7 @@
+import { applyChanges } from '../algorithms/shared/applyChanges.js';
 import { signal } from '../event-signal.js';
 import type { PatchesAPI } from '../net/protocol/types.js';
 import type { Change, EditableVersionMetadata, ListVersionsOptions, VersionMetadata } from '../types.js';
-import { applyChanges } from '../utils.js';
 
 /**
  * LRU cache for version state+changes objects

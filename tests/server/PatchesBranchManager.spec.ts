@@ -16,6 +16,7 @@ import type {
 // Mock crypto-id
 vi.mock('crypto-id', () => ({
   createId: vi.fn(() => `mock-id-${Math.random().toString(36).substring(7)}`),
+  createSortableId: vi.fn(() => `sortable-${Math.random().toString(36).substring(7)}`),
 }));
 
 /**

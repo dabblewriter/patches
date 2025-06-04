@@ -1,6 +1,6 @@
 import { type Unsubscriber, signal } from '../event-signal.js';
 import type { Change } from '../types.js';
-import { oneResult } from '../utils/concurrency.js';
+import { singleInvocation } from '../utils/concurrency.js';
 import { PatchesDoc, type PatchesDocOptions } from './PatchesDoc.js';
 import type { PatchesStore } from './PatchesStore.js';
 
@@ -39,6 +39,7 @@ export class Patches {
   readonly onTrackDocs = signal<(docIds: string[]) => void>();
   readonly onUntrackDocs = signal<(docIds: string[]) => void>();
   readonly onDeleteDoc = signal<(docId: string) => void>();
+  readonly onChange = signal<(docId: string, changes: Change[]) => void>();
 
   constructor(opts: PatchesOptions) {
     this.options = opts;
@@ -92,7 +93,7 @@ export class Patches {
    * @param opts - Optional metadata to merge with the doc's metadata.
    * @returns The opened PatchesDoc instance.
    */
-  @oneResult(true) // ensure a second call to openDoc with the same docId returns the same promise while opening
+  @singleInvocation(true) // ensure a second call to openDoc with the same docId returns the same promise while opening
   async openDoc<T extends object>(
     docId: string,
     opts: { metadata?: Record<string, any> } = {}
@@ -114,7 +115,7 @@ export class Patches {
     }
 
     // Set up local listener -> store
-    const unsubscribe = this._setupLocalDocListeners(docId, doc);
+    const unsubscribe = doc.onChange(changes => this._savePendingChanges(docId, changes));
     this.docs.set(docId, { doc, unsubscribe });
 
     return doc;
@@ -146,62 +147,23 @@ export class Patches {
     if (this.docs.has(docId)) {
       await this.closeDoc(docId);
     }
-    // Unsubscribe from server if tracked
+    // Unsubscribe from server if tracked (deletes the doc from the store before the next step adds a tombstone)
     if (this.trackedDocs.has(docId)) {
       await this.untrackDocs([docId]);
     }
-    // Mark document as deleted in store
+    // Mark document as deleted in store (adds a tombstone until sync commits it)
     await this.store.deleteDoc(docId);
     this.onDeleteDoc.emit(docId);
   }
 
   /**
-   * Gets all tracked document IDs that are currently open in memory.
-   * Used by PatchesSync to determine which docs need syncing.
-   * @returns Array of open document IDs.
+   * Gets an open document instance by ID, if it exists.
+   * Used by PatchesSync for applying server changes to open docs.
+   * @param docId - The document ID to get.
+   * @returns The PatchesDoc instance or undefined if not open.
    */
-  getOpenDocIds(): string[] {
-    return Array.from(this.docs.keys());
-  }
-
-  /**
-   * Retrieves local changes for a document that should be sent to the server.
-   * Used by PatchesSync during synchronization.
-   * @param docId - The document ID to get changes for.
-   * @returns Array of Change objects to send to the server.
-   */
-  getDocChanges(docId: string): Change[] {
-    const doc = this.docs.get(docId)?.doc;
-    if (!doc) return [];
-    try {
-      return doc.getUpdatesForServer();
-    } catch (err) {
-      console.error(`Error getting updates for doc ${docId}:`, err);
-      this.onError.emit(err as Error, { docId });
-      return [];
-    }
-  }
-
-  /**
-   * Handles a failure to send changes to the server for a given document.
-   * Used by PatchesSync to requeue changes after failures.
-   * @param docId - The document ID for which sending failed.
-   */
-  handleSendFailure(docId: string): void {
-    const doc = this.docs.get(docId)?.doc;
-    if (doc) {
-      doc.handleSendFailure();
-    }
-  }
-
-  /**
-   * Applies server-confirmed changes to a document.
-   * Used by PatchesSync to update documents with server changes.
-   * @param docId - The document ID to apply changes to.
-   * @param changes - Array of Change objects from the server.
-   */
-  async applyServerChanges(docId: string, changes: Change[]): Promise<void> {
-    await this._handleServerCommit(docId, changes);
+  getOpenDoc<T extends object>(docId: string): PatchesDoc<T> | undefined {
+    return this.docs.get(docId)?.doc as PatchesDoc<T> | undefined;
   }
 
   /**
@@ -215,75 +177,26 @@ export class Patches {
 
     // Close store connection
     this.store.close();
+    this.onChange.clear();
+    this.onDeleteDoc.clear();
+    this.onUntrackDocs.clear();
+    this.onTrackDocs.clear();
+    this.onServerCommit.clear();
+    this.onError.clear();
   }
 
   /**
-   * Updates document options that will be applied to all new documents
-   * @param options - Options to merge with current docOptions
+   * Internal handler for saving pending changes to the store.
+   * @param docId - The document ID to save the changes for.
+   * @param changes - The changes to save.
    */
-  updateDocOptions(options: Partial<PatchesDocOptions>): void {
-    Object.assign(this.docOptions, options);
-  }
-
-  // --- Internal Handlers ---
-
-  /**
-   * Sets up a listener for local changes on a PatchesDoc, saving pending changes to the store.
-   * @param docId - The document ID being managed.
-   * @param doc - The PatchesDoc instance to listen to.
-   * @returns An Unsubscriber function to remove the listener.
-   */
-  protected _setupLocalDocListeners(docId: string, doc: PatchesDoc<any>): Unsubscriber {
-    const unsubs = [
-      doc.onChange(change => this._savePendingChange(docId, change)),
-      doc.onRebasedChanges(rebasedChanges => this._saveRebasedChanges(docId, rebasedChanges)),
-    ];
-    return () => unsubs.forEach(unsub => unsub());
-  }
-
-  /**
-   * Internal handler for applying server commits to a document and emitting errors if needed.
-   * @param docId - The document ID to update.
-   * @param changes - Array of Change objects from the server.
-   */
-  protected _handleServerCommit = async (docId: string, changes: Change[]) => {
-    const managedDoc = this.docs.get(docId);
-    if (managedDoc) {
-      try {
-        // Apply confirmed/transformed changes from the server
-        managedDoc.doc.applyExternalServerUpdate(changes);
-      } catch (err) {
-        console.error(`Error applying server commit for doc ${docId}:`, err);
-        this.onError.emit(err as Error, { docId });
-      }
-    }
-    // If doc isn't open locally, changes were already saved to store by PatchesSync
-  };
-
-  /**
-   * Internal handler for saving a pending change to the store.
-   * @param docId - The document ID to save the change for.
-   * @param change - The change to save.
-   */
-  protected async _savePendingChange(docId: string, change: Change): Promise<void> {
+  protected async _savePendingChanges(docId: string, changes: Change[]): Promise<void> {
     try {
-      await this.store.savePendingChange(docId, change);
-      // Note: When used with PatchesSync, it will handle flushing the changes
+      await this.store.savePendingChanges(docId, changes);
+      // Only after it is persisted, emit the change (for PatchesSync to flush)
+      this.onChange.emit(docId, changes);
     } catch (err) {
       console.error(`Error saving pending changes for doc ${docId}:`, err);
-      this.onError.emit(err as Error, { docId });
-    }
-  }
-
-  /**
-   * Internal handler for saving rebased pending changes back to the store.
-   * Called by PatchesDoc when external server updates cause pending changes to be rebased.
-   */
-  protected async _saveRebasedChanges(docId: string, rebasedChanges: Change[]): Promise<void> {
-    try {
-      await this.store.replacePendingChanges(docId, rebasedChanges);
-    } catch (err) {
-      console.error(`Error saving rebased changes for doc ${docId}:`, err);
       this.onError.emit(err as Error, { docId });
     }
   }

@@ -1,4 +1,7 @@
-import { createId } from 'crypto-id';
+import { getSnapshotAtRevision } from '../algorithms/server/getSnapshotAtRevision.js';
+import { getStateAtRevision } from '../algorithms/server/getStateAtRevision.js';
+import { handleOfflineSessionsAndBatches } from '../algorithms/server/handleOfflineSessionsAndBatches.js';
+import { applyChanges } from '../algorithms/shared/applyChanges.js';
 import { createChange } from '../data/change.js';
 import { createVersion } from '../data/version.js';
 import { signal } from '../event-signal.js';
@@ -6,8 +9,7 @@ import type { JSONPatch } from '../json-patch/JSONPatch.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
-import type { Change, EditableVersionMetadata, PatchesSnapshot, PatchesState } from '../types.js';
-import { applyChanges } from '../utils.js';
+import type { Change, EditableVersionMetadata, PatchesState } from '../types.js';
 import type { PatchesStoreBackend } from './types.js';
 
 /**
@@ -50,7 +52,7 @@ export class PatchesServer {
    * @returns The state of the document at the specified revision.
    */
   async getDoc(docId: string, atRev?: number): Promise<PatchesState> {
-    return this.getStateAtRevision(docId, atRev);
+    return getStateAtRevision(this.store, docId, atRev);
   }
 
   /**
@@ -90,7 +92,11 @@ export class PatchesServer {
     }
 
     // 1. Load server state details (assuming store methods exist)
-    let { state: currentState, rev: currentRev, changes: currentChanges } = await this._getSnapshotAtRevision(docId);
+    let {
+      state: currentState,
+      rev: currentRev,
+      changes: currentChanges,
+    } = await getSnapshotAtRevision(this.store, docId);
     currentState = applyChanges(currentState, currentChanges);
     currentRev = currentChanges.at(-1)?.rev ?? currentRev;
 
@@ -126,8 +132,8 @@ export class PatchesServer {
       withoutBatchId: batchId,
     });
 
-    const commitedIds = new Set(committedChanges.map(c => c.id));
-    changes = changes.filter(c => !commitedIds.has(c.id));
+    const committedIds = new Set(committedChanges.map(c => c.id));
+    changes = changes.filter(c => !committedIds.has(c.id));
 
     // If all incoming changes were already committed, return the committed changes found
     if (changes.length === 0) {
@@ -139,13 +145,20 @@ export class PatchesServer {
     // - or the first change is older than the session timeout (single-batch offline)
     const isOfflineTimestamp = changes[0].created < Date.now() - this.sessionTimeoutMillis;
     if (isOfflineTimestamp || batchId) {
-      changes = await this._handleOfflineBatches(docId, changes, baseRev, batchId);
+      changes = await handleOfflineSessionsAndBatches(
+        this.store,
+        this.sessionTimeoutMillis,
+        docId,
+        changes,
+        baseRev,
+        batchId
+      );
     }
 
     // 5. Transform the *entire batch* of incoming (and potentially collapsed offline) changes
     //    against committed changes that happened *after* the client's baseRev.
     //    The state used for transformation should be the server state *at the client's baseRev*.
-    let stateAtBaseRev = (await this.getStateAtRevision(docId, baseRev)).state;
+    let stateAtBaseRev = (await getStateAtRevision(this.store, docId, baseRev)).state;
     let rev = currentRev + 1;
     const committedOps = committedChanges.flatMap(c => c.ops);
 
@@ -237,63 +250,13 @@ export class PatchesServer {
    */
   async createVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string> {
     assertVersionMetadata(metadata);
-    let { state, changes } = await this._getSnapshotAtRevision(docId);
+    let { state, changes } = await getSnapshotAtRevision(this.store, docId);
     state = applyChanges(state, changes);
     const version = await this._createVersion(docId, state, changes, metadata);
     if (!version) {
       throw new Error(`No changes to create a version for doc ${docId}.`);
     }
     return version.id;
-  }
-
-  /**
-   * Gets the state at a specific revision.
-   * @param docId The document ID.
-   * @param rev The revision number. If not provided, the latest state and its revision is returned.
-   * @returns The state at the specified revision *and* its revision number.
-   */
-  async getStateAtRevision(docId: string, rev?: number): Promise<PatchesState> {
-    // Note: _getSnapshotAtRevision now returns the state *of the version* and changes *since* it.
-    // We need to apply the changes to get the state *at* the target revision.
-    const { state: versionState, rev: snapshotRev, changes } = await this._getSnapshotAtRevision(docId, rev);
-    return {
-      // Ensure null is passed if versionState or versionState.state is null/undefined
-      state: applyChanges(versionState?.state ?? null, changes),
-      rev: changes.at(-1)?.rev ?? snapshotRev,
-    };
-  }
-
-  /**
-   * Retrieves the document state of the version before the given revision and changes after up to that revision or all
-   * changes since that version.
-   * @param docId The document ID.
-   * @param rev The revision number. If not provided, the latest state, its revision, and all changes since are returned.
-   * @returns The document state at the last version before the revision, its revision number, and all changes up to the specified revision (or all changes if no revision is provided).
-   */
-  protected async _getSnapshotAtRevision(docId: string, rev?: number): Promise<PatchesSnapshot> {
-    const versions = await this.store.listVersions(docId, {
-      limit: 1,
-      reverse: true,
-      startAfter: rev ? rev + 1 : undefined,
-      origin: 'main',
-      orderBy: 'rev',
-    });
-    const latestMainVersion = versions[0];
-    const versionState =
-      (latestMainVersion && (await this.store.loadVersionState(docId, latestMainVersion.id))) || null;
-    const versionRev = latestMainVersion?.rev ?? 0;
-
-    // Get *all* changes since that version up to the target revision (if specified)
-    const changesSinceVersion = await this.store.listChanges(docId, {
-      startAfter: versionRev,
-      endBefore: rev ? rev + 1 : undefined,
-    });
-
-    return {
-      state: versionState, // State from the base version
-      rev: versionRev, // Revision of the base version's state
-      changes: changesSinceVersion, // Changes that occurred *after* the base version state
-    };
   }
 
   /**
@@ -322,95 +285,6 @@ export class PatchesServer {
 
     await this.store.createVersion(docId, sessionMetadata, state, changes);
     return sessionMetadata;
-  }
-
-  /**
-   * Handles offline/large batch versioning logic for multi-batch uploads.
-   * Groups changes into sessions, merges with previous batch if needed, and creates/extends versions.
-   * @param docId Document ID
-   * @param changes The incoming changes (all with the same batchId)
-   * @param baseRev The base revision for the batch
-   * @param batchId The batch identifier
-   * @returns The collapsed changes for transformation
-   */
-  protected async _handleOfflineBatches(
-    docId: string,
-    changes: Change[],
-    baseRev: number,
-    batchId?: string
-  ): Promise<Change[]> {
-    // Use batchId as groupId for multi-batch uploads; default offline sessions have no groupId
-    const groupId = batchId ?? createId();
-    // Find the last version for this groupId (if any)
-    const [lastVersion] = await this.store.listVersions(docId, {
-      groupId,
-      reverse: true,
-      limit: 1,
-    });
-
-    let offlineBaseState: any;
-    let parentId: string | undefined;
-
-    if (lastVersion) {
-      // Continue from the last version's state
-      // loadVersionState returns a PatchState ({state, rev}); extract the .state
-      const vs = await this.store.loadVersionState(docId, lastVersion.id);
-      offlineBaseState = (vs as any).state ?? vs;
-      parentId = lastVersion.id;
-    } else {
-      // First batch for this batchId: start at baseRev
-      offlineBaseState = (await this.getStateAtRevision(docId, baseRev)).state;
-    }
-
-    let sessionStartIndex = 0;
-
-    for (let i = 1; i <= changes.length; i++) {
-      const isLastChange = i === changes.length;
-      const timeDiff = isLastChange ? Infinity : changes[i].created - changes[i - 1].created;
-
-      // Session ends if timeout exceeded OR it's the last change in the batch
-      if (timeDiff > this.sessionTimeoutMillis || isLastChange) {
-        const sessionChanges = changes.slice(sessionStartIndex, i);
-        if (sessionChanges.length > 0) {
-          // Check if this is a continuation of the previous session (merge/extend)
-          const isContinuation =
-            !!lastVersion && sessionChanges[0].created - lastVersion.endDate <= this.sessionTimeoutMillis;
-
-          if (isContinuation) {
-            // Merge/extend the existing version
-            const mergedState = applyChanges(offlineBaseState, sessionChanges);
-            await this.store.saveChanges(docId, sessionChanges);
-            await this.store.updateVersion(docId, lastVersion.id, {}); // metadata already updated above
-            offlineBaseState = mergedState;
-            parentId = lastVersion.parentId;
-          } else {
-            // Create a new version for this session
-            offlineBaseState = applyChanges(offlineBaseState, sessionChanges);
-
-            const sessionMetadata = createVersion({
-              parentId,
-              groupId,
-              origin: 'offline',
-              startDate: sessionChanges[0].created,
-              endDate: sessionChanges[sessionChanges.length - 1].created,
-              rev: sessionChanges[sessionChanges.length - 1].rev,
-              baseRev,
-            });
-            await this.store.createVersion(docId, sessionMetadata, offlineBaseState, sessionChanges);
-            parentId = sessionMetadata.id;
-          }
-          sessionStartIndex = i;
-        }
-      }
-    }
-
-    // Collapse all changes into one for transformation
-    return [
-      changes.reduce((firstChange, nextChange) => {
-        firstChange.ops = [...firstChange.ops, ...nextChange.ops];
-        return firstChange;
-      }),
-    ];
   }
 }
 

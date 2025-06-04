@@ -1,7 +1,13 @@
 import { Delta } from '@dabble/delta';
-import { describe, expect, it } from 'vitest';
-import type { Change } from '../../src/types';
-import { breakChange } from '../../src/utils/breakChange.js';
+import { describe, expect, it, vi } from 'vitest';
+import { breakChange } from '../../../src/algorithms/client/breakChange.js';
+import type { Change } from '../../../src/types.js';
+
+// Mock crypto-id as it's used by createChange
+vi.mock('crypto-id', () => ({
+  createId: vi.fn(() => 'mock-id-' + Math.random().toString(36).substring(7)),
+  createSortableId: vi.fn(() => 'mock-sortable-id-' + Date.now() + Math.random().toString(36).substring(7)),
+}));
 
 describe('breakChange', () => {
   // Helper to create a change for testing
@@ -22,13 +28,23 @@ describe('breakChange', () => {
     expect(result[0]).toBe(change);
   });
 
-  it('should throw error for single non-text op that is too large', () => {
-    // Create a change with a very large non-text operation
-    const largeValue = { array: Array(1000).fill('large value') };
-    const change = createTestChange([{ op: 'add', path: '/data', value: largeValue }]);
+  it('should warn and return single non-text op if it is too large and unsplittable by breakLargeValueOp', () => {
+    const largeValue = { complexObject: Array(500).fill('very large data to ensure size limit') };
+    const originalOp = { op: 'add', path: '/data', value: largeValue };
+    const change = createTestChange([originalOp]);
+    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    // Set small max size to force splitting
-    expect(() => breakChange(change, 100)).toThrow(/^Single operation of type add \(path: \/data\) exceeds/);
+    const result = breakChange(change, 100); // Small maxBytes to trigger the condition
+
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      `Warning: Single operation of type add (path: /data) could not be split further by breakLargeValueOp despite exceeding maxBytes. Including as is.`
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0].ops).toEqual([originalOp]);
+    expect(result[0].id).not.toBe('test-id'); // Should be a new change object from deriveNewChange
+    expect(result[0].baseRev).toBe(change.baseRev);
+
+    consoleWarnSpy.mockRestore();
   });
 
   it('should split a large change by ops', () => {
@@ -151,10 +167,6 @@ describe('breakChange', () => {
     // Basic checks
     expect(result.length).toBeGreaterThan(1);
     expect(allDeltaOps.length).toBeGreaterThan(delta.ops.length);
-
-    // Verify the first op is the original retain or starts with retain 0 if original was insert
-    // (This check might be brittle)
-    // expect(allDeltaOps[0].retain === 10 || allDeltaOps[0].retain === 0).toBe(true);
 
     // Reconstruct the final delta from all pieces
     const reconstructedDelta = new Delta(allDeltaOps);

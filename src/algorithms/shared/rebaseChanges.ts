@@ -1,22 +1,5 @@
-import { applyPatch } from './json-patch/applyPatch.js';
-import { JSONPatch } from './json-patch/JSONPatch.js';
-import type { Change, Deferred } from './types.js';
-
-/**
- * Applies a sequence of changes to a state object.
- * Each change is applied in sequence using the applyPatch function.
- *
- * @param state - The initial state to apply changes to
- * @param changes - Array of changes to apply
- * @returns The state after all changes have been applied
- */
-export function applyChanges<T>(state: T, changes: Change[]): T {
-  if (!changes.length) return state;
-  for (const change of changes) {
-    state = applyPatch(state, change.ops, { strict: true });
-  }
-  return state;
-}
+import { JSONPatch } from '../../json-patch/JSONPatch.js';
+import type { Change } from '../../types.js';
 
 /**
  * Rebases local changes against server changes using operational transformation.
@@ -71,28 +54,4 @@ export function rebaseChanges(serverChanges: Change[], localChanges: Change[]): 
       return { ...change, baseRev, rev, ops };
     })
     .filter(Boolean) as Change[];
-}
-
-export function deferred<T = void>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: any) => void;
-  let _status: 'pending' | 'fulfilled' | 'rejected' = 'pending';
-  const promise = new Promise<T>((_resolve, _reject) => {
-    resolve = (value: T) => {
-      _resolve(value);
-      _status = 'fulfilled';
-    };
-    reject = (reason?: any) => {
-      _reject(reason);
-      _status = 'rejected';
-    };
-  });
-  return {
-    promise,
-    resolve,
-    reject,
-    get status() {
-      return _status;
-    },
-  };
 }

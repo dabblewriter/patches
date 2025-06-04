@@ -259,10 +259,11 @@ describe('PatchesWebSocket', () => {
     });
 
     it('should emit onChangesCommitted when receiving a changesCommitted notification', () => {
-      const params = { docId: 'test-doc', changes: [{ id: 'change-a', ops: [], rev: 1, created: Date.now() }] };
-      rpcNotificationHandlers['changesCommitted'](params);
+      const docId = 'test-doc';
+      const changes = [{ id: 'change-a', ops: [], rev: 1, created: Date.now() }];
+      rpcNotificationHandlers['changesCommitted']({ docId, changes });
       expect(patchesWs.onChangesCommitted.emit).toHaveBeenCalledTimes(1);
-      expect(patchesWs.onChangesCommitted.emit).toHaveBeenCalledWith(params);
+      expect(patchesWs.onChangesCommitted.emit).toHaveBeenCalledWith(docId, changes);
     });
   });
 });

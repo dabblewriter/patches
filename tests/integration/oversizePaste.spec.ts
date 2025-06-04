@@ -20,8 +20,10 @@ describe('Oversize change handling integration', () => {
       patch.text('/content', new Delta().insert(largeText));
     });
 
-    // Verify multiple changes were created and emitted
-    expect(onChangeSpy.mock.calls.length).toBeGreaterThan(1);
+    // onChange should be emitted once with an array containing multiple changes
+    expect(onChangeSpy).toHaveBeenCalledTimes(1);
+    const emittedChanges: any[] = onChangeSpy.mock.calls[0][0];
+    expect(emittedChanges.length).toBeGreaterThan(1);
 
     // Verify the document state contains the full text
     expect(doc.state).toHaveProperty('content');
@@ -29,7 +31,7 @@ describe('Oversize change handling integration', () => {
     expect((doc.state as any).content.ops[0].insert.length).toBeGreaterThanOrEqual(largeText.length);
 
     // Verify all changes are smaller than the max size
-    const pendingChanges = (doc as any)._pendingChanges;
+    const pendingChanges = doc.getPendingChanges();
     expect(pendingChanges.length).toBeGreaterThan(1);
 
     // Each individual change should be under the limit
@@ -73,8 +75,10 @@ describe('Oversize change handling integration', () => {
       patch.text('/textContent', new Delta().insert('Some additional text content'));
     });
 
-    // Verify multiple changes were created
-    expect(onChangeSpy.mock.calls.length).toBeGreaterThan(1);
+    // onChange should emit once with multiple changes
+    expect(onChangeSpy).toHaveBeenCalledTimes(1);
+    const emittedChanges2: any[] = onChangeSpy.mock.calls[0][0];
+    expect(emittedChanges2.length).toBeGreaterThan(1);
 
     // Verify state has both the copied sections and text content
     expect(doc.state).toHaveProperty('copiedSections');
@@ -82,8 +86,8 @@ describe('Oversize change handling integration', () => {
     expect((doc.state as any).copiedSections.length).toBe(50);
 
     // Each individual change should be under the limit
-    const pendingChanges = (doc as any)._pendingChanges;
-    for (const change of pendingChanges) {
+    const pendingChanges2 = doc.getPendingChanges();
+    for (const change of pendingChanges2) {
       const size = new TextEncoder().encode(JSON.stringify(change)).length;
       expect(size).toBeLessThanOrEqual(1000);
     }
@@ -101,10 +105,10 @@ describe('Oversize change handling integration', () => {
     });
 
     // Verify metadata is preserved in all split changes
-    const pendingChanges = (doc as any)._pendingChanges;
-    expect(pendingChanges.length).toBeGreaterThan(1);
+    const pendingChanges3 = doc.getPendingChanges();
+    expect(pendingChanges3.length).toBeGreaterThan(1);
 
-    for (const change of pendingChanges) {
+    for (const change of pendingChanges3) {
       expect(change).toMatchObject(metadata);
     }
   });
@@ -126,7 +130,9 @@ describe('Oversize change handling integration', () => {
     });
 
     // Without maxPayloadBytes, this shouldn't split
-    expect(onChangeSpy.mock.calls.length).toBe(1);
-    expect((doc as any)._pendingChanges.length).toBe(1);
+    expect(onChangeSpy).toHaveBeenCalledTimes(1);
+    const emittedChanges: any[] = onChangeSpy.mock.calls[0][0];
+    expect(emittedChanges.length).toBe(1);
+    expect(doc.getPendingChanges().length).toBe(1);
   });
 });

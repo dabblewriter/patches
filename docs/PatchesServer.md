@@ -150,14 +150,6 @@ const { state, rev, changes } = await server.getDoc(docId);
 const snapshot = await server.getDoc(docId, 50);
 ```
 
-### `_getStateAtRevision()`
-
-Retrieves document state as it was after a specific revision.
-
-```typescript
-const { state, rev } = await server._getStateAtRevision(docId, 50);
-```
-
 ### `getVersionState()`
 
 Get a snapshot of a specific version.

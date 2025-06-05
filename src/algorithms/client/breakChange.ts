@@ -91,7 +91,7 @@ function breakTextOp(origChange: Change, textOp: JSONPatchOp, maxBytes: number, 
   const flushCurrentChangePiece = () => {
     if (!currentOpsForNextChangePiece.length) return;
 
-    let opsToFlush = [...currentOpsForNextChangePiece];
+    const opsToFlush = [...currentOpsForNextChangePiece];
     if (retainToPrefixCurrentPiece > 0) {
       if (!opsToFlush[0]?.retain) {
         // Only add if not already starting with a retain
@@ -109,7 +109,7 @@ function breakTextOp(origChange: Change, textOp: JSONPatchOp, maxBytes: number, 
 
   for (const op of deltaOps) {
     // Try adding current op (with its necessary prefix) to the current batch
-    let testBatchOps = [...currentOpsForNextChangePiece];
+    const testBatchOps = [...currentOpsForNextChangePiece];
     if (retainToPrefixCurrentPiece > 0 && testBatchOps.length === 0) {
       // If batch is empty, it needs the prefix
       testBatchOps.push({ retain: retainToPrefixCurrentPiece });
@@ -131,7 +131,7 @@ function breakTextOp(origChange: Change, textOp: JSONPatchOp, maxBytes: number, 
         const insertChunks = splitLargeInsertText(op.insert, maxLength, op.attributes);
         for (let i = 0; i < insertChunks.length; i++) {
           const chunkOp = insertChunks[i];
-          let opsForThisChunk: any[] = [];
+          const opsForThisChunk: any[] = [];
           if (i === 0 && retainToPrefixCurrentPiece > 0) {
             // Prefix only the first chunk
             opsForThisChunk.push({ retain: retainToPrefixCurrentPiece });
@@ -261,6 +261,7 @@ function breakLargeValueOp(origChange: Change, op: JSONPatchOp, maxBytes: number
 
 function deriveNewChange(origChange: Change, rev: number, ops: JSONPatchOp[]) {
   // Filter out metadata that shouldn't be part of the new change object
-  const { id, ops: _o, rev: _r, baseRev: _br, created: _c, batchId: _bi, ...metadata } = origChange;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { id: _id, ops: _o, rev: _r, baseRev: _br, created: _c, batchId: _bi, ...metadata } = origChange;
   return createChange(origChange.baseRev, rev, ops, metadata);
 }

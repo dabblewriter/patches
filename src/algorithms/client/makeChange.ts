@@ -13,7 +13,7 @@ export function makeChange<T = any>(
 ): Change[] {
   const pendingChanges = snapshot.changes;
   const pendingRev = pendingChanges[pendingChanges.length - 1]?.rev ?? snapshot.rev;
-  let state = createStateFromSnapshot(snapshot); // Current state including pending
+  const state = createStateFromSnapshot(snapshot); // Current state including pending
   const patch = createJSONPatch(state, mutator);
   if (patch.ops.length === 0) {
     return [];

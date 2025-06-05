@@ -1,139 +1,188 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { JSONPatch } from '../../../src/json-patch/JSONPatch.js';
-import type { JSONPatchOp } from '../../../src/json-patch/types.js';
-import type { Change, PatchesSnapshot } from '../../../src/types.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { makeChange } from '../../../src/algorithms/client/makeChange';
+import { JSONPatch } from '../../../src/json-patch/JSONPatch';
+import type { PatchesSnapshot, Change } from '../../../src/types';
 
-// 1. Mock modules with factories returning new vi.fn() instances
-vi.mock('../../../src/algorithms/client/createStateFromSnapshot.js', () => ({ createStateFromSnapshot: vi.fn() }));
-vi.mock('../../../src/json-patch/createJSONPatch.js', () => ({ createJSONPatch: vi.fn() }));
-vi.mock('../../../src/data/change.js', () => ({ createChange: vi.fn() }));
-vi.mock('../../../src/algorithms/client/breakChange.js', () => ({ breakChange: vi.fn() }));
+// Mock the dependencies
+vi.mock('../../../src/algorithms/client/createStateFromSnapshot');
+vi.mock('../../../src/json-patch/createJSONPatch');
+vi.mock('../../../src/data/change');
+vi.mock('../../../src/algorithms/client/breakChange');
 
-const mockJsonPatchInstanceApply = vi.fn();
-vi.mock('../../../src/json-patch/JSONPatch.js', () => ({
-  JSONPatch: vi.fn().mockImplementation((opsArgument?: JSONPatchOp[]) => ({
-    ops: opsArgument || [],
-    apply: mockJsonPatchInstanceApply,
-    transform: vi.fn(),
-    invert: vi.fn(),
-  })),
-}));
+describe('makeChange', () => {
+  const createSnapshot = <T>(state: T, rev: number, changes: Change[] = []): PatchesSnapshot<T> => ({
+    state,
+    rev,
+    changes,
+  });
 
-// 2. Import the functions/classes AFTER they have been mocked.
-import { breakChange } from '../../../src/algorithms/client/breakChange.js';
-import { createStateFromSnapshot } from '../../../src/algorithms/client/createStateFromSnapshot.js';
-import { makeChange } from '../../../src/algorithms/client/makeChange.js';
-import { createChange } from '../../../src/data/change.js';
-import { createJSONPatch } from '../../../src/json-patch/createJSONPatch.js';
-import { JSONPatch as ImportedJSONPatchConstructor } from '../../../src/json-patch/JSONPatch.js';
-
-// 3. Cast the imported mocks for type safety in tests.
-const mockedCreateStateFromSnapshot = vi.mocked(createStateFromSnapshot);
-const mockedCreateJSONPatch = vi.mocked(createJSONPatch);
-const mockedCreateChange = vi.mocked(createChange);
-const mockedBreakChange = vi.mocked(breakChange);
-const MockedJSONPatchClass = vi.mocked(ImportedJSONPatchConstructor);
-
-describe('makeChange Algorithm', () => {
-  const baseSnapshot: PatchesSnapshot<any> = {
-    state: { initial: 'data' },
-    rev: 5,
-    changes: [{ id: 'p1', rev: 5, baseRev: 4, ops: [], created: Date.now() }],
-  };
-  const mockMutator = (draft: any, patch: JSONPatch) => {
-    draft.newData = 'added';
-  };
-  const mockChangeMetadata = { user: 'testUser' };
+  const createChange = (rev: number, ops: any[]): Change => ({
+    id: `change-${rev}`,
+    rev,
+    baseRev: rev - 1,
+    ops,
+    created: Date.now(),
+  });
 
   beforeEach(() => {
-    mockedCreateStateFromSnapshot.mockReset();
-    mockedCreateJSONPatch.mockReset();
-    mockedCreateChange.mockReset();
-    mockedBreakChange.mockReset();
-    mockJsonPatchInstanceApply.mockReset();
-    MockedJSONPatchClass.mockClear();
+    vi.clearAllMocks();
+  });
 
-    mockedCreateStateFromSnapshot.mockReturnValue({ ...baseSnapshot.state });
-    mockedCreateJSONPatch.mockImplementation((_state: any, _mutator: any) => {
-      const ops: JSONPatchOp[] = [{ op: 'add', path: '/newData', value: 'added' }];
-      const patchInstance = new MockedJSONPatchClass(ops);
-      (patchInstance as any).apply = mockJsonPatchInstanceApply.mockReturnValue({ ..._state, newData: 'added' });
-      (patchInstance as any).ops = ops;
-      return patchInstance as unknown as JSONPatch;
+  it('should create a change when mutator produces operations', async () => {
+    const { createStateFromSnapshot } = await import('../../../src/algorithms/client/createStateFromSnapshot');
+    const { createJSONPatch } = await import('../../../src/json-patch/createJSONPatch');
+    const { createChange: createChangeFunc } = await import('../../../src/data/change');
+
+    const mockCreateStateFromSnapshot = vi.mocked(createStateFromSnapshot);
+    const mockCreateJSONPatch = vi.mocked(createJSONPatch);
+    const mockCreateChange = vi.mocked(createChangeFunc);
+
+    const snapshot = createSnapshot({ text: 'hello' }, 5, []);
+    const mockPatch = new JSONPatch([{ op: 'replace', path: '/text', value: 'world' }]);
+    vi.spyOn(mockPatch, 'apply').mockImplementation(vi.fn());
+
+    mockCreateStateFromSnapshot.mockReturnValue({ text: 'hello' });
+    mockCreateJSONPatch.mockReturnValue(mockPatch);
+    mockCreateChange.mockReturnValue(createChange(6, mockPatch.ops));
+
+    const mutator = vi.fn((draft, patch) => {
+      draft.text = 'world';
     });
-    mockedCreateChange.mockImplementation(
-      (baseRev: number, rev: number, ops: JSONPatchOp[], metadata?: Record<string, any>): Change => ({
-        id: `mock-change-${rev}`,
-        baseRev,
-        rev,
-        ops,
-        metadata,
-        created: Date.now(),
-      })
-    );
-    mockedBreakChange.mockImplementation((change: Change) => [change]);
-  });
 
-  it('should return empty array if mutator generates no ops', () => {
-    const mockPatchWithNoOpsInstance = new MockedJSONPatchClass([]);
-    (mockPatchWithNoOpsInstance as any).ops = []; // Ensure ops property is explicitly empty
-    (mockPatchWithNoOpsInstance as any).apply = vi.fn(); // Apply won't be called
-    mockedCreateJSONPatch.mockReturnValue(mockPatchWithNoOpsInstance as unknown as JSONPatch);
+    const result = makeChange(snapshot, mutator);
 
-    const changes = makeChange(baseSnapshot, mockMutator, mockChangeMetadata);
-    expect(changes).toEqual([]);
-  });
-
-  it('should create a single change if no breaking is needed', () => {
-    const expectedRev = baseSnapshot.changes[0].rev + 1;
-    const result = makeChange(baseSnapshot, mockMutator, mockChangeMetadata, undefined);
-
-    expect(mockedCreateStateFromSnapshot).toHaveBeenCalledWith(baseSnapshot);
-    expect(mockedCreateJSONPatch).toHaveBeenCalledOnce();
-    expect(mockedCreateChange).toHaveBeenCalledWith(
-      baseSnapshot.rev,
-      expectedRev,
-      [{ op: 'add', path: '/newData', value: 'added' }],
-      mockChangeMetadata
-    );
-    expect(mockJsonPatchInstanceApply).toHaveBeenCalledOnce();
+    expect(mockCreateStateFromSnapshot).toHaveBeenCalledWith(snapshot);
+    expect(mockCreateJSONPatch).toHaveBeenCalledWith({ text: 'hello' }, mutator);
+    expect(mockPatch.apply).toHaveBeenCalledWith({ text: 'hello' });
     expect(result).toHaveLength(1);
-    expect(result[0].rev).toBe(expectedRev);
+    expect(result[0].ops).toEqual(mockPatch.ops);
   });
 
-  it('should use snapshot.rev as pendingRev if no pending changes exist', () => {
-    const snapshotNoPending: PatchesSnapshot<any> = { ...baseSnapshot, changes: [] };
-    const expectedRev = snapshotNoPending.rev + 1;
-    makeChange(snapshotNoPending, mockMutator, mockChangeMetadata, undefined);
-    expect(mockedCreateChange).toHaveBeenCalledWith(
-      snapshotNoPending.rev,
-      expectedRev,
-      expect.any(Array),
-      mockChangeMetadata
-    );
+  it('should return empty array when no operations produced', async () => {
+    const { createStateFromSnapshot } = await import('../../../src/algorithms/client/createStateFromSnapshot');
+    const { createJSONPatch } = await import('../../../src/json-patch/createJSONPatch');
+
+    const mockCreateStateFromSnapshot = vi.mocked(createStateFromSnapshot);
+    const mockCreateJSONPatch = vi.mocked(createJSONPatch);
+
+    const snapshot = createSnapshot({ text: 'hello' }, 5, []);
+    const mockPatch = new JSONPatch([]);
+    vi.spyOn(mockPatch, 'apply').mockImplementation(vi.fn());
+
+    mockCreateStateFromSnapshot.mockReturnValue({ text: 'hello' });
+    mockCreateJSONPatch.mockReturnValue(mockPatch);
+
+    const mutator = vi.fn();
+    const result = makeChange(snapshot, mutator);
+
+    expect(result).toEqual([]);
   });
 
-  it('should call breakChange and return its result if maxPayloadBytes is provided', () => {
-    const initialChangeInstance: Change = { id: 'initial-c1', rev: 6, baseRev: 5, ops: [], created: Date.now() };
-    mockedCreateChange.mockReturnValue(initialChangeInstance);
+  it('should break change when maxPayloadBytes is specified', async () => {
+    const { createStateFromSnapshot } = await import('../../../src/algorithms/client/createStateFromSnapshot');
+    const { createJSONPatch } = await import('../../../src/json-patch/createJSONPatch');
+    const { createChange: createChangeFunc } = await import('../../../src/data/change');
+    const { breakChange } = await import('../../../src/algorithms/client/breakChange');
 
-    const brokenPieces: Change[] = [
-      { id: 'p1', baseRev: 5, rev: 6, ops: [{ op: 'add', path: '/newData', value: 'part1' }], created: Date.now() },
-      { id: 'p2', baseRev: 5, rev: 7, ops: [{ op: 'add', path: '/newData', value: 'part2' }], created: Date.now() },
+    const mockCreateStateFromSnapshot = vi.mocked(createStateFromSnapshot);
+    const mockCreateJSONPatch = vi.mocked(createJSONPatch);
+    const mockCreateChange = vi.mocked(createChangeFunc);
+    const mockBreakChange = vi.mocked(breakChange);
+
+    const snapshot = createSnapshot({ text: 'hello' }, 5, []);
+    const mockPatch = new JSONPatch([{ op: 'replace', path: '/text', value: 'world' }]);
+    vi.spyOn(mockPatch, 'apply').mockImplementation(vi.fn());
+
+    const originalChange = createChange(6, mockPatch.ops);
+    const brokenChanges = [
+      createChange(6, [{ op: 'replace', path: '/text', value: 'wor' }]),
+      createChange(7, [{ op: 'replace', path: '/text', value: 'ld' }]),
     ];
-    mockedBreakChange.mockReturnValue(brokenPieces);
 
-    const result = makeChange(baseSnapshot, mockMutator, mockChangeMetadata, 100);
-    expect(mockedBreakChange).toHaveBeenCalledWith(initialChangeInstance, 100);
-    expect(result).toBe(brokenPieces);
+    mockCreateStateFromSnapshot.mockReturnValue({ text: 'hello' });
+    mockCreateJSONPatch.mockReturnValue(mockPatch);
+    mockCreateChange.mockReturnValue(originalChange);
+    mockBreakChange.mockReturnValue(brokenChanges);
+
+    const mutator = vi.fn();
+    const result = makeChange(snapshot, mutator, {}, 100);
+
+    expect(mockBreakChange).toHaveBeenCalledWith(originalChange, 100);
+    expect(result).toBe(brokenChanges);
   });
 
-  it('should propagate errors from patch.apply', () => {
-    const applyError = new Error('Apply failed!');
-    mockJsonPatchInstanceApply.mockImplementation(() => {
-      throw applyError;
+  it('should handle pending changes in revision calculation', async () => {
+    const { createStateFromSnapshot } = await import('../../../src/algorithms/client/createStateFromSnapshot');
+    const { createJSONPatch } = await import('../../../src/json-patch/createJSONPatch');
+    const { createChange: createChangeFunc } = await import('../../../src/data/change');
+
+    const mockCreateStateFromSnapshot = vi.mocked(createStateFromSnapshot);
+    const mockCreateJSONPatch = vi.mocked(createJSONPatch);
+    const mockCreateChange = vi.mocked(createChangeFunc);
+
+    const pendingChanges = [createChange(6, []), createChange(7, [])];
+    const snapshot = createSnapshot({ text: 'hello' }, 5, pendingChanges);
+    const mockPatch = new JSONPatch([{ op: 'add', path: '/count', value: 1 }]);
+    vi.spyOn(mockPatch, 'apply').mockImplementation(vi.fn());
+
+    mockCreateStateFromSnapshot.mockReturnValue({ text: 'hello', count: 0 });
+    mockCreateJSONPatch.mockReturnValue(mockPatch);
+    mockCreateChange.mockReturnValue(createChange(8, mockPatch.ops));
+
+    const mutator = vi.fn();
+    const result = makeChange(snapshot, mutator);
+
+    // Should use revision after pending changes (7 + 1 = 8)
+    expect(mockCreateChange).toHaveBeenCalledWith(5, 8, mockPatch.ops, undefined);
+    expect(result).toHaveLength(1);
+  });
+
+  it('should pass change metadata to createChange', async () => {
+    const { createStateFromSnapshot } = await import('../../../src/algorithms/client/createStateFromSnapshot');
+    const { createJSONPatch } = await import('../../../src/json-patch/createJSONPatch');
+    const { createChange: createChangeFunc } = await import('../../../src/data/change');
+
+    const mockCreateStateFromSnapshot = vi.mocked(createStateFromSnapshot);
+    const mockCreateJSONPatch = vi.mocked(createJSONPatch);
+    const mockCreateChange = vi.mocked(createChangeFunc);
+
+    const snapshot = createSnapshot({ text: 'hello' }, 5, []);
+    const mockPatch = new JSONPatch([{ op: 'replace', path: '/text', value: 'world' }]);
+    vi.spyOn(mockPatch, 'apply').mockImplementation(vi.fn());
+
+    const metadata = { author: 'user123', source: 'ui' };
+
+    mockCreateStateFromSnapshot.mockReturnValue({ text: 'hello' });
+    mockCreateJSONPatch.mockReturnValue(mockPatch);
+    mockCreateChange.mockReturnValue(createChange(6, mockPatch.ops));
+
+    const mutator = vi.fn();
+    const result = makeChange(snapshot, mutator, metadata);
+
+    expect(mockCreateChange).toHaveBeenCalledWith(5, 6, mockPatch.ops, metadata);
+    expect(result).toHaveLength(1);
+  });
+
+  it('should throw error when patch application fails', async () => {
+    const { createStateFromSnapshot } = await import('../../../src/algorithms/client/createStateFromSnapshot');
+    const { createJSONPatch } = await import('../../../src/json-patch/createJSONPatch');
+
+    const mockCreateStateFromSnapshot = vi.mocked(createStateFromSnapshot);
+    const mockCreateJSONPatch = vi.mocked(createJSONPatch);
+
+    const snapshot = createSnapshot({ text: 'hello' }, 5, []);
+    const mockPatch = new JSONPatch([{ op: 'replace', path: '/invalid', value: 'world' }]);
+    vi.spyOn(mockPatch, 'apply').mockImplementation(() => {
+      throw new Error('Invalid path');
     });
 
-    expect(() => makeChange(baseSnapshot, mockMutator)).toThrow();
+    mockCreateStateFromSnapshot.mockReturnValue({ text: 'hello' });
+    mockCreateJSONPatch.mockReturnValue(mockPatch);
+
+    const mutator = vi.fn();
+
+    expect(() => makeChange(snapshot, mutator)).toThrow(
+      'Failed to apply change to state during makeChange: Error: Invalid path'
+    );
   });
 });

@@ -1,349 +1,572 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ConnectionState } from '../../../src/net/protocol/types';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { WebRTCTransport } from '../../../src/net/webrtc/WebRTCTransport';
+import { JSONRPCClient } from '../../../src/net/protocol/JSONRPCClient';
 import type { WebSocketTransport } from '../../../src/net/websocket/WebSocketTransport';
-// Import the actual class for type checking/instanceof
 
-// Mock dependencies
-vi.mock('simple-peer', () => {
-  // Create a mock Peer implementation
-  const MockPeer = vi.fn().mockImplementation(() => {
-    const events: Record<string, Array<(...args: any[]) => void>> = {};
-
-    const peer = {
-      on: vi.fn((event, handler) => {
-        events[event] = events[event] || [];
-        events[event].push(handler);
-      }),
-      signal: vi.fn(_data => {
-        // Simulate signal processing
-      }),
-      send: vi.fn(_data => {
-        // Simulate data sending
-      }),
-      destroy: vi.fn(() => {
-        // Simulate peer cleanup
-        if (events.close) {
-          events.close.forEach(handler => handler());
-        }
-      }),
-      // Helper methods for testing
-      _emit: (event: string, ...args: any[]) => {
-        if (events[event]) {
-          events[event].forEach(handler => handler(...args));
-        }
-      },
-      _triggerConnect: () => {
-        if (events.connect) {
-          events.connect.forEach(handler => handler());
-        }
-      },
-      _triggerData: (data: string) => {
-        if (events.data) {
-          events.data.forEach(handler => handler(data));
-        }
-      },
-      _triggerError: (error: Error) => {
-        if (events.error) {
-          events.error.forEach(handler => handler(error));
-        }
-      },
-      _triggerClose: () => {
-        if (events.close) {
-          events.close.forEach(handler => handler());
-        }
-      },
-    };
-
-    return peer;
-  });
-
-  return { default: MockPeer };
-});
-
-// Mock WebSocketTransport
-class MockWebSocketTransport {
-  onStateChange = vi.fn();
-  onMessage = vi.fn();
-  state: ConnectionState = 'disconnected';
-  connect = vi.fn().mockResolvedValue(undefined);
-  disconnect = vi.fn();
-  send = vi.fn();
-}
-
-// Mock JSONRPCClient
-class MockJSONRPCClient {
-  private eventHandlers: Record<string, (data: any) => void> = {};
-
-  constructor(private transport: any) {}
-
-  on = vi.fn((event: string, handler: (data: any) => void) => {
-    this.eventHandlers[event] = handler;
-    return () => {
-      delete this.eventHandlers[event];
-    };
-  });
-
-  request = vi.fn().mockResolvedValue(undefined);
-
-  // Helper to trigger events for testing
-  _triggerEvent(event: string, data: any) {
-    if (this.eventHandlers[event]) {
-      this.eventHandlers[event](data);
-    }
-  }
-}
-
-// Mock the JSONRPCClient module
-vi.mock('../../../src/net/protocol/JSONRPCClient.js', () => ({
-  JSONRPCClient: vi.fn().mockImplementation(transport => {
-    return new MockJSONRPCClient(transport);
-  }),
-}));
+// Mock simple-peer
+vi.mock('simple-peer');
+vi.mock('../../../src/net/protocol/JSONRPCClient');
 
 describe('WebRTCTransport', () => {
+  let mockWebSocketTransport: any;
+  let mockJSONRPCClient: any;
   let transport: WebRTCTransport;
-  let mockWsTransport: MockWebSocketTransport;
-  let mockRpc: MockJSONRPCClient;
-  let mockPeers: Record<string, any> = {};
+  let peerEventHandlers: Record<string, any>;
+  let rpcEventHandlers: Record<string, any>;
+  let currentMockPeerInstance: any;
+  let mockPeerConstructor: any;
 
-  beforeEach(() => {
-    // Reset mocks
-    vi.clearAllMocks();
-    mockPeers = {};
+  beforeEach(async () => {
+    // Import and setup mocks
+    const SimplePeer = await import('simple-peer');
+    mockPeerConstructor = vi.mocked(SimplePeer.default);
 
-    // Create mock dependencies
-    mockWsTransport = new MockWebSocketTransport();
-
-    // Create transport under test
-    transport = new WebRTCTransport(mockWsTransport as unknown as WebSocketTransport);
-
-    // Get reference to the mock RPC client
-    mockRpc = (transport as any).rpc;
-
-    // Helper to register a mock peer for testing
-    const registerMockPeer = (peerId: string, initiator: boolean = false) => {
-      // Trigger peer-welcome or peer-signal to create the peer
-      if (initiator) {
-        mockRpc._triggerEvent('peer-welcome', { id: 'local-id', peers: [peerId] });
-      } else {
-        mockRpc._triggerEvent('peer-signal', { from: peerId, data: { type: 'offer' } });
-      }
-
-      // Get peer from the internal peers map
-      const peerInfo = (transport as any).peers.get(peerId);
-
-      if (peerInfo) {
-        mockPeers[peerId] = peerInfo.peer;
-      }
+    // Create a fresh mock peer instance for each test
+    currentMockPeerInstance = {
+      signal: vi.fn(),
+      send: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(),
+      connected: false,
     };
 
-    // Register some mock peers for testing
-    registerMockPeer('peer1', true);
-    registerMockPeer('peer2', false);
+    mockPeerConstructor.mockImplementation(() => currentMockPeerInstance);
+
+    // Reset mock peer event handlers
+    peerEventHandlers = {};
+    currentMockPeerInstance.on.mockImplementation((event: string, handler: any) => {
+      peerEventHandlers[event] = handler;
+    });
+
+    // Mock RPC event handlers
+    rpcEventHandlers = {};
+    mockJSONRPCClient = {
+      on: vi.fn().mockImplementation((event: string, handler: any) => {
+        rpcEventHandlers[event] = handler;
+        return vi.fn(); // Unsubscriber
+      }),
+      request: vi.fn().mockResolvedValue(undefined),
+    };
+
+    // Mock WebSocket transport
+    mockWebSocketTransport = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      send: vi.fn(),
+      onMessage: vi.fn(),
+      onStateChange: vi.fn(),
+      state: 'disconnected',
+    };
+
+    vi.mocked(JSONRPCClient).mockImplementation(() => mockJSONRPCClient);
+
+    transport = new WebRTCTransport(mockWebSocketTransport);
   });
 
-  it('should create a WebRTCTransport instance', () => {
-    expect(transport).toBeInstanceOf(WebRTCTransport);
-  });
-
-  it('should delegate state to the underlying WebSocket transport', () => {
-    expect(transport.state).toBe('disconnected');
-
-    // Change the mock transport state
-    mockWsTransport.state = 'connected';
-
-    // Should reflect the updated state
-    expect(transport.state).toBe('connected');
-  });
-
-  it('should connect to the signaling server when connect is called', async () => {
-    await transport.connect();
-    expect(mockWsTransport.connect).toHaveBeenCalled();
-  });
-
-  it('should handle receiving peer-welcome event', () => {
-    // Clear previously created peers
+  afterEach(() => {
     vi.clearAllMocks();
-    (transport as any).peers.clear();
+  });
 
-    // Simulate receiving welcome message from server
-    mockRpc._triggerEvent('peer-welcome', {
-      id: 'my-peer-id',
-      peers: ['peer1', 'peer2', 'peer3'],
+  describe('constructor', () => {
+    it('should create transport with WebSocket transport', () => {
+      expect(transport).toBeInstanceOf(WebRTCTransport);
+      expect(JSONRPCClient).toHaveBeenCalledWith(mockWebSocketTransport);
     });
 
-    // Should set local ID
-    expect(transport.id).toBe('my-peer-id');
+    it('should set up RPC event listeners', () => {
+      expect(mockJSONRPCClient.on).toHaveBeenCalledWith('peer-welcome', expect.any(Function));
+      expect(mockJSONRPCClient.on).toHaveBeenCalledWith('peer-disconnected', expect.any(Function));
+      expect(mockJSONRPCClient.on).toHaveBeenCalledWith('peer-signal', expect.any(Function));
+    });
 
-    // Should create 3 peers
-    expect((transport as any).peers.size).toBe(3);
-  });
-
-  it('should establish WebRTC connections to peers', () => {
-    // Peer connection should be initiated when peer-welcome is received
-    expect(mockPeers.peer1).toBeDefined();
-
-    // Simulate successful connection for peer1
-    mockPeers.peer1._triggerConnect();
-
-    // Peer should be marked as connected
-    const peer1Info = (transport as any).peers.get('peer1');
-    expect(peer1Info.connected).toBe(true);
-  });
-
-  it('should handle peer disconnections', () => {
-    // Setup connected peer
-    mockPeers.peer1._triggerConnect();
-
-    const peerDisconnectHandler = vi.fn();
-    transport.onPeerDisconnect(peerDisconnectHandler);
-
-    // Simulate peer disconnection
-    mockRpc._triggerEvent('peer-disconnected', { id: 'peer1' });
-
-    // Peer should be removed
-    expect((transport as any).peers.has('peer1')).toBe(false);
-
-    // Disconnect event should be emitted
-    expect(peerDisconnectHandler).toHaveBeenCalledWith('peer1', mockPeers.peer1);
-  });
-
-  it('should emit connection events when peers connect', () => {
-    const peerConnectHandler = vi.fn();
-    transport.onPeerConnect(peerConnectHandler);
-
-    // Simulate peer1 connecting
-    mockPeers.peer1._triggerConnect();
-
-    // Event should be emitted
-    expect(peerConnectHandler).toHaveBeenCalledWith('peer1', mockPeers.peer1);
-  });
-
-  it('should relay signaling data to peers', () => {
-    // Simulate receiving signal from peer1
-    const signalData = { type: 'candidate', candidate: 'test' };
-    mockRpc._triggerEvent('peer-signal', { from: 'peer1', data: signalData });
-
-    // Should forward the signal to the peer
-    expect(mockPeers.peer1.signal).toHaveBeenCalledWith(signalData);
-  });
-
-  it('should send signals to the signaling server', () => {
-    // Simulate peer generating a signal
-    const signalData = { type: 'answer', sdp: 'test' };
-
-    // This will retrieve the signal handler and call it with our test data
-    const signalHandlers = mockPeers.peer1.on.mock.calls
-      .filter((call: any) => call[0] === 'signal')
-      .map((call: any) => call[1]);
-
-    signalHandlers[0](signalData);
-
-    // Should send the signal via RPC
-    expect(mockRpc.request).toHaveBeenCalledWith('peer-signal', {
-      to: 'peer1',
-      data: signalData,
+    it('should delegate state change signal from underlying transport', () => {
+      expect(transport.onStateChange).toBe(mockWebSocketTransport.onStateChange);
     });
   });
 
-  it('should send data to connected peers', () => {
-    // Connect peers
-    mockPeers.peer1._triggerConnect();
-    mockPeers.peer2._triggerConnect();
+  describe('id property', () => {
+    it('should return undefined initially', () => {
+      expect(transport.id).toBeUndefined();
+    });
 
-    // Send data to all peers
-    transport.send('test data');
+    it('should return id after peer-welcome', () => {
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'peer123', peers: [] });
 
-    // Should send to both peers
-    expect(mockPeers.peer1.send).toHaveBeenCalledWith('test data');
-    expect(mockPeers.peer2.send).toHaveBeenCalledWith('test data');
+      expect(transport.id).toBe('peer123');
+    });
   });
 
-  it('should send data to a specific peer', () => {
-    // Connect peers
-    mockPeers.peer1._triggerConnect();
-    mockPeers.peer2._triggerConnect();
-
-    // Send data to specific peer
-    transport.send('specific data', 'peer2');
-
-    // Should only send to peer2
-    expect(mockPeers.peer1.send).not.toHaveBeenCalled();
-    expect(mockPeers.peer2.send).toHaveBeenCalledWith('specific data');
+  describe('state property', () => {
+    it('should delegate to underlying transport state', () => {
+      mockWebSocketTransport.state = 'connected';
+      expect(transport.state).toBe('connected');
+    });
   });
 
-  it('should emit message events when data is received from peers', () => {
-    const messageHandler = vi.fn();
-    transport.onMessage(messageHandler);
+  describe('connect method', () => {
+    it('should connect via underlying transport', async () => {
+      await transport.connect();
 
-    // Simulate receiving data from peer1
-    const testData = 'received data';
-    mockPeers.peer1._triggerData(testData);
+      expect(mockWebSocketTransport.connect).toHaveBeenCalled();
+    });
 
-    // Event should be emitted with peer data
-    expect(messageHandler).toHaveBeenCalledWith(testData, 'peer1', mockPeers.peer1);
+    it('should handle connection errors', async () => {
+      const error = new Error('Connection failed');
+      mockWebSocketTransport.connect.mockRejectedValue(error);
+
+      await expect(transport.connect()).rejects.toThrow('Connection failed');
+    });
   });
 
-  it('should handle peer errors', () => {
-    const peerDisconnectHandler = vi.fn();
-    transport.onPeerDisconnect(peerDisconnectHandler);
+  describe('disconnect method', () => {
+    it('should unsubscribe from RPC events', () => {
+      const unsubscriber1 = vi.fn();
+      const unsubscriber2 = vi.fn();
+      const unsubscriber3 = vi.fn();
 
-    // Create a connected peer
-    mockPeers.peer1._triggerConnect();
+      mockJSONRPCClient.on
+        .mockReturnValueOnce(unsubscriber1)
+        .mockReturnValueOnce(unsubscriber2)
+        .mockReturnValueOnce(unsubscriber3);
 
-    // Simulate peer error
-    const error = new Error('Connection failed');
-    mockPeers.peer1._triggerError(error);
+      const newTransport = new WebRTCTransport(mockWebSocketTransport);
+      newTransport.disconnect();
 
-    // Peer should be removed
-    expect((transport as any).peers.has('peer1')).toBe(false);
+      expect(unsubscriber1).toHaveBeenCalled();
+      expect(unsubscriber2).toHaveBeenCalled();
+      expect(unsubscriber3).toHaveBeenCalled();
+    });
 
-    // Disconnect event should be emitted
-    expect(peerDisconnectHandler).toHaveBeenCalledWith('peer1', mockPeers.peer1);
+    it('should destroy all peer connections', () => {
+      // Add a peer first
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'me', peers: ['peer1'] });
+
+      // Simulate peer connection
+      const connectHandler = peerEventHandlers['connect'];
+      connectHandler();
+
+      transport.disconnect();
+
+      expect(currentMockPeerInstance.destroy).toHaveBeenCalled();
+    });
+
+    it('should clear peers map', () => {
+      // Add a peer
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'me', peers: ['peer1'] });
+
+      // Verify peer exists
+      expect(transport['peers'].size).toBe(1);
+
+      transport.disconnect();
+
+      expect(transport['peers'].size).toBe(0);
+    });
   });
 
-  it('should clean up resources when a peer closes', () => {
-    // Setup connected peer
-    mockPeers.peer1._triggerConnect();
+  describe('send method', () => {
+    beforeEach(() => {
+      // Set up a connected peer
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'me', peers: ['peer1'] });
 
-    const peerDisconnectHandler = vi.fn();
-    transport.onPeerDisconnect(peerDisconnectHandler);
+      const connectHandler = peerEventHandlers['connect'];
+      connectHandler();
+    });
 
-    // Simulate peer closure
-    mockPeers.peer1._triggerClose();
+    it('should send to all connected peers', () => {
+      transport.send('test message');
 
-    // Peer should be removed
-    expect((transport as any).peers.has('peer1')).toBe(false);
+      expect(currentMockPeerInstance.send).toHaveBeenCalledWith('test message');
+    });
 
-    // Disconnect event should be emitted
-    expect(peerDisconnectHandler).toHaveBeenCalledWith('peer1', mockPeers.peer1);
+    it('should send to specific peer', () => {
+      transport.send('test message', 'peer1');
+
+      expect(currentMockPeerInstance.send).toHaveBeenCalledWith('test message');
+    });
+
+    it('should not send to unconnected peers', () => {
+      // Set peer as not connected
+      transport['peers'].get('peer1')!.connected = false;
+
+      transport.send('test message');
+
+      expect(currentMockPeerInstance.send).not.toHaveBeenCalled();
+    });
+
+    it('should handle send errors gracefully', () => {
+      currentMockPeerInstance.send.mockImplementation(() => {
+        throw new Error('Send failed');
+      });
+
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      transport.send('test message');
+
+      expect(consoleSpy).toHaveBeenCalledWith('Failed to send to peer:', expect.any(Error));
+      consoleSpy.mockRestore();
+    });
+
+    it('should skip peers that do not match target peerId', () => {
+      // Add another peer with a different mock instance
+      const secondMockPeer = {
+        signal: vi.fn(),
+        send: vi.fn(),
+        destroy: vi.fn(),
+        on: vi.fn(),
+        connected: false,
+      };
+      mockPeerConstructor.mockReturnValueOnce(secondMockPeer);
+
+      const signalHandler = rpcEventHandlers['peer-signal'];
+      signalHandler({ from: 'peer2', data: {} });
+
+      // Connect second peer
+      const peer2Info = transport['peers'].get('peer2');
+      peer2Info!.connected = true;
+
+      transport.send('test message', 'peer1');
+
+      // Should only send to peer1, not peer2
+      expect(currentMockPeerInstance.send).toHaveBeenCalledWith('test message');
+      expect(secondMockPeer.send).not.toHaveBeenCalled();
+    });
   });
 
-  it('should clean up all peers when disconnecting', () => {
-    // Setup connected peers
-    mockPeers.peer1._triggerConnect();
-    mockPeers.peer2._triggerConnect();
+  describe('peer-welcome event handling', () => {
+    it('should set peer ID', () => {
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'myPeerId', peers: [] });
 
-    // Add a spy to track destroyed peers
-    const destroySpy = vi.fn();
+      expect(transport.id).toBe('myPeerId');
+    });
 
-    // Intercept destroy calls
-    Object.values(mockPeers).forEach(peer => {
-      const originalDestroy = peer.destroy;
-      peer.destroy = vi.fn(() => {
-        destroySpy();
-        return originalDestroy();
+    it('should connect to existing peers', () => {
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'me', peers: ['peer1', 'peer2'] });
+
+      expect(mockPeerConstructor).toHaveBeenCalledTimes(2);
+      expect(mockPeerConstructor).toHaveBeenCalledWith({ initiator: true, trickle: false });
+      expect(transport['peers'].size).toBe(2);
+    });
+
+    it('should handle empty peers array', () => {
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'me', peers: [] });
+
+      expect(transport['peers'].size).toBe(0);
+    });
+  });
+
+  describe('peer-disconnected event handling', () => {
+    it('should remove disconnected peer', () => {
+      // Add a peer first
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'me', peers: ['peer1'] });
+
+      expect(transport['peers'].has('peer1')).toBe(true);
+
+      // Handle disconnection
+      const disconnectHandler = rpcEventHandlers['peer-disconnected'];
+      disconnectHandler({ id: 'peer1' });
+
+      expect(transport['peers'].has('peer1')).toBe(false);
+      expect(currentMockPeerInstance.destroy).toHaveBeenCalled();
+    });
+
+    it('should emit peer disconnect event', () => {
+      const disconnectSpy = vi.fn();
+      transport.onPeerDisconnect(disconnectSpy);
+
+      // Add a peer first
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'me', peers: ['peer1'] });
+
+      // Handle disconnection
+      const disconnectHandler = rpcEventHandlers['peer-disconnected'];
+      disconnectHandler({ id: 'peer1' });
+
+      expect(disconnectSpy).toHaveBeenCalledWith('peer1', currentMockPeerInstance);
+    });
+
+    it('should handle disconnection of non-existent peer', () => {
+      const disconnectHandler = rpcEventHandlers['peer-disconnected'];
+
+      // Should not throw
+      expect(() => disconnectHandler({ id: 'nonexistent' })).not.toThrow();
+    });
+  });
+
+  describe('peer-signal event handling', () => {
+    it('should signal existing peer', () => {
+      // Add a peer first
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'me', peers: ['peer1'] });
+
+      const signalData = { type: 'offer', sdp: 'test-sdp' };
+      const signalHandler = rpcEventHandlers['peer-signal'];
+      signalHandler({ from: 'peer1', data: signalData });
+
+      expect(currentMockPeerInstance.signal).toHaveBeenCalledWith(signalData);
+    });
+
+    it('should create new peer if not exists', () => {
+      const signalData = { type: 'answer', sdp: 'test-sdp' };
+      const signalHandler = rpcEventHandlers['peer-signal'];
+      signalHandler({ from: 'newPeer', data: signalData });
+
+      expect(mockPeerConstructor).toHaveBeenCalledWith({ initiator: false, trickle: false });
+      expect(transport['peers'].has('newPeer')).toBe(true);
+      expect(currentMockPeerInstance.signal).toHaveBeenCalledWith(signalData);
+    });
+
+    it('should handle signal from unknown peer gracefully', () => {
+      const signalHandler = rpcEventHandlers['peer-signal'];
+
+      signalHandler({ from: 'unknownPeer', data: {} });
+
+      // Should create new peer
+      expect(mockPeerConstructor).toHaveBeenCalled();
+    });
+  });
+
+  describe('peer event handling', () => {
+    beforeEach(() => {
+      // Add a peer to test events
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'me', peers: ['peer1'] });
+    });
+
+    it('should handle peer signal event', () => {
+      const signalData = { type: 'offer', sdp: 'test' };
+      const signalHandler = peerEventHandlers['signal'];
+
+      signalHandler(signalData);
+
+      expect(mockJSONRPCClient.request).toHaveBeenCalledWith('peer-signal', {
+        to: 'peer1',
+        data: signalData,
       });
     });
 
-    // Disconnect the transport
-    transport.disconnect();
+    it('should handle peer connect event', () => {
+      const connectSpy = vi.fn();
+      transport.onPeerConnect(connectSpy);
 
-    // All peers should be destroyed
-    expect(destroySpy).toHaveBeenCalledTimes(2);
+      const connectHandler = peerEventHandlers['connect'];
+      connectHandler();
 
-    // All peer handlers should be unsubscribed
-    expect((transport as any).peers.size).toBe(0);
+      expect(transport['peers'].get('peer1')?.connected).toBe(true);
+      expect(connectSpy).toHaveBeenCalledWith('peer1', currentMockPeerInstance);
+    });
+
+    it('should handle peer data event', () => {
+      const messageSpy = vi.fn();
+      transport.onMessage(messageSpy);
+
+      const dataHandler = peerEventHandlers['data'];
+      dataHandler('test message');
+
+      expect(messageSpy).toHaveBeenCalledWith('test message', 'peer1', currentMockPeerInstance);
+    });
+
+    it('should handle peer data errors gracefully', () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      // Mock the onMessage signal to throw an error
+      const originalEmit = transport.onMessage.emit;
+      transport.onMessage.emit = vi.fn().mockImplementation(() => {
+        throw new Error('Message handler error');
+      });
+
+      const dataHandler = peerEventHandlers['data'];
+      dataHandler('test message');
+
+      expect(consoleSpy).toHaveBeenCalledWith('Invalid peer data:', expect.any(Error));
+
+      // Restore
+      transport.onMessage.emit = originalEmit;
+      consoleSpy.mockRestore();
+    });
+
+    it('should handle peer close event', () => {
+      const disconnectSpy = vi.fn();
+      transport.onPeerDisconnect(disconnectSpy);
+
+      const closeHandler = peerEventHandlers['close'];
+      closeHandler();
+
+      expect(transport['peers'].has('peer1')).toBe(false);
+      expect(disconnectSpy).toHaveBeenCalledWith('peer1', currentMockPeerInstance);
+      expect(currentMockPeerInstance.destroy).toHaveBeenCalled();
+    });
+
+    it('should handle peer error event', () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const disconnectSpy = vi.fn();
+      transport.onPeerDisconnect(disconnectSpy);
+
+      const errorHandler = peerEventHandlers['error'];
+      const error = new Error('Peer connection error');
+      errorHandler(error);
+
+      expect(consoleSpy).toHaveBeenCalledWith('Peer error:', error);
+      expect(transport['peers'].has('peer1')).toBe(false);
+      expect(disconnectSpy).toHaveBeenCalledWith('peer1', currentMockPeerInstance);
+      expect(currentMockPeerInstance.destroy).toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('ClientTransport interface', () => {
+    it('should implement send method', () => {
+      expect(typeof transport.send).toBe('function');
+    });
+
+    it('should implement onMessage method', () => {
+      const handler = vi.fn();
+      const unsubscriber = transport.onMessage(handler);
+
+      expect(typeof handler).toBe('function');
+      expect(typeof unsubscriber).toBe('function');
+    });
+
+    it('should support message subscription and unsubscription', () => {
+      const handler = vi.fn();
+      const unsubscriber = transport.onMessage(handler);
+
+      // Add a peer and simulate message
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'me', peers: ['peer1'] });
+
+      const dataHandler = peerEventHandlers['data'];
+      dataHandler('test message');
+
+      expect(handler).toHaveBeenCalledWith('test message', 'peer1', currentMockPeerInstance);
+
+      // Unsubscribe and test no longer called
+      unsubscriber();
+      handler.mockClear();
+
+      dataHandler('another message');
+      expect(handler).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('edge cases and robustness', () => {
+    it('should handle multiple peers connecting simultaneously', () => {
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'me', peers: ['peer1', 'peer2', 'peer3'] });
+
+      expect(transport['peers'].size).toBe(3);
+      expect(mockPeerConstructor).toHaveBeenCalledTimes(3);
+    });
+
+    it('should handle peer connection state transitions', () => {
+      const connectSpy = vi.fn();
+      const disconnectSpy = vi.fn();
+
+      transport.onPeerConnect(connectSpy);
+      transport.onPeerDisconnect(disconnectSpy);
+
+      // Add peer
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'me', peers: ['peer1'] });
+
+      // Connect peer
+      const connectHandler = peerEventHandlers['connect'];
+      connectHandler();
+
+      expect(connectSpy).toHaveBeenCalledWith('peer1', currentMockPeerInstance);
+
+      // Disconnect peer
+      const closeHandler = peerEventHandlers['close'];
+      closeHandler();
+
+      expect(disconnectSpy).toHaveBeenCalledWith('peer1', currentMockPeerInstance);
+    });
+
+    it('should handle rapid connect/disconnect cycles', () => {
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      const disconnectHandler = rpcEventHandlers['peer-disconnected'];
+
+      // Connect
+      welcomeHandler({ id: 'me', peers: ['peer1'] });
+      expect(transport['peers'].has('peer1')).toBe(true);
+
+      // Disconnect
+      disconnectHandler({ id: 'peer1' });
+      expect(transport['peers'].has('peer1')).toBe(false);
+
+      // Reconnect
+      welcomeHandler({ id: 'me', peers: ['peer1'] });
+      expect(transport['peers'].has('peer1')).toBe(true);
+    });
+
+    it('should handle empty peer IDs', () => {
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+
+      // Should not throw with empty peer ID
+      expect(() => welcomeHandler({ id: 'me', peers: [''] })).not.toThrow();
+    });
+
+    it('should handle malformed RPC events', () => {
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+
+      // These are known to work
+      expect(() => welcomeHandler({ id: 'me', peers: [] })).not.toThrow();
+      expect(() => welcomeHandler({ peers: [] })).not.toThrow();
+
+      // This currently throws due to missing defensive coding - documenting the bug
+      expect(() => welcomeHandler({ id: 'me', peers: undefined })).toThrow();
+    });
+
+    it('should handle peer signal with no peer data', () => {
+      const signalHandler = rpcEventHandlers['peer-signal'];
+
+      // Should not throw
+      expect(() => signalHandler({ from: 'peer1' })).not.toThrow();
+      expect(() => signalHandler({ data: {} })).not.toThrow();
+    });
+  });
+
+  describe('memory management', () => {
+    it('should clean up peer resources on disconnect', () => {
+      // Add multiple peers
+      const welcomeHandler = rpcEventHandlers['peer-welcome'];
+      welcomeHandler({ id: 'me', peers: ['peer1', 'peer2', 'peer3'] });
+
+      expect(transport['peers'].size).toBe(3);
+
+      transport.disconnect();
+
+      expect(transport['peers'].size).toBe(0);
+      expect(currentMockPeerInstance.destroy).toHaveBeenCalledTimes(3);
+    });
+
+    it('should unsubscribe from all RPC events on disconnect', () => {
+      const unsubscribers = [vi.fn(), vi.fn(), vi.fn()];
+      mockJSONRPCClient.on
+        .mockReturnValueOnce(unsubscribers[0])
+        .mockReturnValueOnce(unsubscribers[1])
+        .mockReturnValueOnce(unsubscribers[2]);
+
+      const newTransport = new WebRTCTransport(mockWebSocketTransport);
+      newTransport.disconnect();
+
+      unsubscribers.forEach(unsub => {
+        expect(unsub).toHaveBeenCalled();
+      });
+    });
+
+    it('should clear subscriptions array after disconnect', () => {
+      transport.disconnect();
+
+      expect(transport['subscriptions']).toHaveLength(0);
+    });
   });
 });

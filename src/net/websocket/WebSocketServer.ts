@@ -1,6 +1,5 @@
 import type { ServerTransport } from '../protocol/types.js';
-import type { AuthContext, AuthorizationProvider } from './AuthorizationProvider.js';
-import { denyAll } from './AuthorizationProvider.js';
+import { denyAll, type AuthContext, type AuthorizationProvider } from './AuthorizationProvider.js';
 import type { RPCServer } from './RPCServer.js';
 
 /**

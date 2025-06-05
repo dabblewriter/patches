@@ -103,7 +103,7 @@ export class SignalingService {
 
     try {
       parsed = typeof message === 'string' ? JSON.parse(message) : message;
-    } catch (err) {
+    } catch {
       return false;
     }
 

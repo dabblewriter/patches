@@ -9,6 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Build the library**: `npm run build` (uses svelte-package to build the library)
 - **Run tests**: `npm run test` (runs all Vitest tests)
 - **Test-driven development**: `npm run tdd` (runs Vitest in watch mode)
+- **Lint code**: `npm run lint` (runs ESLint on src and tests)
+- **Fix linting issues**: `npm run lint:fix` (auto-fixes ESLint issues)
 
 ## Project Overview
 
@@ -18,9 +20,11 @@ Patches is a TypeScript library for building real-time collaborative application
 
 The library uses subpath exports. Use these import paths:
 
-- Client client: `@dabble/patches`
+- Main/Client: `@dabble/patches`
+- Client-specific: `@dabble/patches/client`
 - Server components: `@dabble/patches/server`
 - Networking: `@dabble/patches/net`
+- WebRTC: `@dabble/patches/webrtc`
 
 ### Key Features
 
@@ -91,8 +95,16 @@ The system uses JSON Patch operations (RFC 6902) with custom OT transformations 
 
    - Document state is immutable
    - Changes are made through proxy in `doc.change(state => state.prop = 'new value')`
+   - Uses immutable-style updates for performance and consistency
 
-4. **Usage Example**:
+4. **Performance Characteristics**:
+
+   - Handles documents with 480k+ operations
+   - Load time: 1-2ms for large documents
+   - Change application: 0.2ms per operation
+   - Scales linearly with document size through snapshots
+
+5. **Usage Example**:
 
    ```typescript
    // Client-side

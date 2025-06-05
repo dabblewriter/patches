@@ -4,8 +4,7 @@ import type { PatchesServer } from '../../server/PatchesServer.js';
 import type { Change, EditableVersionMetadata, ListChangesOptions, ListVersionsOptions } from '../../types.js';
 import { StatusError } from '../error.js';
 import { JSONRPCServer } from '../protocol/JSONRPCServer.js';
-import type { AuthContext, AuthorizationProvider } from './AuthorizationProvider.js';
-import { denyAll } from './AuthorizationProvider.js';
+import { denyAll, type AuthContext, type AuthorizationProvider } from './AuthorizationProvider.js';
 
 /**
  * High-level client for the Patches real-time collaboration service.

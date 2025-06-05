@@ -56,6 +56,16 @@ export class PatchesServer {
   }
 
   /**
+   * Get the state of a document at a specific revision.
+   * @param docId - The ID of the document.
+   * @param rev - The revision number.
+   * @returns The state of the document at the specified revision.
+   */
+  async getStateAtRevision(docId: string, atRev?: number): Promise<PatchesState> {
+    return getStateAtRevision(this.store, docId, atRev);
+  }
+
+  /**
    * Get changes that occurred after a specific revision.
    * @param docId - The ID of the document.
    * @param rev - The revision number.
@@ -92,13 +102,13 @@ export class PatchesServer {
     }
 
     // 1. Load server state details (assuming store methods exist)
-    let {
-      state: currentState,
-      rev: currentRev,
+    const {
+      state: initialState,
+      rev: initialRev,
       changes: currentChanges,
     } = await getSnapshotAtRevision(this.store, docId);
-    currentState = applyChanges(currentState, currentChanges);
-    currentRev = currentChanges.at(-1)?.rev ?? currentRev;
+    const currentState = applyChanges(initialState, currentChanges);
+    const currentRev = currentChanges.at(-1)?.rev ?? initialRev;
 
     // Basic validation
     if (baseRev > currentRev) {
@@ -250,7 +260,8 @@ export class PatchesServer {
    */
   async createVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string> {
     assertVersionMetadata(metadata);
-    let { state, changes } = await getSnapshotAtRevision(this.store, docId);
+    const { state: initialState, changes } = await getSnapshotAtRevision(this.store, docId);
+    let state = initialState;
     state = applyChanges(state, changes);
     const version = await this._createVersion(docId, state, changes, metadata);
     if (!version) {

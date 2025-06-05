@@ -145,7 +145,8 @@ export class PatchesDoc<T extends object = object> {
     if (this._snapshot.rev !== serverChanges[0].rev - 1) {
       throw new Error('Cannot apply committed changes to a doc that is not at the correct revision');
     }
-    const pendingIds = new Set(rebasedPendingChanges.map(c => c.id));
+    // Track IDs of pending changes for debugging
+    // const pendingIds = new Set(rebasedPendingChanges.map(c => c.id));
 
     // Apply server changes to the base state of the snapshot
     this._snapshot.state = applyChanges(this._snapshot.state, serverChanges);

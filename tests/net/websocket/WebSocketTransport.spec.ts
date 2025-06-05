@@ -1,126 +1,305 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { WebSocketTransport } from '../../../src/net/websocket/WebSocketTransport.js';
-import { onlineState } from '../../../src/net/websocket/onlineState.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { WebSocketTransport } from '../../../src/net/websocket/WebSocketTransport';
 
-// Mock the global WebSocket
-let mockWsInstance: any;
-const MockWebSocketGlobal = vi.fn().mockImplementation(url => {
-  mockWsInstance = {
-    url,
-    readyState: WebSocket.CONNECTING,
-    send: vi.fn(),
-    close: vi.fn(),
-    onopen: null,
-    onmessage: null,
-    onerror: null,
-    onclose: null,
-    addEventListener: vi.fn((event, cb) => {
-      mockWsInstance[`on${event}`] = cb;
-    }),
-    removeEventListener: vi.fn(),
-    simulateOpen: () => {
-      mockWsInstance.readyState = WebSocket.OPEN;
-      if (mockWsInstance.onopen) mockWsInstance.onopen({ type: 'open' });
-    },
-    simulateMessage: (data: any) => {
-      if (mockWsInstance.onmessage) mockWsInstance.onmessage({ data, type: 'message' });
-    },
-    simulateError: (error?: Error) => {
-      if (mockWsInstance.onerror) mockWsInstance.onerror(error || new Error('Mock WebSocket Error'));
-    },
-    simulateClose: (code?: number, reason?: string) => {
-      mockWsInstance.readyState = WebSocket.CLOSED;
-      if (mockWsInstance.onclose) mockWsInstance.onclose({ code, reason, type: 'close' });
-    },
+// Mock Event classes
+class MockEvent {
+  type: string;
+  constructor(type: string) {
+    this.type = type;
+  }
+}
+
+class MockCloseEvent extends MockEvent {
+  code?: number;
+  reason?: string;
+  constructor(type: string, options?: { code?: number; reason?: string }) {
+    super(type);
+    this.code = options?.code;
+    this.reason = options?.reason;
+  }
+}
+
+class MockMessageEvent extends MockEvent {
+  data: any;
+  constructor(type: string, options?: { data?: any }) {
+    super(type);
+    this.data = options?.data;
+  }
+}
+
+// Mock WebSocket
+function MockWebSocket(this: any, url: string, protocol?: string | string[]) {
+  if (!(this instanceof MockWebSocket)) {
+    return new (MockWebSocket as any)(url, protocol);
+  }
+  
+  this.url = url;
+  this.protocol = protocol;
+  this.readyState = MockWebSocket.CONNECTING;
+  this.onopen = null;
+  this.onclose = null;
+  this.onerror = null;
+  this.onmessage = null;
+  
+  // Add methods
+  this.send = vi.fn((data: string) => {
+    if (this.readyState !== MockWebSocket.OPEN) {
+      throw new Error('WebSocket is not open');
+    }
+  });
+
+  this.close = vi.fn((code?: number, reason?: string) => {
+    this.readyState = MockWebSocket.CLOSING;
+    this.readyState = MockWebSocket.CLOSED;
+    this.onclose?.(new MockCloseEvent('close', { code, reason }));
+  });
+  
+  // Helper methods for testing
+  this.simulateOpen = () => {
+    this.readyState = MockWebSocket.OPEN;
+    this.onopen?.(new MockEvent('open'));
   };
-  return mockWsInstance;
-});
 
-// Mock onlineState
-vi.mock('../../../src/net/websocket/onlineState.js', () => ({
+  this.simulateMessage = (data: string) => {
+    this.onmessage?.(new MockMessageEvent('message', { data }));
+  };
+
+  this.simulateError = () => {
+    this.onerror?.(new MockEvent('error'));
+  };
+
+  this.simulateClose = (code = 1000, reason = '') => {
+    this.readyState = MockWebSocket.CLOSED;
+    this.onclose?.(new MockCloseEvent('close', { code, reason }));
+  };
+}
+
+MockWebSocket.CONNECTING = 0;
+MockWebSocket.OPEN = 1;
+MockWebSocket.CLOSING = 2;
+MockWebSocket.CLOSED = 3;
+
+// Mock the online state module
+vi.mock('../../../src/net/websocket/onlineState', () => ({
   onlineState: {
-    isOnline: true,
-    onOnlineChange: vi.fn(() => () => {}),
+    isOffline: false,
+    onOnlineChange: vi.fn().mockReturnValue(() => {}),
   },
-}));
-
-// Mock Deferred utility
-const mockDeferredResolve = vi.fn();
-const mockDeferredReject = vi.fn();
-const mockDeferredPromise = Promise.resolve(); // Always-resolved promise for tests
-
-vi.mock('../../../src/utils/deferred.ts', () => ({
-  deferred: vi.fn(() => ({
-    promise: mockDeferredPromise,
-    resolve: mockDeferredResolve,
-    reject: mockDeferredReject,
-    status: 'pending',
-  })),
 }));
 
 describe('WebSocketTransport', () => {
   let transport: WebSocketTransport;
-  const MOCK_URL = 'ws://localhost:1234';
-  let originalWebSocket: any;
-
-  beforeAll(() => {
-    originalWebSocket = (global as any).WebSocket;
-    (global as any).WebSocket = MockWebSocketGlobal;
-  });
-
-  afterAll(() => {
-    (global as any).WebSocket = originalWebSocket;
-  });
+  let originalWebSocket: typeof WebSocket;
 
   beforeEach(() => {
-    vi.useFakeTimers();
-    MockWebSocketGlobal.mockClear();
-    mockWsInstance = undefined;
-    vi.mocked(onlineState.onOnlineChange).mockClear();
-    vi.mocked(require('../../../src/utils/deferred.ts').deferred).mockClear();
-    mockDeferredResolve.mockClear();
-    mockDeferredReject.mockClear();
-
-    transport = new WebSocketTransport(MOCK_URL, {
-      // No specific WebSocketOptions needed here as PatchesWebSocket takes WebSocketOptions,
-      // not WebSocketTransport directly in its constructor for these low-level options.
-      // Reconnect options are internal to WebSocketTransport.
-    });
+    vi.clearAllMocks();
+    
+    // Mock global WebSocket
+    originalWebSocket = global.WebSocket;
+    global.WebSocket = MockWebSocket as any;
+    
+    transport = new WebSocketTransport('ws://localhost:8080');
   });
 
   afterEach(() => {
-    if (transport) transport.disconnect();
-    vi.clearAllTimers();
-    vi.useRealTimers();
+    global.WebSocket = originalWebSocket;
+    transport.disconnect();
+  });
+
+  describe('constructor', () => {
+    it('should create transport with URL', () => {
+      expect(transport.state).toBe('disconnected');
+    });
+
+    it('should create transport with URL and options', () => {
+      const transport = new WebSocketTransport('ws://localhost:8080', { protocol: 'patches-v1' });
+      expect(transport.state).toBe('disconnected');
+    });
+  });
+
+  describe('state management', () => {
+    it('should start in disconnected state', () => {
+      expect(transport.state).toBe('disconnected');
+    });
+
+    it('should emit state change events', () => {
+      const stateListener = vi.fn();
+      transport.onStateChange(stateListener);
+
+      transport.connect();
+
+      expect(stateListener).toHaveBeenCalledWith('connecting');
+    });
   });
 
   describe('connect method', () => {
-    it('should create a WebSocket connection when connect is called', async () => {
-      const connectPromise = transport.connect();
-      expect(MockWebSocketGlobal).toHaveBeenCalledWith(MOCK_URL, undefined);
-      expect(mockWsInstance).toBeDefined();
+    it('should transition to connecting state', () => {
+      transport.connect();
       expect(transport.state).toBe('connecting');
-      if (mockWsInstance) mockWsInstance.simulateOpen();
+    });
+
+    it('should create WebSocket with correct URL', () => {
+      const spy = vi.spyOn(global, 'WebSocket');
+      
+      transport.connect();
+      
+      expect(spy).toHaveBeenCalledWith('ws://localhost:8080', undefined);
+    });
+
+    it('should create WebSocket with protocol option', () => {
+      const transportWithProtocol = new WebSocketTransport('ws://localhost:8080', { protocol: 'patches-v1' });
+      const spy = vi.spyOn(global, 'WebSocket');
+      
+      transportWithProtocol.connect();
+      
+      expect(spy).toHaveBeenCalledWith('ws://localhost:8080', 'patches-v1');
+    });
+
+    it('should resolve when WebSocket opens', async () => {
+      const connectPromise = transport.connect();
+      
+      // Get the WebSocket instance and simulate opening
+      const ws = (transport as any).ws as MockWebSocket;
+      ws.simulateOpen();
+
       await connectPromise;
       expect(transport.state).toBe('connected');
     });
 
-    it('should defer connection when offline', async () => {
-      vi.mocked(onlineState).isOnline = false; // Control via mocked onlineState
+    it('should reject when WebSocket errors during connection', async () => {
       const connectPromise = transport.connect();
-      expect(MockWebSocketGlobal).not.toHaveBeenCalled();
+      
+      const ws = (transport as any).ws as MockWebSocket;
+      ws.simulateError();
+
+      try {
+        await connectPromise;
+        expect.fail('Expected promise to reject');
+      } catch (error) {
+        // Expected to throw
+        expect(transport.state).toBe('error');
+      }
+    });
+
+    it('should reject when WebSocket closes during connection', async () => {
+      const connectPromise = transport.connect();
+      
+      const ws = (transport as any).ws as MockWebSocket;
+      ws.simulateClose();
+
+      try {
+        await connectPromise;
+        expect.fail('Expected promise to reject');
+      } catch (error) {
+        expect((error as Error).message).toBe('Connection closed');
+        expect(transport.state).toBe('disconnected');
+      }
+    });
+  });
+
+  describe('disconnect method', () => {
+    it('should set state to disconnected', () => {
+      transport.connect();
+      transport.disconnect();
+
       expect(transport.state).toBe('disconnected');
+    });
 
-      vi.mocked(onlineState).isOnline = true;
-      const onlineChangeListener = vi.mocked(onlineState.onOnlineChange).mock.calls[0][0];
-      onlineChangeListener(true);
-      await new Promise(process.nextTick);
+    it('should call WebSocket close if connected', () => {
+      transport.connect();
+      const ws = (transport as any).ws as MockWebSocket;
+      
+      transport.disconnect();
 
-      expect(mockWsInstance).toBeDefined();
-      if (mockWsInstance) mockWsInstance.simulateOpen();
-      await connectPromise;
-      expect(transport.state).toBe('connected');
-      vi.mocked(onlineState).isOnline = true; // Reset for other tests
+      expect(ws.close).toHaveBeenCalled();
+    });
+  });
+
+  describe('send method', () => {
+    it('should throw error when not connected', () => {
+      expect(() => transport.send('test')).toThrow('WebSocket is not connected');
+    });
+
+    it('should send data when connected', () => {
+      transport.connect();
+      const ws = (transport as any).ws as MockWebSocket;
+      ws.readyState = MockWebSocket.OPEN;
+
+      transport.send('test message');
+
+      expect(ws.send).toHaveBeenCalledWith('test message');
+    });
+  });
+
+  describe('message handling', () => {
+    it('should emit received messages', () => {
+      const messageListener = vi.fn();
+      transport.onMessage(messageListener);
+
+      transport.connect();
+      const ws = (transport as any).ws as MockWebSocket;
+      ws.simulateMessage('test message');
+
+      expect(messageListener).toHaveBeenCalledWith('test message');
+    });
+  });
+
+  describe('online/offline handling', () => {
+    it('should set up online/offline listeners when connecting', async () => {
+      const { onlineState } = await import('../../../src/net/websocket/onlineState');
+      
+      transport.connect();
+
+      expect(onlineState.onOnlineChange).toHaveBeenCalled();
+    });
+
+    it('should handle offline state during connect', async () => {
+      const { onlineState } = await import('../../../src/net/websocket/onlineState');
+      onlineState.isOffline = true;
+
+      const connectPromise = transport.connect();
+
+      // Should create deferred promise but not actually connect
+      expect((transport as any).connectionDeferred).toBeTruthy();
+      expect(transport.state).toBe('disconnected');
+      
+      // Clean up
+      onlineState.isOffline = false;
+    });
+  });
+
+  describe('error handling', () => {
+    it('should handle WebSocket constructor errors', async () => {
+      global.WebSocket = class {
+        constructor() {
+          throw new Error('WebSocket constructor failed');
+        }
+      } as any;
+
+      const transport = new WebSocketTransport('ws://localhost:8080');
+      const connectPromise = transport.connect();
+
+      await expect(connectPromise).rejects.toThrow('WebSocket constructor failed');
+      expect(transport.state).toBe('error');
+    });
+
+    it('should log errors', async () => {
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      
+      const connectPromise = transport.connect();
+      const ws = (transport as any).ws as MockWebSocket;
+      ws.simulateError();
+
+      // Properly handle the promise to prevent unhandled rejection
+      try {
+        await connectPromise;
+      } catch {
+        // Expected to fail
+      }
+
+      expect(consoleErrorSpy).toHaveBeenCalledWith('WebSocket error:', expect.any(MockEvent));
+      
+      consoleErrorSpy.mockRestore();
     });
   });
 });

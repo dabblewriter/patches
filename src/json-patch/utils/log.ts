@@ -1,9 +1,5 @@
-let displayLogs = false;
+export let log = console.log;
 
 export function verbose(value: boolean) {
-  displayLogs = value;
-}
-
-export function log(...rest: any[]) {
-  displayLogs && console.log(...rest);
+  log = value ? console.log : () => undefined;
 }

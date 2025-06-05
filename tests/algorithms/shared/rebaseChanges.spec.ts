@@ -1,27 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { rebaseChanges } from '../../../src/algorithms/shared/rebaseChanges.js';
-import type { JSONPatchOp } from '../../../src/json-patch/types.js';
-import type { Change } from '../../../src/types.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { rebaseChanges } from '../../../src/algorithms/shared/rebaseChanges';
+import type { Change } from '../../../src/types';
+import * as jsonPatchModule from '../../../src/json-patch/JSONPatch';
 
-const mockTransformOps = vi.fn();
-vi.mock('../../../src/json-patch/JSONPatch.js', () => ({
-  JSONPatch: vi.fn().mockImplementation((ops: JSONPatchOp[]) => ({
-    ops: ops,
-    transform: mockTransformOps,
-  })),
-}));
+// Mock the dependencies
+vi.mock('../../../src/json-patch/JSONPatch');
 
-// Import the mocked constructor after defining the mock
-import { JSONPatch as MockedJSONPatch } from '../../../src/json-patch/JSONPatch.js';
-const MockedJSONPatchConstructor = vi.mocked(MockedJSONPatch);
+describe('rebaseChanges', () => {
+  const mockJSONPatch = vi.mocked(jsonPatchModule.JSONPatch);
 
-describe('rebaseChanges Algorithm', () => {
-  beforeEach(() => {
-    mockTransformOps.mockReset();
-    MockedJSONPatchConstructor.mockClear();
-  });
-
-  const createDummyChange = (id: string, rev: number, baseRev: number, ops: JSONPatchOp[]): Change => ({
+  const createChange = (id: string, rev: number, ops: any[], baseRev = rev - 1): Change => ({
     id,
     rev,
     baseRev,
@@ -29,96 +17,190 @@ describe('rebaseChanges Algorithm', () => {
     created: Date.now(),
   });
 
-  it('should return localChanges if serverChanges is empty', () => {
-    const local = [createDummyChange('local1', 2, 1, [{ op: 'add', path: '/foo', value: 'bar' }])];
-    const result = rebaseChanges([], local);
-    expect(result).toEqual(local);
-    expect(MockedJSONPatchConstructor).not.toHaveBeenCalled();
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
 
-  it('should return localChanges (empty) if localChanges is empty', () => {
-    const server = [createDummyChange('server1', 2, 1, [{ op: 'add', path: '/foo', value: 'bar' }])];
-    const result = rebaseChanges(server, []);
+  it('should return local changes unchanged when no server changes', () => {
+    const localChanges = [
+      createChange('local1', 3, [{ op: 'add', path: '/test', value: 'hello' }]),
+      createChange('local2', 4, [{ op: 'add', path: '/count', value: 1 }]),
+    ];
+
+    const result = rebaseChanges([], localChanges);
+
+    expect(result).toBe(localChanges);
+  });
+
+  it('should return local changes unchanged when no local changes', () => {
+    const serverChanges = [createChange('server1', 3, [{ op: 'add', path: '/server', value: 'data' }])];
+
+    const result = rebaseChanges(serverChanges, []);
+
     expect(result).toEqual([]);
-    expect(MockedJSONPatchConstructor).not.toHaveBeenCalled();
   });
 
-  it('should filter out local changes already present in server changes by id', () => {
-    const commonOp = [{ op: 'add', path: '/common', value: 1 }];
-    const server = [createDummyChange('s1', 2, 1, commonOp)];
-    const local = [
-      createDummyChange('s1', 2, 1, commonOp),
-      createDummyChange('l1', 3, 1, [{ op: 'add', path: '/localOnly', value: 2 }]),
-    ];
-    mockTransformOps.mockReturnValue({ ops: [{ op: 'add', path: '/localOnly', value: 'transformed' }] });
+  it('should filter out local changes that exist in server changes', () => {
+    const sharedChange = createChange('shared', 3, [{ op: 'add', path: '/shared', value: 'data' }]);
+    const localOnlyChange = createChange('local', 4, [{ op: 'add', path: '/local', value: 'data' }]);
 
-    const result = rebaseChanges(server, local);
+    const serverChanges = [sharedChange];
+    const localChanges = [sharedChange, localOnlyChange];
 
-    expect(MockedJSONPatchConstructor).toHaveBeenCalledOnce();
-    expect(mockTransformOps).toHaveBeenCalledOnce();
+    const mockTransform = vi.fn().mockReturnValue({ ops: localOnlyChange.ops });
+    const mockPatch = { transform: mockTransform };
+    mockJSONPatch.mockImplementation(() => mockPatch as any);
+
+    const result = rebaseChanges(serverChanges, localChanges);
+
     expect(result).toHaveLength(1);
-    expect(result[0].id).toBe('l1');
-    expect(result[0].ops).toEqual([{ op: 'add', path: '/localOnly', value: 'transformed' }]);
+    expect(result[0].id).toBe('local');
+    expect(result[0].baseRev).toBe(3); // Updated to last server change rev
+    expect(result[0].rev).toBe(4); // Incremented from last server change
   });
 
-  it('should transform remaining local changes and update their rev/baseRev', () => {
-    const server = [createDummyChange('s1', 11, 10, [{ op: 'replace', path: '/a', value: 0 }])];
-    const local = [
-      createDummyChange('l1', 11, 10, [{ op: 'add', path: '/b', value: 1 }]),
-      createDummyChange('l2', 12, 10, [{ op: 'add', path: '/c', value: 2 }]),
-    ];
+  it('should transform local changes against server changes', () => {
+    const serverChange = createChange('server', 3, [{ op: 'add', path: '/server', value: 'data' }]);
+    const localChange = createChange('local', 4, [{ op: 'add', path: '/local', value: 'data' }]);
 
-    const transformedOps1 = [{ op: 'add', path: '/b_transformed', value: 1 }];
-    const transformedOps2 = [{ op: 'add', path: '/c_transformed', value: 2 }];
+    const transformedOps = [{ op: 'add', path: '/local_transformed', value: 'data' }];
+    const mockTransform = vi.fn().mockReturnValue({ ops: transformedOps });
+    const mockPatch = { transform: mockTransform };
+    mockJSONPatch.mockImplementation(() => mockPatch as any);
 
-    mockTransformOps.mockReturnValueOnce({ ops: transformedOps1 }).mockReturnValueOnce({ ops: transformedOps2 });
+    const result = rebaseChanges([serverChange], [localChange]);
 
-    const result = rebaseChanges(server, local);
+    expect(mockJSONPatch).toHaveBeenCalledWith([serverChange.ops].flat());
+    expect(mockTransform).toHaveBeenCalledWith(localChange.ops);
+    expect(result).toHaveLength(1);
+    expect(result[0].ops).toBe(transformedOps);
+    expect(result[0].baseRev).toBe(3);
+    expect(result[0].rev).toBe(4);
+  });
 
-    expect(MockedJSONPatchConstructor).toHaveBeenCalledOnce();
-    expect(MockedJSONPatchConstructor.mock.calls[0][0]).toEqual(server[0].ops);
-    expect(mockTransformOps).toHaveBeenCalledTimes(2);
-    expect(mockTransformOps).toHaveBeenNthCalledWith(1, local[0].ops);
-    expect(mockTransformOps).toHaveBeenNthCalledWith(2, local[1].ops);
+  it('should update revision numbers correctly for multiple local changes', () => {
+    const serverChange = createChange('server', 5, [{ op: 'add', path: '/server', value: 'data' }]);
+    const localChange1 = createChange('local1', 3, [{ op: 'add', path: '/local1', value: 'data' }]);
+    const localChange2 = createChange('local2', 4, [{ op: 'add', path: '/local2', value: 'data' }]);
+
+    const mockTransform = vi
+      .fn()
+      .mockReturnValueOnce({ ops: [{ op: 'add', path: '/local1_t', value: 'data' }] })
+      .mockReturnValueOnce({ ops: [{ op: 'add', path: '/local2_t', value: 'data' }] });
+    const mockPatch = { transform: mockTransform };
+    mockJSONPatch.mockImplementation(() => mockPatch as any);
+
+    const result = rebaseChanges([serverChange], [localChange1, localChange2]);
 
     expect(result).toHaveLength(2);
+    expect(result[0].baseRev).toBe(5);
+    expect(result[0].rev).toBe(6);
+    expect(result[1].baseRev).toBe(5);
+    expect(result[1].rev).toBe(7);
+  });
+
+  it('should filter out changes with empty ops after transformation', () => {
+    const serverChange = createChange('server', 3, [{ op: 'add', path: '/server', value: 'data' }]);
+    const localChange1 = createChange('local1', 4, [{ op: 'add', path: '/local1', value: 'data' }]);
+    const localChange2 = createChange('local2', 5, [{ op: 'add', path: '/local2', value: 'data' }]);
+
+    const mockTransform = vi
+      .fn()
+      .mockReturnValueOnce({ ops: [] }) // Empty ops - should be filtered out
+      .mockReturnValueOnce({ ops: [{ op: 'add', path: '/local2_t', value: 'data' }] });
+    const mockPatch = { transform: mockTransform };
+    mockJSONPatch.mockImplementation(() => mockPatch as any);
+
+    const result = rebaseChanges([serverChange], [localChange1, localChange2]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('local2');
+    expect(result[0].rev).toBe(5); // Second rev after server change (first was filtered out)
+  });
+
+  it('should handle multiple server changes', () => {
+    const serverChange1 = createChange('server1', 3, [{ op: 'add', path: '/s1', value: 'data' }]);
+    const serverChange2 = createChange('server2', 4, [{ op: 'add', path: '/s2', value: 'data' }]);
+    const localChange = createChange('local', 5, [{ op: 'add', path: '/local', value: 'data' }]);
+
+    const mockTransform = vi.fn().mockReturnValue({ ops: [{ op: 'add', path: '/local_t', value: 'data' }] });
+    const mockPatch = { transform: mockTransform };
+    mockJSONPatch.mockImplementation(() => mockPatch as any);
+
+    const result = rebaseChanges([serverChange1, serverChange2], [localChange]);
+
+    expect(mockJSONPatch).toHaveBeenCalledWith([...serverChange1.ops, ...serverChange2.ops]);
+    expect(result).toHaveLength(1);
+    expect(result[0].baseRev).toBe(4); // Last server change rev
+    expect(result[0].rev).toBe(5);
+  });
+
+  it('should exclude server changes that are also in local changes from transformation', () => {
+    const sharedChange = createChange('shared', 3, [{ op: 'add', path: '/shared', value: 'data' }]);
+    const serverOnlyChange = createChange('server', 4, [{ op: 'add', path: '/server', value: 'data' }]);
+    const localOnlyChange = createChange('local', 5, [{ op: 'add', path: '/local', value: 'data' }]);
+
+    const serverChanges = [sharedChange, serverOnlyChange];
+    const localChanges = [sharedChange, localOnlyChange];
+
+    const mockTransform = vi.fn().mockReturnValue({ ops: [{ op: 'add', path: '/local_t', value: 'data' }] });
+    const mockPatch = { transform: mockTransform };
+    mockJSONPatch.mockImplementation(() => mockPatch as any);
+
+    const result = rebaseChanges(serverChanges, localChanges);
+
+    // Should only transform against serverOnlyChange, not sharedChange
+    expect(mockJSONPatch).toHaveBeenCalledWith([serverOnlyChange.ops].flat());
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('local');
+  });
+
+  it('should preserve other change properties during rebase', () => {
+    const serverChange = createChange('server', 3, [{ op: 'add', path: '/server', value: 'data' }]);
+    const localChange = createChange('local', 4, [{ op: 'add', path: '/local', value: 'data' }]);
+    localChange.created = 1234567890;
+    (localChange as any).customField = 'test';
+
+    const mockTransform = vi.fn().mockReturnValue({ ops: [{ op: 'add', path: '/local_t', value: 'data' }] });
+    const mockPatch = { transform: mockTransform };
+    mockJSONPatch.mockImplementation(() => mockPatch as any);
+
+    const result = rebaseChanges([serverChange], [localChange]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('local');
+    expect(result[0].created).toBe(1234567890);
+    expect((result[0] as any).customField).toBe('test');
+  });
+
+  it('should handle complex scenario with mixed changes', () => {
+    const serverChange1 = createChange('s1', 3, [{ op: 'add', path: '/s1', value: 'data' }]);
+    const sharedChange = createChange('shared', 4, [{ op: 'add', path: '/shared', value: 'data' }]);
+    const serverChange2 = createChange('s2', 5, [{ op: 'add', path: '/s2', value: 'data' }]);
+
+    const localChange1 = createChange('l1', 6, [{ op: 'add', path: '/l1', value: 'data' }]);
+    const localChange2 = createChange('l2', 7, [{ op: 'add', path: '/l2', value: 'data' }]);
+
+    const serverChanges = [serverChange1, sharedChange, serverChange2];
+    const localChanges = [localChange1, sharedChange, localChange2];
+
+    const mockTransform = vi
+      .fn()
+      .mockReturnValueOnce({ ops: [{ op: 'add', path: '/l1_t', value: 'data' }] })
+      .mockReturnValueOnce({ ops: [{ op: 'add', path: '/l2_t', value: 'data' }] });
+    const mockPatch = { transform: mockTransform };
+    mockJSONPatch.mockImplementation(() => mockPatch as any);
+
+    const result = rebaseChanges(serverChanges, localChanges);
+
+    // Should transform against s1 and s2, but not shared
+    expect(mockJSONPatch).toHaveBeenCalledWith([...serverChange1.ops, ...serverChange2.ops]);
+    expect(result).toHaveLength(2);
     expect(result[0].id).toBe('l1');
-    expect(result[0].ops).toEqual(transformedOps1);
-    expect(result[0].baseRev).toBe(server[0].rev);
-    expect(result[0].rev).toBe(server[0].rev + 1);
-
     expect(result[1].id).toBe('l2');
-    expect(result[1].ops).toEqual(transformedOps2);
-    expect(result[1].baseRev).toBe(server[0].rev);
-    expect(result[1].rev).toBe(server[0].rev + 2);
-  });
-
-  it('should return empty if all local changes are filtered or their ops become empty after transform', () => {
-    const server = [createDummyChange('s1', 2, 1, [{ op: 'add', path: '/a', value: 1 }])];
-    const local = [createDummyChange('l1', 3, 1, [{ op: 'add', path: '/b', value: 2 }])];
-
-    mockTransformOps.mockReturnValue({ ops: [] });
-
-    const result = rebaseChanges(server, local);
-    expect(result).toEqual([]);
-  });
-
-  it('should use ops from server changes that are not acked by local changes for transformation patch', () => {
-    const serverChanges = [
-      createDummyChange('s1', 11, 10, [{ op: 'add', path: '/server1', value: 'sv1' }]),
-      createDummyChange('s2', 12, 11, [{ op: 'add', path: '/server2', value: 'sv2' }]),
-    ];
-    const localChanges = [
-      createDummyChange('s1', 11, 10, [{ op: 'add', path: '/server1', value: 'sv1' }]),
-      createDummyChange('l1', 12, 10, [{ op: 'add', path: '/local1', value: 'lc1' }]),
-    ];
-
-    mockTransformOps.mockImplementation(ops => ({ ops }));
-
-    rebaseChanges(serverChanges, localChanges);
-
-    expect(MockedJSONPatchConstructor).toHaveBeenCalledOnce();
-    expect(MockedJSONPatchConstructor.mock.calls[0][0]).toEqual(serverChanges[1].ops);
-    expect(mockTransformOps).toHaveBeenCalledWith(localChanges[1].ops);
+    expect(result[0].baseRev).toBe(5); // Last server change rev
+    expect(result[1].baseRev).toBe(5);
+    expect(result[0].rev).toBe(6);
+    expect(result[1].rev).toBe(7);
   });
 });

@@ -2,8 +2,7 @@ import { applyChanges } from '../algorithms/shared/applyChanges.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
 import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
-import type { Deferred } from '../utils/deferred.js';
-import { deferred } from '../utils/deferred.js';
+import { deferred, type Deferred } from '../utils/deferred.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
 const DB_VERSION = 1;

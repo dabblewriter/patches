@@ -1,249 +1,478 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { PatchesDoc, type PatchesDocOptions } from '../../src/client/PatchesDoc.js';
-import type { JSONPatchOp } from '../../src/json-patch/types.js';
-import type { Change, PatchesSnapshot, SyncingState } from '../../src/types.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { Change, PatchesSnapshot } from '../../src/types';
 
-// 1. Mock the modules. The factory returns an object with vi.fn() for each function.
-vi.mock('../../src/algorithms/client/makeChange.js', () => ({ makeChange: vi.fn() }));
-vi.mock('../../src/algorithms/shared/applyChanges.js', () => ({ applyChanges: vi.fn() }));
-vi.mock('../../src/algorithms/client/createStateFromSnapshot.js', () => ({ createStateFromSnapshot: vi.fn() }));
+// Mock dependencies completely before importing
+vi.mock('../../src/algorithms/client/createStateFromSnapshot', () => ({
+  createStateFromSnapshot: vi.fn().mockImplementation(snapshot => snapshot.state ?? {}),
+}));
 
-// 2. Import the functions AFTER they have been mocked. These are now the vi.fn() instances.
-import { createStateFromSnapshot } from '../../src/algorithms/client/createStateFromSnapshot.js';
-import { makeChange } from '../../src/algorithms/client/makeChange.js';
-import { applyChanges } from '../../src/algorithms/shared/applyChanges.js';
+vi.mock('../../src/algorithms/client/makeChange', () => ({
+  makeChange: vi.fn().mockImplementation((snapshot, mutator, metadata, maxBytes) => {
+    // By default, return changes (can be overridden in specific tests)
+    return [
+      {
+        id: 'mock-change-id',
+        rev: snapshot.rev + 1,
+        baseRev: snapshot.rev,
+        ops: [{ op: 'add', path: '/test', value: 'mock' }],
+        created: Date.now(),
+        ...metadata,
+      },
+    ];
+  }),
+}));
 
-// 3. Cast the imported mocks to vi.MockedFunction for type safety in tests.
-const makeChangeAlgorithmMock = vi.mocked(makeChange);
-const applyChangesAlgorithmMock = vi.mocked(applyChanges);
-const createStateFromSnapshotAlgorithmMock = vi.mocked(createStateFromSnapshot);
+vi.mock('../../src/algorithms/shared/applyChanges', () => ({
+  applyChanges: vi.fn().mockImplementation((state, changes) => ({
+    ...state,
+    appliedChanges: changes?.length || 0,
+  })),
+}));
+
+vi.mock('../../src/event-signal', () => ({
+  signal: vi.fn().mockImplementation(() => {
+    const subscribers = new Set();
+    const mockSignal = vi.fn().mockImplementation((callback: any) => {
+      subscribers.add(callback);
+      return () => subscribers.delete(callback);
+    }) as any;
+    mockSignal.emit = vi.fn().mockImplementation(async (...args: any[]) => {
+      for (const callback of subscribers) {
+        await (callback as any)(...args);
+      }
+    });
+    mockSignal.error = vi.fn().mockReturnValue(vi.fn());
+    mockSignal.clear = vi.fn().mockImplementation(() => subscribers.clear());
+    return mockSignal;
+  }),
+}));
+
+// Now import after mocking
+const { PatchesDoc } = await import('../../src/client/PatchesDoc');
+const { createStateFromSnapshot } = await import('../../src/algorithms/client/createStateFromSnapshot');
+const { makeChange } = await import('../../src/algorithms/client/makeChange');
+const { applyChanges } = await import('../../src/algorithms/shared/applyChanges');
 
 describe('PatchesDoc', () => {
-  type TestDocShape = { text?: string; count?: number; items?: string[]; other?: boolean };
-  let doc: PatchesDoc<TestDocShape>;
-  const initialDocState: TestDocShape = { text: 'hello' };
-  const initialMetadata = { client: 'testClient' };
-  const docOptions: PatchesDocOptions = { maxPayloadBytes: 1000 };
+  let doc: InstanceType<typeof PatchesDoc>;
 
-  const createInitialSnapshot = (
-    state: TestDocShape = initialDocState,
-    rev = 1,
-    changes: Change[] = []
-  ): PatchesSnapshot<TestDocShape> =>
-    structuredClone({
-      state,
-      rev,
-      changes,
-    });
+  const createChange = (id: string, rev: number, baseRev?: number): Change => ({
+    id,
+    rev,
+    baseRev: baseRev ?? rev - 1,
+    ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
+    created: Date.now(),
+  });
+
+  const createSnapshot = (state: any, rev: number, changes: Change[] = []): PatchesSnapshot<any> => ({
+    state,
+    rev,
+    changes,
+  });
 
   beforeEach(() => {
-    makeChangeAlgorithmMock.mockReset();
-    applyChangesAlgorithmMock.mockReset();
-    createStateFromSnapshotAlgorithmMock.mockReset();
+    vi.clearAllMocks();
+    doc = new PatchesDoc({ text: 'hello' }, { userId: 'user1' });
+  });
 
-    doc = new PatchesDoc<TestDocShape>(structuredClone(initialDocState), initialMetadata, docOptions);
+  afterEach(() => {
+    doc.onChange.clear();
+    doc.onUpdate.clear();
+    doc.onBeforeChange.clear();
+    doc.onSyncing.clear();
+  });
 
-    createStateFromSnapshotAlgorithmMock.mockImplementation((snapshot: PatchesSnapshot<TestDocShape>): TestDocShape => {
-      let s = structuredClone(snapshot.state);
-      if (snapshot.changes && snapshot.changes.length > 0) {
-        s = applyChangesAlgorithmMock(s, snapshot.changes);
-      }
-      return s;
+  describe('constructor', () => {
+    it('should initialize with default values', () => {
+      const emptyDoc = new PatchesDoc();
+
+      expect(emptyDoc.state).toEqual({});
+      expect(emptyDoc.id).toBeNull();
+      expect(emptyDoc.committedRev).toBe(0);
+      expect(emptyDoc.hasPending).toBe(false);
+      expect(emptyDoc.syncing).toBeNull();
     });
 
-    applyChangesAlgorithmMock.mockImplementation((state: TestDocShape, changesToApply: Change[]): TestDocShape => {
-      let s = structuredClone(state);
-      for (const change of changesToApply) {
-        if (change.ops) {
-          change.ops.forEach((op: JSONPatchOp) => {
-            const pathParts = op.path.split('/').slice(1);
-            let currentLevel: any = s;
-            for (let i = 0; i < pathParts.length - 1; i++) {
-              currentLevel = currentLevel[pathParts[i]] = currentLevel[pathParts[i]] || {};
-            }
-            if (op.op === 'add' || op.op === 'replace') {
-              currentLevel[pathParts[pathParts.length - 1]] = op.value;
-            } else if (op.op === 'remove') {
-              delete currentLevel[pathParts[pathParts.length - 1]];
-            }
-          });
-        }
-      }
-      return s;
+    it('should initialize with provided state and metadata', () => {
+      const initialState = { title: 'Test Doc', content: 'Hello world' };
+      const metadata = { userId: 'user1', sessionId: 'session1' };
+      const options = { maxPayloadBytes: 1000 };
+
+      const testDoc = new PatchesDoc(initialState, metadata, options);
+
+      expect(testDoc.state).toEqual(initialState);
+      expect(testDoc.committedRev).toBe(0);
+    });
+
+    it('should clone initial state to avoid mutation', () => {
+      const initialState = { items: [1, 2, 3] };
+      const testDoc = new PatchesDoc(initialState);
+
+      initialState.items.push(4);
+
+      expect(testDoc.state.items).toEqual([1, 2, 3]);
     });
   });
 
-  it('should initialize with given state, metadata, and options', () => {
-    expect(doc.state).toEqual(initialDocState);
-    expect(doc.committedRev).toBe(0);
-    expect(doc.hasPending).toBe(false);
-    expect((doc as any)._changeMetadata).toEqual(initialMetadata);
-    expect((doc as any)._maxPayloadBytes).toBe(docOptions.maxPayloadBytes);
-  });
+  describe('getters', () => {
+    it('should return correct id', () => {
+      expect(doc.id).toBeNull();
 
-  describe('import()', () => {
-    it('should import a snapshot and update state via algorithm', () => {
-      const newSnapshotState: TestDocShape = { text: 'world', count: 1 };
-      const snapshotToImport: PatchesSnapshot<TestDocShape> = { state: newSnapshotState, rev: 5, changes: [] };
+      doc.setId('doc1');
+      expect(doc.id).toBe('doc1');
+    });
 
-      createStateFromSnapshotAlgorithmMock.mockReturnValueOnce(newSnapshotState);
-      const onUpdateSpy = vi.spyOn(doc.onUpdate, 'emit');
+    it('should return current state', () => {
+      expect(doc.state).toEqual({ text: 'hello' });
+    });
 
-      doc.import(snapshotToImport);
+    it('should return syncing state', () => {
+      expect(doc.syncing).toBeNull();
 
-      expect((doc as any)._snapshot).toEqual(snapshotToImport);
-      expect(createStateFromSnapshotAlgorithmMock).toHaveBeenCalledWith(snapshotToImport);
-      expect(doc.state).toEqual(newSnapshotState);
-      expect(onUpdateSpy).toHaveBeenCalledWith(newSnapshotState);
+      doc.updateSyncing('updating');
+      expect(doc.syncing).toBe('updating');
+    });
+
+    it('should return committed revision', () => {
+      expect(doc.committedRev).toBe(0);
+    });
+
+    it('should return pending status', () => {
+      expect(doc.hasPending).toBe(false);
+
+      // Simulate adding pending changes
+      doc.change(() => {});
+      expect(doc.hasPending).toBe(true);
     });
   });
 
-  describe('change()', () => {
-    let mutator: (draft: TestDocShape) => void;
-    let madeChange: Change;
-    let stateAfterOpsAppliedToCurrentView: TestDocShape;
-    let snapshotInDocBeforeCallChange: PatchesSnapshot<TestDocShape>;
-
-    beforeEach(() => {
-      snapshotInDocBeforeCallChange = createInitialSnapshot(initialDocState, 1, []);
-      createStateFromSnapshotAlgorithmMock.mockReset();
-      createStateFromSnapshotAlgorithmMock.mockReturnValueOnce(structuredClone(snapshotInDocBeforeCallChange.state));
-      doc.import(snapshotInDocBeforeCallChange);
-      expect(doc.committedRev).toBe(1);
-      expect(doc.state).toEqual(initialDocState);
-
-      mutator = (d: TestDocShape) => {
-        d.text = 'new text';
-      };
-      const op: JSONPatchOp = { op: 'replace', path: '/text', value: 'new text' };
-      madeChange = { id: 'c1', rev: 2, baseRev: 1, ops: [op], created: Date.now() };
-      stateAfterOpsAppliedToCurrentView = { ...initialDocState, text: 'new text' };
-
-      makeChangeAlgorithmMock.mockReturnValue([madeChange]);
-      applyChangesAlgorithmMock.mockImplementation(
-        (currentState: TestDocShape, changesMade: Change[]): TestDocShape => {
-          if (changesMade[0]?.id === 'c1') return stateAfterOpsAppliedToCurrentView;
-          return currentState;
-        }
-      );
+  describe('setId', () => {
+    it('should set document ID', () => {
+      doc.setId('doc1');
+      expect(doc.id).toBe('doc1');
     });
 
-    it('should call makeChange, update internal state and snapshot, and emit events', () => {
-      const initialLiveStateBeforeChange = doc.state;
-      const onChangeSpy = vi.spyOn(doc.onChange, 'emit');
-      const onUpdateSpy = vi.spyOn(doc.onUpdate, 'emit');
+    it('should allow setting same ID multiple times', () => {
+      doc.setId('doc1');
+      doc.setId('doc1');
+      expect(doc.id).toBe('doc1');
+    });
 
-      const resultChanges = doc.change(mutator);
+    it('should throw error when changing existing ID', () => {
+      doc.setId('doc1');
 
-      expect(makeChangeAlgorithmMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          state: snapshotInDocBeforeCallChange.state,
-          rev: snapshotInDocBeforeCallChange.rev,
-        }),
-        mutator,
-        initialMetadata,
-        docOptions.maxPayloadBytes
-      );
-      expect(resultChanges).toEqual([madeChange]);
-
-      const currentDocSnapshot = doc.export();
-      expect(currentDocSnapshot.changes).toEqual([madeChange]);
-      expect(currentDocSnapshot.rev).toBe(snapshotInDocBeforeCallChange.rev);
-      expect(currentDocSnapshot.state).toEqual(snapshotInDocBeforeCallChange.state);
-
-      expect(applyChangesAlgorithmMock).toHaveBeenCalledWith(initialLiveStateBeforeChange, [madeChange]);
-      expect(doc.state).toEqual(stateAfterOpsAppliedToCurrentView);
-
-      expect(onChangeSpy).toHaveBeenCalledWith([madeChange]);
-      expect(onUpdateSpy).toHaveBeenCalledWith(stateAfterOpsAppliedToCurrentView);
+      expect(() => doc.setId('doc2')).toThrow('Document ID cannot be changed once set. Current: doc1, Attempted: doc2');
     });
   });
 
-  describe('applyCommittedChanges(serverChanges, rebasedPendingChanges)', () => {
-    let initialSnapshotInDoc: PatchesSnapshot<TestDocShape>;
-    let initialLiveStateOfDoc: TestDocShape;
+  describe('setChangeMetadata', () => {
+    it('should update change metadata', () => {
+      const newMetadata = { sessionId: 'session2', timestamp: Date.now() };
+      doc.setChangeMetadata(newMetadata);
 
-    beforeEach(() => {
-      initialSnapshotInDoc = {
-        state: { text: 'initial committed base' },
-        rev: 1,
-        changes: [{ id: 'pendingOld', rev: 2, baseRev: 1, ops: [{ op: 'add', path: '/count', value: 0 }] } as Change],
-      };
-      initialLiveStateOfDoc = { text: 'initial committed base', count: 0 };
+      doc.change(() => {});
 
-      createStateFromSnapshotAlgorithmMock.mockReset();
-      createStateFromSnapshotAlgorithmMock.mockReturnValueOnce(initialLiveStateOfDoc);
-      doc.import(initialSnapshotInDoc);
-      expect(doc.state).toEqual(initialLiveStateOfDoc);
+      expect(makeChange).toHaveBeenCalledWith(expect.any(Object), expect.any(Function), newMetadata, undefined);
+    });
+  });
+
+  describe('subscribe', () => {
+    it('should call callback immediately with current state', () => {
+      const callback = vi.fn();
+
+      doc.subscribe(callback);
+
+      expect(callback).toHaveBeenCalledWith({ text: 'hello' });
     });
 
-    it('should update snapshot state, rev, and pending changes, then update live state via algorithms', () => {
-      const serverChanges: Change[] = [
-        {
-          id: 'server2',
-          rev: 2,
-          baseRev: 1,
-          ops: [{ op: 'replace', path: '/text', value: 'server update' }],
-          created: Date.now(),
-        },
-      ];
-      const rebasedPendingClientChanges: Change[] = [
-        {
-          id: 'pendingOld-rebased',
-          rev: 3,
-          baseRev: 2,
-          ops: [{ op: 'add', path: '/count', value: 0 }],
-          created: Date.now(),
-        },
-      ];
+    it('should return unsubscribe function', () => {
+      const callback = vi.fn();
 
-      const stateAfterServerOpsAppliedToSnapshotBase: TestDocShape = { text: 'server update' };
-      const finalLiveStateFromNewSnapshot: TestDocShape = { text: 'server update', count: 0 };
+      const unsubscribe = doc.subscribe(callback);
 
-      applyChangesAlgorithmMock.mockReset();
-      applyChangesAlgorithmMock.mockImplementationOnce((s_1: TestDocShape, c_1: Change[]): TestDocShape => {
-        expect(s_1).toEqual(initialSnapshotInDoc.state);
-        expect(c_1).toEqual(serverChanges);
-        return stateAfterServerOpsAppliedToSnapshotBase;
+      expect(typeof unsubscribe).toBe('function');
+    });
+  });
+
+  describe('export', () => {
+    it('should export current snapshot', () => {
+      const exported = doc.export();
+
+      expect(exported).toEqual({
+        state: { text: 'hello' },
+        rev: 0,
+        changes: [],
       });
+    });
 
-      createStateFromSnapshotAlgorithmMock.mockReset();
-      createStateFromSnapshotAlgorithmMock.mockImplementationOnce(
-        (s_2: PatchesSnapshot<TestDocShape>): TestDocShape => {
-          expect(s_2.state).toEqual(stateAfterServerOpsAppliedToSnapshotBase);
-          expect(s_2.changes).toEqual(rebasedPendingClientChanges);
-          return finalLiveStateFromNewSnapshot;
-        }
-      );
+    it('should return clone to prevent mutation', () => {
+      const exported1 = doc.export();
+      const exported2 = doc.export();
 
-      const onUpdateSpy = vi.spyOn(doc.onUpdate, 'emit');
+      expect(exported1).not.toBe(exported2);
+      expect(exported1).toEqual(exported2);
+    });
 
-      doc.applyCommittedChanges(serverChanges, rebasedPendingClientChanges);
+    it('should include pending changes', () => {
+      doc.change(() => {});
 
-      const newSnapshot = doc.export();
-      expect(applyChangesAlgorithmMock).toHaveBeenCalledTimes(1);
-      expect(newSnapshot.state).toEqual(stateAfterServerOpsAppliedToSnapshotBase);
-      expect(newSnapshot.rev).toBe(2);
-      expect(newSnapshot.changes).toEqual(rebasedPendingClientChanges);
+      const exported = doc.export();
 
-      expect(createStateFromSnapshotAlgorithmMock).toHaveBeenCalledTimes(1);
-      expect(doc.state).toEqual(finalLiveStateFromNewSnapshot);
-      expect(onUpdateSpy).toHaveBeenCalledWith(finalLiveStateFromNewSnapshot);
+      expect(exported.changes).toHaveLength(1);
     });
   });
 
-  describe('updateSyncing()', () => {
-    it('should update syncing state and emit onSyncing signal', () => {
-      const onSyncingSpy = vi.spyOn(doc.onSyncing, 'emit');
-      const newSyncState: SyncingState = 'updating';
-      doc.updateSyncing(newSyncState);
-      expect(doc.syncing).toBe(newSyncState);
-      expect(onSyncingSpy).toHaveBeenCalledWith(newSyncState);
+  describe('import', () => {
+    it('should import snapshot and update state', () => {
+      const snapshot = createSnapshot({ title: 'Imported Doc' }, 5, [createChange('c1', 6)]);
 
-      const errorState = new Error('Sync Error');
-      doc.updateSyncing(errorState);
-      expect(doc.syncing).toBe(errorState);
-      expect(onSyncingSpy).toHaveBeenCalledWith(errorState);
+      doc.import(snapshot);
+
+      expect(createStateFromSnapshot).toHaveBeenCalledWith(snapshot);
+      expect(doc.committedRev).toBe(5);
+      expect(doc.hasPending).toBe(true);
+    });
+
+    it('should emit onUpdate when importing', () => {
+      const updateSpy = vi.fn();
+      doc.onUpdate(updateSpy);
+
+      const snapshot = createSnapshot({ imported: true }, 3);
+      doc.import(snapshot);
+
+      expect(updateSpy).toHaveBeenCalled();
+    });
+
+    it('should clone imported snapshot', () => {
+      const snapshot = createSnapshot({ mutable: [1, 2, 3] }, 1);
+
+      doc.import(snapshot);
+      (snapshot.state as any).mutable.push(4);
+
+      const exported = doc.export();
+      expect((exported.state as any).mutable).toEqual([1, 2, 3]);
+    });
+  });
+
+  describe('change', () => {
+    it('should create and apply changes', () => {
+      const mutator = vi.fn();
+
+      const changes = doc.change(mutator);
+
+      expect(makeChange).toHaveBeenCalledWith(
+        expect.objectContaining({ rev: 0 }),
+        mutator,
+        { userId: 'user1' },
+        undefined
+      );
+      expect(applyChanges).toHaveBeenCalled();
+      expect(changes).toHaveLength(1);
+    });
+
+    it('should emit onChange and onUpdate when changes are made', () => {
+      const changeSpy = vi.fn();
+      const updateSpy = vi.fn();
+      doc.onChange(changeSpy);
+      doc.onUpdate(updateSpy);
+
+      const changes = doc.change(() => {});
+
+      expect(changeSpy).toHaveBeenCalledWith(changes);
+      expect(updateSpy).toHaveBeenCalled();
+    });
+
+    it('should return empty array and not emit when no changes', () => {
+      vi.mocked(makeChange).mockReturnValue([]);
+      const changeSpy = vi.fn();
+      doc.onChange(changeSpy);
+
+      const changes = doc.change(() => {});
+
+      expect(changes).toEqual([]);
+      expect(changeSpy).not.toHaveBeenCalled();
+    });
+
+    it('should add changes to pending list', () => {
+      // Ensure makeChange returns changes to trigger the logic
+      vi.mocked(makeChange).mockReturnValue([
+        {
+          id: 'test-change',
+          rev: 1,
+          baseRev: 0,
+          ops: [{ op: 'add', path: '/test', value: 'added' }],
+          created: Date.now(),
+        },
+      ]);
+
+      doc.change(() => {});
+
+      expect(doc.hasPending).toBe(true);
+      expect(doc.getPendingChanges()).toHaveLength(1);
+    });
+
+    it('should pass maxPayloadBytes to makeChange', () => {
+      const docWithLimit = new PatchesDoc({}, {}, { maxPayloadBytes: 500 });
+
+      docWithLimit.change(() => {});
+
+      expect(makeChange).toHaveBeenCalledWith(expect.any(Object), expect.any(Function), {}, 500);
+    });
+  });
+
+  describe('getPendingChanges', () => {
+    it('should return pending changes', () => {
+      expect(doc.getPendingChanges()).toEqual([]);
+
+      // Make a change that actually returns changes
+      doc.change(() => {});
+
+      expect(doc.getPendingChanges()).toHaveLength(1);
+    });
+  });
+
+  describe('applyCommittedChanges', () => {
+    it('should apply server changes and update state', () => {
+      const serverChanges = [createChange('s1', 1), createChange('s2', 2)];
+      const rebasedPending = [createChange('p1', 3, 2)];
+
+      doc.applyCommittedChanges(serverChanges, rebasedPending);
+
+      expect(applyChanges).toHaveBeenCalledWith(expect.any(Object), serverChanges);
+      expect(createStateFromSnapshot).toHaveBeenCalled();
+      expect(doc.committedRev).toBe(2);
+    });
+
+    it('should throw error if revision mismatch', () => {
+      const serverChanges = [createChange('s1', 5)]; // Wrong base revision
+
+      expect(() => {
+        doc.applyCommittedChanges(serverChanges, []);
+      }).toThrow('Cannot apply committed changes to a doc that is not at the correct revision');
+    });
+
+    it('should replace pending changes with rebased ones', () => {
+      // Add some pending changes first
+      doc.change(() => {});
+      expect(doc.getPendingChanges()).toHaveLength(1);
+
+      const serverChanges = [createChange('s1', 1)];
+      const rebasedPending = [createChange('p1', 2, 1), createChange('p2', 3, 1)];
+
+      doc.applyCommittedChanges(serverChanges, rebasedPending);
+
+      expect(doc.getPendingChanges()).toEqual(rebasedPending);
+    });
+
+    it('should emit onUpdate after applying changes', () => {
+      const updateSpy = vi.fn();
+      doc.onUpdate(updateSpy);
+
+      const serverChanges = [createChange('s1', 1)];
+      doc.applyCommittedChanges(serverChanges, []);
+
+      expect(updateSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe('updateSyncing', () => {
+    it('should update syncing state and emit event', () => {
+      const syncingSpy = vi.fn();
+      doc.onSyncing(syncingSpy);
+
+      doc.updateSyncing('updating');
+
+      expect(doc.syncing).toBe('updating');
+      expect(syncingSpy).toHaveBeenCalledWith('updating');
+    });
+
+    it('should handle null syncing state', () => {
+      doc.updateSyncing('updating');
+      doc.updateSyncing(null);
+
+      expect(doc.syncing).toBeNull();
+    });
+  });
+
+  describe('toJSON', () => {
+    it('should return exported snapshot', () => {
+      const json = doc.toJSON();
+      const exported = doc.export();
+
+      expect(json).toEqual(exported);
+    });
+  });
+
+  describe('event handling', () => {
+    it('should provide onBeforeChange signal', () => {
+      const callback = vi.fn();
+      const unsubscribe = doc.onBeforeChange(callback);
+
+      expect(typeof unsubscribe).toBe('function');
+    });
+
+    it('should provide onChange signal', () => {
+      const callback = vi.fn();
+      const unsubscribe = doc.onChange(callback);
+
+      expect(typeof unsubscribe).toBe('function');
+    });
+
+    it('should provide onUpdate signal', () => {
+      const callback = vi.fn();
+      const unsubscribe = doc.onUpdate(callback);
+
+      expect(typeof unsubscribe).toBe('function');
+    });
+
+    it('should provide onSyncing signal', () => {
+      const callback = vi.fn();
+      const unsubscribe = doc.onSyncing(callback);
+
+      expect(typeof unsubscribe).toBe('function');
+    });
+  });
+
+  describe('complex scenarios', () => {
+    it('should handle multiple changes and state updates', () => {
+      doc.change(() => {}); // Change 1
+      expect(doc.hasPending).toBe(true);
+
+      doc.change(() => {}); // Change 2
+      expect(doc.getPendingChanges()).toHaveLength(2);
+
+      // Apply some server changes
+      const serverChanges = [createChange('s1', 1)];
+      const rebasedPending = [createChange('p1', 2, 1)];
+      doc.applyCommittedChanges(serverChanges, rebasedPending);
+
+      expect(doc.committedRev).toBe(1);
+      expect(doc.getPendingChanges()).toEqual(rebasedPending);
+    });
+
+    it('should maintain state consistency during rapid changes', () => {
+      const updateSpy = vi.fn();
+      doc.onUpdate(updateSpy);
+
+      // Make multiple rapid changes
+      doc.change(() => {});
+      doc.change(() => {});
+      doc.change(() => {});
+
+      expect(updateSpy).toHaveBeenCalledTimes(3);
+      expect(doc.getPendingChanges()).toHaveLength(3);
+    });
+
+    it('should handle import after changes have been made', () => {
+      doc.change(() => {});
+      expect(doc.hasPending).toBe(true);
+
+      const snapshot = createSnapshot({ newState: true }, 10, []);
+      doc.import(snapshot);
+
+      expect(doc.committedRev).toBe(10);
+      expect(doc.hasPending).toBe(false);
+      expect(createStateFromSnapshot).toHaveBeenCalledWith(snapshot);
     });
   });
 });

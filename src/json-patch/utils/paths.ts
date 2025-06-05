@@ -28,14 +28,14 @@ export function isArrayPath(path: string, state?: State) {
   if (!arrayPathExp.test(path)) return false;
   if (!state || !state.root || !state.root['']) return true;
   // Double-check if this is an array or not
-  const [_, __, target] = getOpData(state, path);
+  const [, , target] = getOpData(state, path);
   return Array.isArray(target) || target == null;
 }
 
 export function getArrayPrefixAndIndex(state: State, path: string, pathLength?: number): [string, number] {
   if (pathLength) path = path.slice(0, path.indexOf('/', pathLength));
   if (!arrayPathExp.test(path)) return EMPTY;
-  const [_, __, target] = getOpData(state, path);
+  const [, , target] = getOpData(state, path);
   if (!Array.isArray(target)) return EMPTY;
   const [prefix, indexStr] = getPrefixAndProp(path);
   const index = parseInt(indexStr);

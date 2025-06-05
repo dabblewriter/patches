@@ -1,292 +1,478 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { WebRTCAwareness } from '../../../src/net/webrtc/WebRTCAwareness';
 import type { WebRTCTransport } from '../../../src/net/webrtc/WebRTCTransport';
 
-// Define test types
-interface TestAwarenessState {
-  id?: string;
-  cursor?: { x: number; y: number };
-  selection?: { start: number; end: number };
-  user?: { name: string; color: string };
-}
-
 describe('WebRTCAwareness', () => {
-  // Mock WebRTCTransport
-  let mockTransport: {
-    onPeerConnect: any;
-    onPeerDisconnect: any;
-    onMessage: any;
-    connect: any;
-    disconnect: any;
-    send: any;
-    id: string;
-  };
-
-  let awareness: WebRTCAwareness<TestAwarenessState>;
-  let connectHandler: (peerId: string) => void;
-  let disconnectHandler: (peerId: string) => void;
-  let messageHandler: (data: string) => void;
+  let mockTransport: any;
+  let awareness: WebRTCAwareness;
+  let transportEventHandlers: Record<string, any>;
 
   beforeEach(() => {
-    // Create mock transport with fake event handlers
-    const onPeerConnectHandlers: ((peerId: string, peer: any) => void)[] = [];
-    const onPeerDisconnectHandlers: ((peerId: string, peer: any) => void)[] = [];
-    const onMessageHandlers: ((data: string, peerId: string, peer: any) => void)[] = [];
+    transportEventHandlers = {};
 
     mockTransport = {
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn(),
       send: vi.fn(),
-      id: 'local-peer-id',
-
-      // Mock event registration methods
-      onPeerConnect: vi.fn(handler => {
-        onPeerConnectHandlers.push(handler);
-        connectHandler = (peerId: string) => {
-          onPeerConnectHandlers.forEach(h => h(peerId, {}));
-        };
-        return () => {};
+      onPeerConnect: vi.fn().mockImplementation((handler: any) => {
+        transportEventHandlers['peerConnect'] = handler;
+        return vi.fn(); // Unsubscriber
       }),
-
-      onPeerDisconnect: vi.fn(handler => {
-        onPeerDisconnectHandlers.push(handler);
-        disconnectHandler = (peerId: string) => {
-          onPeerDisconnectHandlers.forEach(h => h(peerId, {}));
-        };
-        return () => {};
+      onPeerDisconnect: vi.fn().mockImplementation((handler: any) => {
+        transportEventHandlers['peerDisconnect'] = handler;
+        return vi.fn(); // Unsubscriber
       }),
-
-      onMessage: vi.fn(handler => {
-        onMessageHandlers.push(handler);
-        messageHandler = (data: string) => {
-          onMessageHandlers.forEach(h => h(data, '', {}));
-        };
-        return () => {};
+      onMessage: vi.fn().mockImplementation((handler: any) => {
+        transportEventHandlers['message'] = handler;
+        return vi.fn(); // Unsubscriber
       }),
+      id: undefined,
     };
 
-    // Create awareness instance with mock transport
-    awareness = new WebRTCAwareness<TestAwarenessState>(mockTransport as unknown as WebRTCTransport);
+    awareness = new WebRTCAwareness(mockTransport);
   });
 
-  it('should create an awareness instance', () => {
-    expect(awareness).toBeInstanceOf(WebRTCAwareness);
-    expect(awareness.states).toEqual([]);
+  afterEach(() => {
+    vi.clearAllMocks();
   });
 
-  it('should subscribe to transport events on creation', () => {
-    expect(mockTransport.onPeerConnect).toHaveBeenCalled();
-    expect(mockTransport.onPeerDisconnect).toHaveBeenCalled();
-    expect(mockTransport.onMessage).toHaveBeenCalled();
-  });
-
-  it('should connect to the transport when connect is called', async () => {
-    await awareness.connect();
-    expect(mockTransport.connect).toHaveBeenCalled();
-  });
-
-  it('should disconnect from the transport when disconnect is called', () => {
-    awareness.disconnect();
-    expect(mockTransport.disconnect).toHaveBeenCalled();
-  });
-
-  it('should allow setting local state and broadcast it', async () => {
-    // Connect first to ensure myId is set
-    await awareness.connect();
-
-    const testState: TestAwarenessState = {
-      cursor: { x: 100, y: 200 },
-      selection: { start: 10, end: 20 },
-      user: { name: 'Test User', color: '#ff0000' },
-    };
-
-    awareness.localState = testState;
-
-    // Should add id to the state
-    expect(awareness.localState).toEqual({
-      ...testState,
-      id: 'local-peer-id',
+  describe('constructor', () => {
+    it('should create awareness instance with transport', () => {
+      expect(awareness).toBeInstanceOf(WebRTCAwareness);
     });
 
-    // Should broadcast the state
-    expect(mockTransport.send).toHaveBeenCalledWith(JSON.stringify({ ...testState, id: 'local-peer-id' }));
-  });
+    it('should set up transport event listeners', () => {
+      expect(mockTransport.onPeerConnect).toHaveBeenCalledWith(expect.any(Function));
+      expect(mockTransport.onPeerDisconnect).toHaveBeenCalledWith(expect.any(Function));
+      expect(mockTransport.onMessage).toHaveBeenCalledWith(expect.any(Function));
+    });
 
-  it('should send local state to newly connected peers', async () => {
-    // Connect first to ensure myId is set
-    await awareness.connect();
+    it('should initialize with empty states', () => {
+      expect(awareness.states).toEqual([]);
+    });
 
-    // Set local state first
-    const testState: TestAwarenessState = {
-      cursor: { x: 100, y: 200 },
-    };
-    awareness.localState = testState;
-
-    // Clear previous calls
-    mockTransport.send.mockClear();
-
-    // Simulate new peer connection
-    connectHandler('new-peer-id');
-
-    // Should send local state to the new peer
-    expect(mockTransport.send).toHaveBeenCalledWith(
-      JSON.stringify({ ...testState, id: 'local-peer-id' }),
-      'new-peer-id'
-    );
-  });
-
-  it('should remove peer state when a peer disconnects', () => {
-    // Setup initial state with multiple peers
-    const peerState1: TestAwarenessState = {
-      id: 'peer1',
-      user: { name: 'Peer 1', color: '#00ff00' },
-    };
-
-    const peerState2: TestAwarenessState = {
-      id: 'peer2',
-      user: { name: 'Peer 2', color: '#0000ff' },
-    };
-
-    // Add peers to awareness state
-    messageHandler(JSON.stringify(peerState1));
-    messageHandler(JSON.stringify(peerState2));
-
-    // Verify both peers are in the state
-    expect(awareness.states).toHaveLength(2);
-
-    // Simulate peer disconnection
-    disconnectHandler('peer1');
-
-    // Verify peer1 was removed
-    expect(awareness.states).toHaveLength(1);
-    expect(awareness.states[0].id).toBe('peer2');
-  });
-
-  it('should process incoming awareness data', () => {
-    // Simulate receiving data from a peer
-    const peerState: TestAwarenessState = {
-      id: 'peer1',
-      cursor: { x: 50, y: 75 },
-      user: { name: 'Remote User', color: '#00ff00' },
-    };
-
-    messageHandler(JSON.stringify(peerState));
-
-    // Should add to the awareness state
-    expect(awareness.states).toHaveLength(1);
-    expect(awareness.states[0]).toEqual(peerState);
-  });
-
-  it('should update existing peer data when receiving updates', () => {
-    // Initial peer state
-    const initialState: TestAwarenessState = {
-      id: 'peer1',
-      cursor: { x: 50, y: 75 },
-      selection: { start: 5, end: 10 },
-      user: { name: 'Remote User', color: '#00ff00' },
-    };
-
-    // Updated peer state with partial changes
-    const updatedState: TestAwarenessState = {
-      id: 'peer1',
-      cursor: { x: 60, y: 80 },
-    };
-
-    // Add initial state
-    messageHandler(JSON.stringify(initialState));
-    expect(awareness.states[0]).toEqual(initialState);
-
-    // Process update
-    messageHandler(JSON.stringify(updatedState));
-
-    // Should update only the changed fields
-    expect(awareness.states).toHaveLength(1);
-    expect(awareness.states[0]).toEqual({
-      id: 'peer1',
-      cursor: { x: 60, y: 80 }, // Updated
-      selection: { start: 5, end: 10 }, // Preserved
-      user: { name: 'Remote User', color: '#00ff00' }, // Preserved
+    it('should initialize with empty local state', () => {
+      expect(awareness.localState).toEqual({});
     });
   });
 
-  it('should emit update events when the state changes', () => {
-    const updateHandler = vi.fn();
-    awareness.onUpdate(updateHandler);
+  describe('connect method', () => {
+    it('should delegate to transport connect', async () => {
+      await awareness.connect();
 
-    // Simulate peer data
-    const peerState: TestAwarenessState = {
-      id: 'peer1',
-      cursor: { x: 100, y: 100 },
-    };
-
-    // Process data
-    messageHandler(JSON.stringify(peerState));
-
-    // Should emit update
-    expect(updateHandler).toHaveBeenCalledWith([peerState]);
-  });
-
-  it('should ignore invalid awareness data', () => {
-    const invalidData = 'not json';
-
-    // Initial valid state to verify no changes occur
-    const validState: TestAwarenessState = {
-      id: 'peer1',
-      user: { name: 'Remote User', color: '#00ff00' },
-    };
-
-    // Add valid state first
-    messageHandler(JSON.stringify(validState));
-    expect(awareness.states).toHaveLength(1);
-
-    // Try to process invalid data
-    messageHandler(invalidData);
-
-    // State should remain unchanged
-    expect(awareness.states).toHaveLength(1);
-    expect(awareness.states[0]).toEqual(validState);
-  });
-
-  it('should ignore data without an ID', () => {
-    const dataWithoutId = JSON.stringify({
-      cursor: { x: 100, y: 100 },
+      expect(mockTransport.connect).toHaveBeenCalled();
     });
 
-    // Process data without ID
-    messageHandler(dataWithoutId);
+    it('should set myId from transport after connection', async () => {
+      mockTransport.id = 'test-peer-id';
 
-    // Should ignore the data
-    expect(awareness.states).toHaveLength(0);
+      await awareness.connect();
+
+      expect(awareness['myId']).toBe('test-peer-id');
+    });
+
+    it('should handle connection errors', async () => {
+      const error = new Error('Connection failed');
+      mockTransport.connect.mockRejectedValue(error);
+
+      await expect(awareness.connect()).rejects.toThrow('Connection failed');
+    });
   });
 
-  it('should handle multiple peers correctly', () => {
-    // Add multiple peers
-    const peer1State: TestAwarenessState = {
-      id: 'peer1',
-      user: { name: 'Peer 1', color: '#ff0000' },
-    };
+  describe('disconnect method', () => {
+    it('should delegate to transport disconnect', () => {
+      awareness.disconnect();
 
-    const peer2State: TestAwarenessState = {
-      id: 'peer2',
-      user: { name: 'Peer 2', color: '#00ff00' },
-    };
+      expect(mockTransport.disconnect).toHaveBeenCalled();
+    });
+  });
 
-    const peer3State: TestAwarenessState = {
-      id: 'peer3',
-      user: { name: 'Peer 3', color: '#0000ff' },
-    };
+  describe('states property', () => {
+    it('should return current states', () => {
+      const testStates = [{ id: 'peer1', data: 'test' }];
+      awareness['_states'] = testStates;
 
-    // Add all peers
-    messageHandler(JSON.stringify(peer1State));
-    messageHandler(JSON.stringify(peer2State));
-    messageHandler(JSON.stringify(peer3State));
+      expect(awareness.states).toBe(testStates);
+    });
 
-    // Verify all peers are in the state
-    expect(awareness.states).toHaveLength(3);
+    it('should emit onUpdate signal when states are set', () => {
+      const updateSpy = vi.fn();
+      awareness.onUpdate(updateSpy);
 
-    // Check ordering by insertion
-    expect(awareness.states[0].id).toBe('peer1');
-    expect(awareness.states[1].id).toBe('peer2');
-    expect(awareness.states[2].id).toBe('peer3');
+      const newStates = [{ id: 'peer1', data: 'test' }];
+      awareness['states'] = newStates;
+
+      expect(updateSpy).toHaveBeenCalledWith(newStates);
+    });
+
+    it('should update internal states when set', () => {
+      const newStates = [{ id: 'peer1', data: 'test' }];
+      awareness['states'] = newStates;
+
+      expect(awareness['_states']).toBe(newStates);
+    });
+  });
+
+  describe('localState property', () => {
+    beforeEach(() => {
+      awareness['myId'] = 'my-peer-id';
+    });
+
+    it('should return current local state', () => {
+      const testState = { data: 'test' };
+      awareness['_localState'] = testState;
+
+      expect(awareness.localState).toBe(testState);
+    });
+
+    it('should set local state and add peer ID', () => {
+      const newState = { data: 'test' };
+      awareness.localState = newState;
+
+      expect(awareness['_localState']).toEqual({ data: 'test', id: 'my-peer-id' });
+    });
+
+    it('should broadcast local state when set', () => {
+      const newState = { data: 'test' };
+      awareness.localState = newState;
+
+      expect(mockTransport.send).toHaveBeenCalledWith(JSON.stringify({ data: 'test', id: 'my-peer-id' }));
+    });
+
+    it('should handle setting state before peer ID is available', () => {
+      awareness['myId'] = undefined;
+      const newState = { data: 'test' };
+
+      expect(() => {
+        awareness.localState = newState;
+      }).not.toThrow();
+    });
+  });
+
+  describe('_addPeer method', () => {
+    beforeEach(() => {
+      awareness['myId'] = 'my-peer-id';
+    });
+
+    it('should send local state to new peer if local state exists', () => {
+      awareness['_localState'] = { id: 'my-peer-id', data: 'test' };
+
+      const addPeerHandler = transportEventHandlers['peerConnect'];
+      addPeerHandler('new-peer-id');
+
+      expect(mockTransport.send).toHaveBeenCalledWith(
+        JSON.stringify({ id: 'my-peer-id', data: 'test' }),
+        'new-peer-id'
+      );
+    });
+
+    it('should not send local state if local state has no id', () => {
+      awareness['_localState'] = { data: 'test' }; // No id
+
+      const addPeerHandler = transportEventHandlers['peerConnect'];
+      addPeerHandler('new-peer-id');
+
+      expect(mockTransport.send).not.toHaveBeenCalled();
+    });
+
+    it('should not send local state if local state is empty', () => {
+      awareness['_localState'] = {};
+
+      const addPeerHandler = transportEventHandlers['peerConnect'];
+      addPeerHandler('new-peer-id');
+
+      expect(mockTransport.send).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('_removePeer method', () => {
+    it('should remove peer state from states array', () => {
+      const states = [
+        { id: 'peer1', data: 'test1' },
+        { id: 'peer2', data: 'test2' },
+        { id: 'peer3', data: 'test3' },
+      ];
+      awareness['_states'] = states;
+
+      const removePeerHandler = transportEventHandlers['peerDisconnect'];
+      removePeerHandler('peer2');
+
+      expect(awareness.states).toEqual([
+        { id: 'peer1', data: 'test1' },
+        { id: 'peer3', data: 'test3' },
+      ]);
+    });
+
+    it('should emit onUpdate when peer is removed', () => {
+      const updateSpy = vi.fn();
+      awareness.onUpdate(updateSpy);
+
+      const states = [{ id: 'peer1', data: 'test1' }];
+      awareness['_states'] = states;
+
+      const removePeerHandler = transportEventHandlers['peerDisconnect'];
+      removePeerHandler('peer1');
+
+      expect(updateSpy).toHaveBeenCalledWith([]);
+    });
+
+    it('should handle removing non-existent peer', () => {
+      const states = [{ id: 'peer1', data: 'test1' }];
+      awareness['_states'] = states;
+
+      const removePeerHandler = transportEventHandlers['peerDisconnect'];
+      removePeerHandler('non-existent-peer');
+
+      expect(awareness.states).toEqual(states);
+    });
+
+    it('should handle removing from empty states', () => {
+      awareness['_states'] = [];
+
+      const removePeerHandler = transportEventHandlers['peerDisconnect'];
+
+      expect(() => removePeerHandler('peer1')).not.toThrow();
+      expect(awareness.states).toEqual([]);
+    });
+  });
+
+  describe('_receiveData method', () => {
+    it('should parse and add new peer state', () => {
+      const peerState = { id: 'peer1', data: 'test' };
+
+      const receiveDataHandler = transportEventHandlers['message'];
+      receiveDataHandler(JSON.stringify(peerState));
+
+      expect(awareness.states).toEqual([peerState]);
+    });
+
+    it('should update existing peer state', () => {
+      const initialStates = [{ id: 'peer1', data: 'old', other: 'keep' }];
+      awareness['_states'] = initialStates;
+
+      const updatedState = { id: 'peer1', data: 'new' };
+
+      const receiveDataHandler = transportEventHandlers['message'];
+      receiveDataHandler(JSON.stringify(updatedState));
+
+      expect(awareness.states).toEqual([{ id: 'peer1', data: 'new', other: 'keep' }]);
+    });
+
+    it('should emit onUpdate when state is received', () => {
+      const updateSpy = vi.fn();
+      awareness.onUpdate(updateSpy);
+
+      const peerState = { id: 'peer1', data: 'test' };
+
+      const receiveDataHandler = transportEventHandlers['message'];
+      receiveDataHandler(JSON.stringify(peerState));
+
+      expect(updateSpy).toHaveBeenCalledWith([peerState]);
+    });
+
+    it('should handle invalid JSON gracefully', () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const receiveDataHandler = transportEventHandlers['message'];
+      receiveDataHandler('invalid json');
+
+      expect(consoleSpy).toHaveBeenCalledWith('Invalid peer data:', expect.any(Error));
+      expect(awareness.states).toEqual([]);
+
+      consoleSpy.mockRestore();
+    });
+
+    it('should ignore data without peer ID', () => {
+      const peerState = { data: 'test' }; // No id
+
+      const receiveDataHandler = transportEventHandlers['message'];
+      receiveDataHandler(JSON.stringify(peerState));
+
+      expect(awareness.states).toEqual([]);
+    });
+
+    it('should ignore null data', () => {
+      const receiveDataHandler = transportEventHandlers['message'];
+      receiveDataHandler(JSON.stringify(null));
+
+      expect(awareness.states).toEqual([]);
+    });
+
+    it('should ignore undefined data', () => {
+      const receiveDataHandler = transportEventHandlers['message'];
+      receiveDataHandler(JSON.stringify(undefined));
+
+      expect(awareness.states).toEqual([]);
+    });
+
+    it('should handle empty string data', () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const receiveDataHandler = transportEventHandlers['message'];
+      receiveDataHandler('');
+
+      expect(consoleSpy).toHaveBeenCalledWith('Invalid peer data:', expect.any(Error));
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('onUpdate signal', () => {
+    it('should allow subscribing to state updates', () => {
+      const updateSpy = vi.fn();
+      const unsubscriber = awareness.onUpdate(updateSpy);
+
+      expect(typeof unsubscriber).toBe('function');
+    });
+
+    it('should emit updates when states change', () => {
+      const updateSpy = vi.fn();
+      awareness.onUpdate(updateSpy);
+
+      const newStates = [{ id: 'peer1', data: 'test' }];
+      awareness['states'] = newStates;
+
+      expect(updateSpy).toHaveBeenCalledWith(newStates);
+    });
+
+    it('should allow unsubscribing from updates', () => {
+      const updateSpy = vi.fn();
+      const unsubscriber = awareness.onUpdate(updateSpy);
+
+      // First update should trigger
+      awareness['states'] = [{ id: 'peer1', data: 'test' }];
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+
+      // Unsubscribe
+      unsubscriber();
+      updateSpy.mockClear();
+
+      // Second update should not trigger
+      awareness['states'] = [{ id: 'peer2', data: 'test2' }];
+      expect(updateSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('edge cases and integration', () => {
+    it('should handle multiple peer states correctly', () => {
+      const receiveDataHandler = transportEventHandlers['message'];
+
+      receiveDataHandler(JSON.stringify({ id: 'peer1', data: 'test1' }));
+      receiveDataHandler(JSON.stringify({ id: 'peer2', data: 'test2' }));
+      receiveDataHandler(JSON.stringify({ id: 'peer3', data: 'test3' }));
+
+      expect(awareness.states).toHaveLength(3);
+      expect(awareness.states.map(s => s.id)).toEqual(['peer1', 'peer2', 'peer3']);
+    });
+
+    it('should handle peer reconnection correctly', () => {
+      const receiveDataHandler = transportEventHandlers['message'];
+      const removePeerHandler = transportEventHandlers['peerDisconnect'];
+
+      // Add peer
+      receiveDataHandler(JSON.stringify({ id: 'peer1', data: 'initial' }));
+      expect(awareness.states).toHaveLength(1);
+
+      // Remove peer
+      removePeerHandler('peer1');
+      expect(awareness.states).toHaveLength(0);
+
+      // Re-add peer
+      receiveDataHandler(JSON.stringify({ id: 'peer1', data: 'reconnected' }));
+      expect(awareness.states).toEqual([{ id: 'peer1', data: 'reconnected' }]);
+    });
+
+    it('should maintain state consistency during rapid updates', () => {
+      const receiveDataHandler = transportEventHandlers['message'];
+
+      // Rapid updates from same peer
+      receiveDataHandler(JSON.stringify({ id: 'peer1', data: 'v1' }));
+      receiveDataHandler(JSON.stringify({ id: 'peer1', data: 'v2' }));
+      receiveDataHandler(JSON.stringify({ id: 'peer1', data: 'v3' }));
+
+      expect(awareness.states).toHaveLength(1);
+      expect(awareness.states[0].data).toBe('v3');
+    });
+
+    it('should handle complex state objects', () => {
+      const complexState = {
+        id: 'peer1',
+        cursor: { line: 5, column: 10 },
+        selection: { start: { line: 1, column: 0 }, end: { line: 3, column: 5 } },
+        user: { name: 'John Doe', color: '#ff0000' },
+        metadata: { timestamp: Date.now(), version: '1.0.0' },
+      };
+
+      const receiveDataHandler = transportEventHandlers['message'];
+      receiveDataHandler(JSON.stringify(complexState));
+
+      expect(awareness.states[0]).toEqual(complexState);
+    });
+
+    it('should preserve existing properties when updating peer state', () => {
+      const receiveDataHandler = transportEventHandlers['message'];
+
+      // Initial state
+      receiveDataHandler(
+        JSON.stringify({
+          id: 'peer1',
+          cursor: { line: 1, column: 1 },
+          user: { name: 'John' },
+        })
+      );
+
+      // Partial update (should preserve user info)
+      receiveDataHandler(
+        JSON.stringify({
+          id: 'peer1',
+          cursor: { line: 5, column: 10 },
+        })
+      );
+
+      expect(awareness.states[0]).toEqual({
+        id: 'peer1',
+        cursor: { line: 5, column: 10 },
+        user: { name: 'John' },
+      });
+    });
+  });
+
+  describe('memory management', () => {
+    it('should clean up resources when transport disconnects', () => {
+      const updateSpy = vi.fn();
+      awareness.onUpdate(updateSpy);
+
+      // Add some state
+      const receiveDataHandler = transportEventHandlers['message'];
+      receiveDataHandler(JSON.stringify({ id: 'peer1', data: 'test' }));
+
+      expect(awareness.states).toHaveLength(1);
+
+      // Disconnect should be handled by transport
+      awareness.disconnect();
+
+      expect(mockTransport.disconnect).toHaveBeenCalled();
+    });
+
+    it('should handle transport event handler cleanup', () => {
+      // The transport should handle unsubscribing when disconnect is called
+      awareness.disconnect();
+
+      expect(mockTransport.disconnect).toHaveBeenCalled();
+    });
+  });
+
+  describe('TypeScript typing', () => {
+    it('should work with typed awareness states', () => {
+      interface TestAwarenessState {
+        id: string;
+        cursor: { line: number; column: number };
+        user: { name: string; color: string };
+      }
+
+      const typedAwareness = new WebRTCAwareness<TestAwarenessState>(mockTransport);
+
+      expect(typedAwareness).toBeInstanceOf(WebRTCAwareness);
+      expect(typedAwareness.states).toEqual([]);
+    });
   });
 });

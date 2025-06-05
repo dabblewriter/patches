@@ -1,233 +1,570 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Patches } from '../../src/client/Patches.js';
-import { PatchesDoc } from '../../src/client/PatchesDoc.js';
-import type { PatchesStore } from '../../src/client/PatchesStore.js';
-import { signal, type Signal } from '../../src/event-signal.js';
-import { PatchesSync } from '../../src/net/PatchesSync.js';
-import type { ConnectionState } from '../../src/net/protocol/types.js';
-import { PatchesWebSocket } from '../../src/net/websocket/PatchesWebSocket.js';
-import type { Change, PatchesSnapshot } from '../../src/types.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { PatchesSync } from '../../src/net/PatchesSync';
+import { Patches } from '../../src/client/Patches';
+import type { PatchesStore, TrackedDoc } from '../../src/client/PatchesStore';
+import type { Change } from '../../src/types';
+import type { ConnectionState } from '../../src/net/protocol/types';
+import { PatchesWebSocket } from '../../src/net/websocket/PatchesWebSocket';
+import { onlineState } from '../../src/net/websocket/onlineState';
 
-// 1. Mock modules with factories returning new vi.fn()
-vi.mock('../../src/algorithms/client/applyCommittedChanges.js', () => ({ applyCommittedChanges: vi.fn() }));
-vi.mock('../../src/algorithms/client/batching.js', () => ({ breakIntoBatches: vi.fn() }));
-
-// --- Mock Core Dependencies ---
-vi.mock('../../src/client/Patches.js');
-vi.mock('../../src/client/PatchesDoc.js');
-vi.mock('../../src/net/websocket/PatchesWebSocket.js');
-vi.mock('../../src/net/websocket/onlineState.js', () => ({
-  onlineState: {
-    isOnline: true,
-    onOnlineChange: vi.fn(() => () => {}),
-  },
+// Mock all external dependencies
+vi.mock('../../src/client/Patches');
+vi.mock('../../src/net/websocket/PatchesWebSocket');
+vi.mock('../../src/net/websocket/onlineState');
+vi.mock('@dabble/delta', () => ({
+  isEqual: vi.fn((a, b) => JSON.stringify(a) === JSON.stringify(b)),
+}));
+vi.mock('../../src/algorithms/client/applyCommittedChanges', () => ({
+  applyCommittedChanges: vi.fn(() => ({
+    state: { content: 'updated' },
+    rev: 6,
+    changes: [],
+  })),
+}));
+vi.mock('../../src/algorithms/client/batching', () => ({
+  breakIntoBatches: vi.fn(changes => [changes]),
 }));
 
-// 2. Import the functions AFTER they have been mocked.
-import { applyCommittedChanges } from '../../src/algorithms/client/applyCommittedChanges.js';
-import { breakIntoBatches } from '../../src/algorithms/client/batching.js';
-
-// 3. Cast the imported mocks for type safety in tests.
-const mockedApplyCommittedChanges = applyCommittedChanges as vi.MockedFunction<typeof applyCommittedChanges>;
-const mockedBreakIntoBatches = breakIntoBatches as vi.MockedFunction<typeof breakIntoBatches>;
-
 describe('PatchesSync', () => {
-  let mockPatches: vi.Mocked<Patches>;
-  let mockStore: vi.Mocked<PatchesStore>;
-  let mockPatchesWebSocketInstance: vi.Mocked<PatchesWebSocket>;
-  let patchesSync: PatchesSync | undefined; // Allow it to be undefined initially
-
-  const DOC_ID_1 = 'doc1';
-  const MOCK_URL = 'ws://localhost:1234';
+  let mockPatches: any;
+  let mockStore: any;
+  let mockWebSocket: any;
+  let sync: PatchesSync;
 
   beforeEach(() => {
-    mockedApplyCommittedChanges.mockReset();
-    mockedBreakIntoBatches.mockReset();
-    vi.mocked(Patches).mockClear();
-    vi.mocked(PatchesWebSocket).mockClear();
-
+    // Mock PatchesStore
     mockStore = {
-      getDoc: vi.fn().mockResolvedValue(undefined),
       listDocs: vi.fn().mockResolvedValue([]),
       getPendingChanges: vi.fn().mockResolvedValue([]),
       getLastRevs: vi.fn().mockResolvedValue([0, 0]),
       saveDoc: vi.fn().mockResolvedValue(undefined),
-      savePendingChanges: vi.fn().mockResolvedValue(undefined),
       saveCommittedChanges: vi.fn().mockResolvedValue(undefined),
       replacePendingChanges: vi.fn().mockResolvedValue(undefined),
-      trackDocs: vi.fn().mockResolvedValue(undefined),
-      untrackDocs: vi.fn().mockResolvedValue(undefined),
-      deleteDoc: vi.fn().mockResolvedValue(undefined),
       confirmDeleteDoc: vi.fn().mockResolvedValue(undefined),
-      close: vi.fn().mockResolvedValue(undefined),
-    } as vi.Mocked<PatchesStore>;
+      getDoc: vi.fn().mockResolvedValue({
+        state: { content: 'test' },
+        rev: 5,
+        changes: [],
+      }),
+    };
 
-    const MockedPatchesConstructor = vi.mocked(Patches);
-    mockPatches = new MockedPatchesConstructor({ store: mockStore });
-    (mockPatches as any).store = mockStore;
-    (mockPatches as any).docOptions = { maxPayloadBytes: 1000 };
-    (mockPatches as any).trackedDocs = new Set<string>();
-    (mockPatches as any).getOpenDoc = vi.fn();
-    (mockPatches as any).getDocChanges = vi.fn().mockReturnValue([]);
-    (mockPatches as any).onError = signal();
-    (mockPatches as any).onTrackDocs = signal();
-    (mockPatches as any).onUntrackDocs = signal();
-    (mockPatches as any).onDeleteDoc = signal();
-    (mockPatches as any).onChange = signal();
+    // Mock Patches
+    mockPatches = {
+      store: mockStore,
+      trackedDocs: ['doc1', 'doc2'],
+      docOptions: { maxPayloadBytes: 1000 },
+      getOpenDoc: vi.fn().mockReturnValue(null),
+      onTrackDocs: vi.fn(),
+      onUntrackDocs: vi.fn(),
+      onDeleteDoc: vi.fn(),
+    };
 
-    const MockedPatchesWebSocketConstructor = vi.mocked(PatchesWebSocket);
-    mockPatchesWebSocketInstance = new MockedPatchesWebSocketConstructor(MOCK_URL);
+    // Mock PatchesWebSocket
+    mockWebSocket = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      subscribe: vi.fn().mockResolvedValue(['doc1', 'doc2']),
+      unsubscribe: vi.fn().mockResolvedValue(undefined),
+      getDoc: vi.fn().mockResolvedValue({
+        state: { content: 'server' },
+        rev: 10,
+      }),
+      getChangesSince: vi.fn().mockResolvedValue([]),
+      commitChanges: vi.fn().mockResolvedValue([]),
+      deleteDoc: vi.fn().mockResolvedValue(undefined),
+      onStateChange: vi.fn(),
+      onChangesCommitted: vi.fn(),
+    };
 
-    mockPatchesWebSocketInstance.connect = vi.fn().mockResolvedValue(undefined);
-    mockPatchesWebSocketInstance.disconnect = vi.fn();
-    mockPatchesWebSocketInstance.subscribe = vi.fn().mockResolvedValue(undefined);
-    mockPatchesWebSocketInstance.unsubscribe = vi.fn().mockResolvedValue(undefined);
-    mockPatchesWebSocketInstance.getDoc = vi.fn();
-    mockPatchesWebSocketInstance.getChangesSince = vi.fn().mockResolvedValue([]);
-    mockPatchesWebSocketInstance.commitChanges = vi.fn().mockResolvedValue([]);
-    mockPatchesWebSocketInstance.deleteDoc = vi.fn().mockResolvedValue(undefined);
-    (mockPatchesWebSocketInstance as any).onStateChange = signal<(state: ConnectionState) => void>();
-    (mockPatchesWebSocketInstance as any).onChangesCommitted = signal<(docId: string, changes: Change[]) => void>();
+    // Mock constructors
+    vi.mocked(Patches).mockImplementation(() => mockPatches);
+    vi.mocked(PatchesWebSocket).mockImplementation(() => mockWebSocket);
 
-    MockedPatchesWebSocketConstructor.mockImplementation(() => mockPatchesWebSocketInstance);
+    // Mock onlineState
+    Object.defineProperty(vi.mocked(onlineState), 'isOnline', {
+      get: vi.fn().mockReturnValue(true),
+      configurable: true,
+    });
+    vi.mocked(onlineState).onOnlineChange = vi.fn() as any;
 
-    patchesSync = new PatchesSync(mockPatches, MOCK_URL); // wsOptionsFromTest is now passed
-
-    mockedApplyCommittedChanges.mockImplementation(
-      (snapshot: PatchesSnapshot<any>, _serverChanges: Change[]) => snapshot
-    );
-    mockedBreakIntoBatches.mockImplementation((changes: Change[]) => [changes]);
+    sync = new PatchesSync(mockPatches, 'ws://localhost:8080');
   });
 
   afterEach(() => {
-    if (patchesSync) {
-      patchesSync.disconnect(); // Guarded call
-    }
-    vi.clearAllTimers();
+    vi.clearAllMocks();
   });
 
-  describe('Initialization and Connection', () => {
-    it('should initialize with Patches instance, URL, and options', () => {
-      expect((patchesSync as any).patches).toBe(mockPatches);
-      expect((patchesSync as any).store).toBe(mockStore);
-      expect((patchesSync as any).maxPayloadBytes).toBe(1000);
-      expect(vi.mocked(PatchesWebSocket)).toHaveBeenCalledWith(MOCK_URL);
+  describe('constructor', () => {
+    it('should initialize with patches and websocket', () => {
+      expect(sync).toBeInstanceOf(PatchesSync);
+      expect(PatchesWebSocket).toHaveBeenCalledWith('ws://localhost:8080', undefined);
     });
 
-    it('should connect to WebSocket and update state', async () => {
-      const stateChangeSpy = vi.fn();
-      patchesSync!.onStateChange(stateChangeSpy);
-      await patchesSync!.connect();
-      expect(mockPatchesWebSocketInstance.connect).toHaveBeenCalled();
-      ((mockPatchesWebSocketInstance as any).onStateChange as Signal<(state: ConnectionState) => void>).emit(
-        'connected'
-      );
-      expect(patchesSync!.state.connected).toBe(true);
-      expect(stateChangeSpy).toHaveBeenCalledWith(expect.objectContaining({ connected: true }));
+    it('should initialize with websocket options', () => {
+      const wsOptions = { authToken: 'token123' } as any;
+      new PatchesSync(mockPatches, 'ws://localhost:8080', wsOptions);
+
+      expect(PatchesWebSocket).toHaveBeenCalledWith('ws://localhost:8080', wsOptions);
     });
 
-    it('should sync all known docs upon connection', async () => {
-      const syncAllDocsSpy = vi.spyOn(patchesSync as any, 'syncAllKnownDocs').mockResolvedValue(undefined);
-      await patchesSync!.connect();
-      ((mockPatchesWebSocketInstance as any).onStateChange as Signal<(state: ConnectionState) => void>).emit(
-        'connected'
-      );
-      expect(syncAllDocsSpy).toHaveBeenCalled();
-      syncAllDocsSpy.mockRestore();
+    it('should set up event listeners', () => {
+      expect(onlineState.onOnlineChange).toHaveBeenCalled();
+      expect(mockWebSocket.onStateChange).toHaveBeenCalled();
+      expect(mockWebSocket.onChangesCommitted).toHaveBeenCalled();
+      expect(mockPatches.onTrackDocs).toHaveBeenCalled();
+      expect(mockPatches.onUntrackDocs).toHaveBeenCalled();
+      expect(mockPatches.onDeleteDoc).toHaveBeenCalled();
+    });
+
+    it('should initialize state with online status', () => {
+      expect(sync.state.online).toBe(true);
+      expect(sync.state.connected).toBe(false);
+      expect(sync.state.syncing).toBeNull();
+    });
+
+    it('should track existing docs from patches', () => {
+      expect(sync['trackedDocs'].has('doc1')).toBe(true);
+      expect(sync['trackedDocs'].has('doc2')).toBe(true);
     });
   });
 
-  describe('_applyServerChangesToDoc (via _receiveCommittedChanges)', () => {
-    let mockOpenDoc: vi.Mocked<PatchesDoc<any>>;
-    const MOCK_SNAPSHOT_REV_5: PatchesSnapshot = { state: { text: 'rev5' }, rev: 5, changes: [] };
+  describe('state management', () => {
+    it('should return current state', () => {
+      const state = sync.state;
+      expect(state).toEqual({
+        online: true,
+        connected: false,
+        syncing: null,
+      });
+    });
 
+    it('should emit state change when state updates', () => {
+      const stateHandler = vi.fn();
+      sync.onStateChange(stateHandler);
+
+      sync['updateState']({ connected: true });
+
+      expect(stateHandler).toHaveBeenCalledWith({
+        online: true,
+        connected: true,
+        syncing: null,
+      });
+    });
+
+    it('should not emit if state has not changed', () => {
+      const stateHandler = vi.fn();
+      sync.onStateChange(stateHandler);
+
+      sync['updateState']({ online: true }); // Same as current state
+
+      expect(stateHandler).not.toHaveBeenCalled();
+    });
+
+    it('should handle online state changes', () => {
+      const onlineHandler = vi.mocked(onlineState.onOnlineChange).mock.calls[0][0];
+      const stateHandler = vi.fn();
+      sync.onStateChange(stateHandler);
+
+      onlineHandler(false);
+
+      expect(stateHandler).toHaveBeenCalledWith({
+        online: false,
+        connected: false,
+        syncing: null,
+      });
+    });
+  });
+
+  describe('connect method', () => {
+    it('should connect via websocket', async () => {
+      await sync.connect();
+
+      expect(mockWebSocket.connect).toHaveBeenCalled();
+    });
+
+    it('should handle connection errors', async () => {
+      const error = new Error('Connection failed');
+      mockWebSocket.connect.mockRejectedValue(error);
+
+      await expect(sync.connect()).rejects.toThrow('Connection failed');
+
+      expect(sync.state.connected).toBe(false);
+      expect(sync.state.syncing).toBe(error);
+    });
+
+    it('should handle non-Error connection failures', async () => {
+      mockWebSocket.connect.mockRejectedValue('string error');
+
+      await expect(sync.connect()).rejects.toBe('string error');
+
+      expect(sync.state.syncing).toBeInstanceOf(Error);
+    });
+  });
+
+  describe('disconnect method', () => {
+    it('should disconnect and reset state', () => {
+      sync['updateState']({ connected: true, syncing: 'updating' });
+
+      sync.disconnect();
+
+      expect(mockWebSocket.disconnect).toHaveBeenCalled();
+      expect(sync.state.connected).toBe(false);
+      expect(sync.state.syncing).toBeNull();
+    });
+  });
+
+  describe('syncAllKnownDocs method', () => {
     beforeEach(() => {
-      const MockedPatchesDoc = vi.mocked(PatchesDoc);
-      mockOpenDoc = new MockedPatchesDoc();
-      (mockOpenDoc as any).import = vi.fn();
-      (mockOpenDoc as any).applyCommittedChanges = vi.fn();
-      vi.spyOn(mockOpenDoc, 'committedRev', 'get').mockReturnValue(5);
-      (mockOpenDoc as any).getPendingChanges = vi.fn().mockReturnValue([]);
-
-      mockStore.getDoc.mockResolvedValue(MOCK_SNAPSHOT_REV_5);
-      mockPatches.getOpenDoc.mockReturnValue(mockOpenDoc);
-      mockedApplyCommittedChanges.mockImplementation((snap: PatchesSnapshot<any>, serverChanges: Change[]) => ({
-        ...snap,
-        rev: serverChanges.length > 0 ? serverChanges[serverChanges.length - 1].rev : snap.rev,
-        changes: [],
-      }));
+      sync['updateState']({ connected: true });
     });
 
-    it('should call applyCommittedChanges algorithm and update store', async () => {
-      const serverChanges: Change[] = [{ id: 's6', rev: 6, baseRev: 5, ops: [], created: Date.now() }];
-      const algoResultSnapshot: PatchesSnapshot = { state: { text: 'server updated' }, rev: 6, changes: [] };
-      mockedApplyCommittedChanges.mockReturnValue(algoResultSnapshot);
+    it('should sync all active documents', async () => {
+      const activeDocs: TrackedDoc[] = [
+        { docId: 'doc1', committedRev: 0 },
+        { docId: 'doc2', committedRev: 0 },
+      ];
 
-      await (patchesSync as any)._receiveCommittedChanges(DOC_ID_1, serverChanges);
+      mockStore.listDocs.mockResolvedValue(activeDocs);
 
-      expect(mockStore.getDoc).toHaveBeenCalledWith(DOC_ID_1);
-      expect(mockedApplyCommittedChanges).toHaveBeenCalledWith(MOCK_SNAPSHOT_REV_5, serverChanges);
-      expect(mockStore.saveCommittedChanges).toHaveBeenCalledWith(DOC_ID_1, serverChanges, undefined);
-      expect(mockStore.replacePendingChanges).toHaveBeenCalledWith(DOC_ID_1, algoResultSnapshot.changes);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      await sync['syncAllKnownDocs']();
+
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc1', 'doc2']);
+      expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+      expect(syncDocSpy).toHaveBeenCalledWith('doc2');
+      expect(sync.state.syncing).toBeNull();
     });
 
-    it('should call doc.applyCommittedChanges if doc is open and revs align', async () => {
-      const serverChanges: Change[] = [{ id: 's6', rev: 6, baseRev: 5, ops: [], created: Date.now() }];
-      vi.spyOn(mockOpenDoc, 'committedRev', 'get').mockReturnValue(5);
-      const algoResultSnapshot: PatchesSnapshot = {
-        state: { text: 'server updated' },
-        rev: 6,
-        changes: [{ id: 'p7', rev: 7, baseRev: 6, ops: [], created: Date.now() }],
-      };
-      mockedApplyCommittedChanges.mockReturnValue(algoResultSnapshot);
+    it('should handle deleted documents', async () => {
+      const docs: TrackedDoc[] = [
+        { docId: 'doc1', committedRev: 0 },
+        { docId: 'doc2', deleted: true, committedRev: 0 },
+      ];
 
-      await (patchesSync as any)._receiveCommittedChanges(DOC_ID_1, serverChanges);
+      mockStore.listDocs.mockResolvedValue(docs);
 
-      expect(mockPatches.getOpenDoc).toHaveBeenCalledWith(DOC_ID_1);
-      expect(mockOpenDoc.applyCommittedChanges).toHaveBeenCalledWith(serverChanges, algoResultSnapshot.changes);
-      expect(mockOpenDoc.import).not.toHaveBeenCalled();
+      await sync['syncAllKnownDocs']();
+
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc1']);
+      expect(mockWebSocket.deleteDoc).toHaveBeenCalledWith('doc2');
+      expect(mockStore.confirmDeleteDoc).toHaveBeenCalledWith('doc2');
     });
 
-    it('should call doc.import if doc is open and revs do NOT align', async () => {
-      const serverChanges: Change[] = [{ id: 's7', rev: 7, baseRev: 6, ops: [], created: Date.now() }];
-      vi.spyOn(mockOpenDoc, 'committedRev', 'get').mockReturnValue(5);
-      const algoResultSnapshot: PatchesSnapshot = { state: { text: 'server updated to 7' }, rev: 7, changes: [] };
-      mockedApplyCommittedChanges.mockReturnValue(algoResultSnapshot);
+    it('should not sync if not connected', async () => {
+      sync['updateState']({ connected: false });
 
-      await (patchesSync as any)._receiveCommittedChanges(DOC_ID_1, serverChanges);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc');
 
-      expect(mockPatches.getOpenDoc).toHaveBeenCalledWith(DOC_ID_1);
-      expect(mockOpenDoc.import).toHaveBeenCalledWith(algoResultSnapshot);
-      expect(mockOpenDoc.applyCommittedChanges).not.toHaveBeenCalled();
+      await sync['syncAllKnownDocs']();
+
+      expect(syncDocSpy).not.toHaveBeenCalled();
     });
   });
 
-  describe('flushDoc', () => {
+  describe('syncDoc method', () => {
     beforeEach(() => {
-      (patchesSync as any).trackedDocs.add(DOC_ID_1);
-      (patchesSync as any).updateState({ connected: true });
+      sync['updateState']({ connected: true });
     });
-    it('should get pending changes, break into batches, commit, and apply', async () => {
-      const pendingChanges: Change[] = [{ id: 'p1', rev: 1, baseRev: 0, ops: [], created: Date.now() }];
-      const committedChangesFromServer: Change[] = [{ id: 's1', rev: 1, baseRev: 0, ops: [], created: Date.now() }];
-      const snapshotAfterCommit: PatchesSnapshot = { state: { flushed: true }, rev: 1, changes: [] };
-      const range: [number, number] = [1, 1];
+
+    it('should sync document with pending changes', async () => {
+      const pendingChanges: Change[] = [{ id: 'c1', rev: 1, baseRev: 0, ops: [], created: Date.now() }];
 
       mockStore.getPendingChanges.mockResolvedValue(pendingChanges);
-      mockedBreakIntoBatches.mockReturnValue([pendingChanges]);
-      mockPatchesWebSocketInstance.commitChanges.mockResolvedValue(committedChangesFromServer);
 
-      const initialSnapshotForFlush: PatchesSnapshot = { state: {}, rev: 0, changes: pendingChanges };
-      mockStore.getDoc.mockResolvedValue(initialSnapshotForFlush);
-      mockedApplyCommittedChanges.mockReturnValue(snapshotAfterCommit);
+      const flushDocSpy = vi.spyOn(sync as any, 'flushDoc').mockResolvedValue(undefined);
 
-      await (patchesSync as any).flushDoc(DOC_ID_1);
+      await sync['syncDoc']('doc1');
 
-      expect(mockStore.getPendingChanges).toHaveBeenCalledWith(DOC_ID_1);
-      expect(mockedBreakIntoBatches).toHaveBeenCalledWith(pendingChanges, 1000);
-      expect(mockPatchesWebSocketInstance.commitChanges).toHaveBeenCalledWith(DOC_ID_1, pendingChanges);
-      expect(mockStore.saveCommittedChanges).toHaveBeenCalledWith(DOC_ID_1, committedChangesFromServer, range);
-      expect(mockedApplyCommittedChanges).toHaveBeenCalledWith(initialSnapshotForFlush, committedChangesFromServer);
+      expect(flushDocSpy).toHaveBeenCalledWith('doc1');
+    });
+
+    it('should sync document without pending changes', async () => {
+      mockStore.getPendingChanges.mockResolvedValue([]);
+      mockStore.getLastRevs.mockResolvedValue([5, 3]);
+
+      const serverChanges: Change[] = [{ id: 'c2', rev: 6, baseRev: 5, ops: [], created: Date.now() }];
+
+      mockWebSocket.getChangesSince.mockResolvedValue(serverChanges);
+
+      const applySpy = vi.spyOn(sync as any, '_applyServerChangesToDoc').mockResolvedValue(undefined);
+
+      await sync['syncDoc']('doc1');
+
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledWith('doc1', 5);
+      expect(applySpy).toHaveBeenCalledWith('doc1', serverChanges);
+    });
+
+    it('should get full document snapshot if no committed rev', async () => {
+      mockStore.getPendingChanges.mockResolvedValue([]);
+      mockStore.getLastRevs.mockResolvedValue([0, 0]); // No committed rev
+
+      const snapshot = { state: { content: 'new' }, rev: 1 };
+      mockWebSocket.getDoc.mockResolvedValue(snapshot);
+
+      await sync['syncDoc']('doc1');
+
+      expect(mockWebSocket.getDoc).toHaveBeenCalledWith('doc1');
+      expect(mockStore.saveDoc).toHaveBeenCalledWith('doc1', snapshot);
+    });
+
+    it('should update open document syncing state', async () => {
+      const mockDoc = {
+        updateSyncing: vi.fn(),
+      };
+
+      mockPatches.getOpenDoc.mockReturnValue(mockDoc);
+      mockStore.getPendingChanges.mockResolvedValue([]);
+      mockStore.getLastRevs.mockResolvedValue([0, 0]);
+
+      await sync['syncDoc']('doc1');
+
+      expect(mockDoc.updateSyncing).toHaveBeenCalledWith('updating');
+      expect(mockDoc.updateSyncing).toHaveBeenCalledWith(null);
+    });
+
+    it('should not sync if not connected', async () => {
+      sync['updateState']({ connected: false });
+
+      await sync['syncDoc']('doc1');
+
+      expect(mockStore.getPendingChanges).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('flushDoc method', () => {
+    beforeEach(() => {
+      sync['updateState']({ connected: true });
+      sync['trackedDocs'].add('doc1');
+    });
+
+    it('should throw if document not tracked', async () => {
+      await expect(sync['flushDoc']('untracked-doc')).rejects.toThrow('Document untracked-doc is not tracked');
+    });
+
+    it('should throw if not connected', async () => {
+      sync['updateState']({ connected: false });
+
+      await expect(sync['flushDoc']('doc1')).rejects.toThrow('Not connected to server');
+    });
+
+    it('should return early if no pending changes', async () => {
+      mockStore.getPendingChanges.mockResolvedValue([]);
+
+      await sync['flushDoc']('doc1');
+
+      expect(mockWebSocket.commitChanges).not.toHaveBeenCalled();
+    });
+
+    it('should flush pending changes in batches', async () => {
+      const pendingChanges: Change[] = [
+        { id: 'c1', rev: 1, baseRev: 0, ops: [], created: Date.now() },
+        { id: 'c2', rev: 2, baseRev: 1, ops: [], created: Date.now() },
+      ];
+
+      mockStore.getPendingChanges
+        .mockResolvedValueOnce(pendingChanges) // Initial call
+        .mockResolvedValueOnce([]); // After flush
+
+      const committed = pendingChanges.map(c => ({ ...c, rev: c.rev + 10 }));
+      mockWebSocket.commitChanges.mockResolvedValue(committed);
+
+      const applySpy = vi.spyOn(sync as any, '_applyServerChangesToDoc').mockResolvedValue(undefined);
+
+      await sync['flushDoc']('doc1');
+
+      expect(mockWebSocket.commitChanges).toHaveBeenCalledWith('doc1', pendingChanges);
+      expect(applySpy).toHaveBeenCalledWith('doc1', committed, [1, 2]);
+    });
+  });
+
+  describe('_applyServerChangesToDoc method', () => {
+    it('should apply server changes to document', async () => {
+      const serverChanges: Change[] = [{ id: 'c1', rev: 6, baseRev: 5, ops: [], created: Date.now() }];
+
+      const currentSnapshot = {
+        state: { content: 'current' },
+        rev: 5,
+        changes: [],
+      };
+
+      mockStore.getDoc.mockResolvedValue(currentSnapshot);
+
+      await sync['_applyServerChangesToDoc']('doc1', serverChanges);
+
+      expect(mockStore.saveCommittedChanges).toHaveBeenCalledWith('doc1', serverChanges, undefined);
+      expect(mockStore.replacePendingChanges).toHaveBeenCalledWith('doc1', []);
+    });
+
+    it('should handle non-existent documents', async () => {
+      mockStore.getDoc.mockResolvedValue(null);
+
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await sync['_applyServerChangesToDoc']('doc1', []);
+
+      expect(consoleSpy).toHaveBeenCalledWith('Cannot apply server changes to non-existent doc: doc1');
+
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('connection state handling', () => {
+    it('should handle connection state changes', () => {
+      const connectionHandler = vi.mocked(mockWebSocket.onStateChange).mock.calls[0][0];
+
+      const stateHandler = vi.fn();
+      sync.onStateChange(stateHandler);
+
+      connectionHandler('connected');
+
+      expect(sync.state.connected).toBe(true);
+      expect(stateHandler).toHaveBeenCalled();
+    });
+
+    it('should sync all docs when connected', () => {
+      const connectionHandler = vi.mocked(mockWebSocket.onStateChange).mock.calls[0][0];
+      const syncAllSpy = vi.spyOn(sync as any, 'syncAllKnownDocs').mockResolvedValue(undefined);
+
+      connectionHandler('connected');
+
+      expect(syncAllSpy).toHaveBeenCalled();
+    });
+
+    it('should preserve syncing state when connecting', () => {
+      sync['updateState']({ syncing: 'updating' });
+
+      const connectionHandler = vi.mocked(mockWebSocket.onStateChange).mock.calls[0][0];
+
+      connectionHandler('connecting');
+
+      expect(sync.state.syncing).toBe('updating'); // Preserved
+    });
+
+    it('should reset syncing state when disconnected', () => {
+      sync['updateState']({ connected: true, syncing: 'updating' });
+
+      const connectionHandler = vi.mocked(mockWebSocket.onStateChange).mock.calls[0][0];
+
+      connectionHandler('disconnected');
+
+      expect(sync.state.connected).toBe(false);
+      expect(sync.state.syncing).toBeNull(); // Reset
+    });
+  });
+
+  describe('document tracking handlers', () => {
+    beforeEach(() => {
+      sync['updateState']({ connected: true });
+    });
+
+    it('should handle new tracked documents', async () => {
+      const trackHandler = vi.mocked(mockPatches.onTrackDocs).mock.calls[0][0];
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      await trackHandler(['doc3', 'doc4']);
+
+      expect(sync['trackedDocs'].has('doc3')).toBe(true);
+      expect(sync['trackedDocs'].has('doc4')).toBe(true);
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc3', 'doc4']);
+      expect(syncDocSpy).toHaveBeenCalledWith('doc3');
+      expect(syncDocSpy).toHaveBeenCalledWith('doc4');
+    });
+
+    it('should handle already tracked documents', async () => {
+      const trackHandler = vi.mocked(mockPatches.onTrackDocs).mock.calls[0][0];
+
+      await trackHandler(['doc1']); // Already tracked
+
+      expect(mockWebSocket.subscribe).not.toHaveBeenCalled();
+    });
+
+    it('should handle untracked documents', async () => {
+      const untrackHandler = vi.mocked(mockPatches.onUntrackDocs).mock.calls[0][0];
+
+      await untrackHandler(['doc1', 'doc2']);
+
+      expect(sync['trackedDocs'].has('doc1')).toBe(false);
+      expect(sync['trackedDocs'].has('doc2')).toBe(false);
+      expect(mockWebSocket.unsubscribe).toHaveBeenCalledWith(['doc1', 'doc2']);
+    });
+
+    it('should handle non-existent untracked documents', async () => {
+      const untrackHandler = vi.mocked(mockPatches.onUntrackDocs).mock.calls[0][0];
+
+      await untrackHandler(['nonexistent']);
+
+      expect(mockWebSocket.unsubscribe).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('document deletion handling', () => {
+    beforeEach(() => {
+      sync['updateState']({ connected: true });
+    });
+
+    it('should delete document on server when connected', async () => {
+      const deleteHandler = vi.mocked(mockPatches.onDeleteDoc).mock.calls[0][0];
+
+      await deleteHandler('doc1');
+
+      expect(mockWebSocket.deleteDoc).toHaveBeenCalledWith('doc1');
+      expect(mockStore.confirmDeleteDoc).toHaveBeenCalledWith('doc1');
+    });
+
+    it('should defer deletion when offline', async () => {
+      sync['updateState']({ connected: false });
+
+      const deleteHandler = vi.mocked(mockPatches.onDeleteDoc).mock.calls[0][0];
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await deleteHandler('doc1');
+
+      expect(consoleSpy).toHaveBeenCalledWith('Offline: Server delete for doc doc1 deferred.');
+      expect(mockWebSocket.deleteDoc).not.toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('committed changes handling', () => {
+    it('should receive and apply committed changes', async () => {
+      const changesHandler = vi.mocked(mockWebSocket.onChangesCommitted).mock.calls[0][0];
+      const applySpy = vi.spyOn(sync as any, '_applyServerChangesToDoc').mockResolvedValue(undefined);
+
+      const serverChanges: Change[] = [{ id: 'c1', rev: 6, baseRev: 5, ops: [], created: Date.now() }];
+
+      await changesHandler('doc1', serverChanges);
+
+      expect(applySpy).toHaveBeenCalledWith('doc1', serverChanges);
+    });
+  });
+
+  describe('edge cases and robustness', () => {
+    it('should handle empty tracked docs list', async () => {
+      mockPatches.trackedDocs = [];
+      const newSync = new PatchesSync(mockPatches, 'ws://localhost:8080');
+
+      expect(newSync['trackedDocs'].size).toBe(0);
+    });
+
+    it('should handle missing docOptions', () => {
+      mockPatches.docOptions = undefined;
+      const newSync = new PatchesSync(mockPatches, 'ws://localhost:8080');
+
+      expect(newSync['maxPayloadBytes']).toBeUndefined();
+    });
+
+    it('should handle concurrent sync operations', async () => {
+      sync['updateState']({ connected: true });
+
+      const syncPromise1 = sync['syncDoc']('doc1');
+      const syncPromise2 = sync['syncDoc']('doc2');
+
+      await Promise.all([syncPromise1, syncPromise2]);
+
+      expect(mockStore.getPendingChanges).toHaveBeenCalledWith('doc1');
+      expect(mockStore.getPendingChanges).toHaveBeenCalledWith('doc2');
     });
   });
 });

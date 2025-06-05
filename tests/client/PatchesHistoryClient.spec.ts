@@ -1,243 +1,442 @@
-import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { PatchesHistoryClient } from '../../src/client/PatchesHistoryClient';
-import type { JSONPatchOp } from '../../src/json-patch';
-import type { PatchesAPI } from '../../src/net/protocol/types.js';
-import type { Change, VersionMetadata } from '../../src/types';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { PatchesAPI } from '../../src/net/protocol/types';
+import type { Change, VersionMetadata, EditableVersionMetadata } from '../../src/types';
 
-// Define a helper type for a mocked PatchesAPI using Vitest
-type MockedPatchesAPI = {
-  [K in keyof PatchesAPI]: PatchesAPI[K] extends (...args: infer A) => infer R
-    ? Mock<(...args: A) => R>
-    : PatchesAPI[K];
-};
+// Mock dependencies completely before importing
+vi.mock('../../src/algorithms/shared/applyChanges', () => ({
+  applyChanges: vi.fn().mockImplementation((state, changes) => ({
+    ...state,
+    appliedChanges: changes?.length || 0,
+  })),
+}));
+
+vi.mock('../../src/event-signal', () => ({
+  signal: vi.fn().mockImplementation(() => {
+    const subscribers = new Set();
+    const mockSignal = vi.fn().mockImplementation((callback: any) => {
+      subscribers.add(callback);
+      return () => subscribers.delete(callback);
+    }) as any;
+    mockSignal.emit = vi.fn().mockImplementation(async (...args: any[]) => {
+      for (const callback of subscribers) {
+        await (callback as any)(...args);
+      }
+    });
+    mockSignal.error = vi.fn().mockReturnValue(vi.fn());
+    mockSignal.clear = vi.fn().mockImplementation(() => subscribers.clear());
+    return mockSignal;
+  }),
+}));
+
+// Now import after mocking
+const { PatchesHistoryClient } = await import('../../src/client/PatchesHistoryClient');
+const { applyChanges } = await import('../../src/algorithms/shared/applyChanges');
 
 describe('PatchesHistoryClient', () => {
-  let client: PatchesHistoryClient;
-  let mockApi: MockedPatchesAPI;
-  let onVersionsChangeHandler: Mock<(versions: VersionMetadata[]) => void>;
-  let onStateChangeHandler: Mock<(state: any) => void>;
+  let client: InstanceType<typeof PatchesHistoryClient>;
+  let mockAPI: PatchesAPI;
 
-  const createMockVersion = (
-    id: string,
-    name: string,
-    timestamp: number,
-    rev: number,
-    baseRev: number,
-    parentId?: string,
-    origin: 'main' | 'offline' | 'branch' = 'main'
-  ): VersionMetadata => ({
+  const createVersion = (id: string, rev: number, parentId?: string): VersionMetadata => ({
     id,
-    name,
-    timestamp,
+    rev,
+    baseRev: rev - 1,
+    origin: 'main' as const,
+    startDate: Date.now() - 1000,
+    endDate: Date.now(),
     parentId,
-    origin,
-    startDate: timestamp - 100, // Ensure this is a number
-    endDate: timestamp, // Ensure this is a number
-    rev, // Ensure this is a number
-    baseRev, // Ensure this is a number
-    // groupId and branchName can be undefined if optional
+    groupId: 'group1',
+    name: `Version ${id}`,
+    description: `Description for version ${id}`,
   });
 
-  const mockVersionsInitial: VersionMetadata[] = [
-    createMockVersion('v1', 'Version 1', Date.now() - 2000, 1, 0),
-    createMockVersion('v2', 'Version 2', Date.now() - 1000, 2, 1, 'v1'),
-    createMockVersion('v3', 'Version 3', Date.now(), 3, 2, 'v2'),
-  ];
-  let currentMockVersions: VersionMetadata[];
+  const createChange = (id: string, rev: number): Change => ({
+    id,
+    rev,
+    baseRev: rev - 1,
+    ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
+    created: Date.now(),
+  });
 
   beforeEach(() => {
-    mockApi = {
-      subscribe: vi.fn(),
-      unsubscribe: vi.fn(),
-      getDoc: vi.fn(),
-      getChangesSince: vi.fn(),
-      commitChanges: vi.fn(),
-      deleteDoc: vi.fn(),
-      createVersion: vi.fn(),
-      listVersions: vi.fn(),
-      getVersionState: vi.fn(),
-      getVersionChanges: vi.fn(),
-      updateVersion: vi.fn(),
-    } as MockedPatchesAPI;
+    vi.clearAllMocks();
 
-    client = new PatchesHistoryClient('doc1', mockApi);
-    onVersionsChangeHandler = vi.fn();
-    onStateChangeHandler = vi.fn();
-    // Corrected subscription
-    client.onVersionsChange(onVersionsChangeHandler);
-    client.onStateChange(onStateChangeHandler);
+    mockAPI = {
+      listVersions: vi.fn().mockResolvedValue([]),
+      createVersion: vi.fn().mockResolvedValue('new-version-id'),
+      updateVersion: vi.fn().mockResolvedValue(undefined),
+      getVersionState: vi.fn().mockResolvedValue({ state: { default: 'state' } }),
+      getVersionChanges: vi.fn().mockResolvedValue([]),
+    } as any;
 
-    currentMockVersions = JSON.parse(JSON.stringify(mockVersionsInitial)); // Deep copy for isolation
-    mockApi.listVersions.mockResolvedValue(currentMockVersions);
+    client = new PatchesHistoryClient('doc1', mockAPI);
   });
 
   afterEach(() => {
     client.clear();
-    vi.clearAllMocks();
   });
 
-  it('should initialize with an ID', () => {
-    expect(client.id).toBe('doc1');
+  describe('constructor', () => {
+    it('should initialize with document ID and API', () => {
+      expect(client.id).toBe('doc1');
+      expect(client.versions).toEqual([]);
+      expect(client.state).toBeNull();
+    });
   });
 
-  it('should list versions and emit onVersionsChange', async () => {
-    const versionsToReturn = [...currentMockVersions];
-    mockApi.listVersions.mockResolvedValue(versionsToReturn);
+  describe('getters', () => {
+    it('should return versions list', () => {
+      expect(client.versions).toEqual([]);
+    });
 
-    const versions = await client.listVersions();
-    expect(versions).toEqual(versionsToReturn);
-    expect(mockApi.listVersions).toHaveBeenCalledWith('doc1', undefined);
-    expect(client.versions).toEqual(versionsToReturn);
-    expect(onVersionsChangeHandler).toHaveBeenCalledWith(versionsToReturn);
+    it('should return current state', () => {
+      expect(client.state).toBeNull();
+    });
   });
 
-  it('should create a version and refresh the versions list', async () => {
-    const newVersionId = 'v4';
-    const newVersionName = 'New Version Name';
-    const newVersionTimestamp = Date.now();
-    const newVersionRev = 4;
-    const newVersionBaseRev = 3;
-    const newVersion = createMockVersion(
-      newVersionId,
-      newVersionName,
-      newVersionTimestamp,
-      newVersionRev,
-      newVersionBaseRev,
-      'v3'
-    );
-    const updatedMockVersions = [...currentMockVersions, newVersion];
+  describe('listVersions', () => {
+    it('should fetch and store versions', async () => {
+      const versions = [createVersion('v1', 1), createVersion('v2', 2)];
+      vi.mocked(mockAPI.listVersions).mockResolvedValue(versions);
 
-    mockApi.createVersion.mockResolvedValue(newVersionId);
-    mockApi.listVersions.mockResolvedValue(updatedMockVersions);
+      const result = await client.listVersions();
 
-    const versionId = await client.createVersion({ name: newVersionName });
+      expect(mockAPI.listVersions).toHaveBeenCalledWith('doc1', undefined);
+      expect(client.versions).toEqual(versions);
+      expect(result).toEqual(versions);
+    });
 
-    expect(mockApi.createVersion).toHaveBeenCalledWith('doc1', { name: newVersionName });
-    expect(versionId).toBe(newVersionId);
-    expect(mockApi.listVersions).toHaveBeenCalledWith('doc1', undefined);
-    expect(client.versions).toEqual(updatedMockVersions);
-    // The onVersionsChangeHandler is called by listVersions, which gets the updatedMockVersions
-    expect(onVersionsChangeHandler).toHaveBeenCalledWith(updatedMockVersions);
+    it('should pass options to API call', async () => {
+      const options = { limit: 10, reverse: true };
+
+      await client.listVersions(options);
+
+      expect(mockAPI.listVersions).toHaveBeenCalledWith('doc1', options);
+    });
+
+    it('should emit onVersionsChange event', async () => {
+      const versions = [createVersion('v1', 1)];
+      const versionsSpy = vi.fn();
+      client.onVersionsChange(versionsSpy);
+      vi.mocked(mockAPI.listVersions).mockResolvedValue(versions);
+
+      await client.listVersions();
+
+      expect(versionsSpy).toHaveBeenCalledWith(versions);
+    });
   });
 
-  it('should update a version and refresh the versions list', async () => {
-    const versionToUpdateId = 'v2';
-    const updatedName = 'Updated Version Name';
-    const updates = { name: updatedName };
+  describe('createVersion', () => {
+    it('should create version and refresh list', async () => {
+      const metadata: EditableVersionMetadata = {
+        name: 'New Version',
+        description: 'A new version',
+      };
+      const versions = [createVersion('new-v', 1)];
 
-    const versionsAfterUpdate = currentMockVersions.map(v =>
-      v.id === versionToUpdateId ? { ...v, name: updatedName } : v
-    );
-    mockApi.updateVersion.mockResolvedValue(undefined);
-    mockApi.listVersions.mockResolvedValue(versionsAfterUpdate);
+      vi.mocked(mockAPI.createVersion).mockResolvedValue('new-version-id');
+      vi.mocked(mockAPI.listVersions).mockResolvedValue(versions);
 
-    await client.updateVersion(versionToUpdateId, updates);
+      const result = await client.createVersion(metadata);
 
-    expect(mockApi.updateVersion).toHaveBeenCalledWith('doc1', versionToUpdateId, updates);
-    expect(mockApi.listVersions).toHaveBeenCalledWith('doc1', undefined);
-    expect(client.versions).toEqual(versionsAfterUpdate);
-    expect(onVersionsChangeHandler).toHaveBeenCalledWith(versionsAfterUpdate);
+      expect(mockAPI.createVersion).toHaveBeenCalledWith('doc1', metadata);
+      expect(mockAPI.listVersions).toHaveBeenCalledWith('doc1', undefined);
+      expect(result).toBe('new-version-id');
+      expect(client.versions).toEqual(versions);
+    });
   });
 
-  it('should load state for a specific version and cache it', async () => {
-    const versionId = 'v2';
-    const docState = { content: 'version 2 state' };
-    const versionData = currentMockVersions.find(v => v.id === versionId)!;
-    mockApi.getVersionState.mockResolvedValue({ state: docState, rev: versionData.rev });
+  describe('updateVersion', () => {
+    it('should update version and refresh list', async () => {
+      const metadata: EditableVersionMetadata = {
+        name: 'Updated Version',
+        description: 'Updated description',
+      };
+      const versions = [createVersion('v1', 1)];
 
-    const result = await client.getVersionState(versionId);
-    expect(result).toEqual(docState);
-    expect(mockApi.getVersionState).toHaveBeenCalledWith('doc1', versionId);
-    expect(client.state).toEqual(docState);
-    expect(onStateChangeHandler).toHaveBeenCalledWith(docState);
+      vi.mocked(mockAPI.listVersions).mockResolvedValue(versions);
 
-    await client.getVersionState(versionId);
-    const parentVersion = currentMockVersions.find(v => v.id === 'v2');
-    expect(parentVersion).toBeDefined();
+      await client.updateVersion('v1', metadata);
 
-    const parentDocState = { content: 'version 2 state' };
-    const versionChanges: Change[] = [
-      {
-        id: 'c1_v3',
-        ops: [{ op: 'replace', path: '/content', value: 'change 1' } as JSONPatchOp],
-        rev: 3,
-        created: Date.now(),
-        baseRev: 2,
-      },
-      {
-        id: 'c2_v3',
-        ops: [{ op: 'replace', path: '/content', value: 'change 2' } as JSONPatchOp],
-        rev: 3,
-        created: Date.now(),
-        baseRev: 2,
-      },
-    ];
-    const expectedState = { content: 'change 1' }; // Note: applyChanges logic not tested here, just flow
-
-    mockApi.getVersionState.mockResolvedValue({ state: parentDocState, rev: parentVersion!.rev }); // For parent v2
-    mockApi.getVersionChanges.mockResolvedValue(versionChanges); // For v3
-
-    // Prime client.versions if not already (though beforeEach does it)
-    if (client.versions.length === 0) await client.listVersions();
-    onStateChangeHandler.mockClear();
-
-    await client.scrubTo(versionId, 1); // scrub to the first change
-
-    expect(mockApi.getVersionState).toHaveBeenCalledWith('doc1', parentVersion!.id);
-    expect(mockApi.getVersionChanges).toHaveBeenCalledWith('doc1', versionId);
-    // This assertion depends on the actual applyChanges logic which is external to this client
-    // For PatchesHistoryClient, we mainly test that it calls the right things and emits.
-    // The actual state transformation might be better for an integration test or if applyChanges is mocked.
-    expect(client.state).toEqual(expectedState);
-    expect(onStateChangeHandler).toHaveBeenCalledWith(expectedState);
+      expect(mockAPI.updateVersion).toHaveBeenCalledWith('doc1', 'v1', metadata);
+      expect(mockAPI.listVersions).toHaveBeenCalledWith('doc1', undefined);
+      expect(client.versions).toEqual(versions);
+    });
   });
 
-  it('should scrub to a specific change within a version with no parent', async () => {
-    const versionId = 'v1';
-    const versionChanges: Change[] = [
-      {
-        id: 'c1_v1',
-        ops: [{ op: 'add', path: '/content', value: ' change 1' } as JSONPatchOp],
-        rev: 1,
-        created: Date.now(),
-        baseRev: 0,
-      },
-    ];
-    const expectedState = { content: ' change 1' }; // Depends on applyChanges
+  describe('getVersionState', () => {
+    it('should fetch and cache version state', async () => {
+      const state = { title: 'Test Doc', content: 'Hello world' };
+      vi.mocked(mockAPI.getVersionState).mockResolvedValue({ state, rev: 1 });
 
-    mockApi.getVersionChanges.mockResolvedValue(versionChanges);
-    if (client.versions.length === 0) await client.listVersions();
-    onStateChangeHandler.mockClear();
+      const result = await client.getVersionState('v1');
 
-    await client.scrubTo(versionId, 1);
+      expect(mockAPI.getVersionState).toHaveBeenCalledWith('doc1', 'v1');
+      expect(result).toEqual(state);
+      expect(client.state).toEqual(state);
+    });
 
-    expect(mockApi.getVersionState).not.toHaveBeenCalled();
-    expect(mockApi.getVersionChanges).toHaveBeenCalledWith('doc1', versionId);
-    expect(client.state).toEqual(expectedState);
-    expect(onStateChangeHandler).toHaveBeenCalledWith(expectedState);
+    it('should return cached state on second call', async () => {
+      const state = { cached: 'data' };
+      vi.mocked(mockAPI.getVersionState).mockResolvedValue({ state, rev: 1 });
+
+      // First call
+      await client.getVersionState('v1');
+
+      // Second call
+      const result = await client.getVersionState('v1');
+
+      expect(mockAPI.getVersionState).toHaveBeenCalledTimes(1);
+      expect(result).toEqual(state);
+    });
+
+    it('should emit onStateChange event', async () => {
+      const state = { test: 'state' };
+      const stateSpy = vi.fn();
+      client.onStateChange(stateSpy);
+      vi.mocked(mockAPI.getVersionState).mockResolvedValue({ state, rev: 1 });
+
+      await client.getVersionState('v1');
+
+      expect(stateSpy).toHaveBeenCalledWith(state);
+    });
+
+    it('should merge with existing cache data', async () => {
+      const state = { version: 'state' };
+      const changes = [createChange('c1', 1)];
+
+      // First get changes (to populate cache)
+      vi.mocked(mockAPI.getVersionChanges).mockResolvedValue(changes);
+      await client.getVersionChanges('v1');
+
+      // Then get state (should merge with existing cache)
+      vi.mocked(mockAPI.getVersionState).mockResolvedValue({ state, rev: 1 });
+      await client.getVersionState('v1');
+
+      expect(mockAPI.getVersionState).toHaveBeenCalledTimes(1);
+      expect(mockAPI.getVersionChanges).toHaveBeenCalledTimes(1);
+    });
   });
 
-  it('should clear versions, state, cache, and listeners', async () => {
-    await client.listVersions();
-    const v1DocState = { content: 'v1 state' };
-    const v1VersionData = currentMockVersions.find(v => v.id === 'v1')!;
-    mockApi.getVersionState.mockResolvedValue({ state: v1DocState, rev: v1VersionData.rev });
-    await client.getVersionState('v1');
-    const getVersionStateCallCountBeforeClear = mockApi.getVersionState.mock.calls.length;
+  describe('getVersionChanges', () => {
+    it('should fetch and cache version changes', async () => {
+      const changes = [createChange('c1', 1), createChange('c2', 2)];
+      vi.mocked(mockAPI.getVersionChanges).mockResolvedValue(changes);
 
-    onVersionsChangeHandler.mockClear();
-    onStateChangeHandler.mockClear();
+      const result = await client.getVersionChanges('v1');
 
-    client.clear();
+      expect(mockAPI.getVersionChanges).toHaveBeenCalledWith('doc1', 'v1');
+      expect(result).toEqual(changes);
+    });
 
-    expect(client.versions).toEqual([]);
-    expect(client.state).toBeNull();
-    expect(onVersionsChangeHandler).toHaveBeenCalledWith([]);
-    expect(onStateChangeHandler).toHaveBeenCalledWith(null);
+    it('should return cached changes on second call', async () => {
+      const changes = [createChange('c1', 1)];
+      vi.mocked(mockAPI.getVersionChanges).mockResolvedValue(changes);
 
-    mockApi.getVersionState.mockResolvedValue({ state: v1DocState, rev: v1VersionData.rev });
-    await client.getVersionState('v1');
-    // Should be called one more time than before clear, as cache is gone
-    expect(mockApi.getVersionState.mock.calls.length).toBe(getVersionStateCallCountBeforeClear + 1);
+      // First call
+      await client.getVersionChanges('v1');
+
+      // Second call
+      const result = await client.getVersionChanges('v1');
+
+      expect(mockAPI.getVersionChanges).toHaveBeenCalledTimes(1);
+      expect(result).toEqual(changes);
+    });
+
+    it('should merge with existing cache data', async () => {
+      const state = { version: 'state' };
+      const changes = [createChange('c1', 1)];
+
+      // First get state (to populate cache)
+      vi.mocked(mockAPI.getVersionState).mockResolvedValue({ state, rev: 1 });
+      await client.getVersionState('v1');
+
+      // Then get changes (should merge with existing cache)
+      vi.mocked(mockAPI.getVersionChanges).mockResolvedValue(changes);
+      await client.getVersionChanges('v1');
+
+      expect(mockAPI.getVersionState).toHaveBeenCalledTimes(1);
+      expect(mockAPI.getVersionChanges).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('scrubTo', () => {
+    beforeEach(async () => {
+      // Set up versions in client
+      const versions = [createVersion('v1', 1), createVersion('v2', 2, 'v1')];
+      vi.mocked(mockAPI.listVersions).mockResolvedValue(versions);
+      await client.listVersions();
+    });
+
+    it('should scrub to specific change index', async () => {
+      const parentState = { title: 'Parent' };
+      const changes = [createChange('c1', 1), createChange('c2', 2), createChange('c3', 3)];
+      const expectedState = { title: 'Parent', appliedChanges: 2 };
+
+      vi.mocked(mockAPI.getVersionState).mockResolvedValue({ state: parentState, rev: 1 });
+      vi.mocked(mockAPI.getVersionChanges).mockResolvedValue(changes);
+      vi.mocked(applyChanges).mockReturnValue(expectedState);
+
+      const stateSpy = vi.fn();
+      client.onStateChange(stateSpy);
+
+      await client.scrubTo('v2', 2);
+
+      expect(mockAPI.getVersionState).toHaveBeenCalledWith('doc1', 'v1');
+      expect(mockAPI.getVersionChanges).toHaveBeenCalledWith('doc1', 'v2');
+      expect(applyChanges).toHaveBeenCalledWith(parentState, changes.slice(0, 2));
+      expect(client.state).toEqual(expectedState);
+      expect(stateSpy).toHaveBeenCalledWith(expectedState);
+    });
+
+    it('should handle scrubbing to index 0 (parent version)', async () => {
+      const parentState = { title: 'Parent' };
+      const changes = [createChange('c1', 1)];
+
+      vi.mocked(mockAPI.getVersionState).mockResolvedValue({ state: parentState, rev: 1 });
+      vi.mocked(mockAPI.getVersionChanges).mockResolvedValue(changes);
+
+      await client.scrubTo('v2', 0);
+
+      expect(mockAPI.getVersionState).toHaveBeenCalledWith('doc1', 'v1');
+      expect(applyChanges).not.toHaveBeenCalled();
+      expect(client.state).toEqual(parentState);
+    });
+
+    it('should handle version without parent', async () => {
+      const changes = [createChange('c1', 1)];
+
+      vi.mocked(mockAPI.getVersionChanges).mockResolvedValue(changes);
+
+      await client.scrubTo('v1', 1);
+
+      expect(mockAPI.getVersionState).not.toHaveBeenCalled();
+      expect(mockAPI.getVersionChanges).toHaveBeenCalledWith('doc1', 'v1');
+      expect(applyChanges).toHaveBeenCalledWith(undefined, changes.slice(0, 1));
+    });
+
+    it('should emit state change event', async () => {
+      const changes = [createChange('c1', 1)];
+      const stateSpy = vi.fn();
+      client.onStateChange(stateSpy);
+
+      vi.mocked(mockAPI.getVersionChanges).mockResolvedValue(changes);
+
+      await client.scrubTo('v1', 1);
+
+      expect(stateSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe('clear', () => {
+    it('should reset all state and clear caches', async () => {
+      // Set up some state
+      const versions = [createVersion('v1', 1)];
+      const state = { test: 'data' };
+
+      vi.mocked(mockAPI.listVersions).mockResolvedValue(versions);
+      vi.mocked(mockAPI.getVersionState).mockResolvedValue({ state, rev: 1 });
+
+      await client.listVersions();
+      await client.getVersionState('v1');
+
+      expect(client.versions).toHaveLength(1);
+      expect(client.state).toEqual(state);
+
+      // Clear everything
+      client.clear();
+
+      expect(client.versions).toEqual([]);
+      expect(client.state).toBeNull();
+    });
+
+    it('should emit events for cleared state', () => {
+      const versionsSpy = vi.fn();
+      const stateSpy = vi.fn();
+
+      client.onVersionsChange(versionsSpy);
+      client.onStateChange(stateSpy);
+
+      client.clear();
+
+      expect(versionsSpy).toHaveBeenCalledWith([]);
+      expect(stateSpy).toHaveBeenCalledWith(null);
+    });
+  });
+
+  describe('LRU cache behavior', () => {
+    it('should cache version data', async () => {
+      const state = { cached: 'data' };
+      const changes = [createChange('c1', 1)];
+
+      vi.mocked(mockAPI.getVersionState).mockResolvedValue({ state, rev: 1 });
+      vi.mocked(mockAPI.getVersionChanges).mockResolvedValue(changes);
+
+      // Load both state and changes
+      await client.getVersionState('v1');
+      await client.getVersionChanges('v1');
+
+      // Second calls should use cache
+      await client.getVersionState('v1');
+      await client.getVersionChanges('v1');
+
+      expect(mockAPI.getVersionState).toHaveBeenCalledTimes(1);
+      expect(mockAPI.getVersionChanges).toHaveBeenCalledTimes(1);
+    });
+
+    it('should evict least recently used items when cache is full', async () => {
+      // Create many versions to exceed cache size (6)
+      const versions = Array.from({ length: 8 }, (_, i) => `v${i + 1}`);
+
+      // Load state for all versions
+      for (const versionId of versions) {
+        vi.mocked(mockAPI.getVersionState).mockResolvedValue({ state: { id: versionId }, rev: 1 });
+        await client.getVersionState(versionId);
+      }
+
+      // First few versions should be evicted from cache
+      vi.mocked(mockAPI.getVersionState).mockClear();
+
+      // Accessing early version should require new API call
+      await client.getVersionState('v1');
+      expect(mockAPI.getVersionState).toHaveBeenCalledTimes(1);
+
+      // Accessing recent version should use cache
+      await client.getVersionState('v8');
+      expect(mockAPI.getVersionState).toHaveBeenCalledTimes(1); // Still 1, no new call
+    });
+  });
+
+  describe('error handling', () => {
+    it('should propagate API errors', async () => {
+      const error = new Error('API Error');
+      vi.mocked(mockAPI.listVersions).mockRejectedValue(error);
+
+      await expect(client.listVersions()).rejects.toThrow('API Error');
+    });
+
+    it('should handle missing version in scrubTo', async () => {
+      // Try to scrub to non-existent version
+      await client.scrubTo('non-existent', 1);
+
+      // Should still try to get changes but not parent state
+      expect(mockAPI.getVersionChanges).toHaveBeenCalledWith('doc1', 'non-existent');
+      expect(mockAPI.getVersionState).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('event signals', () => {
+    it('should provide onVersionsChange signal', () => {
+      const callback = vi.fn();
+      const unsubscribe = client.onVersionsChange(callback);
+
+      expect(typeof unsubscribe).toBe('function');
+    });
+
+    it('should provide onStateChange signal', () => {
+      const callback = vi.fn();
+      const unsubscribe = client.onStateChange(callback);
+
+      expect(typeof unsubscribe).toBe('function');
+    });
   });
 });

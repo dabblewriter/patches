@@ -33,15 +33,15 @@ src/algorithms/
 │   ├── createStateFromSnapshot.ts # Building current state from history
 │   ├── getJSONByteSize.ts      # Estimating change size
 │   └── makeChange.ts             # Crafting new local changes
-├── server/                     # Server-side command center (TODO: needs more here!)
-│   └── operational-transform.ts # Core server OT logic (still mostly in PatchesServer)
+├── server/                     # Server-side algorithms
+│   ├── getSnapshotAtRevision.ts  # Server snapshot retrieval
+│   ├── getStateAtRevision.ts     # Server state retrieval
+│   └── handleOfflineSessionsAndBatches.ts # Offline sync handling
 ├── shared/                     # Bits everyone can use
 │   ├── applyChanges.ts         # Applying a list of changes to a state
 │   └── rebaseChanges.ts        # The core OT rebasing dance
 └── index.ts                    # The friendly neighborhood exporter
 ```
-
-(Heads up: The server-side is still a bit of a work-in-progress for this new structure. More to come!)
 
 ## Client-Side Algorithms: The Nitty-Gritty
 

@@ -1,32 +1,38 @@
 # `PatchesDoc<T>`
 
-Say hello to the star of the show! 🌟
+Say hello to your document's friendly neighborhood manager! 🌟
 
-`PatchesDoc<T>` is your direct interface to a single collaborative document. It's where all the client-side magic happens - making changes, handling updates from the server, and keeping your UI in sync with everyone else's edits.
+`PatchesDoc<T>` is your direct interface to a single collaborative document. Think of it as your document's personal assistant - it handles your local changes, keeps track of what's happening, and provides a clean API for your app to work with.
 
-**Here's a hot tip:** Don't create these yourself! Let the main `Patches` client create them for you with `patches.openDoc()`.
+**Here's the deal:** Don't create these yourself! Let the main `Patches` client create them for you with `patches.openDoc()`.
 
 **Table of Contents**
 
-- [Overview](#overview)
-- [Initialization](#initialization)
-- [State Management](#state-management)
-- [Making Local Changes](#making-local-changes)
-- [Synchronization with Server](#synchronization-with-server)
-- [Accessing State and Metadata](#accessing-state-and-metadata)
+- [What's Its Job?](#whats-its-job)
+- [Getting Your Hands on One](#getting-your-hands-on-one)
+- [State Management Made Simple](#state-management-made-simple)
+- [Making Changes](#making-changes)
+- [Accessing State and Status](#accessing-state-and-status)
 - [Event Hooks](#event-hooks)
 - [Example Usage](#example-usage)
 
-## Overview
+## What's Its Job?
 
-`PatchesDoc` is your document's local representation. Think of it as your personal view into a shared world. It does some seriously clever stuff:
+After the big refactor, `PatchesDoc` has a much cleaner, focused role. It's your app's interface to a document. No more juggling complex sync logic - that's handled elsewhere now!
 
-- **Optimistic Updates:** Apply your changes locally right away for super-responsive UI
-- **Change Tracking:** Keep track of what's pending, what's sending, and what's confirmed
-- **Operational Transformation:** Handle rebasing your local changes on top of server changes
-- **Immutable State:** Give you a clean, consistent state object that won't be accidentally mutated
+Here's what it actually does:
 
-## Initialization
+- **State Management:** Keeps track of your document's current state (committed + pending changes)
+- **Change Interface:** Provides the `change()` method for making edits
+- **Status Tracking:** Tells you if there are pending changes, syncing status, etc.
+- **Event Emission:** Lets you know when things change so your UI can update
+
+Here's what it does NOT do anymore:
+- ❌ Operational Transformation (that's in the algorithms now)
+- ❌ Server communication (that's PatchesSync's job)
+- ❌ Complex rebasing logic (also in algorithms)
+
+## Getting Your Hands on One
 
 Remember, you almost never create a `PatchesDoc` directly. Let `Patches` do it for you:
 
@@ -46,34 +52,30 @@ If you really need to create one directly (rare!):
 import { PatchesDoc } from '@dabble/patches/client';
 
 const doc = new PatchesDoc<MyDocType>({
-  initialState: {
-    /* initial state */
-  },
-  id: 'my-document-id', // Optional, can set later with setId()
+  /* initial state */
+}, {
+  /* initial metadata */
+}, {
+  maxPayloadBytes: 1024 * 1024 // 1MB max per change
 });
 ```
 
-## State Management
+## State Management Made Simple
 
-`PatchesDoc` is a state management genius. It juggles three different versions of your document state:
+`PatchesDoc` manages a simple but powerful state model:
 
-### Committed State
-
-This is the last confirmed state from the server - the ground truth that everyone agrees on. It's stored in `doc._committedState` and has a revision number in `doc.committedRev`.
-
-### Optimistic State
-
-This is what you actually see and use via `doc.state`. It includes all confirmed changes PLUS your pending local changes. This makes your app feel super responsive since you see your changes immediately.
+### Current State
+What you see via `doc.state` - this includes all confirmed server changes PLUS your local pending changes. This makes your app feel super responsive since you see your changes immediately.
 
 ### Pending Changes
+Your local edits that haven't been confirmed by the server yet. These live in the document's internal snapshot and get handled by the sync layer.
 
-These are your local edits that haven't been confirmed by the server yet. They're in three possible states:
+### Metadata
+Information about the document's revision, sync status, and change metadata.
 
-1. **Pending:** Changes waiting to be sent (`_pendingChanges`)
-2. **Sending:** Changes currently being sent to the server (`_sendingChanges`)
-3. **Confirmed:** Changes the server accepted (these become part of the committed state)
+The beauty is that you don't need to think about the complexity. Just make changes and check the status!
 
-## Making Local Changes
+## Making Changes
 
 Changing your document is dead simple:
 
@@ -95,51 +97,14 @@ doc.change(draft => {
 The `change` method:
 
 1. Takes your changes and applies them to a draft object
-2. Creates a new immutable state with those changes applied
-3. Generates a change record to send to the server
-4. Updates the local state immediately (optimistic update)
-5. Adds the change to the pending queue
+2. Uses the `makeChange` algorithm to create proper change objects
+3. Updates the local state immediately (optimistic update)
+4. Adds the changes to the pending queue
+5. Emits events so your UI can update
 
-You get instant feedback while changes sync in the background!
+The sync layer (PatchesSync) will handle getting these changes to the server and dealing with any conflicts.
 
-## Synchronization with Server
-
-`PatchesDoc` has three key methods for syncing with the server:
-
-### `getUpdatesForServer()`
-
-```typescript
-const changesToSend = doc.getUpdatesForServer();
-```
-
-This moves pending changes to "sending" status and returns them so they can be sent to the server. Usually, your sync provider calls this for you.
-
-### `applyServerConfirmation()`
-
-```typescript
-doc.applyServerConfirmation(serverCommittedChanges);
-```
-
-When the server confirms changes, this method:
-
-1. Updates the committed state and revision number
-2. Clears the corresponding sending changes
-3. Triggers update events for your UI
-
-### `applyExternalServerUpdate()`
-
-```typescript
-doc.applyExternalServerUpdate(changesFromOtherClients);
-```
-
-When other clients make changes, this method:
-
-1. Updates the committed state with their changes
-2. Rebases any pending local changes on top using OT
-3. Updates the optimistic state
-4. Triggers update events for your UI
-
-## Accessing State and Metadata
+## Accessing State and Status
 
 There are several ways to access your document's state and metadata:
 
@@ -149,7 +114,7 @@ There are several ways to access your document's state and metadata:
 const currentState = doc.state;
 ```
 
-This gives you the optimistic state (committed + pending changes). This is what you use for rendering your UI.
+This gives you the current state (committed + pending changes). This is what you use for rendering your UI.
 
 ### `committedRev` Getter
 
@@ -162,33 +127,26 @@ Get the current server revision number.
 ### Status Getters
 
 ```typescript
-if (doc.isSending) {
-  // Show a "saving..." indicator
+if (doc.hasPending) {
+  // Show an "unsaved changes" indicator
 }
 
-if (doc.hasPending) {
-  // Show an "unsaved changes" warning
+if (doc.syncing) {
+  // Show sync status - could be an error or "syncing" state
 }
 ```
 
-### Import/Export
+### Import/Export for Persistence
 
 ```typescript
-// Get the full document state with all changes
-const exportedDoc = doc.export();
+// Get the full document snapshot
+const snapshot = doc.export();
 
-// Import a document state (e.g., when initializing)
+// Import a document snapshot (e.g., when loading from storage)
 doc.import({
-  state: {
-    /* ... */
-  },
-  committedRev: 42,
-  pendingChanges: [
-    /* ... */
-  ],
-  sendingChanges: [
-    /* ... */
-  ],
+  state: { /* ... */ },
+  rev: 42,
+  changes: [ /* pending changes */ ]
 });
 ```
 
@@ -197,29 +155,29 @@ doc.import({
 Listen to document events to update your UI:
 
 ```typescript
-// Called whenever the document state changes
-doc.onUpdate((newState, oldState) => {
+// Called whenever the document state changes (from any source)
+doc.onUpdate(newState => {
   console.log('Document updated:', newState);
   updateUI(newState);
 });
 
-// Called when a change is made locally
-doc.onChange(change => {
-  console.log('Local change made:', change);
+// Called when a local change is made
+doc.onChange(changes => {
+  console.log('Local changes made:', changes);
 });
 
-// Called before applying a change (can be used for validation)
-doc.onBeforeChange((draftState, callback) => {
-  if (!isValid(draftState)) {
-    callback(new Error('Invalid change!'));
-    return;
+// Called before applying a local change (can be used for validation)
+doc.onBeforeChange(change => {
+  console.log('About to apply change:', change);
+});
+
+// Called when syncing state changes
+doc.onSyncing(syncingState => {
+  if (syncingState) {
+    console.log('Syncing or sync error:', syncingState);
+  } else {
+    console.log('Sync completed successfully');
   }
-  callback(null);
-});
-
-// Called when the server confirms changes
-doc.onCommit(committedChanges => {
-  console.log('Changes committed by server:', committedChanges);
 });
 ```
 
@@ -243,10 +201,11 @@ interface TodoDoc {
 }
 
 function TodoApp() {
-  const [doc, setDoc] = useState(null);
+  const [doc, setDoc] = useState<PatchesDoc<TodoDoc> | null>(null);
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [newTodo, setNewTodo] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
+  const [hasUnsaved, setHasUnsaved] = useState(false);
+  const [syncError, setSyncError] = useState<Error | null>(null);
 
   // Set up Patches on component mount
   useEffect(() => {
@@ -254,8 +213,8 @@ function TodoApp() {
       const store = new InMemoryStore();
       const patches = new Patches({ store });
 
-      // Connect to server
-      const sync = new PatchesSync('wss://your-server.example.com', patches);
+      // Connect to server (PatchesSync handles all the sync logic)
+      const sync = new PatchesSync(patches, 'wss://your-server.example.com');
       await sync.connect();
 
       // Open the todos document
@@ -268,15 +227,21 @@ function TodoApp() {
         });
       }
 
-      // Listen for updates
+      // Listen for state updates
       todoDoc.onUpdate(newState => {
         setTodos(newState.items || []);
       });
 
-      // Track saving status
-      setInterval(() => {
-        setIsSaving(todoDoc.isSending || todoDoc.hasPending);
-      }, 100);
+      // Track pending changes
+      todoDoc.onChange(() => {
+        setHasUnsaved(todoDoc.hasPending);
+      });
+
+      // Track sync errors
+      todoDoc.onSyncing(syncingState => {
+        setSyncError(syncingState instanceof Error ? syncingState : null);
+        setHasUnsaved(todoDoc.hasPending);
+      });
 
       setDoc(todoDoc);
     };
@@ -314,7 +279,14 @@ function TodoApp() {
   return (
     <div>
       <h1>Collaborative Todo List</h1>
-      {isSaving && <div className="saving-indicator">Saving...</div>}
+      
+      {/* Status indicators */}
+      {syncError && (
+        <div className="error">Sync error: {syncError.message}</div>
+      )}
+      {hasUnsaved && !syncError && (
+        <div className="info">Unsaved changes</div>
+      )}
 
       <div className="add-todo">
         <input
@@ -342,4 +314,4 @@ function TodoApp() {
 }
 ```
 
-That's it! Your todo list now has real-time collaboration. Multiple people can add and complete todos together, and everything stays in sync automagically. ✨
+That's it! Your todo list now has real-time collaboration. The `PatchesDoc` handles your local state and changes, while `PatchesSync` (behind the scenes) makes sure everything stays in sync with other users. Clean separation of concerns! ✨

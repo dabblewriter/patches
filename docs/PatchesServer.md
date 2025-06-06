@@ -63,6 +63,8 @@ async commitChanges(docId: string, changes: Change[]): Promise<[Change[], Change
 
 ### What Happens Inside
 
+The heavy lifting is handled by the `commitChanges` algorithm in `src/algorithms/server/commitChanges.ts`. Here's the workflow:
+
 1. **Validation First!**
 
    - Is the changes array empty? (Returns `[]` if so)
@@ -95,7 +97,8 @@ async commitChanges(docId: string, changes: Change[]): Promise<[Change[], Change
    - Transform the incoming ops against already-committed ops
    - This is where OT saves the day!
 
-7. **Return the Result**
+7. **Persist and Return**
+   - Save the transformed changes to the store
    - Send back both committed changes by others AND the transformed version of the client's changes
 
 ### What Comes Out

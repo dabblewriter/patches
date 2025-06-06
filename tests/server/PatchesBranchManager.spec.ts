@@ -14,7 +14,7 @@ vi.mock('../../src/data/change', () => ({
 }));
 
 vi.mock('../../src/data/version', () => ({
-  createVersion: vi.fn(),
+  createVersionMetadata: vi.fn(),
 }));
 
 import { createId } from 'crypto-id';

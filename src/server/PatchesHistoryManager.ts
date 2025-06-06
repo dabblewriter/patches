@@ -40,7 +40,7 @@ export class PatchesHistoryManager {
    */
   async createVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string> {
     assertVersionMetadata(metadata);
-    return await this.patches.createVersion(docId, metadata);
+    return await this.patches.captureCurrentVersion(docId, metadata);
   }
 
   /**

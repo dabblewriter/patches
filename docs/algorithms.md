@@ -34,9 +34,11 @@ src/algorithms/
 │   ├── getJSONByteSize.ts      # Estimating change size
 │   └── makeChange.ts             # Crafting new local changes
 ├── server/                     # Server-side algorithms
+│   ├── createVersion.ts          # Version creation with persistence
 │   ├── getSnapshotAtRevision.ts  # Server snapshot retrieval
 │   ├── getStateAtRevision.ts     # Server state retrieval
-│   └── handleOfflineSessionsAndBatches.ts # Offline sync handling
+│   ├── handleOfflineSessionsAndBatches.ts # Offline sync handling
+│   └── transformIncomingChanges.ts # Core OT transformation logic
 ├── shared/                     # Bits everyone can use
 │   ├── applyChanges.ts         # Applying a list of changes to a state
 │   └── rebaseChanges.ts        # The core OT rebasing dance
@@ -78,6 +80,24 @@ src/algorithms/
 ### `rebaseChanges.ts`
 
 - **`rebaseChanges(serverChanges, localChanges)`**: The heart of client-side Operational Transformation. When the server has new changes that your local (pending) changes didn't know about, this function rewrites your local changes so they can be applied _after_ the server's changes, as if you made them on top of the server's latest version. It's what prevents your work from overwriting someone else's, and vice-versa.
+
+## Server-Side Algorithms: The Authority
+
+### `createVersion.ts`
+
+- **`createVersion(store, docId, state, changes, metadata?)`**: Creates and persists a new version snapshot. Takes the document state, changes since the last version, and optional metadata, then handles all the version creation logic including ID generation, metadata setup, and storage persistence. This is what `PatchesServer.captureCurrentVersion()` uses internally.
+
+### `transformIncomingChanges.ts`
+
+- **`transformIncomingChanges(changes, stateAtBaseRev, committedChanges, currentRev)`**: The heart of server-side Operational Transformation. Takes incoming client changes and transforms them against any changes that were committed since the client's base revision. This ensures proper conflict resolution and sequential revision assignment. Core to the `PatchesServer.commitChanges()` workflow.
+
+### `getSnapshotAtRevision.ts` & `getStateAtRevision.ts`
+
+These handle the server's version of state reconstruction - loading the appropriate snapshot and applying changes to get the state at any given revision.
+
+### `handleOfflineSessionsAndBatches.ts`
+
+Manages the complex logic for processing offline sessions and multi-batch uploads, including version creation for offline work.
 
 ## How This Makes `PatchesSync` and `PatchesDoc` Better
 

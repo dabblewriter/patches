@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PatchesBranchManager, assertBranchMetadata } from '../../src/server/PatchesBranchManager';
 import { PatchesServer } from '../../src/server/PatchesServer';
 import type { BranchingStoreBackend } from '../../src/server/types';
@@ -19,7 +19,7 @@ vi.mock('../../src/data/version', () => ({
 
 import { createId } from 'crypto-id';
 import { createChange } from '../../src/data/change';
-import { createVersion } from '../../src/data/version';
+import { createVersionMetadata } from '../../src/data/version';
 
 describe('PatchesBranchManager', () => {
   let branchManager: PatchesBranchManager;
@@ -111,7 +111,7 @@ describe('PatchesBranchManager', () => {
       vi.mocked(mockStore.loadBranch).mockResolvedValue(null);
       vi.mocked(mockServer.getStateAtRevision).mockResolvedValue({ state: mockState, rev: 5 });
       vi.mocked(createId).mockReturnValue('generated-id');
-      vi.mocked(createVersion).mockReturnValue(mockVersion);
+      vi.mocked(createVersionMetadata).mockReturnValue(mockVersion);
       vi.mocked(mockStore.createVersion).mockResolvedValue();
       vi.mocked(mockStore.createBranch).mockResolvedValue();
     });
@@ -126,7 +126,7 @@ describe('PatchesBranchManager', () => {
 
       expect(mockStore.loadBranch).toHaveBeenCalledWith('doc1');
       expect(mockServer.getStateAtRevision).toHaveBeenCalledWith('doc1', 5);
-      expect(createVersion).toHaveBeenCalledWith({
+      expect(createVersionMetadata).toHaveBeenCalledWith({
         origin: 'main',
         startDate: expect.any(Number),
         endDate: expect.any(Number),
@@ -387,24 +387,24 @@ describe('PatchesBranchManager', () => {
       ];
 
       vi.mocked(mockStore.listVersions).mockResolvedValue(multipleVersions);
-      vi.mocked(createVersion)
-        .mockReturnValueOnce({ 
-          id: 'new-version1', 
-          origin: 'branch', 
+      vi.mocked(createVersionMetadata)
+        .mockReturnValueOnce({
+          id: 'new-version1',
+          origin: 'branch',
           parentId: undefined,
           startDate: 1000,
           endDate: 1100,
           rev: 1,
-          baseRev: 5
+          baseRev: 5,
         })
-        .mockReturnValueOnce({ 
-          id: 'new-version2', 
-          origin: 'branch', 
+        .mockReturnValueOnce({
+          id: 'new-version2',
+          origin: 'branch',
           parentId: 'new-version1',
           startDate: 1100,
           endDate: 1200,
           rev: 2,
-          baseRev: 5
+          baseRev: 5,
         });
       vi.mocked(createChange).mockReturnValue({
         id: 'merged-change',
@@ -419,7 +419,7 @@ describe('PatchesBranchManager', () => {
       await branchManager.mergeBranch('branch1');
 
       expect(mockStore.createVersion).toHaveBeenCalledTimes(2);
-      expect(createVersion).toHaveBeenNthCalledWith(1, {
+      expect(createVersionMetadata).toHaveBeenNthCalledWith(1, {
         ...multipleVersions[0],
         origin: 'branch',
         baseRev: 5,
@@ -427,7 +427,7 @@ describe('PatchesBranchManager', () => {
         branchName: 'Feature Branch',
         parentId: undefined,
       });
-      expect(createVersion).toHaveBeenNthCalledWith(2, {
+      expect(createVersionMetadata).toHaveBeenNthCalledWith(2, {
         ...multipleVersions[1],
         origin: 'branch',
         baseRev: 5,

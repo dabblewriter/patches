@@ -37,7 +37,7 @@ describe('PatchesHistoryManager', () => {
 
     mockServer = {
       store: mockStore,
-      createVersion: vi.fn(),
+      captureCurrentVersion: vi.fn(),
     } as any;
 
     historyManager = new PatchesHistoryManager(mockServer);
@@ -149,28 +149,28 @@ describe('PatchesHistoryManager', () => {
         tags: ['release'],
       };
 
-      vi.mocked(mockServer.createVersion).mockResolvedValue('version-123');
+      vi.mocked(mockServer.captureCurrentVersion).mockResolvedValue('version-123');
 
       const result = await historyManager.createVersion('doc1', metadata);
 
       expect(assertVersionMetadata).toHaveBeenCalledWith(metadata);
-      expect(mockServer.createVersion).toHaveBeenCalledWith('doc1', metadata);
+      expect(mockServer.captureCurrentVersion).toHaveBeenCalledWith('doc1', metadata);
       expect(result).toBe('version-123');
     });
 
     it('should create version without metadata', async () => {
-      vi.mocked(mockServer.createVersion).mockResolvedValue('version-123');
+      vi.mocked(mockServer.captureCurrentVersion).mockResolvedValue('version-123');
 
       const result = await historyManager.createVersion('doc1');
 
       expect(assertVersionMetadata).toHaveBeenCalledWith(undefined);
-      expect(mockServer.createVersion).toHaveBeenCalledWith('doc1', undefined);
+      expect(mockServer.captureCurrentVersion).toHaveBeenCalledWith('doc1', undefined);
       expect(result).toBe('version-123');
     });
 
     it('should propagate errors from server createVersion', async () => {
       const error = new Error('Creation failed');
-      vi.mocked(mockServer.createVersion).mockRejectedValue(error);
+      vi.mocked(mockServer.captureCurrentVersion).mockRejectedValue(error);
 
       await expect(historyManager.createVersion('doc1')).rejects.toThrow('Creation failed');
     });
@@ -365,7 +365,7 @@ describe('PatchesHistoryManager', () => {
       };
 
       // Mock creation
-      vi.mocked(mockServer.createVersion).mockResolvedValue('new-version-id');
+      vi.mocked(mockServer.captureCurrentVersion).mockResolvedValue('new-version-id');
 
       // Mock listing
       const versions = [

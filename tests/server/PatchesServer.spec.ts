@@ -1,17 +1,17 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { PatchesServer, assertVersionMetadata } from '../../src/server/PatchesServer';
-import { JSONPatch } from '../../src/json-patch/JSONPatch';
-import type { PatchesStoreBackend } from '../../src/server/types';
-import type { Change, PatchesState, EditableVersionMetadata } from '../../src/types';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createChange } from '../../src/data/change';
+import { JSONPatch } from '../../src/json-patch/JSONPatch';
+import { PatchesServer, assertVersionMetadata } from '../../src/server/PatchesServer';
+import type { PatchesStoreBackend } from '../../src/server/types';
+import type { Change, EditableVersionMetadata } from '../../src/types';
 
 // Mock the algorithm modules
 vi.mock('../../src/algorithms/server/getSnapshotAtRevision');
 vi.mock('../../src/algorithms/server/getStateAtRevision');
 vi.mock('../../src/algorithms/server/handleOfflineSessionsAndBatches');
+vi.mock('../../src/algorithms/server/createVersion');
 vi.mock('../../src/algorithms/shared/applyChanges');
 vi.mock('../../src/data/change');
-vi.mock('../../src/data/version');
 vi.mock('../../src/json-patch/applyPatch');
 vi.mock('../../src/json-patch/createJSONPatch');
 vi.mock('../../src/json-patch/transformPatch');
@@ -20,7 +20,7 @@ import { getSnapshotAtRevision } from '../../src/algorithms/server/getSnapshotAt
 import { getStateAtRevision } from '../../src/algorithms/server/getStateAtRevision';
 import { handleOfflineSessionsAndBatches } from '../../src/algorithms/server/handleOfflineSessionsAndBatches';
 import { applyChanges } from '../../src/algorithms/shared/applyChanges';
-import { createVersion } from '../../src/data/version';
+import { createVersion as createVersionAlgorithm } from '../../src/algorithms/server/createVersion';
 import { applyPatch } from '../../src/json-patch/applyPatch';
 import { createJSONPatch } from '../../src/json-patch/createJSONPatch';
 import { transformPatch } from '../../src/json-patch/transformPatch';
@@ -315,7 +315,7 @@ describe('PatchesServer', () => {
     });
   });
 
-  describe('createVersion', () => {
+  describe('captureCurrentVersion', () => {
     it('should create version with metadata', async () => {
       const mockVersion = {
         id: 'version1',
@@ -332,17 +332,17 @@ describe('PatchesServer', () => {
         changes: [{ id: 'change1', rev: 5, baseRev: 1, created: Date.now() } as Change],
       });
       vi.mocked(applyChanges).mockReturnValue({ content: 'test' });
-      vi.mocked(createVersion).mockReturnValue(mockVersion);
+      vi.mocked(createVersionAlgorithm).mockResolvedValue(mockVersion);
 
-      const result = await server.createVersion('doc1', { name: 'v1.0' });
+      const result = await server.captureCurrentVersion('doc1', { name: 'v1.0' });
 
-      expect(createVersion).toHaveBeenCalledWith(
-        expect.objectContaining({
-          origin: 'main',
-          name: 'v1.0',
-        })
+      expect(createVersionAlgorithm).toHaveBeenCalledWith(
+        expect.any(Object), // store
+        'doc1',
+        { content: 'test' },
+        expect.any(Array), // changes
+        { name: 'v1.0' }
       );
-      expect(mockStore.createVersion).toHaveBeenCalledWith('doc1', mockVersion, { content: 'test' }, expect.any(Array));
       expect(result).toBe('version1');
     });
 
@@ -352,55 +352,13 @@ describe('PatchesServer', () => {
         rev: 5,
         changes: [],
       });
+      vi.mocked(applyChanges).mockReturnValue({ content: 'test' });
+      vi.mocked(createVersionAlgorithm).mockResolvedValue(undefined);
 
-      await expect(server.createVersion('doc1')).rejects.toThrow('No changes to create a version');
+      await expect(server.captureCurrentVersion('doc1')).rejects.toThrow('No changes to create a version');
     });
   });
 
-  describe('_createVersion', () => {
-    it('should return undefined for empty changes', async () => {
-      const result = await server['_createVersion']('doc1', {}, []);
-      expect(result).toBeUndefined();
-    });
-
-    it('should throw error for changes without baseRev', async () => {
-      const invalidChange = { id: 'change1', rev: 1, created: Date.now() } as Change;
-
-      await expect(server['_createVersion']('doc1', {}, [invalidChange])).rejects.toThrow(
-        'Client changes must include baseRev'
-      );
-    });
-
-    it('should create version with proper metadata', async () => {
-      const changes = [
-        { id: 'change1', rev: 2, baseRev: 1, created: 1000 },
-        { id: 'change2', rev: 3, baseRev: 1, created: 2000 },
-      ] as Change[];
-
-      const mockVersion = {
-        id: 'version1',
-        origin: 'main' as const,
-        startDate: 1000,
-        endDate: 2000,
-        rev: 3,
-        baseRev: 1,
-      };
-
-      vi.mocked(createVersion).mockReturnValue(mockVersion);
-
-      const result = await server['_createVersion']('doc1', { content: 'test' }, changes);
-
-      expect(createVersion).toHaveBeenCalledWith({
-        origin: 'main',
-        startDate: 1000,
-        endDate: 2000,
-        rev: 3,
-        baseRev: 1,
-      });
-      expect(mockStore.createVersion).toHaveBeenCalledWith('doc1', mockVersion, { content: 'test' }, changes);
-      expect(result).toBe(mockVersion);
-    });
-  });
 });
 
 describe('assertVersionMetadata', () => {

@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { handleOfflineSessionsAndBatches } from '../../../src/algorithms/server/handleOfflineSessionsAndBatches';
-import type { Change } from '../../../src/types';
 import type { PatchesStoreBackend } from '../../../src/server/types';
+import type { Change } from '../../../src/types';
 
 // Mock the dependencies
 vi.mock('crypto-id');
@@ -29,7 +29,7 @@ describe('handleOfflineSessionsAndBatches', () => {
     vi.mocked(createSortableId).mockReturnValue('generated-group-id');
 
     // Mock createVersion
-    const { createVersion } = await import('../../../src/data/version');
+    const { createVersionMetadata: createVersion } = await import('../../../src/data/version');
     vi.mocked(createVersion).mockImplementation((data: any) => ({
       id: 'version-id',
       origin: 'offline' as const,
@@ -200,7 +200,7 @@ describe('handleOfflineSessionsAndBatches', () => {
 
     await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
 
-    const { createVersion } = await import('../../../src/data/version');
+    const { createVersionMetadata: createVersion } = await import('../../../src/data/version');
     expect(createVersion).toHaveBeenCalledWith({
       parentId: undefined,
       groupId: 'generated-group-id',

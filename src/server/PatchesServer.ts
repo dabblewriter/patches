@@ -1,14 +1,13 @@
 import { getSnapshotAtRevision } from '../algorithms/server/getSnapshotAtRevision.js';
 import { getStateAtRevision } from '../algorithms/server/getStateAtRevision.js';
 import { handleOfflineSessionsAndBatches } from '../algorithms/server/handleOfflineSessionsAndBatches.js';
+import { transformIncomingChanges } from '../algorithms/server/transformIncomingChanges.js';
+import { createVersion } from '../algorithms/server/createVersion.js';
 import { applyChanges } from '../algorithms/shared/applyChanges.js';
 import { createChange } from '../data/change.js';
-import { createVersion } from '../data/version.js';
 import { signal } from '../event-signal.js';
 import type { JSONPatch } from '../json-patch/JSONPatch.js';
-import { applyPatch } from '../json-patch/applyPatch.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
-import { transformPatch } from '../json-patch/transformPatch.js';
 import type { Change, EditableVersionMetadata, PatchesState } from '../types.js';
 import type { PatchesStoreBackend } from './types.js';
 
@@ -133,7 +132,7 @@ export class PatchesServer {
     // 2. Check if we need to create a new version - if the last change was created more than a session ago
     const lastChange = currentChanges[currentChanges.length - 1];
     if (lastChange && lastChange.created < Date.now() - this.sessionTimeoutMillis) {
-      await this._createVersion(docId, currentState, currentChanges);
+      await createVersion(this.store, docId, currentState, currentChanges);
     }
 
     // 3. Load committed changes *after* the client's baseRev for transformation and idempotency checks
@@ -168,33 +167,8 @@ export class PatchesServer {
     // 5. Transform the *entire batch* of incoming (and potentially collapsed offline) changes
     //    against committed changes that happened *after* the client's baseRev.
     //    The state used for transformation should be the server state *at the client's baseRev*.
-    let stateAtBaseRev = (await getStateAtRevision(this.store, docId, baseRev)).state;
-    let rev = currentRev + 1;
-    const committedOps = committedChanges.flatMap(c => c.ops);
-
-    // Apply transformation based on state at baseRev
-    const transformedChanges = changes
-      .map(change => {
-        // Transform the incoming change's ops against the ops committed since baseRev
-        const transformedOps = transformPatch(stateAtBaseRev, committedOps, change.ops);
-        if (transformedOps.length === 0) {
-          return null; // Change is obsolete after transformation
-        }
-        try {
-          const previous = stateAtBaseRev;
-          stateAtBaseRev = applyPatch(stateAtBaseRev, transformedOps, { strict: true });
-          if (previous === stateAtBaseRev) {
-            // Changes were no-ops, we can skip this change
-            return null;
-          }
-        } catch (error) {
-          console.error(`Error applying change ${change.id} to state:`, error);
-          return null;
-        }
-        // Return a new change object with transformed ops and original metadata
-        return { ...change, rev: rev++, ops: transformedOps };
-      })
-      .filter(Boolean) as Change[];
+    const stateAtBaseRev = (await getStateAtRevision(this.store, docId, baseRev)).state;
+    const transformedChanges = transformIncomingChanges(changes, stateAtBaseRev, committedChanges, currentRev);
 
     // Persist and notify about newly transformed changes atomically
     if (transformedChanges.length > 0) {
@@ -253,50 +227,23 @@ export class PatchesServer {
   // === Version Operations ===
 
   /**
-   * Create a new named version snapshot of a document's current state.
+   * Captures the current state of a document as a new version.
    * @param docId The document ID.
-   * @param name The name of the version.
+   * @param metadata Optional metadata for the version.
    * @returns The ID of the created version.
    */
-  async createVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string> {
+  async captureCurrentVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string> {
     assertVersionMetadata(metadata);
     const { state: initialState, changes } = await getSnapshotAtRevision(this.store, docId);
     let state = initialState;
     state = applyChanges(state, changes);
-    const version = await this._createVersion(docId, state, changes, metadata);
+    const version = await createVersion(this.store, docId, state, changes, metadata);
     if (!version) {
       throw new Error(`No changes to create a version for doc ${docId}.`);
     }
     return version.id;
   }
 
-  /**
-   * Creates a new version snapshot of a document's current state.
-   * @param docId The document ID.
-   * @param state The document state at the time of the version.
-   * @param changes The changes since the last version that created the state (the last change's rev is the state's rev and will be the version's rev).
-   * @param metadata The metadata of the version.
-   * @returns The ID of the created version.
-   */
-  protected async _createVersion(docId: string, state: any, changes: Change[], metadata?: EditableVersionMetadata) {
-    if (changes.length === 0) return;
-    const baseRev = changes[0].baseRev;
-    if (baseRev === undefined) {
-      throw new Error(`Client changes must include baseRev for doc ${docId}.`);
-    }
-
-    const sessionMetadata = createVersion({
-      origin: 'main',
-      startDate: changes[0].created,
-      endDate: changes[changes.length - 1].created,
-      rev: changes[changes.length - 1].rev,
-      baseRev,
-      ...metadata,
-    });
-
-    await this.store.createVersion(docId, sessionMetadata, state, changes);
-    return sessionMetadata;
-  }
 }
 
 const nonModifiableMetadataFields = new Set([

@@ -1,5 +1,5 @@
 import { createSortableId } from 'crypto-id';
-import { createVersion } from '../../data/version';
+import { createVersionMetadata } from '../../data/version';
 import type { PatchesStoreBackend } from '../../server';
 import type { Change } from '../../types';
 import { applyChanges } from '../shared/applyChanges';
@@ -69,7 +69,7 @@ export async function handleOfflineSessionsAndBatches(
           // Create a new version for this session
           offlineBaseState = applyChanges(offlineBaseState, sessionChanges);
 
-          const sessionMetadata = createVersion({
+          const sessionMetadata = createVersionMetadata({
             parentId,
             groupId,
             origin: 'offline',

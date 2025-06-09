@@ -1,5 +1,4 @@
-import type { Op } from '@dabble/delta';
-import { Delta } from '@dabble/delta';
+import { Delta, type Op } from '@dabble/delta';
 import { replace } from '../ops/replace.js';
 import type { JSONPatchOpHandler } from '../types.js';
 import { get } from '../utils/get.js';

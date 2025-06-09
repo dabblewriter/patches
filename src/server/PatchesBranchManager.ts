@@ -1,6 +1,6 @@
 import { createId } from 'crypto-id';
 import { createChange } from '../data/change.js';
-import { createVersion } from '../data/version.js';
+import { createVersionMetadata } from '../data/version.js';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
 import type { BranchingStoreBackend } from './types.js';
@@ -44,7 +44,7 @@ export class PatchesBranchManager {
     const branchDocId = createId();
     const now = Date.now();
     // Create an initial version at the branch point rev (for snapshotting/large docs)
-    const initialVersionMetadata = createVersion({
+    const initialVersionMetadata = createVersionMetadata({
       origin: 'main', // Branch doc versions are 'main' until merged
       startDate: now,
       endDate: now,
@@ -116,7 +116,7 @@ export class PatchesBranchManager {
     // 4. For each version, create a corresponding version in the main doc with updated fields
     let lastVersionId: string | undefined;
     for (const v of branchVersions) {
-      const newVersionMetadata = createVersion({
+      const newVersionMetadata = createVersionMetadata({
         ...v,
         origin: 'branch',
         baseRev: branchStartRevOnSource,

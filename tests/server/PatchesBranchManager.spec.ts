@@ -1,511 +1,475 @@
-import { createId } from 'crypto-id';
-import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { PatchesBranchManager } from '../../src/server/PatchesBranchManager';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { PatchesBranchManager, assertBranchMetadata } from '../../src/server/PatchesBranchManager';
 import { PatchesServer } from '../../src/server/PatchesServer';
-import type { BranchingStoreBackend } from '../../src/server/types.js';
-import type {
-  Branch,
-  BranchStatus,
-  Change,
-  EditableVersionMetadata,
-  ListChangesOptions,
-  ListVersionsOptions,
-  VersionMetadata,
-} from '../../src/types';
+import type { BranchingStoreBackend } from '../../src/server/types';
+import type { Branch, BranchStatus, Change, EditableBranchMetadata, VersionMetadata } from '../../src/types';
 
-// Mock crypto-id
+// Mock the dependencies
 vi.mock('crypto-id', () => ({
-  createId: vi.fn(() => `mock-id-${Math.random().toString(36).substring(7)}`),
+  createId: vi.fn(() => 'generated-id'),
 }));
 
-/**
- * Mock implementation of BranchingStoreBackend for testing PatchesBranchManager
- */
-class MockBranchingStoreBackend implements BranchingStoreBackend {
-  private docs: Map<string, { state: any; rev: number; changes: Change[] }> = new Map();
-  private versions: Map<string, { metadata: VersionMetadata; state: any; changes: Change[] }[]> = new Map();
-  private branches: Map<string, Branch[]> = new Map(); // docId -> branches from this doc
-  private branchLookup: Map<string, Branch> = new Map(); // branchId -> branch metadata
-  private subscriptions: Map<string, Set<string>> = new Map(); // clientId -> Set<docId>
+vi.mock('../../src/data/change', () => ({
+  createChange: vi.fn(),
+}));
 
-  // Helper methods
-  private _getDocData(docId: string) {
-    if (!this.docs.has(docId)) {
-      this.docs.set(docId, { state: null, rev: 0, changes: [] });
-    }
-    return this.docs.get(docId)!;
-  }
+vi.mock('../../src/data/version', () => ({
+  createVersionMetadata: vi.fn(),
+}));
 
-  private _getDocVersions(docId: string) {
-    if (!this.versions.has(docId)) {
-      this.versions.set(docId, []);
-    }
-    return this.versions.get(docId)!;
-  }
-
-  private _getDocBranches(docId: string) {
-    if (!this.branches.has(docId)) {
-      this.branches.set(docId, []);
-    }
-    return this.branches.get(docId)!;
-  }
-
-  // Subscription methods
-  addSubscription = vi.fn(async (clientId: string, docIds: string[]): Promise<string[]> => {
-    if (!this.subscriptions.has(clientId)) {
-      this.subscriptions.set(clientId, new Set());
-    }
-    const clientSubs = this.subscriptions.get(clientId)!;
-    docIds.forEach(id => clientSubs.add(id));
-    return docIds;
-  });
-
-  removeSubscription = vi.fn(async (clientId: string, docIds: string[]): Promise<string[]> => {
-    const clientSubs = this.subscriptions.get(clientId);
-    if (clientSubs) {
-      docIds.forEach(id => clientSubs.delete(id));
-    }
-    return docIds;
-  });
-
-  // Change methods
-  saveChanges = vi.fn(async (docId: string, changes: Change[]): Promise<void> => {
-    const docData = this._getDocData(docId);
-    for (const change of changes) {
-      // If rev not set, assign next rev
-      if (!change.rev || change.rev === 0) {
-        change.rev = docData.rev + 1;
-      }
-      docData.changes.push(change);
-      docData.rev = Math.max(docData.rev, change.rev);
-    }
-  });
-
-  listChanges = vi.fn(async (docId: string, options: ListChangesOptions = {}): Promise<Change[]> => {
-    const docData = this._getDocData(docId);
-    let changes = docData.changes;
-
-    if (options.startAfter !== undefined) {
-      changes = changes.filter(c => c.rev > options.startAfter!);
-    }
-    if (options.endBefore !== undefined) {
-      changes = changes.filter(c => c.rev < options.endBefore!);
-    }
-    if (options.reverse) {
-      changes = [...changes].reverse();
-    }
-    if (options.limit !== undefined) {
-      changes = changes.slice(0, options.limit);
-    }
-    return changes;
-  });
-
-  // Version methods
-  createVersion = vi.fn(
-    async (docId: string, metadata: VersionMetadata, state: any, changes: Change[]): Promise<void> => {
-      const docVersions = this._getDocVersions(docId);
-      docVersions.push({ metadata, state, changes });
-    }
-  );
-
-  listVersions = vi.fn(async (docId: string, options: ListVersionsOptions = {}): Promise<VersionMetadata[]> => {
-    const docVersions = this._getDocVersions(docId);
-    let versions = docVersions.map(v => v.metadata);
-
-    if (options.origin) {
-      versions = versions.filter(v => v.origin === options.origin);
-    }
-    if (options.groupId) {
-      versions = versions.filter(v => v.groupId === options.groupId);
-    }
-    if (options.orderBy) {
-      versions.sort((a, b) => {
-        if (options.orderBy === 'startDate') return a.startDate - b.startDate;
-        if (options.orderBy === 'rev') return a.rev - b.rev;
-        if (options.orderBy === 'baseRev') return a.baseRev - b.baseRev;
-        return 0;
-      });
-    }
-    if (options.reverse) {
-      versions = versions.reverse();
-    }
-    if (options.startAfter !== undefined) {
-      versions = versions.filter(v => {
-        const compareValue =
-          options.orderBy === 'startDate'
-            ? v.startDate
-            : options.orderBy === 'rev'
-              ? v.rev
-              : options.orderBy === 'baseRev'
-                ? v.baseRev
-                : v.rev;
-        return compareValue > options.startAfter!;
-      });
-    }
-    if (options.endBefore !== undefined) {
-      versions = versions.filter(v => {
-        const compareValue =
-          options.orderBy === 'startDate'
-            ? v.startDate
-            : options.orderBy === 'rev'
-              ? v.rev
-              : options.orderBy === 'baseRev'
-                ? v.baseRev
-                : v.rev;
-        return compareValue < options.endBefore!;
-      });
-    }
-    if (options.limit !== undefined) {
-      versions = versions.slice(0, options.limit);
-    }
-    return versions;
-  });
-
-  loadVersionState = vi.fn(async (docId: string, versionId: string): Promise<any> => {
-    const version = this._getDocVersions(docId).find(v => v.metadata.id === versionId);
-    if (!version) return undefined;
-    return version.state;
-  });
-
-  loadVersionChanges = vi.fn(async (docId: string, versionId: string): Promise<Change[]> => {
-    const version = this._getDocVersions(docId).find(v => v.metadata.id === versionId);
-    if (!version) return [];
-    return version.changes;
-  });
-
-  updateVersion = vi.fn(async (docId: string, versionId: string, updates: EditableVersionMetadata): Promise<void> => {
-    const version = this._getDocVersions(docId).find(v => v.metadata.id === versionId);
-    if (version) {
-      Object.assign(version.metadata, updates);
-    }
-  });
-
-  // Branch methods
-  createBranch = vi.fn(async (branch: Branch): Promise<void> => {
-    const docBranches = this._getDocBranches(branch.branchedFromId);
-    docBranches.push(branch);
-    this.branchLookup.set(branch.id, branch);
-  });
-
-  loadBranch = vi.fn(async (branchId: string): Promise<Branch | null> => {
-    return this.branchLookup.get(branchId) || null;
-  });
-
-  listBranches = vi.fn(async (docId: string): Promise<Branch[]> => {
-    return this._getDocBranches(docId);
-  });
-
-  updateBranch = vi.fn(
-    async (branchId: string, updates: Partial<Pick<Branch, 'status' | 'name' | 'metadata'>>): Promise<void> => {
-      const branch = this.branchLookup.get(branchId);
-      if (branch) {
-        Object.assign(branch, updates);
-      }
-    }
-  );
-
-  closeBranch = vi.fn(async (branchId: string): Promise<void> => {
-    await this.updateBranch(branchId, { status: 'closed' });
-  });
-
-  // Doc methods
-  deleteDoc = vi.fn(async (docId: string): Promise<void> => {
-    this.docs.delete(docId);
-    this.versions.delete(docId);
-  });
-
-  // Helper methods for tests
-  setDocState(docId: string, state: any, rev: number) {
-    this._getDocData(docId).state = state;
-    this._getDocData(docId).rev = rev;
-  }
-}
-
-// --- Tests ---
+import { createId } from 'crypto-id';
+import { createChange } from '../../src/data/change';
+import { createVersionMetadata } from '../../src/data/version';
 
 describe('PatchesBranchManager', () => {
-  let mockStore: MockBranchingStoreBackend;
-  let mockPatchesServer: Partial<PatchesServer>;
   let branchManager: PatchesBranchManager;
-  const mainDocId = 'doc-main';
+  let mockStore: BranchingStoreBackend;
+  let mockServer: PatchesServer;
 
   beforeEach(() => {
+    mockStore = {
+      listBranches: vi.fn(),
+      loadBranch: vi.fn(),
+      createBranch: vi.fn(),
+      updateBranch: vi.fn(),
+      createVersion: vi.fn(),
+      listVersions: vi.fn(),
+      loadVersionState: vi.fn(),
+      loadVersionChanges: vi.fn(),
+      listChanges: vi.fn(),
+    } as any;
+
+    mockServer = {
+      getStateAtRevision: vi.fn(),
+      commitChanges: vi.fn(),
+    } as any;
+
+    branchManager = new PatchesBranchManager(mockStore, mockServer);
+
+    // Reset all mocks
     vi.clearAllMocks();
-    mockStore = new MockBranchingStoreBackend();
+  });
 
-    // Mock PatchesServer with just the methods PatchesBranchManager needs
-    mockPatchesServer = {
-      getStateAtRevision: vi.fn().mockResolvedValue({ state: { value: 'test' }, rev: 10 }),
-      commitChanges: vi.fn().mockResolvedValue([[], []]),
-    };
-
-    branchManager = new PatchesBranchManager(mockStore as BranchingStoreBackend, mockPatchesServer as PatchesServer);
-
-    // Reset createId mock to be deterministic
-    let idCounter = 0;
-    (createId as Mock).mockImplementation(() => `mock-id-${idCounter++}`);
+  describe('constructor', () => {
+    it('should create branch manager with store and server', () => {
+      expect(branchManager).toBeDefined();
+    });
   });
 
   describe('listBranches', () => {
-    it('should return empty array if no branches exist', async () => {
-      const branches = await branchManager.listBranches(mainDocId);
-      expect(branches).toEqual([]);
-      expect(mockStore.listBranches).toHaveBeenCalledWith(mainDocId);
+    it('should list branches for a document', async () => {
+      const mockBranches: Branch[] = [
+        {
+          id: 'branch1',
+          branchedFromId: 'doc1',
+          branchedRev: 5,
+          created: 1000,
+          status: 'open',
+          name: 'Feature Branch',
+        },
+        {
+          id: 'branch2',
+          branchedFromId: 'doc1',
+          branchedRev: 3,
+          created: 2000,
+          status: 'merged',
+          name: 'Bug Fix Branch',
+        },
+      ];
+
+      vi.mocked(mockStore.listBranches).mockResolvedValue(mockBranches);
+
+      const result = await branchManager.listBranches('doc1');
+
+      expect(mockStore.listBranches).toHaveBeenCalledWith('doc1');
+      expect(result).toEqual(mockBranches);
     });
 
-    it('should return branches for a document', async () => {
-      const branch: Branch = {
-        id: 'branch-1',
-        branchedFromId: mainDocId,
-        branchedRev: 10,
-        created: Date.now(),
-        status: 'open',
-        name: 'Test Branch',
-      };
-      await mockStore.createBranch(branch);
+    it('should handle empty branch list', async () => {
+      vi.mocked(mockStore.listBranches).mockResolvedValue([]);
 
-      const branches = await branchManager.listBranches(mainDocId);
-      expect(branches).toHaveLength(1);
-      expect(branches[0].id).toBe('branch-1');
-      expect(branches[0].name).toBe('Test Branch');
+      const result = await branchManager.listBranches('doc1');
+
+      expect(result).toEqual([]);
     });
   });
 
   describe('createBranch', () => {
-    it('should create a branch with initial version at the branch point', async () => {
-      const rev = 10;
-      const branchName = 'Test Branch';
-      const metadata = { name: branchName, author: 'User' };
-      const stateAtRev = { value: 'test' };
+    const mockState = { title: 'Document', content: 'Content' };
+    const mockVersion = {
+      id: 'version1',
+      origin: 'main' as const,
+      startDate: 1000,
+      endDate: 1000,
+      rev: 5,
+      baseRev: 5,
+      groupId: 'generated-id',
+      branchName: 'Test Branch',
+    };
 
-      // Setup mock for getStateAtRevision
-      (mockPatchesServer.getStateAtRevision as unknown as Mock).mockResolvedValue({ state: stateAtRev, rev });
-
-      // Create branch
-      const branchId = await branchManager.createBranch(mainDocId, rev, metadata);
-
-      // Verify createVersion was called correctly
-      expect(mockStore.createVersion).toHaveBeenCalledTimes(1);
-      const createVersionCall = mockStore.createVersion.mock.calls[0];
-
-      // Check branch document ID is correct
-      expect(createVersionCall[0]).toBe(branchId);
-
-      // Check version metadata
-      const versionMetadata = createVersionCall[1];
-      expect(versionMetadata.origin).toBe('main');
-      expect(versionMetadata.rev).toBe(rev);
-      expect(versionMetadata.baseRev).toBe(rev);
-      expect(versionMetadata.name).toBe(branchName);
-      expect(versionMetadata.groupId).toBe(branchId);
-      expect(versionMetadata.branchName).toBe(branchName);
-
-      // Check state
-      expect(createVersionCall[2]).toBe(stateAtRev);
-
-      // Check changes (should be empty array)
-      expect(createVersionCall[3]).toEqual([]);
-
-      // Verify createBranch was called correctly
-      expect(mockStore.createBranch).toHaveBeenCalledTimes(1);
-      const branch = mockStore.createBranch.mock.calls[0][0];
-      expect(branch.id).toBe(branchId);
-      expect(branch.branchedFromId).toBe(mainDocId);
-      expect(branch.branchedRev).toBe(rev);
-      expect(branch.name).toBe(branchName);
-      expect(branch.status).toBe('open');
-      expect(branch.author).toBe(metadata.author);
+    beforeEach(() => {
+      vi.mocked(mockStore.loadBranch).mockResolvedValue(null);
+      vi.mocked(mockServer.getStateAtRevision).mockResolvedValue({ state: mockState, rev: 5 });
+      vi.mocked(createId).mockReturnValue('generated-id');
+      vi.mocked(createVersionMetadata).mockReturnValue(mockVersion);
+      vi.mocked(mockStore.createVersion).mockResolvedValue();
+      vi.mocked(mockStore.createBranch).mockResolvedValue();
     });
 
-    it('should throw error if trying to branch off a branch', async () => {
-      // Setup: Create a branch
-      const branchDocId = 'branch-doc';
-      const branch: Branch = {
-        id: branchDocId,
-        branchedFromId: mainDocId,
+    it('should create branch successfully', async () => {
+      const metadata: EditableBranchMetadata = {
+        name: 'Test Branch',
+        description: 'A test branch',
+      };
+
+      const result = await branchManager.createBranch('doc1', 5, metadata);
+
+      expect(mockStore.loadBranch).toHaveBeenCalledWith('doc1');
+      expect(mockServer.getStateAtRevision).toHaveBeenCalledWith('doc1', 5);
+      expect(createVersionMetadata).toHaveBeenCalledWith({
+        origin: 'main',
+        startDate: expect.any(Number),
+        endDate: expect.any(Number),
+        rev: 5,
+        baseRev: 5,
+        name: 'Test Branch',
+        groupId: 'generated-id',
+        branchName: 'Test Branch',
+      });
+      expect(mockStore.createVersion).toHaveBeenCalledWith('generated-id', mockVersion, mockState, []);
+      expect(mockStore.createBranch).toHaveBeenCalledWith({
+        name: 'Test Branch',
+        description: 'A test branch',
+        id: 'generated-id',
+        branchedFromId: 'doc1',
         branchedRev: 5,
-        created: Date.now(),
+        created: expect.any(Number),
+        status: 'open',
+      });
+      expect(result).toBe('generated-id');
+    });
+
+    it('should create branch without metadata', async () => {
+      const result = await branchManager.createBranch('doc1', 3);
+
+      expect(result).toBe('generated-id');
+      expect(mockStore.createBranch).toHaveBeenCalledWith({
+        id: 'generated-id',
+        branchedFromId: 'doc1',
+        branchedRev: 3,
+        created: expect.any(Number),
+        status: 'open',
+      });
+    });
+
+    it('should throw error when trying to branch from a branch', async () => {
+      const existingBranch: Branch = {
+        id: 'branch1',
+        branchedFromId: 'original-doc',
+        branchedRev: 1,
+        created: 1000,
         status: 'open',
       };
-      await mockStore.createBranch(branch);
 
-      // Setup mock to return this branch
-      mockStore.loadBranch.mockResolvedValue(branch);
+      vi.mocked(mockStore.loadBranch).mockResolvedValue(existingBranch);
 
-      // Attempt to branch off the branch should fail
-      await expect(branchManager.createBranch(branchDocId, 10)).rejects.toThrow(
+      await expect(branchManager.createBranch('branch1', 5)).rejects.toThrow(
         'Cannot create a branch from another branch.'
       );
+    });
 
-      // Verify loadBranch was called
-      expect(mockStore.loadBranch).toHaveBeenCalledWith(branchDocId);
+    it('should handle state retrieval errors', async () => {
+      vi.mocked(mockServer.getStateAtRevision).mockRejectedValue(new Error('State not found'));
+
+      await expect(branchManager.createBranch('doc1', 5)).rejects.toThrow('State not found');
+    });
+  });
+
+  describe('updateBranch', () => {
+    it('should update branch metadata', async () => {
+      const metadata: EditableBranchMetadata = {
+        name: 'Updated Branch',
+        description: 'Updated description',
+      };
+
+      vi.mocked(mockStore.updateBranch).mockResolvedValue();
+
+      await branchManager.updateBranch('branch1', metadata);
+
+      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', metadata);
+    });
+
+    it('should propagate store errors', async () => {
+      const error = new Error('Update failed');
+      vi.mocked(mockStore.updateBranch).mockRejectedValue(error);
+
+      await expect(branchManager.updateBranch('branch1', { name: 'Test' })).rejects.toThrow('Update failed');
     });
   });
 
   describe('closeBranch', () => {
-    it('should update branch status to closed by default', async () => {
-      await branchManager.closeBranch('branch-1');
-      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch-1', { status: 'closed' });
+    it('should close branch with default status', async () => {
+      vi.mocked(mockStore.updateBranch).mockResolvedValue();
+
+      await branchManager.closeBranch('branch1');
+
+      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', { status: 'closed' });
     });
 
-    it('should update branch status to specified status', async () => {
-      await branchManager.closeBranch('branch-1', 'merged');
-      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch-1', { status: 'merged' });
+    it('should close branch with specific status', async () => {
+      vi.mocked(mockStore.updateBranch).mockResolvedValue();
 
-      await branchManager.closeBranch('branch-2', 'archived');
-      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch-2', { status: 'archived' });
+      await branchManager.closeBranch('branch1', 'merged');
+
+      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', { status: 'merged' });
     });
   });
 
   describe('mergeBranch', () => {
-    let branch: Branch;
-    let branchDocId: string;
+    const mockBranch: Branch = {
+      id: 'branch1',
+      branchedFromId: 'doc1',
+      branchedRev: 5,
+      created: 1000,
+      status: 'open',
+      name: 'Feature Branch',
+    };
 
-    beforeEach(async () => {
-      // Setup: Create a branch
-      branchDocId = 'branch-1';
-      branch = {
-        id: branchDocId,
-        branchedFromId: mainDocId,
-        branchedRev: 10,
-        created: Date.now() - 1000,
-        status: 'open',
-        name: 'Test Branch',
+    const mockBranchChanges: Change[] = [
+      {
+        id: 'change1',
+        rev: 1,
+        baseRev: 0,
+        ops: [{ op: 'replace', path: '/title', value: 'New Title' }],
+        created: 1100,
+        metadata: {},
+      },
+      {
+        id: 'change2',
+        rev: 2,
+        baseRev: 1,
+        ops: [{ op: 'add', path: '/section', value: 'New Section' }],
+        created: 1200,
+        metadata: {},
+      },
+    ];
+
+    const mockVersions: VersionMetadata[] = [
+      {
+        id: 'version1',
+        parentId: undefined,
+        groupId: 'branch1',
+        origin: 'main',
+        branchName: 'Feature Branch',
+        startDate: 1000,
+        endDate: 1200,
+        rev: 2,
+        baseRev: 0,
+      },
+    ];
+
+    beforeEach(() => {
+      vi.mocked(mockStore.loadBranch).mockResolvedValue(mockBranch);
+      vi.mocked(mockStore.listChanges).mockResolvedValue(mockBranchChanges);
+      vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
+      vi.mocked(mockStore.loadVersionState).mockResolvedValue({ title: 'New Title', section: 'New Section' });
+      vi.mocked(mockStore.loadVersionChanges).mockResolvedValue(mockBranchChanges);
+      vi.mocked(mockStore.createVersion).mockResolvedValue();
+      vi.mocked(mockStore.updateBranch).mockResolvedValue();
+    });
+
+    it('should merge branch successfully', async () => {
+      const flattenedChange = {
+        id: 'merged-change',
+        baseRev: 5,
+        rev: 7,
+        ops: [
+          { op: 'replace', path: '/title', value: 'New Title' },
+          { op: 'add', path: '/section', value: 'New Section' },
+        ],
+        created: expect.any(Number),
+        metadata: {},
       };
-      await mockStore.createBranch(branch);
 
-      // Mock the branch lookup
-      mockStore.loadBranch.mockResolvedValue(branch);
+      const committedChanges: Change[] = [flattenedChange];
 
-      // Set up some changes in the branch
-      const changes: Change[] = [
+      vi.mocked(createChange).mockReturnValue(flattenedChange);
+      vi.mocked(mockServer.commitChanges).mockResolvedValue([[], committedChanges]);
+
+      const result = await branchManager.mergeBranch('branch1');
+
+      expect(mockStore.loadBranch).toHaveBeenCalledWith('branch1');
+      expect(mockStore.listChanges).toHaveBeenCalledWith('branch1', {});
+      expect(mockStore.listVersions).toHaveBeenCalledWith('branch1', { origin: 'main' });
+      expect(createChange).toHaveBeenCalledWith(
+        5,
+        7,
+        mockBranchChanges.flatMap(c => c.ops)
+      );
+      expect(mockServer.commitChanges).toHaveBeenCalledWith('doc1', [flattenedChange]);
+      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', { status: 'merged' });
+      expect(result).toEqual(committedChanges);
+    });
+
+    it('should throw error for non-existent branch', async () => {
+      vi.mocked(mockStore.loadBranch).mockResolvedValue(null);
+
+      await expect(branchManager.mergeBranch('nonexistent')).rejects.toThrow('Branch with ID nonexistent not found.');
+    });
+
+    it('should throw error for non-open branch', async () => {
+      const closedBranch = { ...mockBranch, status: 'merged' as BranchStatus };
+      vi.mocked(mockStore.loadBranch).mockResolvedValue(closedBranch);
+
+      await expect(branchManager.mergeBranch('branch1')).rejects.toThrow(
+        'Branch branch1 is not open (status: merged). Cannot merge.'
+      );
+    });
+
+    it('should handle branch with no changes', async () => {
+      vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const result = await branchManager.mergeBranch('branch1');
+
+      expect(consoleSpy).toHaveBeenCalledWith('Branch branch1 has no changes to merge.');
+      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', { status: 'merged' });
+      expect(result).toEqual([]);
+
+      consoleSpy.mockRestore();
+    });
+
+    it('should handle commit errors gracefully', async () => {
+      const commitError = new Error('Commit failed');
+      vi.mocked(createChange).mockReturnValue({
+        id: 'merged-change',
+        baseRev: 5,
+        rev: 7,
+        ops: [],
+        created: Date.now(),
+        metadata: {},
+      });
+      vi.mocked(mockServer.commitChanges).mockRejectedValue(commitError);
+
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await expect(branchManager.mergeBranch('branch1')).rejects.toThrow('Merge failed: Commit failed');
+
+      expect(consoleSpy).toHaveBeenCalledWith('Failed to merge branch branch1 into doc1:', commitError);
+
+      consoleSpy.mockRestore();
+    });
+
+    it('should create versions for all branch versions', async () => {
+      const multipleVersions: VersionMetadata[] = [
         {
-          id: 'change-1',
-          ops: [{ op: 'add', path: '/property1', value: 'value1' }],
-          rev: 11,
-          baseRev: 10,
-          created: Date.now() - 500,
+          id: 'version1',
+          parentId: undefined,
+          groupId: 'branch1',
+          origin: 'main',
+          branchName: 'Feature Branch',
+          startDate: 1000,
+          endDate: 1100,
+          rev: 1,
+          baseRev: 0,
         },
         {
-          id: 'change-2',
-          ops: [{ op: 'add', path: '/property2', value: 'value2' }],
-          rev: 12,
-          baseRev: 11,
-          created: Date.now() - 200,
+          id: 'version2',
+          parentId: undefined,
+          groupId: 'branch1',
+          origin: 'main',
+          branchName: 'Feature Branch',
+          startDate: 1100,
+          endDate: 1200,
+          rev: 2,
+          baseRev: 1,
         },
       ];
 
-      await mockStore.saveChanges(branchDocId, changes);
-      mockStore.listChanges.mockResolvedValue(changes);
-
-      // Set up a version in the branch
-      const versionMetadata: VersionMetadata = {
-        id: 'version-1',
-        origin: 'main',
-        startDate: Date.now() - 500,
-        endDate: Date.now() - 200,
-        rev: 12,
-        baseRev: 10,
-        groupId: branchDocId,
-        branchName: 'Test Branch',
-      };
-
-      const state = { value: 'test', property1: 'value1', property2: 'value2' };
-      await mockStore.createVersion(branchDocId, versionMetadata, state, changes);
-      mockStore.listVersions.mockResolvedValue([versionMetadata]);
-      mockStore.loadVersionState.mockResolvedValue(state);
-      mockStore.loadVersionChanges.mockResolvedValue(changes);
-
-      // Mock patchesDoc to return a successful merge
-      (mockPatchesServer.commitChanges as Mock).mockResolvedValue([
-        [],
-        [
-          {
-            id: 'merged-change',
-            ops: changes.flatMap(c => c.ops),
-            rev: 11,
-            baseRev: 10,
-            created: Date.now(),
-          },
-        ],
-      ]);
-    });
-
-    it('should throw if branch not found', async () => {
-      mockStore.loadBranch.mockResolvedValue(null);
-
-      await expect(branchManager.mergeBranch('non-existent')).rejects.toThrow('Branch with ID non-existent not found.');
-    });
-
-    it('should throw if branch is not open', async () => {
-      const closedBranch = { ...branch, status: 'closed' as BranchStatus };
-      mockStore.loadBranch.mockResolvedValue(closedBranch);
-
-      await expect(branchManager.mergeBranch(branchDocId)).rejects.toThrow(
-        `Branch ${branchDocId} is not open (status: closed). Cannot merge.`
-      );
-    });
-
-    it('should do nothing if branch has no changes', async () => {
-      mockStore.listChanges.mockResolvedValue([]);
-
-      const result = await branchManager.mergeBranch(branchDocId);
-
-      expect(result).toEqual([]);
-      expect(mockStore.updateBranch).toHaveBeenCalledWith(branchDocId, { status: 'merged' });
-      expect(mockPatchesServer.commitChanges).not.toHaveBeenCalled();
-    });
-
-    it('should copy branch versions to main doc and flatten changes', async () => {
-      const result = await branchManager.mergeBranch(branchDocId);
-
-      // Should list versions to find 'main' versions
-      expect(mockStore.listVersions).toHaveBeenCalledWith(branchDocId, { origin: 'main' });
-
-      // Should create a version in the main doc
-      expect(mockStore.createVersion).toHaveBeenCalledWith(
-        mainDocId,
-        expect.objectContaining({
+      vi.mocked(mockStore.listVersions).mockResolvedValue(multipleVersions);
+      vi.mocked(createVersionMetadata)
+        .mockReturnValueOnce({
+          id: 'new-version1',
           origin: 'branch',
-          baseRev: 10, // branchedRev
-          groupId: branchDocId,
-          branchName: 'Test Branch',
-        }),
-        expect.any(Object),
-        expect.any(Array)
-      );
+          parentId: undefined,
+          startDate: 1000,
+          endDate: 1100,
+          rev: 1,
+          baseRev: 5,
+        })
+        .mockReturnValueOnce({
+          id: 'new-version2',
+          origin: 'branch',
+          parentId: 'new-version1',
+          startDate: 1100,
+          endDate: 1200,
+          rev: 2,
+          baseRev: 5,
+        });
+      vi.mocked(createChange).mockReturnValue({
+        id: 'merged-change',
+        baseRev: 5,
+        rev: 7,
+        ops: [],
+        created: Date.now(),
+        metadata: {},
+      });
+      vi.mocked(mockServer.commitChanges).mockResolvedValue([[], []]);
 
-      // Should create flattened change with all ops
-      expect(mockPatchesServer.commitChanges).toHaveBeenCalledWith(mainDocId, [
-        expect.objectContaining({
-          ops: expect.arrayContaining([
-            { op: 'add', path: '/property1', value: 'value1' },
-            { op: 'add', path: '/property2', value: 'value2' },
-          ]),
-          baseRev: 10, // branchedRev
-          rev: 12, // branchedRev + changes.length
-        }),
-      ]);
+      await branchManager.mergeBranch('branch1');
 
-      // Should mark branch as merged
-      expect(mockStore.updateBranch).toHaveBeenCalledWith(branchDocId, { status: 'merged' });
-
-      // Should return the result from commitChanges
-      expect(result).toEqual([
-        expect.objectContaining({
-          id: 'merged-change',
-        }),
-      ]);
+      expect(mockStore.createVersion).toHaveBeenCalledTimes(2);
+      expect(createVersionMetadata).toHaveBeenNthCalledWith(1, {
+        ...multipleVersions[0],
+        origin: 'branch',
+        baseRev: 5,
+        groupId: 'branch1',
+        branchName: 'Feature Branch',
+        parentId: undefined,
+      });
+      expect(createVersionMetadata).toHaveBeenNthCalledWith(2, {
+        ...multipleVersions[1],
+        origin: 'branch',
+        baseRev: 5,
+        groupId: 'branch1',
+        branchName: 'Feature Branch',
+        parentId: 'new-version1',
+      });
     });
+  });
+});
 
-    it('should handle merge failure', async () => {
-      const error = new Error('Merge conflict');
-      (mockPatchesServer.commitChanges as Mock).mockRejectedValue(error);
+describe('assertBranchMetadata', () => {
+  it('should allow undefined metadata', () => {
+    expect(() => assertBranchMetadata(undefined)).not.toThrow();
+  });
 
-      await expect(branchManager.mergeBranch(branchDocId)).rejects.toThrow('Merge failed: Merge conflict');
+  it('should allow valid editable metadata', () => {
+    const metadata: EditableBranchMetadata = {
+      name: 'Feature Branch',
+      description: 'Working on new feature',
+      tags: ['feature', 'wip'],
+    };
 
-      // Should not mark branch as merged
-      expect(mockStore.updateBranch).not.toHaveBeenCalled();
+    expect(() => assertBranchMetadata(metadata)).not.toThrow();
+  });
+
+  it('should throw error for non-modifiable fields', () => {
+    const invalidFields = ['id', 'branchedFromId', 'branchedRev', 'created', 'status'];
+
+    invalidFields.forEach(field => {
+      const metadata = { [field]: 'value' } as any;
+      expect(() => assertBranchMetadata(metadata)).toThrow(`Cannot modify branch field ${field}`);
     });
+  });
+
+  it('should allow custom metadata fields', () => {
+    const metadata = {
+      customField: 'value',
+      priority: 'high',
+      assignee: 'user123',
+    } as any;
+
+    expect(() => assertBranchMetadata(metadata)).not.toThrow();
   });
 });

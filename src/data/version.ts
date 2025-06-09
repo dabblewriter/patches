@@ -14,7 +14,7 @@ export function createVersionId() {
  * @param data - The version data.
  * @returns The version.
  */
-export function createVersion(data: Omit<VersionMetadata, 'id'>): VersionMetadata {
+export function createVersionMetadata(data: Omit<VersionMetadata, 'id'>): VersionMetadata {
   data.id = createVersionId();
   return data as VersionMetadata;
 }

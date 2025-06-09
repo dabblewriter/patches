@@ -1,10 +1,9 @@
-import { createChange } from '../data/change.js';
+import { createStateFromSnapshot } from '../algorithms/client/createStateFromSnapshot.js';
+import { makeChange } from '../algorithms/client/makeChange.js';
+import { applyChanges } from '../algorithms/shared/applyChanges.js';
 import { signal, type Unsubscriber } from '../event-signal.js';
-import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { JSONPatch } from '../json-patch/JSONPatch.js';
-import type { Change, PatchesSnapshot } from '../types.js';
-import { applyChanges, rebaseChanges } from '../utils.js';
-import { breakChange } from '../utils/breakChange.js';
+import type { Change, PatchesSnapshot, SyncingState } from '../types.js';
 
 /**
  * Options for creating a PatchesDoc instance
@@ -25,21 +24,19 @@ export interface PatchesDocOptions {
 export class PatchesDoc<T extends object = object> {
   protected _id: string | null = null;
   protected _state: T;
-  protected _committedState: T;
-  protected _committedRev: number;
-  protected _pendingChanges: Change[] = [];
-  protected _sendingChanges: Change[] = [];
+  protected _snapshot: PatchesSnapshot<T>;
   protected _changeMetadata: Record<string, any> = {};
+  protected _syncing: SyncingState = null;
   protected readonly _maxPayloadBytes?: number;
 
   /** Subscribe to be notified before local state changes. */
   readonly onBeforeChange = signal<(change: Change) => void>();
   /** Subscribe to be notified after local state changes are applied. */
-  readonly onChange = signal<(change: Change) => void>();
+  readonly onChange = signal<(changes: Change[]) => void>();
   /** Subscribe to be notified whenever state changes from any source. */
   readonly onUpdate = signal<(newState: T) => void>();
-  /** Subscribe to be notified when pending changes are rebased. */
-  readonly onRebasedChanges = signal<(rebasedChanges: Change[]) => void | Promise<void>>();
+  /** Subscribe to be notified when syncing state changes. */
+  readonly onSyncing = signal<(newSyncing: SyncingState) => void>();
 
   /**
    * Creates an instance of PatchesDoc.
@@ -48,9 +45,8 @@ export class PatchesDoc<T extends object = object> {
    * @param options Additional options for the document.
    */
   constructor(initialState: T = {} as T, initialMetadata: Record<string, any> = {}, options: PatchesDocOptions = {}) {
-    this._committedState = structuredClone(initialState);
     this._state = structuredClone(initialState);
-    this._committedRev = 0;
+    this._snapshot = { state: this._state, rev: 0, changes: [] };
     this._changeMetadata = initialMetadata;
     this._maxPayloadBytes = options.maxPayloadBytes;
   }
@@ -60,27 +56,27 @@ export class PatchesDoc<T extends object = object> {
     return this._id;
   }
 
-  /** Current local state (committed + sending + pending). */
+  /** Current local state (committed + pending). */
   get state(): T {
     return this._state;
   }
 
-  /** Last committed revision number from the server. */
-  get committedRev(): number {
-    return this._committedRev;
+  /** Are we currently syncing this document? */
+  get syncing(): SyncingState {
+    return this._syncing;
   }
 
-  /** Are there changes currently awaiting server confirmation? */
-  get isSending(): boolean {
-    return this._sendingChanges.length > 0;
+  /** Last committed revision number from the server. */
+  get committedRev(): number {
+    return this._snapshot.rev;
   }
 
   /** Are there local changes that haven't been sent yet? */
   get hasPending(): boolean {
-    return this._pendingChanges.length > 0;
+    return this._snapshot.changes.length > 0;
   }
 
-  /** Subscribe to be notified whenever value changes. */
+  /** Subscribe to be notified whenever the state changes. */
   subscribe(onUpdate: (newValue: T) => void): Unsubscriber {
     const unsub = this.onUpdate(onUpdate);
     onUpdate(this._state);
@@ -94,12 +90,7 @@ export class PatchesDoc<T extends object = object> {
    * are treated as pending.
    */
   export(): PatchesSnapshot<T> {
-    return {
-      state: this._committedState,
-      rev: this._committedRev,
-      // Includes sending and pending changes. On import, all become pending.
-      changes: [...this._sendingChanges, ...this._pendingChanges],
-    };
+    return structuredClone(this._snapshot);
   }
 
   /**
@@ -107,11 +98,8 @@ export class PatchesDoc<T extends object = object> {
    * Resets sending state and treats all imported changes as pending.
    */
   import(snapshot: PatchesSnapshot<T>) {
-    this._committedState = structuredClone(snapshot.state); // Use structuredClone
-    this._committedRev = snapshot.rev;
-    this._pendingChanges = snapshot.changes ?? []; // All imported changes become pending
-    this._sendingChanges = []; // Reset sending state on import
-    this._recalculateLocalState();
+    this._snapshot = structuredClone(snapshot);
+    this._state = createStateFromSnapshot(snapshot);
     this.onUpdate.emit(this._state);
   }
 
@@ -127,230 +115,49 @@ export class PatchesDoc<T extends object = object> {
    * @param mutator Function modifying a draft state.
    * @returns The generated Change object or null if no changes occurred.
    */
-  change(mutator: (draft: T, patch: JSONPatch) => void): Change | null {
-    const patch = createJSONPatch(this._state, mutator);
-    if (patch.ops.length === 0) {
-      return null;
+  change(mutator: (draft: T, patch: JSONPatch) => void): Change[] {
+    const changes = makeChange(this._snapshot, mutator, this._changeMetadata, this._maxPayloadBytes);
+    if (changes.length === 0) {
+      return changes;
     }
-
-    // Determine the client-side rev for local ordering before server assigns final rev.
-    const lastPendingRev = this._pendingChanges[this._pendingChanges.length - 1]?.rev;
-    const lastSendingRev = this._sendingChanges[this._sendingChanges.length - 1]?.rev;
-    const latestLocalRev = Math.max(this._committedRev, lastPendingRev ?? 0, lastSendingRev ?? 0);
-    const rev = latestLocalRev + 1; // Optimistic rev for local sorting
-
-    // It's the baseRev that matters for sending.
-    const change = createChange(this._committedRev, rev, patch.ops, this._changeMetadata);
-
-    this.onBeforeChange.emit(change);
-
-    // Apply to local state immediately
-    this._state = patch.apply(this._state);
-
-    if (this._maxPayloadBytes) {
-      // Check if the change needs to be split due to size
-      const changes = breakChange(change, this._maxPayloadBytes);
-
-      // Emit events for each change piece
-      for (const piece of changes) {
-        this._pendingChanges.push(piece);
-        this.onChange.emit(piece);
-      }
-    } else {
-      this._pendingChanges.push(change);
-      this.onChange.emit(change);
-    }
-
+    this._state = applyChanges(this._state, changes);
+    this._snapshot.changes.push(...changes);
+    this.onChange.emit(changes);
     this.onUpdate.emit(this._state);
-
-    return change;
+    return changes;
   }
 
   /**
-   * Retrieves pending changes and marks them as sending.
-   * @returns Array of changes ready to be sent to the server.
-   * @throws Error if changes are already being sent.
+   * Returns the pending changes for this document.
+   * @returns The pending changes.
    */
-  getUpdatesForServer(): Change[] {
-    if (this.isSending) {
-      // It's generally simpler if the client waits for confirmation before sending more.
-      // If overlapping requests are needed, state management becomes much more complex.
-      throw new Error('Cannot get updates while previous batch is awaiting confirmation.');
-    }
-    if (!this.hasPending) {
-      return [];
-    }
-
-    this._sendingChanges = this._pendingChanges;
-    this._pendingChanges = [];
-
-    return this._sendingChanges;
+  getPendingChanges(): Change[] {
+    return this._snapshot.changes;
   }
 
   /**
-   * Processes the server's response to a batch of changes sent via `getUpdatesForServer`.
-   * @param serverCommit The array of committed changes from the server.
-   *                     Expected to be empty (`[]`) if the sent batch was a no‑op,
-   *                     or contain **one or more** `Change` objects consisting of:
-   *                       • any missing history since the client's `baseRev`, followed by
-   *                       • the server‑side result of the client's batch (typically the
-   *                         transformed versions of the changes the client sent).
-   * @throws Error if the input format is unexpected or application fails.
+   * Applies committed changes to the document. Should only be called from a sync provider.
+   * @param serverChanges The changes to apply.
+   * @param rebasedPendingChanges The rebased pending changes to apply.
    */
-  applyServerConfirmation(serverCommit: Change[]): void {
-    if (!Array.isArray(serverCommit)) {
-      throw new Error('Invalid server confirmation format: Expected an array.');
+  applyCommittedChanges(serverChanges: Change[], rebasedPendingChanges: Change[]) {
+    // Ensure server changes are sequential to the current committed revision
+    if (this._snapshot.rev !== serverChanges[0].rev - 1) {
+      throw new Error('Cannot apply committed changes to a doc that is not at the correct revision');
     }
+    // Track IDs of pending changes for debugging
+    // const pendingIds = new Set(rebasedPendingChanges.map(c => c.id));
 
-    if (!this.isSending) {
-      console.warn('Received server confirmation but no changes were marked as sending.');
-      // Decide how to handle this - ignore? Apply if possible?
-      // For now, let's ignore if the server sent something unexpected.
-      if (serverCommit.length === 0) return; // Ignore empty confirmations if not sending
-      // If server sent a commit unexpectedly, it implies a state mismatch. Hard to recover.
-      // Maybe apply cautiously if rev matches?
-      const commit = serverCommit[0];
-      if (commit && commit.rev === this._committedRev + 1) {
-        console.warn('Applying unexpected server commit cautiously.');
-        // Proceed as if confirmation was expected
-      } else {
-        throw new Error('Received unexpected server commit with mismatching revision.');
-      }
-    }
+    // Apply server changes to the base state of the snapshot
+    this._snapshot.state = applyChanges(this._snapshot.state, serverChanges);
+    this._snapshot.rev = serverChanges[serverChanges.length - 1].rev;
 
-    if (serverCommit.length === 0) {
-      // Server confirmed no change; discard the sending changes.
-      this._sendingChanges = [];
-    } else {
-      // Server responded with one *or more* changes:
-      //   1. possibly earlier missing revisions produced by other clients
-      //   2. followed by the server‑side commit(s) that correspond to the batch we sent.
+    // The rebasedPendingChanges are the new complete set of pending changes
+    this._snapshot.changes = rebasedPendingChanges;
 
-      // Basic sanity check – final revision in the array should advance committedRev.
-      const lastChange = serverCommit[serverCommit.length - 1];
-      if (!lastChange.rev || lastChange.rev <= this._committedRev) {
-        throw new Error(`Server commit invalid final revision: ${lastChange.rev}, expected > ${this._committedRev}`);
-      }
-
-      // 1. Discard the confirmed _sendingChanges first so that the delegated
-      //    external‑update path does not attempt to rebase them.
-      this._sendingChanges = [];
-
-      // 2. Apply everything through the common external‑update handler which
-      //    will update committed state, revision, rebase pending changes, etc.
-      this.applyExternalServerUpdate(serverCommit);
-
-      return; // done – external handler emitted updates
-    }
-
-    // For the zero‑length confirmation path we still need to recalc state and
-    // notify listeners (the 1‑change path is handled by applyExternalServerUpdate).
-    this._recalculateLocalState();
+    // Recalculate the live state from the updated snapshot
+    this._state = createStateFromSnapshot(this._snapshot);
     this.onUpdate.emit(this._state);
-  }
-
-  /**
-   * Applies incoming changes from the server that were *not* initiated by this client.
-   * @param externalServerChanges An array of sequential changes from the server.
-   */
-  applyExternalServerUpdate(externalServerChanges: Change[]): void {
-    if (externalServerChanges.length === 0) {
-      return;
-    }
-
-    const firstChange = externalServerChanges[0];
-    // Allow for gaps if server sends updates out of order, but warn.
-    if (firstChange.rev && firstChange.rev <= this._committedRev) {
-      console.warn(
-        `Ignoring external server update starting at revision ${firstChange.rev} which is <= current committed ${this._committedRev}`
-      );
-      return; // Ignore already processed or irrelevant changes
-    }
-    // if (firstChange.rev && firstChange.rev !== this._committedRev + 1) {
-    //   console.warn(`External server update starting at ${firstChange.rev} does not directly follow committed ${this._committedRev}`);
-    //   // Handle potential gaps - request resync? Apply cautiously?
-    // }
-
-    const lastChange = externalServerChanges[externalServerChanges.length - 1];
-
-    // 1. Apply to committed state
-    try {
-      this._committedState = applyChanges(this._committedState, externalServerChanges);
-    } catch (error) {
-      console.error('Failed to apply external server update to committed state:', error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      throw new Error(`Critical sync error applying external server update: ${errorMessage}`);
-    }
-
-    // 2. Update committed revision
-    if (lastChange.rev) {
-      this._committedRev = lastChange.rev;
-    } else {
-      console.error('External server update missing revision on last change.');
-      // Cannot reliably update revision - potential state divergence
-    }
-
-    // 3. Rebase *both* sending and pending changes against the external changes
-    if (this.isSending) {
-      this._sendingChanges = rebaseChanges(externalServerChanges, this._sendingChanges);
-    }
-    if (this.hasPending) {
-      this._pendingChanges = rebaseChanges(externalServerChanges, this._pendingChanges);
-    }
-    const pendingWereRebased = this.isSending || this.hasPending;
-
-    // 4. Recalculate local state
-    this._recalculateLocalState();
-
-    // 5. Save rebased pending changes back to store if available
-    if (pendingWereRebased) {
-      // Fire and forget - don't block the update process
-      this.onRebasedChanges.emit([...this._sendingChanges, ...this._pendingChanges]).catch(error => {
-        console.error('Failed to save rebased pending changes:', error);
-      });
-    }
-
-    // 6. Notify listeners
-    this.onUpdate.emit(this._state);
-  }
-
-  /**
-   * Handles the scenario where sending changes to the server failed.
-   * Moves the changes that were in the process of being sent back to the
-   * beginning of the pending queue to be retried later.
-   */
-  handleSendFailure(): void {
-    if (this.isSending) {
-      console.warn(`Handling send failure: Moving ${this._sendingChanges.length} changes back to pending queue.`);
-      // Prepend sending changes back to pending queue to maintain order and prioritize retry
-      this._pendingChanges.unshift(...this._sendingChanges);
-      this._sendingChanges = [];
-      // Do NOT recalculate state here, as the state didn't actually advance
-      // due to the failed send. The state should still reflect the last known
-      // good state + pending changes (which now includes the failed ones).
-    } else {
-      console.warn('handleSendFailure called but no changes were marked as sending.');
-    }
-  }
-
-  /** Recalculates _state from _committedState + _sendingChanges + _pendingChanges */
-  protected _recalculateLocalState(): void {
-    try {
-      this._state = applyChanges(this._committedState, [...this._sendingChanges, ...this._pendingChanges]);
-    } catch (error) {
-      console.error('CRITICAL: Error recalculating local state after update:', error);
-      // This indicates a potentially serious issue with patch application or rebasing logic.
-      // Re-throw the error to allow higher-level handling (e.g., trigger resync)
-      throw error;
-    }
-  }
-
-  /**
-   * @deprecated Use export() - kept for backward compatibility if needed.
-   */
-  toJSON(): PatchesSnapshot<T> {
-    console.warn('PatchesDoc.toJSON() is deprecated. Use export() instead.');
-    return this.export();
   }
 
   /**
@@ -365,5 +172,18 @@ export class PatchesDoc<T extends object = object> {
     if (this._id === null) {
       this._id = id;
     }
+  }
+
+  /**
+   * Updates the syncing state of the document.
+   * @param newSyncing The new syncing state.
+   */
+  updateSyncing(newSyncing: SyncingState) {
+    this._syncing = newSyncing;
+    this.onSyncing.emit(newSyncing);
+  }
+
+  toJSON(): PatchesSnapshot<T> {
+    return this.export();
   }
 }

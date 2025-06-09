@@ -27,7 +27,7 @@ export class PatchesWebSocket implements PatchesAPI {
   public readonly onStateChange: Signal<(state: ConnectionState) => void>;
 
   /** Signal emitted when the server pushes document changes. */
-  public readonly onChangesCommitted = signal<(params: PatchesNotificationParams) => void>();
+  public readonly onChangesCommitted = signal<(docId: string, changes: Change[]) => void>();
 
   /**
    * Creates a new Patches WebSocket client instance.
@@ -41,8 +41,9 @@ export class PatchesWebSocket implements PatchesAPI {
 
     // Register handlers for server-sent notifications
     // Note: Type assertions might be needed if rpc.on doesn't infer strongly enough
-    this.rpc.on('changesCommitted', (params /*: PatchesNotificationParams */) => {
-      this.onChangesCommitted.emit(params as PatchesNotificationParams);
+    this.rpc.on('changesCommitted', (params: PatchesNotificationParams) => {
+      const { docId, changes } = params;
+      this.onChangesCommitted.emit(docId, changes);
     });
   }
 

@@ -1,6 +1,6 @@
+import { applyChanges } from '../algorithms/shared/applyChanges.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
 import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
-import { applyChanges } from '../utils.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
 interface DocBuffers {
@@ -69,10 +69,11 @@ export class InMemoryStore implements PatchesStore {
   async saveDoc(docId: string, snapshot: PatchesState): Promise<void> {
     this.docs.set(docId, { snapshot, committed: [], pending: [] });
   }
-  async savePendingChange(docId: string, change: Change): Promise<void> {
+
+  async savePendingChanges(docId: string, changes: Change[]): Promise<void> {
     const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
     if (!this.docs.has(docId)) this.docs.set(docId, buf);
-    buf.pending.push(change);
+    buf.pending.push(...changes);
   }
 
   async saveCommittedChanges(docId: string, changes: Change[], sentPendingRange?: [number, number]): Promise<void> {

@@ -1,204 +1,370 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { InMemoryStore } from '../../src/client/InMemoryStore';
-import type { Change } from '../../src/types';
+import type { Change, PatchesState } from '../../src/types';
+
+// Mock the dependencies
+vi.mock('../../src/algorithms/shared/applyChanges');
+vi.mock('../../src/json-patch/transformPatch');
 
 describe('InMemoryStore', () => {
   let store: InMemoryStore;
 
-  beforeEach(() => {
+  const createChange = (id: string, rev: number, baseRev = rev - 1): Change => ({
+    id,
+    rev,
+    baseRev,
+    ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
+    created: Date.now(),
+  });
+
+  const createState = (data: any, rev: number): PatchesState => ({
+    state: data,
+    rev,
+  });
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
     store = new InMemoryStore();
+
+    // Mock applyChanges
+    const { applyChanges } = await import('../../src/algorithms/shared/applyChanges');
+    vi.mocked(applyChanges).mockImplementation((state: any, changes: any) => ({
+      ...(state || {}),
+      appliedChanges: changes.length,
+    }));
+
+    // Mock transformPatch
+    const { transformPatch } = await import('../../src/json-patch/transformPatch');
+    vi.mocked(transformPatch).mockImplementation((state, patch, ops) => ops);
   });
 
-  describe('Document Operations', () => {
-    it('should store and retrieve document state', async () => {
-      const docId = 'test-doc';
-      const change: Change = {
-        id: 'change-1',
-        ops: [{ op: 'add', path: '/content', value: 'test content' }],
-        rev: 1,
-        baseRev: 0,
-        created: Date.now(),
-      };
-
-      await store.saveCommittedChanges(docId, [change]);
-      const doc = await store.getDoc(docId);
-
-      expect(doc).toBeDefined();
-      expect(doc?.state).toEqual({ content: 'test content' });
-      expect(doc?.rev).toBe(1);
+  describe('getDoc', () => {
+    it('should return undefined for non-existent document', async () => {
+      const result = await store.getDoc('non-existent');
+      expect(result).toBeUndefined();
     });
 
-    it('should handle empty document state', async () => {
-      const docId = 'empty-doc';
-      const doc = await store.getDoc(docId);
-
-      expect(doc).toBeUndefined();
+    it('should return undefined for deleted document', async () => {
+      await store.deleteDoc('doc1');
+      const result = await store.getDoc('doc1');
+      expect(result).toBeUndefined();
     });
 
-    it('should not return deleted documents', async () => {
-      const docId = 'deleted-doc';
-      const change: Change = {
-        id: 'change-1',
-        ops: [{ op: 'add', path: '/content', value: 'test content' }],
-        rev: 1,
-        baseRev: 0,
-        created: Date.now(),
-      };
+    it('should return document with snapshot only', async () => {
+      const snapshot = createState({ text: 'hello' }, 5);
+      await store.saveDoc('doc1', snapshot);
 
-      await store.saveCommittedChanges(docId, [change]);
-      await store.deleteDoc(docId);
-      const doc = await store.getDoc(docId);
+      const result = await store.getDoc('doc1');
 
-      expect(doc).toBeUndefined();
+      expect(result).toEqual({
+        state: { text: 'hello', appliedChanges: 0 },
+        rev: 5,
+        changes: [],
+      });
+    });
+
+    it('should return document with committed changes applied', async () => {
+      const snapshot = createState({ text: 'hello' }, 5);
+      const changes = [createChange('c1', 6), createChange('c2', 7)];
+
+      await store.saveDoc('doc1', snapshot);
+      await store.saveCommittedChanges('doc1', changes);
+
+      const result = await store.getDoc('doc1');
+
+      expect(result).toEqual({
+        state: { text: 'hello', appliedChanges: 2 },
+        rev: 7,
+        changes: [],
+      });
+    });
+
+    it('should include pending changes in result', async () => {
+      const snapshot = createState({ text: 'hello' }, 5);
+      const pending = [createChange('p1', 6), createChange('p2', 7)];
+
+      await store.saveDoc('doc1', snapshot);
+      await store.savePendingChanges('doc1', pending);
+
+      const result = await store.getDoc('doc1');
+
+      expect(result?.changes).toEqual(pending);
+    });
+
+    it('should rebase stale pending changes', async () => {
+      const snapshot = createState({ text: 'hello' }, 5);
+      const committed = [createChange('c1', 6), createChange('c2', 7)];
+      const pending = [createChange('p1', 6, 5)]; // Based on old revision
+
+      await store.saveDoc('doc1', snapshot);
+      await store.saveCommittedChanges('doc1', committed);
+      await store.savePendingChanges('doc1', pending);
+
+      const result = await store.getDoc('doc1');
+
+      expect(result?.changes[0].rev).toBe(8); // Should be rebased
+      expect(result?.changes[0].baseRev).toBe(5);
+    });
+
+    it('should handle document with no snapshot', async () => {
+      const committed = [createChange('c1', 1), createChange('c2', 2)];
+      await store.saveCommittedChanges('doc1', committed);
+
+      const result = await store.getDoc('doc1');
+
+      expect(result).toEqual({
+        state: { appliedChanges: 2 },
+        rev: 2,
+        changes: [],
+      });
     });
   });
 
-  describe('Change Management', () => {
-    it('should store and retrieve pending changes', async () => {
-      const docId = 'test-doc';
-      const change: Change = {
-        id: 'change-1',
-        ops: [{ op: 'add', path: '/content', value: 'test content' }],
-        rev: 1,
-        baseRev: 0,
-        created: Date.now(),
-      };
-
-      await store.savePendingChange(docId, change);
-      const pendingChanges = await store.getPendingChanges(docId);
-
-      expect(pendingChanges).toHaveLength(1);
-      expect(pendingChanges[0]).toEqual(change);
+  describe('getPendingChanges', () => {
+    it('should return empty array for non-existent document', async () => {
+      const result = await store.getPendingChanges('non-existent');
+      expect(result).toEqual([]);
     });
 
-    it('should handle committed changes and remove pending changes', async () => {
-      const docId = 'test-doc';
-      const pendingChange: Change = {
-        id: 'change-1',
-        ops: [{ op: 'add', path: '/content', value: 'test content' }],
-        rev: 1,
-        baseRev: 0,
-        created: Date.now(),
-      };
+    it('should return pending changes', async () => {
+      const pending = [createChange('p1', 6), createChange('p2', 7)];
+      await store.savePendingChanges('doc1', pending);
 
-      await store.savePendingChange(docId, pendingChange);
-      await store.saveCommittedChanges(docId, [pendingChange], [1, 1]);
-      const pendingChanges = await store.getPendingChanges(docId);
-
-      expect(pendingChanges).toHaveLength(0);
+      const result = await store.getPendingChanges('doc1');
+      expect(result).toEqual(pending);
     });
 
-    it('should track revisions correctly', async () => {
-      const docId = 'test-doc';
-      const changes: Change[] = [
-        {
-          id: 'change-1',
-          ops: [{ op: 'add', path: '/content', value: 'content 1' }],
-          rev: 1,
-          baseRev: 0,
-          created: Date.now(),
-        },
-        {
-          id: 'change-2',
-          ops: [{ op: 'replace', path: '/content', value: 'content 2' }],
-          rev: 2,
-          baseRev: 1,
-          created: Date.now(),
-        },
-      ];
+    it('should return copy of pending changes array', async () => {
+      const pending = [createChange('p1', 6)];
+      await store.savePendingChanges('doc1', pending);
 
-      await store.saveCommittedChanges(docId, changes);
-      const [committedRev, pendingRev] = await store.getLastRevs(docId);
+      const result = await store.getPendingChanges('doc1');
+      result.push(createChange('extra', 999));
 
+      const result2 = await store.getPendingChanges('doc1');
+      expect(result2).toHaveLength(1); // Array should not be modified
+      expect(result2[0].id).toBe('p1');
+    });
+  });
+
+  describe('getLastRevs', () => {
+    it('should return [0, 0] for non-existent document', async () => {
+      const result = await store.getLastRevs('non-existent');
+      expect(result).toEqual([0, 0]);
+    });
+
+    it('should return revision from snapshot only', async () => {
+      const snapshot = createState({ text: 'hello' }, 5);
+      await store.saveDoc('doc1', snapshot);
+
+      const result = await store.getLastRevs('doc1');
+      expect(result).toEqual([5, 5]);
+    });
+
+    it('should return committed and pending revisions', async () => {
+      const committed = [createChange('c1', 3), createChange('c2', 4)];
+      const pending = [createChange('p1', 5), createChange('p2', 6)];
+
+      await store.saveCommittedChanges('doc1', committed);
+      await store.savePendingChanges('doc1', pending);
+
+      const result = await store.getLastRevs('doc1');
+      expect(result).toEqual([4, 6]);
+    });
+
+    it('should handle empty buffers', async () => {
+      await store.trackDocs(['doc1']);
+
+      const result = await store.getLastRevs('doc1');
+      expect(result).toEqual([0, 0]);
+    });
+  });
+
+  describe('listDocs', () => {
+    it('should return empty array when no documents', async () => {
+      const result = await store.listDocs();
+      expect(result).toEqual([]);
+    });
+
+    it('should list tracked documents', async () => {
+      const snapshot = createState({ text: 'hello' }, 5);
+      await store.saveDoc('doc1', snapshot);
+      await store.trackDocs(['doc2']);
+
+      const result = await store.listDocs();
+      expect(result).toHaveLength(2);
+      expect(result.find(d => d.docId === 'doc1')?.committedRev).toBe(5);
+      expect(result.find(d => d.docId === 'doc2')?.committedRev).toBe(0);
+    });
+
+    it('should exclude deleted documents by default', async () => {
+      await store.trackDocs(['doc1', 'doc2']);
+      await store.deleteDoc('doc1');
+
+      const result = await store.listDocs();
+      expect(result).toHaveLength(1);
+      expect(result[0].docId).toBe('doc2');
+    });
+
+    it('should include deleted documents when requested', async () => {
+      await store.trackDocs(['doc1', 'doc2']);
+      await store.deleteDoc('doc1');
+
+      const result = await store.listDocs(true);
+      expect(result).toHaveLength(2);
+      expect(result.find(d => d.docId === 'doc1')?.deleted).toBe(true);
+    });
+  });
+
+  describe('saveDoc', () => {
+    it('should save document snapshot', async () => {
+      const snapshot = createState({ text: 'hello' }, 5);
+      await store.saveDoc('doc1', snapshot);
+
+      const result = await store.getDoc('doc1');
+      expect(result?.rev).toBe(5);
+    });
+
+    it('should reset committed and pending changes', async () => {
+      await store.savePendingChanges('doc1', [createChange('p1', 1)]);
+      await store.saveCommittedChanges('doc1', [createChange('c1', 2)]);
+
+      const snapshot = createState({ text: 'hello' }, 5);
+      await store.saveDoc('doc1', snapshot);
+
+      const result = await store.getDoc('doc1');
+      expect(result?.changes).toEqual([]);
+    });
+  });
+
+  describe('savePendingChanges', () => {
+    it('should save pending changes to new document', async () => {
+      const changes = [createChange('p1', 1), createChange('p2', 2)];
+      await store.savePendingChanges('doc1', changes);
+
+      const result = await store.getPendingChanges('doc1');
+      expect(result).toEqual(changes);
+    });
+
+    it('should append to existing pending changes', async () => {
+      const initial = [createChange('p1', 1)];
+      const additional = [createChange('p2', 2)];
+
+      await store.savePendingChanges('doc1', initial);
+      await store.savePendingChanges('doc1', additional);
+
+      const result = await store.getPendingChanges('doc1');
+      expect(result).toEqual([...initial, ...additional]);
+    });
+  });
+
+  describe('saveCommittedChanges', () => {
+    it('should save committed changes', async () => {
+      const changes = [createChange('c1', 1), createChange('c2', 2)];
+      await store.saveCommittedChanges('doc1', changes);
+
+      const [committedRev] = await store.getLastRevs('doc1');
       expect(committedRev).toBe(2);
-      expect(pendingRev).toBe(2);
     });
 
-    it('should rebase pending changes when committed changes arrive', async () => {
-      const docId = 'test-doc';
+    it('should remove sent pending changes when range provided', async () => {
+      const pending = [createChange('p1', 1), createChange('p2', 2), createChange('p3', 3)];
+      const committed = [createChange('c1', 4)];
 
-      // First, save a committed change
-      const committedChange: Change = {
-        id: 'committed-1',
-        ops: [{ op: 'add', path: '/content', value: 'initial content' }],
-        rev: 1,
-        baseRev: 0,
-        created: Date.now() - 1000,
-      };
-      await store.saveCommittedChanges(docId, [committedChange]);
+      await store.savePendingChanges('doc1', pending);
+      await store.saveCommittedChanges('doc1', committed, [1, 2]); // Remove p1 and p2
 
-      // Then save a pending change based on the initial state
-      const pendingChange: Change = {
-        id: 'pending-1',
-        ops: [{ op: 'replace', path: '/content', value: 'updated content' }],
-        rev: 2,
-        baseRev: 1,
-        created: Date.now(),
-      };
-      await store.savePendingChange(docId, pendingChange);
-
-      // Now save a new committed change that would conflict
-      const newCommittedChange: Change = {
-        id: 'committed-2',
-        ops: [{ op: 'replace', path: '/content', value: 'server content' }],
-        rev: 2,
-        baseRev: 1,
-        created: Date.now() - 500,
-      };
-      await store.saveCommittedChanges(docId, [newCommittedChange]);
-
-      // Get the document - pending changes should be rebased
-      const doc = await store.getDoc(docId);
-
-      expect(doc).toBeDefined();
-      expect(doc?.state).toEqual({ content: 'server content' });
-      expect(doc?.changes).toHaveLength(1); // The rebased pending change
-      expect(doc?.changes[0].rev).toBe(3); // Rev should be incremented
-      expect(doc?.changes[0].baseRev).toBe(1); // BaseRev should remain the same
+      const remainingPending = await store.getPendingChanges('doc1');
+      expect(remainingPending).toHaveLength(1);
+      expect(remainingPending[0].id).toBe('p3');
     });
   });
 
-  describe('Document Tracking', () => {
-    it('should track and list documents', async () => {
-      const docIds = ['doc-1', 'doc-2', 'doc-3'];
+  describe('replacePendingChanges', () => {
+    it('should replace all pending changes', async () => {
+      const initial = [createChange('p1', 1), createChange('p2', 2)];
+      const replacement = [createChange('p3', 3)];
 
-      await store.trackDocs(docIds);
-      const docs = await store.listDocs();
+      await store.savePendingChanges('doc1', initial);
+      await store.replacePendingChanges('doc1', replacement);
 
-      expect(docs).toHaveLength(3);
-      expect(docs.map(d => d.docId)).toEqual(expect.arrayContaining(docIds));
+      const result = await store.getPendingChanges('doc1');
+      expect(result).toEqual(replacement);
     });
+  });
 
-    it('should untrack documents', async () => {
-      const docIds = ['doc-1', 'doc-2', 'doc-3'];
+  describe('trackDocs', () => {
+    it('should track new documents', async () => {
+      await store.trackDocs(['doc1', 'doc2']);
 
-      await store.trackDocs(docIds);
-      await store.untrackDocs(['doc-2']);
       const docs = await store.listDocs();
-
       expect(docs).toHaveLength(2);
-      expect(docs.map(d => d.docId)).toEqual(expect.arrayContaining(['doc-1', 'doc-3']));
     });
 
-    it('should handle deleted documents in listing', async () => {
-      const docIds = ['doc-1', 'doc-2', 'doc-3'];
+    it('should unmark deleted documents', async () => {
+      await store.deleteDoc('doc1');
+      await store.trackDocs(['doc1']);
 
-      await store.trackDocs(docIds);
-      await store.deleteDoc('doc-2');
-
-      const activeDocs = await store.listDocs(false);
-      const allDocs = await store.listDocs(true);
-
-      expect(activeDocs).toHaveLength(2);
-      expect(allDocs).toHaveLength(3);
-      expect(allDocs.find(d => d.docId === 'doc-2')?.deleted).toBe(true);
+      const docs = await store.listDocs();
+      expect(docs.find(d => d.docId === 'doc1')?.deleted).toBeUndefined();
     });
   });
 
-  describe('Lifecycle', () => {
-    it('should have a no-op close method', async () => {
-      // This is just for API compatibility with other stores
-      await expect(store.close()).resolves.toBeUndefined();
+  describe('untrackDocs', () => {
+    it('should remove documents from tracking', async () => {
+      await store.trackDocs(['doc1', 'doc2', 'doc3']);
+      await store.untrackDocs(['doc1', 'doc3']);
+
+      const docs = await store.listDocs();
+      expect(docs).toHaveLength(1);
+      expect(docs[0].docId).toBe('doc2');
+    });
+  });
+
+  describe('deleteDoc', () => {
+    it('should mark document as deleted', async () => {
+      await store.trackDocs(['doc1']);
+      await store.deleteDoc('doc1');
+
+      const result = await store.getDoc('doc1');
+      expect(result).toBeUndefined();
+
+      const docs = await store.listDocs(true);
+      expect(docs.find(d => d.docId === 'doc1')?.deleted).toBe(true);
+    });
+
+    it('should clear document data', async () => {
+      const snapshot = createState({ text: 'hello' }, 5);
+      await store.saveDoc('doc1', snapshot);
+      await store.savePendingChanges('doc1', [createChange('p1', 6)]);
+      await store.saveCommittedChanges('doc1', [createChange('c1', 7)]);
+
+      await store.deleteDoc('doc1');
+
+      const docs = await store.listDocs(true);
+      const doc = docs.find(d => d.docId === 'doc1');
+      expect(doc?.committedRev).toBe(0);
+    });
+  });
+
+  describe('confirmDeleteDoc', () => {
+    it('should permanently remove document', async () => {
+      await store.trackDocs(['doc1']);
+      await store.deleteDoc('doc1');
+      await store.confirmDeleteDoc('doc1');
+
+      const docs = await store.listDocs(true);
+      expect(docs.find(d => d.docId === 'doc1')).toBeUndefined();
+    });
+  });
+
+  describe('close', () => {
+    it('should clear all documents', async () => {
+      await store.trackDocs(['doc1', 'doc2']);
+      await store.close();
+
+      const docs = await store.listDocs();
+      expect(docs).toEqual([]);
     });
   });
 });

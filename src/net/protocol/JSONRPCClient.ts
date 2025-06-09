@@ -8,7 +8,7 @@ import type { ClientTransport, Notification, Request, Response } from './types.j
  */
 export class JSONRPCClient {
   private nextId = 1;
-  private pending = new Map<number, { resolve: Function; reject: Function }>();
+  private pending = new Map<number, { resolve: (value: any) => void; reject: (reason?: any) => void }>();
   private notificationSignals = new Map<string, Signal>();
 
   /**

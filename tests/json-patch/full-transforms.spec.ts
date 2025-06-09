@@ -17,7 +17,9 @@ describe('JSONPatch.transform', () => {
   }
 
   function testPatches(start: any, patch1: JSONPatch, patch2: JSONPatch, _reverse: boolean) {
-    (client1 = start), (client2 = start), (server = start);
+    client1 = start;
+    client2 = start;
+    server = start;
     // Patches applied on clients simultaneously
     client1 = patch1.apply(client1);
     client2 = patch2.apply(client2);

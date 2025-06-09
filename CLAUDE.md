@@ -9,6 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Build the library**: `npm run build` (uses svelte-package to build the library)
 - **Run tests**: `npm run test` (runs all Vitest tests)
 - **Test-driven development**: `npm run tdd` (runs Vitest in watch mode)
+- **Lint code**: `npm run lint` (runs ESLint on src and tests)
+- **Fix linting issues**: `npm run lint:fix` (auto-fixes ESLint issues)
 
 ## Project Overview
 
@@ -18,9 +20,11 @@ Patches is a TypeScript library for building real-time collaborative application
 
 The library uses subpath exports. Use these import paths:
 
-- Client client: `@dabble/patches`
+- Main/Client: `@dabble/patches`
+- Client-specific: `@dabble/patches/client`
 - Server components: `@dabble/patches/server`
 - Networking: `@dabble/patches/net`
+- WebRTC: `@dabble/patches/webrtc`
 
 ### Key Features
 
@@ -37,49 +41,76 @@ The codebase is divided into client-side and server-side components:
 
 ### Client-Side Components
 
-1. **Patches**: Main client entry point for document management
-2. **PatchesDoc**: Represents a single collaborative document
-   - Handles local state management and optimistic updates
-   - Implements client-side OT logic for rebasing changes
+1. **Patches**: Main client coordinator and public API
+   - Document lifecycle management and event coordination
+2. **PatchesDoc**: Document interface focused on app interaction
+   - Local state management and change API
+   - Uses algorithm functions for change creation
+3. **PatchesSync**: Sync coordinator between client and server
+   - Orchestrates OT operations using algorithm functions
+   - Handles connection management and batching
+4. **PatchesStore**: Client-side storage interface
+   - Implementations: InMemoryStore, IndexedDBStore
 
 ### Server-Side Components
 
-1. **PatchesServer**: Core server-side logic
-   - Processes incoming changes, performs transformations
+1. **PatchesServer**: Core server-side authority
+   - Processes incoming changes, assigns revisions
+   - Uses server algorithm functions for state management
    - Maintains document history
-2. **PatchesHistoryManager**: Handles document history and versioning
-3. **PatchesBranchManager**: Manages branching and merging workflows
+2. **PatchesStoreBackend**: Server-side storage interface
+3. **PatchesHistoryManager**: Handles document history and versioning
+4. **PatchesBranchManager**: Manages branching and merging workflows
+
+### Algorithm Layer
+
+1. **Client Algorithms**: Pure functions for client-side operations
+   - `makeChange`: Creates change objects from mutations
+   - `applyCommittedChanges`: Merges server updates with local state
+   - `createStateFromSnapshot`: Builds current state from snapshots
+   - `breakChange`, `breakIntoBatches`: Handles large change splitting
+
+2. **Shared Algorithms**: Core OT logic used by both client and server
+   - `applyChanges`: Applies change sequences to states
+   - `rebaseChanges`: Core operational transformation logic
+
+3. **Server Algorithms**: Server-specific state management
+   - `getStateAtRevision`, `getSnapshotAtRevision`: Historical state retrieval
+   - `handleOfflineSessionsAndBatches`: Offline sync processing
 
 ### Networking & Persistence
 
 1. **Transport Layer**:
    - **WebSocketTransport**: Server-mediated communication
    - **WebRTCTransport**: Peer-to-peer communication
-2. **Persistence Layer**:
-   - **PatchesStore**: Client-side storage interface
-   - **PatchesStoreBackend**: Server-side storage interface
-   - Implementations: InMemoryStore, IndexedDBStore
 
 ### OT Implementation
 
-The system uses JSON Patch operations (RFC 6902) with custom OT transformations to handle concurrent edits.
+The system uses JSON Patch operations (RFC 6902) with custom OT transformations to handle concurrent edits. The OT logic has been extracted into pure algorithm functions, making it easier to test and reuse.
 
 ## Code Structure
 
 - `/src/client`: Client-side implementation
 - `/src/server`: Server-side implementation
-- `/src/json-patch`: JSON Patch operations and transformations
+- `/src/algorithms`: Pure algorithm functions for OT and sync operations
+  - `/client`: Client-specific algorithms
+  - `/server`: Server-specific algorithms  
+  - `/shared`: Common algorithms used by both client and server
 - `/src/net`: Networking and transport layer
+- `/src/json-patch`: JSON Patch operations and transformations
 - `/tests`: Test files matching the source structure
 
 ## Important Implementation Details
 
 1. **Change Processing Flow**:
 
-   - Client makes a change → optimistically applied locally
-   - Change sent to server with baseRev (server revision it was based on)
+   - Client calls `doc.change()` → `makeChange` algorithm creates change objects
+   - Change applied locally (optimistic update)
+   - `PatchesSync` batches and sends changes to server
    - Server transforms against concurrent changes, assigns new revision
-   - Transformed change is broadcast to all clients
+   - Server changes flow back → `PatchesSync` uses `applyCommittedChanges` algorithm
+   - `applyCommittedChanges` calls `rebaseChanges` to handle conflicts
+   - Updated state propagated to `PatchesDoc` and UI
 
 2. **Versioning**:
 
@@ -91,16 +122,29 @@ The system uses JSON Patch operations (RFC 6902) with custom OT transformations 
 
    - Document state is immutable
    - Changes are made through proxy in `doc.change(state => state.prop = 'new value')`
+   - Uses immutable-style updates for performance and consistency
 
-4. **Usage Example**:
+4. **Performance Characteristics**:
+
+   - Handles documents with over 480k operations
+   - Load time: 1-2ms for large documents
+   - Change application: 0.2ms per operation
+   - Scales linearly with document size through snapshots rather than history size
+
+5. **Usage Example**:
 
    ```typescript
    // Client-side
-   import { Patches, InMemoryStore } from '@dabble/patches';
+   import { Patches, InMemoryStore } from '@dabble/patches/client';
    import { PatchesSync } from '@dabble/patches/net';
+   
+   const patches = new Patches({ store: new InMemoryStore() });
+   const sync = new PatchesSync(patches, 'wss://server.com');
 
    // Server-side
    import { PatchesServer } from '@dabble/patches/server';
+   
+   const server = new PatchesServer(store);
    ```
 
 ## Testing Approach
@@ -119,92 +163,35 @@ To run tests with a specific pattern:
 npm run test -- -t "test description pattern"
 ```
 
+- **When writing tests, always run them and fix the errors**
+- **When refactoring code, fix the tests and documentation for that code at the same time.**
+
 ## Architecture Analysis and Critical Issues
 
 ### Architectural Insights
 
-1. **Three-Layer Architecture**:
-   - **Application Layer**: Client-side state management with optimistic updates
-   - **Transformation Layer**: JSON Patch-based OT implementation
+1. **Four-Layer Architecture**:
+
+   - **Application Layer**: Patches, PatchesDoc for user-facing API
+   - **Orchestration Layer**: PatchesSync coordinates between layers
+   - **Algorithm Layer**: Pure functions handle OT and state operations
    - **Transport Layer**: Pluggable networking (WebSocket/WebRTC)
 
 2. **State Management Approach**:
+
    - Immutable state with proxy-based change tracking
    - Optimistic client updates with server reconciliation
+   - Algorithm functions handle state transformations
    - Linear history with snapshot-based versioning
 
-3. **Concurrency Model**:
+3. **Separation of Concerns**:
+
+   - **Pure algorithms** for testable, reusable OT logic
+   - **Orchestration classes** handle coordination and events
+   - **Clean interfaces** between layers
+   - **Focused responsibilities** for each component
+
+4. **Concurrency Model**:
    - Centralized server arbitrates operation order
    - Client-side rebasing for pending changes
    - Event-driven architecture with signal patterns
-
-### Critical Logical Errors Found
-
-#### Client-Side Issues
-
-1. **Race Condition in Document Creation** (`Patches.ts:94-119`):
-   - Multiple concurrent `openDoc()` calls can create duplicate document instances
-   - Missing atomic check-and-create operation
-
-2. **Memory Leaks** (`Patches.ts:115-117`, `PatchesHistoryClient.ts:47-50`):
-   - Event listeners not cleaned up on error paths
-   - Long-lived instances accumulate listeners without cleanup
-
-3. **State Divergence During Import/Export** (`PatchesDoc.ts:94-101`):
-   - Export combines sending and pending changes
-   - Import loses distinction, marking all as pending
-   - Can cause duplicate operations on reconnection
-
-4. **Silent Data Loss Risk** (`IndexedDBStore.ts:296-309`):
-   - Snapshot creation can fail silently
-   - Unbounded accumulation of committed changes possible
-
-#### Server-Side Issues
-
-1. **Critical Transformation Bug** (`PatchesServer.ts:146-172`):
-   - Applies original ops instead of transformed ops to state
-   - Causes server state to diverge from client expectations
-
-2. **Missing Atomicity** (`PatchesServer.ts:175-182`):
-   - State saved but clients not notified if emit fails
-   - Breaks consistency guarantees
-
-3. **Branch Merge Revision Calculation** (`PatchesBranchManager.ts:137-139`):
-   - Incorrect revision calculation for merged changes
-   - Can cause revision conflicts
-
-#### JSON Patch Implementation Issues
-
-1. **Array Index Parser Bug** (`toArrayIndex.ts:7-9`):
-   - Returns `Infinity` for non-numeric indices
-   - Can cause unexpected behavior in array operations
-
-2. **Path Handling Vulnerability**:
-   - Inconsistent handling of `-` in array paths
-   - Fragile string replacement logic
-
-3. **Memory Leak in State Cache** (`state.ts`):
-   - Cache grows unboundedly during large patch operations
-
-#### Networking Layer Issues
-
-1. **Message Loss During Reconnection** (`PatchesSync.ts:232-245`):
-   - Partial batch sends possible during disconnection
-   - No retry mechanism for failed batches
-
-2. **Security Vulnerability** (`AuthorizationProvider.ts:55-57`):
-   - Default provider allows all operations
-   - Easy to accidentally deploy with open permissions
-
-3. **OnlineState Logic Error** (`onlineState.ts:9-10`):
-   - Offline handler always evaluates to true due to `||` operator
-
-### Recommendations for Fixes
-
-1. **Add Distributed Locking**: Implement proper locking for critical sections
-2. **Improve Error Recovery**: Add transaction-like semantics for multi-step operations
-3. **Fix Memory Management**: Implement proper cleanup in all error paths
-4. **Add Input Validation**: Validate all inputs, especially array indices and paths
-5. **Implement Retry Logic**: Add exponential backoff with jitter for network operations
-6. **Security Hardening**: Make authorization fail-closed by default
-7. **Add Monitoring**: Implement health checks and metrics for production debugging

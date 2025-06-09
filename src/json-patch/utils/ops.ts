@@ -20,14 +20,17 @@ export function mapAndFilterOps(
   iterator: (
     op: JSONPatchOp,
     index: number,
-    breakAfter: (keepRest?: boolean) => {}
+    breakAfter: (keepRest?: boolean) => void
   ) => JSONPatchOp | JSONPatchOp[] | null
 ): JSONPatchOp[] {
   let changed = false;
   const mapped: JSONPatchOp[] = [];
   let shouldBreak = false;
   let keepRest: boolean | undefined;
-  const breakAfter = (keep?: boolean): any => (shouldBreak = true) && (keepRest = keep);
+  const breakAfter = (keep?: boolean): void => {
+    shouldBreak = true;
+    keepRest = keep;
+  };
   for (let i = 0; i < ops.length; i++) {
     const original = ops[i];
     // If an op was copied or moved to the same path, it is a no-op and should be removed

@@ -30,7 +30,7 @@ Think of it like this: Use `PatchesDoc` when you want to write, use `PatchesHist
 import { PatchesHistoryClient } from '@dabble/patches/client';
 import { PatchesWebSocket } from '@dabble/patches/net';
 
-// First, get your transport (the connection to the mothership)
+// First, get your transport (the connection to the server)
 const ws = new PatchesWebSocket('wss://your-awesome-server.com');
 await ws.connect();
 

@@ -1,7 +1,7 @@
 import { createId } from 'crypto-id';
-import type { Change } from '../types.js';
-import { breakChange } from './breakChange.js'; // Import from new file
-import { getJSONByteSize } from './getJSONByteSize.js'; // Import from new file
+import type { Change } from '../../types.js';
+import { breakChange } from './breakChange.js';
+import { getJSONByteSize } from './getJSONByteSize.js';
 
 /** Break changes into batches based on maxPayloadBytes. */
 export function breakIntoBatches(changes: Change[], maxPayloadBytes?: number): Change[][] {

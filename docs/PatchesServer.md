@@ -22,8 +22,9 @@ Meet the boss of your OT system! 🏢
 1. **Central Authority:** It's the one source of truth that decides the correct order of operations
 2. **Transformation:** Takes client changes and transforms them against other clients' changes so everything works perfectly
 3. **State Management:** Keeps track of the real, authoritative document state and revision numbers
-4. **Persistence:** Works with your backend store to save everything important
-5. **Versioning:** Creates snapshots of document states at key moments (perfect for history features!)
+4. **Algorithm Integration:** Uses server-side algorithm functions for state retrieval and offline session handling
+5. **Persistence:** Works with your backend store to save everything important
+6. **Versioning:** Creates snapshots of document states at key moments (perfect for history features!)
 
 ## Initialization
 
@@ -62,6 +63,8 @@ async commitChanges(docId: string, changes: Change[]): Promise<[Change[], Change
 
 ### What Happens Inside
 
+The heavy lifting is handled by the `commitChanges` algorithm in `src/algorithms/server/commitChanges.ts`. Here's the workflow:
+
 1. **Validation First!**
 
    - Is the changes array empty? (Returns `[]` if so)
@@ -94,7 +97,8 @@ async commitChanges(docId: string, changes: Change[]): Promise<[Change[], Change
    - Transform the incoming ops against already-committed ops
    - This is where OT saves the day!
 
-7. **Return the Result**
+7. **Persist and Return**
+   - Save the transformed changes to the store
    - Send back both committed changes by others AND the transformed version of the client's changes
 
 ### What Comes Out
@@ -148,14 +152,6 @@ const { state, rev, changes } = await server.getDoc(docId);
 
 // Want a specific revision? No problem:
 const snapshot = await server.getDoc(docId, 50);
-```
-
-### `_getStateAtRevision()`
-
-Retrieves document state as it was after a specific revision.
-
-```typescript
-const { state, rev } = await server._getStateAtRevision(docId, 50);
 ```
 
 ### `getVersionState()`

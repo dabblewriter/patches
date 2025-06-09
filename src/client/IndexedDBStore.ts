@@ -1,6 +1,8 @@
+import { applyChanges } from '../algorithms/shared/applyChanges.js';
 import { transformPatch } from '../json-patch/transformPatch.js';
-import type { Change, Deferred, PatchesSnapshot, PatchesState } from '../types.js';
-import { applyChanges, deferred } from '../utils.js';
+import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
+import { blockable } from '../utils/concurrency.js';
+import { deferred, type Deferred } from '../utils/deferred.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
 const DB_VERSION = 1;
@@ -124,8 +126,6 @@ export class IndexedDBStore implements PatchesStore {
     return [tx, ...stores];
   }
 
-  // ─── Snapshots + Reconstruction ────────────────────────────────────────────
-
   /**
    * Rebuilds a document snapshot + pending queue *without* loading
    * the full PatchesDoc into memory.
@@ -136,6 +136,7 @@ export class IndexedDBStore implements PatchesStore {
    * 4. apply committed changes, rebase pending
    * 5. return { state, rev, changes: pending }
    */
+  @blockable
   async getDoc(docId: string): Promise<PatchesSnapshot | undefined> {
     const [tx, docsStore, snapshots, committedChanges, pendingChanges] = await this.transaction(
       ['docs', 'snapshots', 'committedChanges', 'pendingChanges'],
@@ -183,6 +184,7 @@ export class IndexedDBStore implements PatchesStore {
   /**
    * Completely remove all data for this docId and mark it as deleted (tombstone).
    */
+  @blockable
   async deleteDoc(docId: string): Promise<void> {
     const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.transaction(
       ['snapshots', 'committedChanges', 'pendingChanges', 'docs'],
@@ -201,14 +203,23 @@ export class IndexedDBStore implements PatchesStore {
     await tx.complete();
   }
 
+  /**
+   * Confirm the deletion of a document.
+   * @param docId - The ID of the document to delete.
+   */
+  @blockable
   async confirmDeleteDoc(docId: string): Promise<void> {
     const [tx, docsStore] = await this.transaction(['docs'], 'readwrite');
     await docsStore.delete(docId);
     await tx.complete();
   }
 
-  // ─── Pending Changes ────────────────────────────────────────────────────────
-
+  /**
+   * Save a document's state to the store.
+   * @param docId - The ID of the document to save.
+   * @param docState - The state of the document to save.
+   */
+  @blockable
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
     const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.transaction(
       ['snapshots', 'committedChanges', 'pendingChanges', 'docs'],
@@ -231,7 +242,8 @@ export class IndexedDBStore implements PatchesStore {
    * Append an array of local changes to the pending queue.
    * Called *before* you attempt to send them to the server.
    */
-  async savePendingChange(docId: string, change: Change): Promise<void> {
+  @blockable
+  async savePendingChanges(docId: string, changes: Change[]): Promise<void> {
     const [tx, pendingChanges, docsStore] = await this.transaction(['pendingChanges', 'docs'], 'readwrite');
 
     let docMeta = await docsStore.get<TrackedDoc>(docId);
@@ -244,11 +256,16 @@ export class IndexedDBStore implements PatchesStore {
       console.warn(`Revived document ${docId} by saving pending changes.`);
     }
 
-    await pendingChanges.put<StoredChange>({ ...change, docId });
+    await Promise.all(changes.map(change => pendingChanges.put<StoredChange>({ ...change, docId })));
     await tx.complete();
   }
 
-  /** Read back all pending changes for this docId (in order). */
+  /**
+   * Read back all pending changes for this docId (in order).
+   * @param docId - The ID of the document to get the pending changes for.
+   * @returns The pending changes.
+   */
+  @blockable
   async getPendingChanges(docId: string): Promise<Change[]> {
     const [tx, pendingChanges] = await this.transaction(['pendingChanges'], 'readonly');
     const result = await pendingChanges.getAll<Change>([docId, 0], [docId, Infinity]);
@@ -256,7 +273,12 @@ export class IndexedDBStore implements PatchesStore {
     return result;
   }
 
-  /** Replace all pending changes for a document (used after rebasing). */
+  /**
+   * Replace all pending changes for a document (used after rebasing).
+   * @param docId - The ID of the document to replace the pending changes for.
+   * @param changes - The changes to replace the pending changes with.
+   */
+  @blockable
   async replacePendingChanges(docId: string, changes: Change[]): Promise<void> {
     const [tx, pendingChanges, docsStore] = await this.transaction(['pendingChanges', 'docs'], 'readwrite');
 
@@ -290,6 +312,7 @@ export class IndexedDBStore implements PatchesStore {
    * @param sentPendingRange - The range of pending changes to remove, *must* be provided after receiving the changes
    * from the server in response to a patchesDoc request.
    */
+  @blockable
   async saveCommittedChanges(docId: string, changes: Change[], sentPendingRange?: [number, number]): Promise<void> {
     const [tx, committedChanges, pendingChanges, snapshots, docsStore] = await this.transaction(
       ['committedChanges', 'pendingChanges', 'snapshots', 'docs'],
@@ -343,7 +366,11 @@ export class IndexedDBStore implements PatchesStore {
     await tx.complete();
   }
 
-  // --- New method for OfflineStore interface ---
+  /**
+   * List all documents in the store.
+   * @param includeDeleted - Whether to include deleted documents.
+   * @returns The list of documents.
+   */
   async listDocs(includeDeleted = false): Promise<TrackedDoc[]> {
     const [tx, docsStore] = await this.transaction(['docs'], 'readonly');
     const allDocs = await docsStore.getAll<TrackedDoc>();
@@ -351,7 +378,10 @@ export class IndexedDBStore implements PatchesStore {
     return includeDeleted ? allDocs : allDocs.filter(doc => !doc.deleted);
   }
 
-  // ─── Metadata / Tracking ───────────────────────────────────────────
+  /**
+   * Track a document.
+   * @param docIds - The IDs of the documents to track.
+   */
   async trackDocs(docIds: string[]): Promise<void> {
     const [tx, docsStore] = await this.transaction(['docs'], 'readwrite');
     await Promise.all(
@@ -372,6 +402,10 @@ export class IndexedDBStore implements PatchesStore {
     await tx.complete();
   }
 
+  /**
+   * Untrack a document.
+   * @param docIds - The IDs of the documents to untrack.
+   */
   async untrackDocs(docIds: string[]): Promise<void> {
     const [tx, docsStore, snapshots, committedChanges, pendingChanges] = await this.transaction(
       ['docs', 'snapshots', 'committedChanges', 'pendingChanges'],
@@ -390,14 +424,13 @@ export class IndexedDBStore implements PatchesStore {
     await tx.complete();
   }
 
-  // ─── Revision Tracking ─────────────────────────────────────────────────────
-
   /**
    * Tell me the last committed revision you have *and* the highest
    * rev of any change.  Use these to drive:
    *   - fetch changes:   api.getChangesSince(docId, committedRev)
    *   - build new patch: newChange.rev = pendingRev; baseRev = committedRev
    */
+  @blockable
   async getLastRevs(docId: string): Promise<[number, number]> {
     const [tx, committedChanges, pendingChanges] = await this.transaction(
       ['committedChanges', 'pendingChanges'],

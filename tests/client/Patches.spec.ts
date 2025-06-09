@@ -1,226 +1,419 @@
-import { afterEach, beforeEach, describe, expect, it, vi, type Mocked } from 'vitest';
-import { Patches } from '../../src/client/Patches';
-import { PatchesDoc } from '../../src/client/PatchesDoc';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { PatchesStore } from '../../src/client/PatchesStore';
-import { signal } from '../../src/event-signal';
 import type { Change } from '../../src/types';
 
-// Mock PatchesDoc before any test setup
-vi.mock('../../src/client/PatchesDoc');
+// Mock dependencies completely before importing
+vi.mock('../../src/client/PatchesDoc', () => {
+  return {
+    PatchesDoc: vi.fn().mockImplementation(() => ({
+      setId: vi.fn(),
+      import: vi.fn(),
+      onChange: vi.fn().mockReturnValue(vi.fn()),
+      close: vi.fn(),
+    })),
+  };
+});
 
-// Define a type for the document state used in tests
-interface TestDocState {
-  count?: number;
-  initial?: boolean;
-}
+vi.mock('../../src/utils/concurrency', () => ({
+  singleInvocation: vi.fn().mockImplementation((matchOnFirstArg?: boolean) => {
+    if (typeof matchOnFirstArg === 'function') {
+      return matchOnFirstArg;
+    }
+    return (target: any) => target;
+  }),
+}));
+
+vi.mock('../../src/event-signal', () => ({
+  signal: vi.fn().mockImplementation(() => {
+    const subscribers = new Set();
+    const mockSignal = vi.fn().mockImplementation((callback: any) => {
+      subscribers.add(callback);
+      return () => subscribers.delete(callback);
+    }) as any;
+    mockSignal.emit = vi.fn().mockImplementation(async (...args: any[]) => {
+      for (const callback of subscribers) {
+        await (callback as any)(...args);
+      }
+    });
+    mockSignal.error = vi.fn().mockReturnValue(vi.fn());
+    mockSignal.clear = vi.fn().mockImplementation(() => subscribers.clear());
+    return mockSignal;
+  }),
+}));
+
+// Now import after mocking
+const { Patches } = await import('../../src/client/Patches');
+const { PatchesDoc } = await import('../../src/client/PatchesDoc');
 
 describe('Patches', () => {
-  let mockStore: Mocked<PatchesStore>;
-  let mockDocInstanceFactory: () => Mocked<PatchesDoc<any>>;
-  let patches: Patches;
+  let patches: InstanceType<typeof Patches>;
+  let mockStore: PatchesStore;
+  let mockDoc: any;
 
-  const DOC_ID = 'test-doc-1';
+  const createChange = (id: string, rev: number): Change => ({
+    id,
+    rev,
+    baseRev: rev - 1,
+    ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
+    created: Date.now(),
+  });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
 
-    // Setup mock store
+    // Mock store
     mockStore = {
-      getDoc: vi.fn().mockResolvedValue({ state: { initial: true }, rev: 0, changes: [] }),
-      getPendingChanges: vi.fn().mockResolvedValue([]),
-      getLastRevs: vi.fn().mockResolvedValue([0, 0]),
       listDocs: vi.fn().mockResolvedValue([]),
-      savePendingChange: vi.fn().mockResolvedValue(undefined),
-      saveCommittedChanges: vi.fn().mockResolvedValue(undefined),
       trackDocs: vi.fn().mockResolvedValue(undefined),
       untrackDocs: vi.fn().mockResolvedValue(undefined),
+      getDoc: vi.fn().mockResolvedValue(undefined),
+      saveDoc: vi.fn().mockResolvedValue(undefined),
+      savePendingChanges: vi.fn().mockResolvedValue(undefined),
+      getPendingChanges: vi.fn().mockResolvedValue([]),
+      replacePendingChanges: vi.fn().mockResolvedValue(undefined),
+      saveCommittedChanges: vi.fn().mockResolvedValue(undefined),
+      getLastRevs: vi.fn().mockResolvedValue([0, 0]),
       deleteDoc: vi.fn().mockResolvedValue(undefined),
+      confirmDeleteDoc: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
-      onPendingChanges: signal(),
-    } as unknown as Mocked<PatchesStore>;
+    } as any;
 
-    // Setup mock PatchesDoc factory
-    mockDocInstanceFactory = () => {
-      const _mockPendingChanges: Change[] = [];
-      let _mockSendingChanges: Change[] = [];
-      let _id: string | null = null;
-      let _mockUpdatesForServer: Change[] = [];
-
-      const instance = {
-        state: { initial: true },
-        committedRev: 0,
-        get isSending() {
-          return _mockSendingChanges.length > 0;
-        },
-        get hasPending() {
-          return _mockPendingChanges.length > 0;
-        },
-        get id() {
-          return _id;
-        },
-        setId: vi.fn((docId: string) => {
-          if (_id !== null && _id !== docId) {
-            throw new Error('Document ID cannot be changed once set');
-          }
-          _id = docId;
-        }),
-        import: vi.fn(),
-        change: vi.fn((_mutator: (draft: any) => void) => {
-          const newChange: Change = { id: `mock-${Math.random()}`, ops: [], rev: 0, baseRev: 0, created: Date.now() };
-          _mockPendingChanges.push(newChange);
-          instance.onChange.emit(newChange);
-          return newChange;
-        }),
-        getUpdatesForServer: vi.fn(() => _mockUpdatesForServer),
-        applyServerConfirmation: vi.fn((serverCommit: Change[]) => {
-          if (serverCommit.length === 0) {
-            _mockSendingChanges = [];
-          } else {
-            _mockSendingChanges = [];
-          }
-        }),
-        applyExternalServerUpdate: vi.fn(),
-        handleSendFailure: vi.fn(() => {
-          _mockPendingChanges.unshift(..._mockSendingChanges);
-          _mockSendingChanges = [];
-        }),
-        onChange: signal<(change: Change) => void>(),
-        onBeforeChange: signal(),
-        onUpdate: signal(),
-        onRebasedChanges: signal(),
-        _setMockUpdatesForServer: (updates: Change[]) => {
-          _mockUpdatesForServer = updates;
-        },
-      } as unknown as Mocked<PatchesDoc<any>>;
-
-      vi.spyOn(instance, 'getUpdatesForServer');
-      vi.spyOn(instance, 'handleSendFailure');
-      vi.spyOn(instance, 'import');
-      vi.spyOn(instance, 'applyServerConfirmation');
-      vi.spyOn(instance, 'applyExternalServerUpdate');
-      vi.spyOn(instance, 'setId');
-      return instance;
+    // Mock PatchesDoc
+    mockDoc = {
+      setId: vi.fn(),
+      import: vi.fn(),
+      onChange: vi.fn().mockReturnValue(vi.fn()),
+      close: vi.fn(),
     };
+    vi.mocked(PatchesDoc).mockImplementation(() => mockDoc);
 
-    // Mock PatchesDoc constructor
-    const mockPatchesDoc = vi.mocked(PatchesDoc);
-    mockPatchesDoc.mockImplementation(() => {
-      const instance = mockDocInstanceFactory();
-      return instance;
-    });
+    patches = new Patches({ store: mockStore });
 
-    // Create Patches instance
-    patches = new Patches({
-      store: mockStore,
-    });
-
-    // Spy on console methods
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Wait for initial listDocs call
+    await new Promise(resolve => setTimeout(resolve, 0));
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    patches.close();
   });
 
-  // --- Test Cases ---
-
-  describe('Initialization', () => {
-    it('should initialize with the provided store', () => {
-      expect(patches['store']).toBe(mockStore);
+  describe('constructor', () => {
+    it('should initialize with store and options', () => {
+      expect(patches.store).toBe(mockStore);
+      expect(patches.trackedDocs).toBeInstanceOf(Set);
+      expect(mockStore.listDocs).toHaveBeenCalled();
     });
-  });
 
-  describe('Document Operations', () => {
-    it('should open a document and set up listeners', async () => {
-      const doc = await patches.openDoc<TestDocState>(DOC_ID);
+    it('should track docs returned from store.listDocs', async () => {
+      const docs = [{ docId: 'doc1', committedRev: 0 }, { docId: 'doc2', committedRev: 0 }];
+      vi.mocked(mockStore.listDocs).mockResolvedValue(docs);
 
-      expect(mockStore.getDoc).toHaveBeenCalledWith(DOC_ID);
-      expect(doc.setId).toHaveBeenCalledWith(DOC_ID);
-      expect(doc.import).toHaveBeenCalled();
-      expect((patches as any).docs.has(DOC_ID)).toBe(true);
-
-      const testChange: Change = { id: 'test-change', ops: [], rev: 1, baseRev: 0, created: Date.now() };
-      (doc as any)._setMockUpdatesForServer([testChange]);
-
-      doc.onChange.emit(testChange);
-
+      const patchesInstance = new Patches({ store: mockStore });
       await new Promise(resolve => setTimeout(resolve, 0));
 
-      expect(mockStore.savePendingChange).toHaveBeenCalledWith(DOC_ID, testChange);
+      expect(patchesInstance.trackedDocs.has('doc1')).toBe(true);
+      expect(patchesInstance.trackedDocs.has('doc2')).toBe(true);
     });
 
-    it('should return existing doc if already open', async () => {
-      const mockDoc = mockDocInstanceFactory();
-      (patches as any).docs.set(DOC_ID, {
-        doc: mockDoc,
-        onChangeUnsubscriber: vi.fn(),
+    it('should accept custom docOptions', () => {
+      const customOptions = { maxPayloadBytes: 100 };
+      const patchesInstance = new Patches({
+        store: mockStore,
+        docOptions: customOptions,
       });
 
-      const doc = await patches.openDoc<TestDocState>(DOC_ID);
+      expect(patchesInstance.docOptions).toEqual(customOptions);
+    });
+  });
 
+  describe('trackDocs', () => {
+    it('should track new documents', async () => {
+      const onTrackSpy = vi.fn();
+      patches.onTrackDocs(onTrackSpy);
+
+      await patches.trackDocs(['doc1', 'doc2']);
+
+      expect(patches.trackedDocs.has('doc1')).toBe(true);
+      expect(patches.trackedDocs.has('doc2')).toBe(true);
+      expect(mockStore.trackDocs).toHaveBeenCalledWith(['doc1', 'doc2']);
+      expect(onTrackSpy).toHaveBeenCalledWith(['doc1', 'doc2']);
+    });
+
+    it('should filter out already tracked documents', async () => {
+      await patches.trackDocs(['doc1']);
+      vi.clearAllMocks();
+
+      await patches.trackDocs(['doc1', 'doc2']);
+
+      expect(mockStore.trackDocs).toHaveBeenCalledWith(['doc2']);
+    });
+
+    it('should do nothing if no new documents to track', async () => {
+      await patches.trackDocs(['doc1']);
+      vi.clearAllMocks();
+
+      await patches.trackDocs(['doc1']);
+
+      expect(mockStore.trackDocs).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('untrackDocs', () => {
+    it('should untrack documents and close open docs', async () => {
+      const onUntrackSpy = vi.fn();
+      patches.onUntrackDocs(onUntrackSpy);
+
+      await patches.trackDocs(['doc1', 'doc2']);
+      await patches.openDoc('doc1');
+
+      vi.clearAllMocks();
+
+      await patches.untrackDocs(['doc1', 'doc2']);
+
+      expect(patches.trackedDocs.has('doc1')).toBe(false);
+      expect(patches.trackedDocs.has('doc2')).toBe(false);
+      expect(mockStore.untrackDocs).toHaveBeenCalledWith(['doc1', 'doc2']);
+      expect(onUntrackSpy).toHaveBeenCalledWith(['doc1', 'doc2']);
+    });
+
+    it('should filter out non-tracked documents', async () => {
+      await patches.trackDocs(['doc1']);
+
+      await patches.untrackDocs(['doc1', 'doc2']);
+
+      expect(mockStore.untrackDocs).toHaveBeenCalledWith(['doc1']);
+    });
+
+    it('should do nothing if no tracked documents to untrack', async () => {
+      await patches.untrackDocs(['doc1']);
+
+      expect(mockStore.untrackDocs).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('openDoc', () => {
+    it('should open a new document', async () => {
+      const snapshot = { state: { text: 'hello' }, rev: 5, changes: [] };
+      vi.mocked(mockStore.getDoc).mockResolvedValue(snapshot);
+
+      const doc = await patches.openDoc('doc1');
+
+      expect(patches.trackedDocs.has('doc1')).toBe(true);
+      expect(mockStore.getDoc).toHaveBeenCalledWith('doc1');
+      expect(PatchesDoc).toHaveBeenCalledWith({ text: 'hello' }, {}, {});
+      expect(mockDoc.setId).toHaveBeenCalledWith('doc1');
+      expect(mockDoc.import).toHaveBeenCalledWith(snapshot);
+      expect(mockDoc.onChange).toHaveBeenCalled();
       expect(doc).toBe(mockDoc);
-      expect(mockStore.getDoc).not.toHaveBeenCalled();
     });
 
-    it('should close a document and clean up listeners', async () => {
-      const mockDoc = mockDocInstanceFactory();
-      const unsubscriber = vi.fn();
-      (patches as any).docs.set(DOC_ID, {
-        doc: mockDoc,
-        onChangeUnsubscriber: unsubscriber,
-      });
+    it('should return existing document if already open', async () => {
+      const doc1 = await patches.openDoc('doc1');
+      const doc2 = await patches.openDoc('doc1');
 
-      await patches.closeDoc(DOC_ID);
-
-      expect(unsubscriber).toHaveBeenCalled();
-      expect((patches as any).docs.has(DOC_ID)).toBe(false);
+      expect(doc1).toBe(doc2);
+      expect(PatchesDoc).toHaveBeenCalledTimes(1);
     });
 
-    it('should delete a document', async () => {
-      const mockDoc = mockDocInstanceFactory();
-      const unsubscriber = vi.fn();
-      (patches as any).docs.set(DOC_ID, {
-        doc: mockDoc,
-        onChangeUnsubscriber: unsubscriber,
+    it('should handle document without snapshot', async () => {
+      vi.mocked(mockStore.getDoc).mockResolvedValue(undefined);
+
+      const doc = await patches.openDoc('doc1');
+
+      expect(PatchesDoc).toHaveBeenCalledWith({}, {}, {});
+      expect(mockDoc.import).not.toHaveBeenCalled();
+      expect(doc).toBe(mockDoc);
+    });
+
+    it('should merge metadata options', async () => {
+      const globalMetadata = { userId: 'user1' };
+      const docMetadata = { sessionId: 'session1' };
+
+      const patchesWithMetadata = new Patches({
+        store: mockStore,
+        metadata: globalMetadata,
       });
 
-      await patches.deleteDoc(DOC_ID);
+      await patchesWithMetadata.openDoc('doc1', { metadata: docMetadata });
 
-      expect(unsubscriber).toHaveBeenCalled();
-      expect((patches as any).docs.has(DOC_ID)).toBe(false);
-      expect(mockStore.deleteDoc).toHaveBeenCalledWith(DOC_ID);
+      expect(PatchesDoc).toHaveBeenCalledWith({}, { userId: 'user1', sessionId: 'session1' }, {});
     });
   });
 
-  describe('Error Handling', () => {
-    it('should emit errors when saving pending changes fails', async () => {
-      const mockDoc = mockDocInstanceFactory();
+  describe('closeDoc', () => {
+    it('should close an open document', async () => {
+      const unsubscribe = vi.fn();
+      mockDoc.onChange.mockReturnValue(unsubscribe);
 
-      mockDoc.getUpdatesForServer.mockReturnValue([
-        { id: 'change-1', ops: [], rev: 1, baseRev: 0, created: Date.now() },
-      ]);
+      await patches.openDoc('doc1');
+      await patches.closeDoc('doc1');
 
-      const saveError = new Error('Failed to save pending changes');
-      mockStore.savePendingChange.mockRejectedValue(saveError);
+      expect(unsubscribe).toHaveBeenCalled();
+      expect(patches.getOpenDoc('doc1')).toBeUndefined();
+    });
 
-      // Setup doc
-      (patches as any).docs.set(DOC_ID, {
-        doc: mockDoc,
-        onChangeUnsubscriber: (patches as any)._setupLocalDocListeners(DOC_ID, mockDoc),
+    it('should untrack document when untrack option is true', async () => {
+      await patches.openDoc('doc1');
+      await patches.closeDoc('doc1', { untrack: true });
+
+      expect(patches.trackedDocs.has('doc1')).toBe(false);
+      expect(mockStore.untrackDocs).toHaveBeenCalledWith(['doc1']);
+    });
+
+    it('should do nothing if document is not open', async () => {
+      await patches.closeDoc('non-existent');
+      // Test passes if no errors thrown
+    });
+  });
+
+  describe('deleteDoc', () => {
+    it('should delete an open document', async () => {
+      const onDeleteSpy = vi.fn();
+      patches.onDeleteDoc(onDeleteSpy);
+
+      await patches.openDoc('doc1');
+      await patches.deleteDoc('doc1');
+
+      expect(patches.getOpenDoc('doc1')).toBeUndefined();
+      expect(patches.trackedDocs.has('doc1')).toBe(false);
+      expect(mockStore.deleteDoc).toHaveBeenCalledWith('doc1');
+      expect(onDeleteSpy).toHaveBeenCalledWith('doc1');
+    });
+
+    it('should delete a tracked but not open document', async () => {
+      await patches.trackDocs(['doc1']);
+      await patches.deleteDoc('doc1');
+
+      expect(patches.trackedDocs.has('doc1')).toBe(false);
+      expect(mockStore.deleteDoc).toHaveBeenCalledWith('doc1');
+    });
+
+    it('should delete an untracked document', async () => {
+      await patches.deleteDoc('doc1');
+
+      expect(mockStore.deleteDoc).toHaveBeenCalledWith('doc1');
+    });
+  });
+
+  describe('getOpenDoc', () => {
+    it('should return open document', async () => {
+      const doc = await patches.openDoc('doc1');
+      const retrieved = patches.getOpenDoc('doc1');
+
+      expect(retrieved).toBe(doc);
+    });
+
+    it('should return undefined for non-open document', () => {
+      const retrieved = patches.getOpenDoc('doc1');
+
+      expect(retrieved).toBeUndefined();
+    });
+  });
+
+  describe('close', () => {
+    it('should close all documents and clean up', async () => {
+      const unsubscribe1 = vi.fn();
+      const unsubscribe2 = vi.fn();
+      mockDoc.onChange.mockReturnValueOnce(unsubscribe1).mockReturnValueOnce(unsubscribe2);
+
+      await patches.openDoc('doc1');
+      await patches.openDoc('doc2');
+
+      patches.close();
+
+      expect(unsubscribe1).toHaveBeenCalled();
+      expect(unsubscribe2).toHaveBeenCalled();
+      expect(mockStore.close).toHaveBeenCalled();
+      expect(patches.getOpenDoc('doc1')).toBeUndefined();
+      expect(patches.getOpenDoc('doc2')).toBeUndefined();
+    });
+  });
+
+  describe('_savePendingChanges', () => {
+    it('should save changes to store and emit onChange', async () => {
+      const onChangeSpy = vi.fn();
+      patches.onChange(onChangeSpy);
+
+      const changes = [createChange('c1', 1)];
+      await (patches as any)._savePendingChanges('doc1', changes);
+
+      expect(mockStore.savePendingChanges).toHaveBeenCalledWith('doc1', changes);
+      expect(onChangeSpy).toHaveBeenCalledWith('doc1', changes);
+    });
+
+    it('should handle errors and emit onError', async () => {
+      const onErrorSpy = vi.fn();
+      patches.onError(onErrorSpy);
+
+      const error = new Error('Save failed');
+      vi.mocked(mockStore.savePendingChanges).mockRejectedValue(error);
+
+      const changes = [createChange('c1', 1)];
+      await (patches as any)._savePendingChanges('doc1', changes);
+
+      expect(onErrorSpy).toHaveBeenCalledWith(error, { docId: 'doc1' });
+    });
+  });
+
+  describe('signals', () => {
+    it('should provide onChange signal', () => {
+      const callback = vi.fn();
+      const unsubscribe = patches.onChange(callback);
+
+      expect(typeof unsubscribe).toBe('function');
+    });
+
+    it('should provide onTrackDocs signal', () => {
+      const callback = vi.fn();
+      const unsubscribe = patches.onTrackDocs(callback);
+
+      expect(typeof unsubscribe).toBe('function');
+    });
+
+    it('should provide onUntrackDocs signal', () => {
+      const callback = vi.fn();
+      const unsubscribe = patches.onUntrackDocs(callback);
+
+      expect(typeof unsubscribe).toBe('function');
+    });
+
+    it('should provide onDeleteDoc signal', () => {
+      const callback = vi.fn();
+      const unsubscribe = patches.onDeleteDoc(callback);
+
+      expect(typeof unsubscribe).toBe('function');
+    });
+
+    it('should provide onError signal', () => {
+      const callback = vi.fn();
+      const unsubscribe = patches.onError(callback);
+
+      expect(typeof unsubscribe).toBe('function');
+    });
+
+    it('should provide onServerCommit signal', () => {
+      const callback = vi.fn();
+      const unsubscribe = patches.onServerCommit(callback);
+
+      expect(typeof unsubscribe).toBe('function');
+    });
+  });
+
+  describe('change listener integration', () => {
+    it('should set up change listener when opening document', async () => {
+      const changeHandler = vi.fn();
+      mockDoc.onChange.mockImplementation((callback: any) => {
+        changeHandler.mockImplementation(callback);
+        return vi.fn();
       });
 
-      // Spy on error signal
-      const errorSpy = vi.spyOn(patches.onError, 'emit');
+      await patches.openDoc('doc1');
 
-      // Trigger change
-      const testChange: Change = { id: 'change-1', ops: [], rev: 1, baseRev: 0, created: Date.now() };
-      mockDoc.onChange.emit(testChange);
+      // Simulate a change in the document
+      const changes = [createChange('c1', 1)];
+      changeHandler(changes);
 
-      // Wait for the async operation to complete
-      await new Promise(resolve => setTimeout(resolve, 0));
-
-      expect(errorSpy).toHaveBeenCalledWith(saveError, { docId: DOC_ID });
+      expect(mockStore.savePendingChanges).toHaveBeenCalledWith('doc1', changes);
     });
   });
 });

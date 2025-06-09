@@ -14,14 +14,14 @@ Meet `Patches` - the brains of your collaborative app operation! This class is w
 
 ## What Is It?
 
-`Patches` is like the quarterback of your collaborative app. It:
+`Patches` is like the conductor of your collaborative symphony. After the refactor, it's focused on coordination rather than doing the heavy lifting itself. It:
 
-- **Manages Documents**: Opens, tracks, and closes your collaborative docs
-- **Handles Persistence**: Saves changes to whatever storage system you choose
-- **Coordinates Sync**: Works with `PatchesSync` to keep everything in real-time
-- **Emits Events**: Lets you know when important stuff happens
+- **Document Management**: Opens, tracks, and closes your collaborative docs
+- **Event Coordination**: Listens to document events and re-emits them for your app
+- **Storage Interface**: Manages persistence through your chosen PatchesStore
+- **Public API**: Provides the clean interface your app uses
 
-Here's the key: You create **one** `Patches` instance for your whole app, then use it to open as many documents as you need. Think of it as your document factory and manager.
+Here's the key: You create **one** `Patches` instance for your whole app, then use it to open as many documents as you need. Think of it as your document orchestrator and public API.
 
 ## Getting Started
 
@@ -131,8 +131,8 @@ Closing docs helps free up memory and ensures everything is saved properly.
 ```typescript
 import { PatchesSync } from '@dabble/patches/net';
 
-// Create your sync connection
-const sync = new PatchesSync('wss://your-server.example.com', patches);
+// Create your sync connection (note the parameter order!)
+const sync = new PatchesSync(patches, 'wss://your-server.example.com');
 
 // Connect to the server
 await sync.connect();
@@ -142,30 +142,41 @@ await sync.connect();
 
 The magic of this setup:
 
-- Local changes are sent to the server automatically
-- Server changes are applied to local documents
-- Everything stays in sync with no extra code
+- `Patches` emits events when documents change
+- `PatchesSync` listens to these events and handles server communication
+- Server changes flow back through `PatchesSync` to update documents
+- All the complex OT logic happens in pure algorithm functions
+- Your app just sees clean, coordinated state updates
 
 ## Event Hooks
 
 Listen for important events from the `Patches` system:
 
 ```typescript
-// When a document is updated from the server
+// When a document receives changes from the server
 patches.onServerCommit((docId, changes) => {
   console.log(`Document ${docId} received ${changes.length} changes from server`);
 });
 
-// When there's a sync error
+// When there's an error (usually from sync operations)
 patches.onError((error, context) => {
-  console.error(`Error in document ${context.docId}:`, error);
+  console.error(`Error in document ${context?.docId}:`, error);
   showErrorNotification('Something went wrong. Retrying...');
 });
 
-// When a document fails to open
-patches.onDocOpenFailed((docId, error) => {
-  console.error(`Failed to open document ${docId}:`, error);
-  showErrorNotification('Could not open document. Try again later.');
+// When any document changes locally
+patches.onChange((docId, changes) => {
+  console.log(`Document ${docId} changed locally:`, changes);
+  updateRecentActivity(docId);
+});
+
+// When documents are tracked/untracked
+patches.onTrackDocs(docIds => {
+  console.log('Now tracking:', docIds);
+});
+
+patches.onUntrackDocs(docIds => {
+  console.log('No longer tracking:', docIds);
 });
 ```
 
@@ -197,8 +208,8 @@ class CollaborativeApp {
     // Set up error handling
     this.patches.onError(this.handleError.bind(this));
 
-    // Set up sync
-    this.sync = new PatchesSync('wss://collab.example.com', this.patches);
+    // Set up sync (note: patches comes first now)
+    this.sync = new PatchesSync(this.patches, 'wss://collab.example.com');
 
     // Handle connection state
     this.sync.onConnectionStateChange(state => {
@@ -280,8 +291,9 @@ app.makeChange('project-notes', draft => {
 The `Patches` class is just one piece of the puzzle. Check out these related components:
 
 - [`PatchesDoc`](./PatchesDoc.md) - Individual document instances that `Patches` creates for you
+- [`PatchesSync`](./PatchesSync.md) - Real-time synchronization coordinator with a server
 - [`PatchesStore`](./persist.md) - The interface for document persistence
-- [`PatchesSync`](./websocket.md) - Real-time synchronization with a server
 - [`PatchesServer`](./PatchesServer.md) - The server-side component that handles collaboration
+- [`Algorithms`](./algorithms.md) - The pure functions that handle OT and change processing
 
-Remember, `Patches` is your friendly neighborhood document manager. Let it handle the complex stuff while you focus on building an awesome collaborative experience! 🚀
+Remember, `Patches` is your friendly neighborhood document orchestrator. It coordinates everything so you can focus on building an awesome collaborative experience! 🚀

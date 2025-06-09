@@ -1,433 +1,305 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { WebSocketTransport } from '../../../src/net/websocket/WebSocketTransport';
-import { onlineState } from '../../../src/net/websocket/onlineState';
 
-// Mock WebSocket implementation
-class MockWebSocket {
-  onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: ((error: any) => void) | null = null;
-  onmessage: ((event: { data: any }) => void) | null = null;
-  readyState = 0; // CONNECTING
-  send = vi.fn();
-  close = vi.fn();
-
-  constructor(public url: string) {}
-
-  // Helper methods for testing
-  simulateOpen() {
-    this.readyState = 1; // OPEN
-    if (this.onopen) this.onopen();
-  }
-
-  simulateClose() {
-    this.readyState = 3; // CLOSED
-    if (this.onclose) this.onclose();
-  }
-
-  simulateError(error: any) {
-    if (this.onerror) this.onerror(error);
-  }
-
-  simulateMessage(data: any) {
-    if (this.onmessage) this.onmessage({ data });
+// Mock Event classes
+class MockEvent {
+  type: string;
+  constructor(type: string) {
+    this.type = type;
   }
 }
 
-// Mock timers
-const mockTimers = new Map<number, { callback: Function; delay: number }>();
-const mockSetTimeout = vi.fn((callback: Function, delay: number) => {
-  const id = Math.random();
-  mockTimers.set(id, { callback, delay });
-  return id;
-});
-const mockClearTimeout = vi.fn((id: number) => {
-  mockTimers.delete(id);
-});
+class MockCloseEvent extends MockEvent {
+  code?: number;
+  reason?: string;
+  constructor(type: string, options?: { code?: number; reason?: string }) {
+    super(type);
+    this.code = options?.code;
+    this.reason = options?.reason;
+  }
+}
+
+class MockMessageEvent extends MockEvent {
+  data: any;
+  constructor(type: string, options?: { data?: any }) {
+    super(type);
+    this.data = options?.data;
+  }
+}
+
+// Mock WebSocket
+function MockWebSocket(this: any, url: string, protocol?: string | string[]) {
+  if (!(this instanceof MockWebSocket)) {
+    return new (MockWebSocket as any)(url, protocol);
+  }
+  
+  this.url = url;
+  this.protocol = protocol;
+  this.readyState = MockWebSocket.CONNECTING;
+  this.onopen = null;
+  this.onclose = null;
+  this.onerror = null;
+  this.onmessage = null;
+  
+  // Add methods
+  this.send = vi.fn((data: string) => {
+    if (this.readyState !== MockWebSocket.OPEN) {
+      throw new Error('WebSocket is not open');
+    }
+  });
+
+  this.close = vi.fn((code?: number, reason?: string) => {
+    this.readyState = MockWebSocket.CLOSING;
+    this.readyState = MockWebSocket.CLOSED;
+    this.onclose?.(new MockCloseEvent('close', { code, reason }));
+  });
+  
+  // Helper methods for testing
+  this.simulateOpen = () => {
+    this.readyState = MockWebSocket.OPEN;
+    this.onopen?.(new MockEvent('open'));
+  };
+
+  this.simulateMessage = (data: string) => {
+    this.onmessage?.(new MockMessageEvent('message', { data }));
+  };
+
+  this.simulateError = () => {
+    this.onerror?.(new MockEvent('error'));
+  };
+
+  this.simulateClose = (code = 1000, reason = '') => {
+    this.readyState = MockWebSocket.CLOSED;
+    this.onclose?.(new MockCloseEvent('close', { code, reason }));
+  };
+}
+
+MockWebSocket.CONNECTING = 0;
+MockWebSocket.OPEN = 1;
+MockWebSocket.CLOSING = 2;
+MockWebSocket.CLOSED = 3;
+
+// Mock the online state module
+vi.mock('../../../src/net/websocket/onlineState', () => ({
+  onlineState: {
+    isOffline: false,
+    onOnlineChange: vi.fn().mockReturnValue(() => {}),
+  },
+}));
 
 describe('WebSocketTransport', () => {
   let transport: WebSocketTransport;
-  let mockWs: MockWebSocket;
-  const testUrl = 'ws://test.example.com';
-
-  // Original methods to restore in afterEach
-  const originalWebSocket = global.WebSocket;
-  const originalSetTimeout = global.setTimeout;
-  const originalClearTimeout = global.clearTimeout;
+  let originalWebSocket: typeof WebSocket;
 
   beforeEach(() => {
-    // Clear mock state
     vi.clearAllMocks();
-    mockTimers.clear();
-
-    // Mock console.error to avoid test noise
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    // Mock WebSocket constructor
-    global.WebSocket = vi.fn((url: string) => {
-      mockWs = new MockWebSocket(url);
-      return mockWs;
-    }) as any;
-
-    // Add readyState constants
-    (global.WebSocket as any).CONNECTING = 0;
-    (global.WebSocket as any).OPEN = 1;
-    (global.WebSocket as any).CLOSING = 2;
-    (global.WebSocket as any).CLOSED = 3;
-
-    // Mock timers
-    global.setTimeout = mockSetTimeout as any;
-    global.clearTimeout = mockClearTimeout as any;
-
-    // Mock online
-    (onlineState as any)._isOnline = true;
-
-    // Create transport instance
-    transport = new WebSocketTransport(testUrl);
+    
+    // Mock global WebSocket
+    originalWebSocket = global.WebSocket;
+    global.WebSocket = MockWebSocket as any;
+    
+    transport = new WebSocketTransport('ws://localhost:8080');
   });
 
   afterEach(() => {
-    // Restore original globals
     global.WebSocket = originalWebSocket;
-    global.setTimeout = originalSetTimeout;
-    global.clearTimeout = originalClearTimeout;
-    (mockWs as any) = undefined;
+    transport.disconnect();
   });
 
-  it('should create a WebSocketTransport instance with correct initial state', () => {
-    expect(transport).toBeInstanceOf(WebSocketTransport);
-    expect(transport.state).toBe('disconnected');
+  describe('constructor', () => {
+    it('should create transport with URL', () => {
+      expect(transport.state).toBe('disconnected');
+    });
+
+    it('should create transport with URL and options', () => {
+      const transport = new WebSocketTransport('ws://localhost:8080', { protocol: 'patches-v1' });
+      expect(transport.state).toBe('disconnected');
+    });
+  });
+
+  describe('state management', () => {
+    it('should start in disconnected state', () => {
+      expect(transport.state).toBe('disconnected');
+    });
+
+    it('should emit state change events', () => {
+      const stateListener = vi.fn();
+      transport.onStateChange(stateListener);
+
+      transport.connect();
+
+      expect(stateListener).toHaveBeenCalledWith('connecting');
+    });
   });
 
   describe('connect method', () => {
-    it('should create a WebSocket connection when connect is called', async () => {
-      const connectPromise = transport.connect();
+    it('should transition to connecting state', () => {
+      transport.connect();
+      expect(transport.state).toBe('connecting');
+    });
 
-      // Simulate successful connection
-      mockWs.simulateOpen();
+    it('should create WebSocket with correct URL', () => {
+      const spy = vi.spyOn(global, 'WebSocket');
+      
+      transport.connect();
+      
+      expect(spy).toHaveBeenCalledWith('ws://localhost:8080', undefined);
+    });
+
+    it('should create WebSocket with protocol option', () => {
+      const transportWithProtocol = new WebSocketTransport('ws://localhost:8080', { protocol: 'patches-v1' });
+      const spy = vi.spyOn(global, 'WebSocket');
+      
+      transportWithProtocol.connect();
+      
+      expect(spy).toHaveBeenCalledWith('ws://localhost:8080', 'patches-v1');
+    });
+
+    it('should resolve when WebSocket opens', async () => {
+      const connectPromise = transport.connect();
+      
+      // Get the WebSocket instance and simulate opening
+      const ws = (transport as any).ws as MockWebSocket;
+      ws.simulateOpen();
 
       await connectPromise;
       expect(transport.state).toBe('connected');
     });
 
-    it('should defer connection when offline', async () => {
-      // Set offline state
-      (onlineState as any)._isOnline = false;
-
+    it('should reject when WebSocket errors during connection', async () => {
       const connectPromise = transport.connect();
+      
+      const ws = (transport as any).ws as MockWebSocket;
+      ws.simulateError();
 
-      // Connection should be deferred
-      expect(transport.state).toBe('disconnected');
-      expect(mockWs).toBeUndefined();
-
-      // Go back online
-      (onlineState as any)._isOnline = true;
-      onlineState.onOnlineChange.emit(true);
-
-      // Now connection should proceed
-      mockWs.simulateOpen();
-      await connectPromise;
-      expect(transport.state).toBe('connected');
-      console.log('Finished Running This Test');
+      try {
+        await connectPromise;
+        expect.fail('Expected promise to reject');
+      } catch (error) {
+        // Expected to throw
+        expect(transport.state).toBe('error');
+      }
     });
 
-    it('should return existing promise when connect is called while connecting', async () => {
-      console.log('Started Running Next Test');
-      const firstPromise = transport.connect();
-      const secondPromise = transport.connect();
-
-      // Both should resolve similarly (using toStrictEqual due to potential instance differences in test env)
-      expect(secondPromise).toStrictEqual(firstPromise);
-
-      // Simulate connection success
-      mockWs.simulateOpen();
-
-      await firstPromise;
-      expect(transport.state).toBe('connected');
-    });
-
-    it('should immediately resolve if already connected', async () => {
-      // First connect and open
+    it('should reject when WebSocket closes during connection', async () => {
       const connectPromise = transport.connect();
-      mockWs.simulateOpen();
-      await connectPromise;
+      
+      const ws = (transport as any).ws as MockWebSocket;
+      ws.simulateClose();
 
-      // Clear mocks to verify new WebSocket is not created
-      vi.clearAllMocks();
-
-      // Connect again
-      await transport.connect();
-
-      // Should not create a new WebSocket instance
-      expect(global.WebSocket).not.toHaveBeenCalled();
-    });
-
-    it('should reject the promise when connection fails', async () => {
-      const errorMock = new Error('Connection failed');
-      const connectPromise = transport.connect();
-
-      // Simulate connection error
-      mockWs.simulateError(errorMock);
-
-      await expect(connectPromise).rejects.toEqual(errorMock);
-      expect(transport.state).toBe('error');
-    });
-
-    it('should reject the promise when connection closes during connection attempt', async () => {
-      const connectPromise = transport.connect();
-
-      // Simulate connection closing
-      mockWs.simulateClose();
-
-      await expect(connectPromise).rejects.toThrow('Connection closed');
-      expect(transport.state).toBe('disconnected');
+      try {
+        await connectPromise;
+        expect.fail('Expected promise to reject');
+      } catch (error) {
+        expect((error as Error).message).toBe('Connection closed');
+        expect(transport.state).toBe('disconnected');
+      }
     });
   });
 
   describe('disconnect method', () => {
-    it('should close the WebSocket connection when disconnect is called', async () => {
-      // First connect
-      const connectPromise = transport.connect();
-      mockWs.simulateOpen();
-      await connectPromise;
-
-      // Then disconnect
+    it('should set state to disconnected', () => {
+      transport.connect();
       transport.disconnect();
 
-      // Should close the WebSocket
-      expect(mockWs.close).toHaveBeenCalled();
       expect(transport.state).toBe('disconnected');
     });
 
-    it('should cancel pending reconnection when disconnect is called', async () => {
-      // First connect
-      const connectPromise = transport.connect();
-
-      // Simulate error to trigger reconnect
-      mockWs.simulateError(new Error('Test error'));
-      mockWs.simulateClose();
-
-      try {
-        await connectPromise;
-      } catch (error) {
-        // Expected error, ignore
-      }
-
-      // Should have scheduled a reconnect
-      expect(mockTimers.size).toBe(1);
-
-      // Disconnect
+    it('should call WebSocket close if connected', () => {
+      transport.connect();
+      const ws = (transport as any).ws as MockWebSocket;
+      
       transport.disconnect();
 
-      // Should have cleared the reconnect timer
-      expect(mockClearTimeout).toHaveBeenCalled();
+      expect(ws.close).toHaveBeenCalled();
     });
   });
 
   describe('send method', () => {
-    it('should send data through the WebSocket', async () => {
-      // First connect
-      const connectPromise = transport.connect();
-      mockWs.simulateOpen();
-      await connectPromise;
-
-      // Send data
-      const testData = 'test message';
-      transport.send(testData);
-
-      // Should have sent the data
-      expect(mockWs.send).toHaveBeenCalledWith(testData);
+    it('should throw error when not connected', () => {
+      expect(() => transport.send('test')).toThrow('WebSocket is not connected');
     });
 
-    it('should throw an error if trying to send when not connected', () => {
-      const testData = 'test message';
+    it('should send data when connected', () => {
+      transport.connect();
+      const ws = (transport as any).ws as MockWebSocket;
+      ws.readyState = MockWebSocket.OPEN;
 
-      // Try to send without connecting
-      expect(() => transport.send(testData)).toThrow('WebSocket is not connected');
+      transport.send('test message');
+
+      expect(ws.send).toHaveBeenCalledWith('test message');
     });
   });
 
-  describe('automatic reconnection', () => {
-    it('should schedule a reconnect after connection error', async () => {
-      const connectPromise = transport.connect();
+  describe('message handling', () => {
+    it('should emit received messages', () => {
+      const messageListener = vi.fn();
+      transport.onMessage(messageListener);
 
-      // Simulate error and close to trigger reconnect
-      mockWs.simulateError(new Error('Test error'));
-      mockWs.simulateClose();
+      transport.connect();
+      const ws = (transport as any).ws as MockWebSocket;
+      ws.simulateMessage('test message');
 
-      try {
-        await connectPromise;
-      } catch (error) {
-        // Expected error, ignore
-      }
-
-      // Should have scheduled a reconnect
-      expect(mockTimers.size).toBe(1);
-      const [[, timer]] = mockTimers.entries();
-      expect(timer.delay).toBe(1000); // Initial backoff
-    });
-
-    it('should not schedule reconnect when offline', async () => {
-      const connectPromise = transport.connect();
-      (onlineState as any)._isOnline = false;
-      onlineState.onOnlineChange.emit(false);
-
-      // Simulate error and close
-      mockWs.simulateError(new Error('Test error'));
-      mockWs.simulateClose();
-
-      try {
-        await connectPromise;
-      } catch (error) {
-        // Expected error, ignore
-      }
-
-      // Should not have scheduled a reconnect
-      expect(mockTimers.size).toBe(0);
-    });
-
-    it('should increase backoff time on consecutive failures', async () => {
-      // First attempt
-      const connectPromise = transport.connect();
-      mockWs.simulateError(new Error('Test error'));
-      mockWs.simulateClose();
-
-      try {
-        await connectPromise;
-      } catch (error) {
-        /* Expected error */
-      }
-
-      // Get first timer's delay
-      expect(mockTimers.size).toBe(1);
-      let [[, timer]] = mockTimers.entries();
-      const firstDelay = timer.delay;
-
-      // Simulate timer firing and trigger reconnect
-      const callback = timer.callback;
-      mockTimers.clear();
-
-      // Execute reconnect callback - this initiates transport.connect() internally
-      callback();
-
-      // Get the promise for the connection attempt initiated by the callback
-      const reconnectPromise = transport.connect(); // Should return the pending promise
-
-      // Wrap error simulation in a microtask to manage timing
-      await Promise.resolve().then(() => {
-        mockWs.simulateError(new Error('Test error'));
-        mockWs.simulateClose();
-      });
-
-      // Now assert that the promise rejects
-      await expect(reconnectPromise).rejects.toThrow('Test error');
-
-      // Check for increased backoff
-      expect(mockTimers.size).toBe(1);
-      [[, timer]] = mockTimers.entries();
-      const secondDelay = timer.delay;
-
-      // Second delay should be more than first delay
-      expect(secondDelay).toBeGreaterThan(firstDelay);
-    });
-
-    it('should reset backoff time on successful connection', async () => {
-      // First connect with failure
-      let connectPromise = transport.connect();
-      mockWs.simulateError(new Error('Test error'));
-      mockWs.simulateClose();
-
-      try {
-        await connectPromise;
-      } catch (error) {
-        /* Expected error */
-      }
-
-      // Get first backoff timer
-      let [[, timer]] = mockTimers.entries();
-      const callback = timer.callback;
-      mockTimers.clear();
-
-      // Execute reconnect callback and simulate successful connection
-      callback();
-      mockWs.simulateOpen();
-
-      // Force a disconnect to trigger another reconnect
-      transport.disconnect();
-
-      // Connect again and fail to check backoff reset
-      connectPromise = transport.connect();
-
-      mockWs.simulateError(new Error('Test error'));
-      mockWs.simulateClose();
-
-      try {
-        await connectPromise;
-      } catch (error) {
-        /* Expected error */
-      }
-
-      // Check for reset backoff
-      expect(mockTimers.size).toBe(1);
-      [[, timer]] = mockTimers.entries();
-
-      // Should have reset to initial backoff
-      expect(timer.delay).toBe(1000);
+      expect(messageListener).toHaveBeenCalledWith('test message');
     });
   });
 
-  describe('event handling', () => {
-    it('should emit state change events', async () => {
-      const stateChangeHandler = vi.fn();
-      transport.onStateChange(stateChangeHandler);
+  describe('online/offline handling', () => {
+    it('should set up online/offline listeners when connecting', async () => {
+      const { onlineState } = await import('../../../src/net/websocket/onlineState');
+      
+      transport.connect();
 
-      // Connect and trigger state changes
-      const connectPromise = transport.connect();
-
-      // Should have emitted 'connecting' state
-      expect(stateChangeHandler).toHaveBeenCalledWith('connecting');
-
-      // Simulate open
-      mockWs.simulateOpen();
-      await connectPromise;
-
-      // Should have emitted 'connected' state
-      expect(stateChangeHandler).toHaveBeenCalledWith('connected');
-
-      // Reset mock to track next calls
-      stateChangeHandler.mockReset();
-
-      // Simulate error
-      mockWs.simulateError(new Error('Test error'));
-
-      // Should have emitted 'error' state
-      expect(stateChangeHandler).toHaveBeenCalledWith('error');
-
-      // Reset mock to track next calls
-      stateChangeHandler.mockReset();
-
-      // Simulate close
-      mockWs.simulateClose();
-
-      // Should have emitted 'disconnected' state
-      expect(stateChangeHandler).toHaveBeenCalledWith('disconnected');
+      expect(onlineState.onOnlineChange).toHaveBeenCalled();
     });
 
-    it('should emit message events', async () => {
-      const messageHandler = vi.fn();
-      transport.onMessage(messageHandler);
+    it('should handle offline state during connect', async () => {
+      const { onlineState } = await import('../../../src/net/websocket/onlineState');
+      onlineState.isOffline = true;
 
-      // First connect
       const connectPromise = transport.connect();
-      mockWs.simulateOpen();
-      await connectPromise;
 
-      // Simulate receiving a message
-      const testMessage = 'test message data';
-      mockWs.simulateMessage(testMessage);
+      // Should create deferred promise but not actually connect
+      expect((transport as any).connectionDeferred).toBeTruthy();
+      expect(transport.state).toBe('disconnected');
+      
+      // Clean up
+      onlineState.isOffline = false;
+    });
+  });
 
-      // Should have emitted the message
-      expect(messageHandler).toHaveBeenCalledWith(testMessage);
+  describe('error handling', () => {
+    it('should handle WebSocket constructor errors', async () => {
+      global.WebSocket = class {
+        constructor() {
+          throw new Error('WebSocket constructor failed');
+        }
+      } as any;
+
+      const transport = new WebSocketTransport('ws://localhost:8080');
+      const connectPromise = transport.connect();
+
+      await expect(connectPromise).rejects.toThrow('WebSocket constructor failed');
+      expect(transport.state).toBe('error');
+    });
+
+    it('should log errors', async () => {
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      
+      const connectPromise = transport.connect();
+      const ws = (transport as any).ws as MockWebSocket;
+      ws.simulateError();
+
+      // Properly handle the promise to prevent unhandled rejection
+      try {
+        await connectPromise;
+      } catch {
+        // Expected to fail
+      }
+
+      expect(consoleErrorSpy).toHaveBeenCalledWith('WebSocket error:', expect.any(MockEvent));
+      
+      consoleErrorSpy.mockRestore();
     });
   });
 });

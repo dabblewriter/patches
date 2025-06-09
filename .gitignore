@@ -8,3 +8,4 @@ dist/
 .svelte-kit/
 
 **/.claude/settings.local.json
+CLAUDE.local.md

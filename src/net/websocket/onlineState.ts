@@ -2,7 +2,7 @@ import { signal } from '../../event-signal';
 
 class OnlineState {
   onOnlineChange = signal<(isOnline: boolean) => void>();
-  _isOnline = typeof navigator !== 'undefined' && navigator.onLine;
+  protected _isOnline = typeof navigator !== 'undefined' && navigator.onLine;
 
   constructor() {
     if (typeof addEventListener === 'function') {

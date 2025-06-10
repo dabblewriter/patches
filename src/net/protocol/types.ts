@@ -1,5 +1,11 @@
 import type { Unsubscriber } from '../../event-signal.js';
-import type { Change, EditableVersionMetadata, ListVersionsOptions, PatchesState, VersionMetadata } from '../../types';
+import type {
+  Change,
+  EditableVersionMetadata,
+  ListVersionsOptions,
+  PatchesState,
+  VersionMetadata,
+} from '../../types.js';
 
 /**
  * Represents the possible states of a network transport connection.

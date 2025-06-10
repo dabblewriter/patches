@@ -1,5 +1,5 @@
 import { createSortableId } from 'crypto-id';
-import type { VersionMetadata } from '../types';
+import type { VersionMetadata } from '../types.js';
 
 /**
  * Create a version id for a given document. Uses a sortable 16 character id.

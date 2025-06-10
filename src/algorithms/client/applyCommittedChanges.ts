@@ -1,6 +1,6 @@
-import type { Change, PatchesSnapshot } from '../../types';
-import { applyChanges } from '../shared/applyChanges';
-import { rebaseChanges } from '../shared/rebaseChanges';
+import type { Change, PatchesSnapshot } from '../../types.js';
+import { applyChanges } from '../shared/applyChanges.js';
+import { rebaseChanges } from '../shared/rebaseChanges.js';
 
 /**
  * Applies incoming changes from the server that were *not* initiated by this client.

@@ -1,4 +1,4 @@
-export { PatchesBranchManager } from './PatchesBranchManager';
-export { PatchesHistoryManager } from './PatchesHistoryManager';
-export { PatchesServer } from './PatchesServer';
-export type { BranchingStoreBackend, PatchesStoreBackend } from './types';
+export { PatchesBranchManager } from './PatchesBranchManager.js';
+export { PatchesHistoryManager } from './PatchesHistoryManager.js';
+export { PatchesServer } from './PatchesServer.js';
+export type { BranchingStoreBackend, PatchesStoreBackend } from './types.js';

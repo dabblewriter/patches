@@ -6,7 +6,7 @@ import type {
   ListVersionsOptions,
   PatchesState,
   VersionMetadata,
-} from '../types';
+} from '../types.js';
 
 /**
  * Interface for a backend storage system for patch synchronization.

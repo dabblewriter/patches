@@ -1,5 +1,5 @@
-import type { PatchesStoreBackend } from '../../server';
-import type { PatchesSnapshot } from '../../types';
+import type { PatchesStoreBackend } from '../../server.js';
+import type { PatchesSnapshot } from '../../types.js';
 
 /**
  * Retrieves the document state of the version before the given revision and changes after up to that revision or all

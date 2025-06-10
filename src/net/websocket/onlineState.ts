@@ -1,4 +1,4 @@
-import { signal } from '../../event-signal';
+import { signal } from '../../event-signal.js';
 
 class OnlineState {
   onOnlineChange = signal<(isOnline: boolean) => void>();

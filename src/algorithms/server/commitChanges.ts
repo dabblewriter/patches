@@ -1,11 +1,11 @@
-import type { PatchesStoreBackend } from '../../server/types';
-import type { Change } from '../../types';
-import { applyChanges } from '../shared/applyChanges';
-import { createVersion } from './createVersion';
-import { getSnapshotAtRevision } from './getSnapshotAtRevision';
-import { getStateAtRevision } from './getStateAtRevision';
-import { handleOfflineSessionsAndBatches } from './handleOfflineSessionsAndBatches';
-import { transformIncomingChanges } from './transformIncomingChanges';
+import type { PatchesStoreBackend } from '../../server/types.js';
+import type { Change } from '../../types.js';
+import { applyChanges } from '../shared/applyChanges.js';
+import { createVersion } from './createVersion.js';
+import { getSnapshotAtRevision } from './getSnapshotAtRevision.js';
+import { getStateAtRevision } from './getStateAtRevision.js';
+import { handleOfflineSessionsAndBatches } from './handleOfflineSessionsAndBatches.js';
+import { transformIncomingChanges } from './transformIncomingChanges.js';
 
 /**
  * Commits a set of changes to a document, applying operational transformation as needed.

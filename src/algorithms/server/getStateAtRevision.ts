@@ -1,7 +1,7 @@
-import type { PatchesStoreBackend } from '../../server';
-import type { PatchesState } from '../../types';
-import { applyChanges } from '../shared/applyChanges';
-import { getSnapshotAtRevision } from './getSnapshotAtRevision';
+import type { PatchesStoreBackend } from '../../server.js';
+import type { PatchesState } from '../../types.js';
+import { applyChanges } from '../shared/applyChanges.js';
+import { getSnapshotAtRevision } from './getSnapshotAtRevision.js';
 
 /**
  * Gets the state at a specific revision.

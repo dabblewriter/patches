@@ -1,9 +1,9 @@
 import type { JSONPatch } from '../..';
-import { createChange } from '../../data/change';
-import { createJSONPatch } from '../../json-patch/createJSONPatch';
-import type { Change, PatchesSnapshot } from '../../types';
-import { breakChange } from './breakChange';
-import { createStateFromSnapshot } from './createStateFromSnapshot';
+import { createChange } from '../../data/change.js';
+import { createJSONPatch } from '../../json-patch/createJSONPatch.js';
+import type { Change, PatchesSnapshot } from '../../types.js';
+import { breakChange } from './breakChange.js';
+import { createStateFromSnapshot } from './createStateFromSnapshot.js';
 
 export function makeChange<T = any>(
   snapshot: PatchesSnapshot<T>,

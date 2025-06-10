@@ -1,6 +1,6 @@
 import { createVersionMetadata } from '../../data/version.js';
-import type { Change, EditableVersionMetadata, VersionMetadata } from '../../types';
-import type { PatchesStoreBackend } from '../../server/types';
+import type { PatchesStoreBackend } from '../../server/types.js';
+import type { Change, EditableVersionMetadata, VersionMetadata } from '../../types.js';
 
 /**
  * Creates a new version snapshot of a document's state from changes.
@@ -19,7 +19,7 @@ export async function createVersion(
   metadata?: EditableVersionMetadata
 ): Promise<VersionMetadata | undefined> {
   if (changes.length === 0) return;
-  
+
   const baseRev = changes[0].baseRev;
   if (baseRev === undefined) {
     throw new Error(`Client changes must include baseRev for doc ${docId}.`);

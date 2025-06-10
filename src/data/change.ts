@@ -1,7 +1,7 @@
 import { inc } from 'alphacounter';
 import { createId } from 'crypto-id';
-import type { JSONPatchOp } from '../json-patch/types';
-import type { Change } from '../types';
+import type { JSONPatchOp } from '../json-patch/types.js';
+import type { Change } from '../types.js';
 
 /**
  * Create a change id for a given revision. Uses a random 4 character id, prefixed with a revision number string.

@@ -1,6 +1,6 @@
 import { applyPatch } from '../../json-patch/applyPatch.js';
 import { transformPatch } from '../../json-patch/transformPatch.js';
-import type { Change } from '../../types';
+import type { Change } from '../../types.js';
 
 /**
  * Transforms incoming changes against committed changes that happened *after* the client's baseRev.

@@ -1,6 +1,6 @@
 {
   "name": "@dabble/patches",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Immutable JSON Patch implementation based on RFC 6902 supporting operational transformation and last-writer-wins",
   "author": "Jacob Wright <jacwright@gmail.com>",
   "bugs": {

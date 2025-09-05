@@ -72,7 +72,7 @@ describe('Path Proxy Utilities', () => {
 
   describe('JSONPatch integration with path proxy', () => {
     let patch: JSONPatch;
-    let path: typeof createPathProxy<TestType>;
+    let path: ReturnType<typeof createPathProxy<TestType>>;
 
     beforeEach(() => {
       patch = new JSONPatch();

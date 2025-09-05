@@ -4,14 +4,15 @@
     "declaration": true,
     "sourceMap": true,
     "esModuleInterop": true,
-    "target": "es2021",
-    "lib": ["es2021", "dom"],
+    "target": "es2022",
+    "lib": ["es2022", "dom"],
     "moduleResolution": "bundler",
     "module": "ESNext",
     "strict": true,
     "noImplicitAny": true,
     "types": ["vitest/globals"],
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true
   },
   "exclude": ["node_modules", "dist"],
   "include": ["src/**/*.ts", "tests/**/*.ts"]

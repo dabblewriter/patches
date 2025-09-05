@@ -53,7 +53,9 @@ describe('commitChanges', () => {
     });
 
     // Mock handleOfflineSessionsAndBatches
-    const { handleOfflineSessionsAndBatches } = await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
+    const { handleOfflineSessionsAndBatches } = await import(
+      '../../../src/algorithms/server/handleOfflineSessionsAndBatches'
+    );
     vi.mocked(handleOfflineSessionsAndBatches).mockImplementation(async (store, timeout, docId, changes) => changes);
 
     // Mock transformIncomingChanges
@@ -80,11 +82,11 @@ describe('commitChanges', () => {
   });
 
   it('should throw error when changes lack baseRev', async () => {
-    const changes = [{ id: '1', rev: 1, ops: [], created: Date.now() }] as Change[];
+    const changes = [{ id: '1', rev: 1, baseRev: 0, ops: [], created: Date.now() }] as Change[];
 
-    await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis))
-      .rejects
-      .toThrow('Client changes must include baseRev for doc doc1.');
+    await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis)).rejects.toThrow(
+      'Client changes must include baseRev for doc doc1.'
+    );
   });
 
   it('should throw error when changes have inconsistent baseRev', async () => {
@@ -93,9 +95,9 @@ describe('commitChanges', () => {
       createChange('2', 2, 1), // Different baseRev
     ];
 
-    await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis))
-      .rejects
-      .toThrow('Client changes must have consistent baseRev in all changes for doc doc1.');
+    await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis)).rejects.toThrow(
+      'Client changes must have consistent baseRev in all changes for doc doc1.'
+    );
   });
 
   it('should throw error when baseRev is ahead of server', async () => {
@@ -108,9 +110,9 @@ describe('commitChanges', () => {
 
     const changes = [createChange('1', 1, 5)]; // baseRev ahead of server
 
-    await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis))
-      .rejects
-      .toThrow('Client baseRev (5) is ahead of server revision (1) for doc doc1. Client needs to reload the document.');
+    await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis)).rejects.toThrow(
+      'Client baseRev (5) is ahead of server revision (1) for doc doc1. Client needs to reload the document.'
+    );
   });
 
   it('should throw error when trying to create document that already exists', async () => {
@@ -124,9 +126,9 @@ describe('commitChanges', () => {
     const changes = [createChange('1', 1, 0)];
     changes[0].ops = [{ op: 'add', path: '', value: {} }]; // Root creation
 
-    await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis))
-      .rejects
-      .toThrow('Client baseRev is 0 but server has already been created for doc doc1. Client needs to load the existing document.');
+    await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis)).rejects.toThrow(
+      'Client baseRev is 0 but server has already been created for doc doc1. Client needs to load the existing document.'
+    );
   });
 
   it('should allow root creation when part of initial batch', async () => {
@@ -176,18 +178,15 @@ describe('commitChanges', () => {
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
     const { createVersion } = await import('../../../src/algorithms/server/createVersion');
-    expect(createVersion).toHaveBeenCalledWith(
-      mockStore,
-      'doc1',
-      expect.objectContaining({ appliedChanges: 1 }),
-      [lastChange]
-    );
+    expect(createVersion).toHaveBeenCalledWith(mockStore, 'doc1', expect.objectContaining({ appliedChanges: 1 }), [
+      lastChange,
+    ]);
   });
 
   it('should filter out already committed changes', async () => {
     const existingChange = createChange('existing', 2, 1);
     const newChange = createChange('new', 3, 1);
-    
+
     const changes = [existingChange, newChange];
 
     // Mock server state to have existing changes up to rev 2
@@ -236,7 +235,9 @@ describe('commitChanges', () => {
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    const { handleOfflineSessionsAndBatches } = await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
+    const { handleOfflineSessionsAndBatches } = await import(
+      '../../../src/algorithms/server/handleOfflineSessionsAndBatches'
+    );
     expect(handleOfflineSessionsAndBatches).toHaveBeenCalledWith(
       mockStore,
       sessionTimeoutMillis,
@@ -255,7 +256,9 @@ describe('commitChanges', () => {
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    const { handleOfflineSessionsAndBatches } = await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
+    const { handleOfflineSessionsAndBatches } = await import(
+      '../../../src/algorithms/server/handleOfflineSessionsAndBatches'
+    );
     expect(handleOfflineSessionsAndBatches).toHaveBeenCalledWith(
       mockStore,
       sessionTimeoutMillis,
@@ -350,13 +353,10 @@ describe('commitChanges', () => {
   it('should handle complex scenario with multiple changes and offline processing', async () => {
     const oldTime = Date.now() - sessionTimeoutMillis - 1000;
     const recentTime = Date.now() - 1000;
-    
+
     const committedChange = createChange('committed', 2, 0, oldTime);
-    const incomingChanges = [
-      createChange('incoming1', 1, 0, oldTime),
-      createChange('incoming2', 2, 0, recentTime),
-    ];
-    
+    const incomingChanges = [createChange('incoming1', 1, 0, oldTime), createChange('incoming2', 2, 0, recentTime)];
+
     const processedChanges = [createChange('processed', 1, 0, oldTime)];
     const transformedChanges = [{ ...processedChanges[0], rev: 3 }];
 
@@ -369,7 +369,9 @@ describe('commitChanges', () => {
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
 
-    const { handleOfflineSessionsAndBatches } = await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
+    const { handleOfflineSessionsAndBatches } = await import(
+      '../../../src/algorithms/server/handleOfflineSessionsAndBatches'
+    );
     vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue(processedChanges);
 
     const { transformIncomingChanges } = await import('../../../src/algorithms/server/transformIncomingChanges');
@@ -378,12 +380,7 @@ describe('commitChanges', () => {
     const result = await commitChanges(mockStore, 'doc1', incomingChanges, sessionTimeoutMillis);
 
     expect(handleOfflineSessionsAndBatches).toHaveBeenCalled();
-    expect(transformIncomingChanges).toHaveBeenCalledWith(
-      processedChanges,
-      expect.any(Object),
-      [committedChange],
-      2
-    );
+    expect(transformIncomingChanges).toHaveBeenCalledWith(processedChanges, expect.any(Object), [committedChange], 2);
     expect(mockStore.saveChanges).toHaveBeenCalledWith('doc1', transformedChanges);
     expect(result[0]).toEqual([committedChange]);
     expect(result[1]).toEqual(transformedChanges);

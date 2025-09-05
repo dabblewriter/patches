@@ -49,7 +49,9 @@ export class WebRTCTransport implements ClientTransport {
    * Signal that emits when the underlying signaling transport's state changes.
    * This is delegated directly from the WebSocketTransport.
    */
-  public readonly onStateChange = this.transport.onStateChange;
+  public get onStateChange() {
+    return this.transport.onStateChange;
+  }
 
   /**
    * Creates a new WebRTC transport instance.

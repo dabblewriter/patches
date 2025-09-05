@@ -1,6 +1,6 @@
 import { createSortableId } from 'crypto-id';
 import { createVersionMetadata } from '../../data/version.js';
-import type { PatchesStoreBackend } from '../../server.js';
+import type { PatchesStoreBackend } from '../../server/types.js';
 import type { Change } from '../../types.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { getStateAtRevision } from './getStateAtRevision.js';

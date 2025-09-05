@@ -1,4 +1,4 @@
-import type { PatchesStoreBackend } from '../../server.js';
+import type { PatchesStoreBackend } from '../../server/types.js';
 import type { PatchesSnapshot } from '../../types.js';
 
 /**

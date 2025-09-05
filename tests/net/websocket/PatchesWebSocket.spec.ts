@@ -65,7 +65,7 @@ describe('PatchesWebSocket', () => {
       await patchesWS.getChangesSince('doc1', 5);
       expect(mockRPCInstance.request).toHaveBeenCalledWith('getChangesSince', { docId: 'doc1', rev: 5 });
 
-      const changes = [{ id: 'change1', op: [] }];
+      const changes = [{ id: 'change1', ops: [], rev: 1, baseRev: 0, created: Date.now() }];
       await patchesWS.commitChanges('doc1', changes);
       expect(mockRPCInstance.request).toHaveBeenCalledWith('commitChanges', { docId: 'doc1', changes });
 

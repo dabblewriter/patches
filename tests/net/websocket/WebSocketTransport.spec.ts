@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { WebSocketTransport } from '../../../src/net/websocket/WebSocketTransport';
 
+// MockWebSocket is now a proper class, so we can use it directly as a type
+
 // Mock Event classes
 class MockEvent {
   type: string;
@@ -27,65 +29,69 @@ class MockMessageEvent extends MockEvent {
   }
 }
 
-// Mock WebSocket
-function MockWebSocket(this: any, url: string, protocol?: string | string[]) {
-  if (!(this instanceof MockWebSocket)) {
-    return new (MockWebSocket as any)(url, protocol);
-  }
-  
-  this.url = url;
-  this.protocol = protocol;
-  this.readyState = MockWebSocket.CONNECTING;
-  this.onopen = null;
-  this.onclose = null;
-  this.onerror = null;
-  this.onmessage = null;
-  
-  // Add methods
-  this.send = vi.fn((data: string) => {
-    if (this.readyState !== MockWebSocket.OPEN) {
-      throw new Error('WebSocket is not open');
-    }
-  });
+// Mock WebSocket class
+class MockWebSocket {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
 
-  this.close = vi.fn((code?: number, reason?: string) => {
-    this.readyState = MockWebSocket.CLOSING;
-    this.readyState = MockWebSocket.CLOSED;
-    this.onclose?.(new MockCloseEvent('close', { code, reason }));
-  });
-  
+  url: string;
+  protocol?: string | string[];
+  readyState: number;
+  onopen: ((event: any) => void) | null = null;
+  onclose: ((event: any) => void) | null = null;
+  onerror: ((event: any) => void) | null = null;
+  onmessage: ((event: any) => void) | null = null;
+  send: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof vi.fn>;
+
+  constructor(url: string, protocol?: string | string[]) {
+    this.url = url;
+    this.protocol = protocol;
+    this.readyState = MockWebSocket.CONNECTING;
+    
+    this.send = vi.fn((data: string) => {
+      if (this.readyState !== MockWebSocket.OPEN) {
+        throw new Error('WebSocket is not open');
+      }
+    });
+
+    this.close = vi.fn((code?: number, reason?: string) => {
+      this.readyState = MockWebSocket.CLOSING;
+      this.readyState = MockWebSocket.CLOSED;
+      this.onclose?.(new MockCloseEvent('close', { code, reason }));
+    });
+  }
+
   // Helper methods for testing
-  this.simulateOpen = () => {
+  simulateOpen = () => {
     this.readyState = MockWebSocket.OPEN;
     this.onopen?.(new MockEvent('open'));
   };
 
-  this.simulateMessage = (data: string) => {
+  simulateMessage = (data: string) => {
     this.onmessage?.(new MockMessageEvent('message', { data }));
   };
 
-  this.simulateError = () => {
+  simulateError = () => {
     this.onerror?.(new MockEvent('error'));
   };
 
-  this.simulateClose = (code = 1000, reason = '') => {
+  simulateClose = (code = 1000, reason = '') => {
     this.readyState = MockWebSocket.CLOSED;
     this.onclose?.(new MockCloseEvent('close', { code, reason }));
   };
 }
 
-MockWebSocket.CONNECTING = 0;
-MockWebSocket.OPEN = 1;
-MockWebSocket.CLOSING = 2;
-MockWebSocket.CLOSED = 3;
-
 // Mock the online state module
-vi.mock('../../../src/net/websocket/onlineState', () => ({
-  onlineState: {
+vi.mock('../../../src/net/websocket/onlineState', () => {
+  const onlineState = {
     isOffline: false,
     onOnlineChange: vi.fn().mockReturnValue(() => {}),
-  },
-}));
+  };
+  return { onlineState };
+});
 
 describe('WebSocketTransport', () => {
   let transport: WebSocketTransport;
@@ -255,7 +261,8 @@ describe('WebSocketTransport', () => {
 
     it('should handle offline state during connect', async () => {
       const { onlineState } = await import('../../../src/net/websocket/onlineState');
-      onlineState.isOffline = true;
+      const mockedOnlineState = vi.mocked(onlineState, { partial: false, deep: true });
+      mockedOnlineState.isOffline = true;
 
       const connectPromise = transport.connect();
 
@@ -264,7 +271,7 @@ describe('WebSocketTransport', () => {
       expect(transport.state).toBe('disconnected');
       
       // Clean up
-      onlineState.isOffline = false;
+      mockedOnlineState.isOffline = false;
     });
   });
 

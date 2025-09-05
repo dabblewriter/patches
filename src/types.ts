@@ -1,4 +1,4 @@
-import type { JSONPatch } from './json-patch/JSONPatch.js';
+import { JSONPatch } from './json-patch/JSONPatch.js';
 import type { JSONPatchOp } from './json-patch/types.js';
 
 export interface Change {
@@ -147,8 +147,8 @@ export interface ListVersionsOptions {
  * without null checks, but should only be used for path generation, not value access.
  */
 export type PathProxy<T> = {
-  [P in keyof T]-?: T[P] extends object ? PathProxy<T[P]> : T[P];
-};
+  [P in keyof T]-?: NonNullable<T[P]> extends object ? PathProxy<NonNullable<T[P]>> : { toString: () => string };
+} & { toString: () => string };
 
 /**
  * Type signature for change mutator functions that use path-only proxies.

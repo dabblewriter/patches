@@ -49,7 +49,7 @@ export interface AuthorizationProvider<T extends AuthContext = AuthContext> {
 }
 
 /**
- * A permissive provider that authorises every action. 
+ * A permissive provider that authorises every action.
  * WARNING: This should only be used for development/testing purposes.
  * Never use this in production as it allows unrestricted access.
  */

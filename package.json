@@ -56,6 +56,8 @@
     "prepare": "npm run build",
     "test": "vitest run",
     "tdd": "vitest",
+    "format": "prettier --write src/",
+    "format:check": "prettier --check src/",
     "lint": "eslint src tests",
     "lint:fix": "eslint src tests --fix"
   },

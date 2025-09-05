@@ -82,7 +82,7 @@ describe('commitChanges', () => {
   });
 
   it('should throw error when changes lack baseRev', async () => {
-    const changes = [{ id: '1', rev: 1, baseRev: 0, ops: [], created: Date.now() }] as Change[];
+    const changes = [{ id: '1', rev: 1, ops: [], created: Date.now() }] as any as Change[];
 
     await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis)).rejects.toThrow(
       'Client changes must include baseRev for doc doc1.'

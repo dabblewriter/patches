@@ -1,7 +1,7 @@
 import { Delta } from '@dabble/delta';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { JSONPatch } from '../../src/json-patch/JSONPatch.js';
-import { createPathProxy } from '../../src/json-patch/patchProxy.js';
+import { createPathProxy } from '../../src/json-patch/pathProxy.js';
 
 interface TestType {
   foo: string;
@@ -48,19 +48,19 @@ describe('Path Proxy Utilities', () => {
     it('should throw error when attempting to set properties', () => {
       expect(() => {
         (pathProxy as any).foo = 'goodbye';
-      }).toThrow('Cannot set property \'foo\' on path proxy');
+      }).toThrow("Cannot set property 'foo' on path proxy");
     });
 
     it('should throw error when attempting to delete properties', () => {
       expect(() => {
         delete (pathProxy as any).foo;
-      }).toThrow('Cannot delete property \'foo\' on path proxy');
+      }).toThrow("Cannot delete property 'foo' on path proxy");
     });
 
     it('should throw helpful error messages for nested properties', () => {
       expect(() => {
         (pathProxy as any).nested.a = 'universe';
-      }).toThrow('Cannot set property \'a\' on path proxy');
+      }).toThrow("Cannot set property 'a' on path proxy");
     });
 
     it('should provide helpful error messages with usage instructions', () => {
@@ -81,37 +81,29 @@ describe('Path Proxy Utilities', () => {
 
     it('should work with replace operations', () => {
       patch.replace(path.foo, 'new value');
-      expect(patch.ops).toEqual([
-        { op: 'replace', path: '/foo', value: 'new value' }
-      ]);
+      expect(patch.ops).toEqual([{ op: 'replace', path: '/foo', value: 'new value' }]);
     });
 
     it('should work with add operations', () => {
       patch.add(path.arr[0], 'new item');
-      expect(patch.ops).toEqual([
-        { op: 'add', path: '/arr/0', value: 'new item' }
-      ]);
+      expect(patch.ops).toEqual([{ op: 'add', path: '/arr/0', value: 'new item' }]);
     });
 
     it('should work with remove operations', () => {
       patch.remove(path.bar!);
-      expect(patch.ops).toEqual([
-        { op: 'remove', path: '/bar' }
-      ]);
+      expect(patch.ops).toEqual([{ op: 'remove', path: '/bar' }]);
     });
 
     it('should work with nested paths', () => {
       patch.replace(path.nested.a, 'universe');
-      expect(patch.ops).toEqual([
-        { op: 'replace', path: '/nested/a', value: 'universe' }
-      ]);
+      expect(patch.ops).toEqual([{ op: 'replace', path: '/nested/a', value: 'universe' }]);
     });
 
     it('should work with text operations using Delta', () => {
       patch.text(path.foo, new Delta().retain(5).insert(' beautiful'));
       expect(patch.ops[0]).toMatchObject({
         op: '@txt',
-        path: '/foo'
+        path: '/foo',
       });
       // Verify the Delta was stored
       expect(patch.ops[0].value).toBeInstanceOf(Delta);
@@ -119,22 +111,18 @@ describe('Path Proxy Utilities', () => {
 
     it('should work with increment operations', () => {
       patch.increment(path.bar!, 5);
-      expect(patch.ops).toEqual([
-        { op: '@inc', path: '/bar', value: 5 }
-      ]);
+      expect(patch.ops).toEqual([{ op: '@inc', path: '/bar', value: 5 }]);
     });
 
     it('should work with decrement operations', () => {
       patch.decrement(path.bar!, 3);
-      expect(patch.ops).toEqual([
-        { op: '@inc', path: '/bar', value: -3 }
-      ]);
+      expect(patch.ops).toEqual([{ op: '@inc', path: '/bar', value: -3 }]);
     });
 
     it('should work with bit operations', () => {
       patch.bit(path.bar!, 2, true);
       expect(patch.ops).toEqual([
-        { op: '@bit', path: '/bar', value: 4 } // bit 2 = 2^2 = 4
+        { op: '@bit', path: '/bar', value: 4 }, // bit 2 = 2^2 = 4
       ]);
     });
 
@@ -155,7 +143,7 @@ describe('Path Proxy Utilities', () => {
   describe('Path proxy with complex array paths', () => {
     it('should handle array indices correctly', () => {
       const path = createPathProxy<{ items: Array<{ name: string; tags: string[] }> }>();
-      
+
       expect(path.items[0].name.toString()).toBe('/items/0/name');
       expect(path.items[5].tags[2].toString()).toBe('/items/5/tags/2');
     });
@@ -171,7 +159,7 @@ describe('Path Proxy Utilities', () => {
       expect(patch.ops).toEqual([
         { op: 'add', path: '/items/0', value: 'first item' },
         { op: 'replace', path: '/items/1', value: 'second item' },
-        { op: 'remove', path: '/items/2' }
+        { op: 'remove', path: '/items/2' },
       ]);
     });
   });

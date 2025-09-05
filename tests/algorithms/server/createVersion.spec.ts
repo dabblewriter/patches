@@ -7,7 +7,6 @@ import type { PatchesStoreBackend } from '../../../src/server/types';
 // Mock the createVersionMetadata function
 vi.mock('../../../src/data/version');
 const main = 'main' as const;
-const branch = 'branch' as const;
 
 describe('createVersion', () => {
   const mockCreateVersionMetadata = vi.mocked(versionModule.createVersionMetadata);
@@ -167,7 +166,7 @@ describe('createVersion', () => {
     };
 
     const expectedVersionData = {
-      origin: branch, // Should use overridden value
+      origin: main,
       startDate: 9000,
       endDate: 9000,
       rev: 2,

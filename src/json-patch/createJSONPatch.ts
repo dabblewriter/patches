@@ -1,6 +1,6 @@
 import type { ChangeMutator } from '../types.js';
 import { JSONPatch } from './JSONPatch.js';
-import { createPathProxy } from './patchProxy.js';
+import { createPathProxy } from './pathProxy.js';
 
 /**
  * Creates a `JSONPatch` instance using a path-only proxy for type-safe operation generation.

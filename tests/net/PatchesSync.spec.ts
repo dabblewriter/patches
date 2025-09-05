@@ -1,11 +1,10 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { PatchesSync } from '../../src/net/PatchesSync';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Patches } from '../../src/client/Patches';
-import type { PatchesStore, TrackedDoc } from '../../src/client/PatchesStore';
-import type { Change } from '../../src/types';
-import type { ConnectionState } from '../../src/net/protocol/types';
+import type { TrackedDoc } from '../../src/client/PatchesStore';
+import { PatchesSync } from '../../src/net/PatchesSync';
 import { PatchesWebSocket } from '../../src/net/websocket/PatchesWebSocket';
 import { onlineState } from '../../src/net/websocket/onlineState';
+import type { Change } from '../../src/types';
 
 // Mock all external dependencies
 vi.mock('../../src/client/Patches');
@@ -102,7 +101,7 @@ describe('PatchesSync', () => {
 
     it('should initialize with websocket options', () => {
       const wsOptions = { authToken: 'token123' } as any;
-      new PatchesSync(mockPatches, 'ws://localhost:8080', wsOptions);
+      new PatchesSync(mockPatches, 'ws://localhost:8080', { websocket: wsOptions });
 
       expect(PatchesWebSocket).toHaveBeenCalledWith('ws://localhost:8080', wsOptions);
     });

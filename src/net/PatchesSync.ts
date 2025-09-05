@@ -17,17 +17,22 @@ export interface PatchesSyncState {
   syncing: SyncingState;
 }
 
+export interface PatchesSyncOptions {
+  subscribeFilter?: (docIds: string[]) => string[];
+  websocket?: WebSocketOptions;
+}
+
 /**
  * Handles WebSocket connection, document subscriptions, and syncing logic between
  * the Patches instance and the server.
  */
 export class PatchesSync {
-  private ws: PatchesWebSocket;
-  private patches: Patches;
-  private store: PatchesStore;
-  private maxPayloadBytes?: number;
-  private trackedDocs: Set<string>;
-  private _state: PatchesSyncState = { online: false, connected: false, syncing: null };
+  protected ws: PatchesWebSocket;
+  protected patches: Patches;
+  protected store: PatchesStore;
+  protected maxPayloadBytes?: number;
+  protected trackedDocs: Set<string>;
+  protected _state: PatchesSyncState = { online: false, connected: false, syncing: null };
 
   /**
    * Signal emitted when the sync state changes.
@@ -38,11 +43,15 @@ export class PatchesSync {
    */
   readonly onError = signal<(error: Error, context?: { docId?: string }) => void>();
 
-  constructor(patches: Patches, url: string, wsOptions?: WebSocketOptions) {
+  constructor(
+    patches: Patches,
+    url: string,
+    protected options?: PatchesSyncOptions
+  ) {
     this.patches = patches;
     this.store = patches.store;
     this.maxPayloadBytes = patches.docOptions?.maxPayloadBytes;
-    this.ws = new PatchesWebSocket(url, wsOptions);
+    this.ws = new PatchesWebSocket(url, options?.websocket);
     this._state.online = onlineState.isOnline;
     this.trackedDocs = new Set(patches.trackedDocs);
 
@@ -118,7 +127,10 @@ export class PatchesSync {
       // Subscribe to active docs
       if (activeDocIds.length > 0) {
         try {
-          await this.ws.subscribe(activeDocIds);
+          const subscribeIds = this.options?.subscribeFilter?.(activeDocIds) || activeDocIds;
+          if (subscribeIds.length) {
+            await this.ws.subscribe(subscribeIds);
+          }
         } catch (err) {
           console.warn('Error subscribing to active docs during sync:', err);
           this.onError.emit(err as Error);
@@ -342,10 +354,19 @@ export class PatchesSync {
     if (!newIds.length) return;
 
     newIds.forEach(id => this.trackedDocs.add(id));
+    let subscribeIds = newIds;
+
+    // If a subscribe filter is provided, filter out docs that are already tracked
+    if (this.options?.subscribeFilter) {
+      const alreadyTracked = this.options.subscribeFilter([...this.trackedDocs]);
+      subscribeIds = subscribeIds.filter(id => !alreadyTracked.includes(id));
+    }
 
     if (this.state.connected) {
       try {
-        await this.ws.subscribe(newIds);
+        if (subscribeIds.length) {
+          await this.ws.subscribe(subscribeIds);
+        }
         // Trigger sync for newly tracked docs immediately
         await Promise.all(newIds.map(id => this.syncDoc(id)));
       } catch (err) {

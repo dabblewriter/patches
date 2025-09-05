@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeChange } from '../../../src/algorithms/client/makeChange';
 import { JSONPatch } from '../../../src/json-patch/JSONPatch';
-import type { PatchesSnapshot, Change } from '../../../src/types';
+import type { Change, PatchesSnapshot } from '../../../src/types';
 
 // Mock the dependencies
 vi.mock('../../../src/algorithms/client/createStateFromSnapshot');
@@ -45,14 +45,14 @@ describe('makeChange', () => {
     mockCreateJSONPatch.mockReturnValue(mockPatch);
     mockCreateChange.mockReturnValue(createChange(6, mockPatch.ops));
 
-    const mutator = vi.fn((draft, patch) => {
-      draft.text = 'world';
+    const mutator = vi.fn((patch, path) => {
+      patch.replace(path.text, 'world');
     });
 
     const result = makeChange(snapshot, mutator);
 
     expect(mockCreateStateFromSnapshot).toHaveBeenCalledWith(snapshot);
-    expect(mockCreateJSONPatch).toHaveBeenCalledWith({ text: 'hello' }, mutator);
+    expect(mockCreateJSONPatch).toHaveBeenCalledWith(mutator);
     expect(mockPatch.apply).toHaveBeenCalledWith({ text: 'hello' });
     expect(result).toHaveLength(1);
     expect(result[0].ops).toEqual(mockPatch.ops);

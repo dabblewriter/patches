@@ -16,11 +16,11 @@ vi.mock('../../src/json-patch/applyPatch');
 vi.mock('../../src/json-patch/createJSONPatch');
 vi.mock('../../src/json-patch/transformPatch');
 
+import { createVersion as createVersionAlgorithm } from '../../src/algorithms/server/createVersion';
 import { getSnapshotAtRevision } from '../../src/algorithms/server/getSnapshotAtRevision';
 import { getStateAtRevision } from '../../src/algorithms/server/getStateAtRevision';
 import { handleOfflineSessionsAndBatches } from '../../src/algorithms/server/handleOfflineSessionsAndBatches';
 import { applyChanges } from '../../src/algorithms/shared/applyChanges';
-import { createVersion as createVersionAlgorithm } from '../../src/algorithms/server/createVersion';
 import { applyPatch } from '../../src/json-patch/applyPatch';
 import { createJSONPatch } from '../../src/json-patch/createJSONPatch';
 import { transformPatch } from '../../src/json-patch/transformPatch';
@@ -273,13 +273,13 @@ describe('PatchesServer', () => {
 
       const result = await server.change(
         'doc1',
-        draft => {
-          draft.content = 'new';
+        (patch, path) => {
+          patch.replace(path.content, 'new');
         },
         { author: 'server' }
       );
 
-      expect(createJSONPatch).toHaveBeenCalledWith({ content: 'old' }, expect.any(Function));
+      expect(createJSONPatch).toHaveBeenCalledWith(expect.any(Function));
       expect(mockPatch.apply).toHaveBeenCalledWith({ content: 'old' });
       expect(commitSpy).toHaveBeenCalledWith('doc1', [expect.any(Object)]);
       expect(result).toBeDefined();
@@ -358,7 +358,6 @@ describe('PatchesServer', () => {
       await expect(server.captureCurrentVersion('doc1')).rejects.toThrow('No changes to create a version');
     });
   });
-
 });
 
 describe('assertVersionMetadata', () => {

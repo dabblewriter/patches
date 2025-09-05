@@ -58,6 +58,7 @@
     "tdd": "vitest",
     "format": "prettier --write src/",
     "format:check": "prettier --check src/",
+    "type:check": "tsc --noEmit",
     "lint": "eslint src tests",
     "lint:fix": "eslint src tests --fix"
   },

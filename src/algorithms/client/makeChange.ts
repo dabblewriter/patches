@@ -1,20 +1,19 @@
-import type { JSONPatch } from '../..';
 import { createChange } from '../../data/change.js';
 import { createJSONPatch } from '../../json-patch/createJSONPatch.js';
-import type { Change, DeepRequired, PatchesSnapshot } from '../../types.js';
+import type { Change, ChangeMutator, PatchesSnapshot } from '../../types.js';
 import { breakChange } from './breakChange.js';
 import { createStateFromSnapshot } from './createStateFromSnapshot.js';
 
 export function makeChange<T = any>(
   snapshot: PatchesSnapshot<T>,
-  mutator: (draft: DeepRequired<T>, patch: JSONPatch) => void,
+  mutator: ChangeMutator<T>,
   changeMetadata?: Record<string, any>,
   maxPayloadBytes?: number
 ): Change[] {
   const pendingChanges = snapshot.changes;
   const pendingRev = pendingChanges[pendingChanges.length - 1]?.rev ?? snapshot.rev;
   const state = createStateFromSnapshot(snapshot); // Current state including pending
-  const patch = createJSONPatch(state, mutator);
+  const patch = createJSONPatch(mutator);
   if (patch.ops.length === 0) {
     return [];
   }

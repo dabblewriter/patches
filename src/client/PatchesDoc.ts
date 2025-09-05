@@ -2,8 +2,7 @@ import { createStateFromSnapshot } from '../algorithms/client/createStateFromSna
 import { makeChange } from '../algorithms/client/makeChange.js';
 import { applyChanges } from '../algorithms/shared/applyChanges.js';
 import { signal, type Unsubscriber } from '../event-signal.js';
-import type { JSONPatch } from '../json-patch/JSONPatch.js';
-import type { Change, DeepRequired, PatchesSnapshot, SyncingState } from '../types.js';
+import type { Change, ChangeMutator, PatchesSnapshot, SyncingState } from '../types.js';
 
 /**
  * Options for creating a PatchesDoc instance
@@ -112,10 +111,10 @@ export class PatchesDoc<T extends object = object> {
 
   /**
    * Applies an update to the local state, generating a patch and adding it to pending changes.
-   * @param mutator Function modifying a draft state.
-   * @returns The generated Change object or null if no changes occurred.
+   * @param mutator Function that uses JSONPatch methods with type-safe paths.
+   * @returns The generated Change objects.
    */
-  change(mutator: (draft: DeepRequired<T>, patch: JSONPatch) => void): Change[] {
+  change(mutator: ChangeMutator<T>): Change[] {
     const changes = makeChange(this._snapshot, mutator, this._changeMetadata, this._maxPayloadBytes);
     if (changes.length === 0) {
       return changes;

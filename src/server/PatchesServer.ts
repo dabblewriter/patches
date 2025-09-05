@@ -7,7 +7,7 @@ import { createChange } from '../data/change.js';
 import { signal } from '../event-signal.js';
 import type { JSONPatch } from '../json-patch/JSONPatch.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
-import type { Change, DeepRequired, EditableVersionMetadata, PatchesState } from '../types.js';
+import type { Change, EditableVersionMetadata, PatchesState, PathProxy } from '../types.js';
 import type { PatchesStoreBackend } from './types.js';
 
 /**
@@ -114,11 +114,11 @@ export class PatchesServer {
    */
   async change<T = Record<string, any>>(
     docId: string,
-    mutator: (draft: DeepRequired<T>, patch: JSONPatch) => void,
+    mutator: (patch: JSONPatch, path: PathProxy<T>) => void,
     metadata?: Record<string, any>
   ): Promise<Change | null> {
     const { state, rev } = await this.getDoc(docId);
-    const patch = createJSONPatch(state as T, mutator);
+    const patch = createJSONPatch<T>(mutator);
     if (patch.ops.length === 0) {
       return null;
     }

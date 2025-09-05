@@ -1,4 +1,5 @@
 import type { JSONPatchOp } from './json-patch/types.js';
+import type { JSONPatch } from './json-patch/JSONPatch.js';
 
 export interface Change {
   /** Unique identifier for the change, generated client-side. */
@@ -141,27 +142,17 @@ export interface ListVersionsOptions {
 }
 
 /**
- * Makes optional object properties required for Proxies that allow setting deep properties.
+ * A proxy type for creating JSON Pointer paths in a type-safe way.
+ * This type makes all optional properties required to allow path navigation
+ * without null checks, but should only be used for path generation, not value access.
  */
-export type DeepRequired<T> = {
-  // Required properties: keep as-is but recurse into objects
-  [P in keyof T as undefined extends T[P] ? never : P]: T[P] extends object ? DeepRequired<T[P]> : T[P];
-} & {
-  // Optional object properties: make required and recurse
-  [P in keyof T as undefined extends T[P]
-    ? T[P] extends object | undefined
-      ? T[P] extends Function | Date | RegExp | Array<any> | null | undefined
-        ? never
-        : P
-      : never
-    : never]-?: T[P] extends object | undefined ? DeepRequired<T[P]> : T[P];
-} & {
-  // Optional primitive properties: keep optional
-  [P in keyof T as undefined extends T[P]
-    ? T[P] extends object | undefined
-      ? T[P] extends Function | Date | RegExp | Array<any> | null | undefined
-        ? P
-        : never
-      : P
-    : never]?: T[P];
+export type PathProxy<T> = {
+  [P in keyof T]-?: T[P] extends object ? PathProxy<T[P]> : T[P];
 };
+
+/**
+ * Type signature for change mutator functions that use path-only proxies.
+ * The mutator receives a JSONPatch instance and a PathProxy for type-safe path creation.
+ * All modifications must be done through explicit patch operations.
+ */
+export type ChangeMutator<T> = (patch: JSONPatch, path: PathProxy<T>) => void;

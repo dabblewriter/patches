@@ -1,3 +1,4 @@
+import type { DeepRequired } from '../types.js';
 import { JSONPatch } from './JSONPatch.js';
 
 // We use a function as the target so that `push` and other array methods can be called without error.
@@ -41,15 +42,15 @@ const proxyFodder = {} as any;
  * @param patch The `JSONPatch` instance to add generated operations to (required for automatic patch generation mode).
  * @returns A proxy object of type T.
  */
-export function createPatchProxy<T>(): T;
-export function createPatchProxy<T>(target: T, patch: JSONPatch): T;
-export function createPatchProxy<T>(target?: T, patch?: JSONPatch): T {
+export function createPatchProxy<T>(): DeepRequired<T>;
+export function createPatchProxy<T>(target: T, patch: JSONPatch): DeepRequired<T>;
+export function createPatchProxy<T>(target?: T, patch?: JSONPatch): DeepRequired<T> {
   // Call the internal implementation
-  return createPatchProxyInternal(target, patch) as T;
+  return createPatchProxyInternal(target, patch) as DeepRequired<T>;
 }
 
 // Internal implementation with the path parameter
-function createPatchProxyInternal<T>(target?: T, patch?: JSONPatch, path = ''): T {
+function createPatchProxyInternal<T>(target?: T, patch?: JSONPatch, path = ''): DeepRequired<T> {
   // Always use an empty function as the proxy target
   // This allows us to proxy any type of value, including primitives and undefined,
   // and enables calling array methods like push/splice directly on array proxies.
@@ -182,5 +183,5 @@ function createPatchProxyInternal<T>(target?: T, patch?: JSONPatch, path = ''): 
     has(_, prop) {
       return target != null && typeof target === 'object' && prop in target;
     },
-  }) as T;
+  }) as DeepRequired<T>;
 }

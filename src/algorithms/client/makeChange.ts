@@ -1,13 +1,13 @@
 import type { JSONPatch } from '../..';
 import { createChange } from '../../data/change.js';
 import { createJSONPatch } from '../../json-patch/createJSONPatch.js';
-import type { Change, PatchesSnapshot } from '../../types.js';
+import type { Change, DeepRequired, PatchesSnapshot } from '../../types.js';
 import { breakChange } from './breakChange.js';
 import { createStateFromSnapshot } from './createStateFromSnapshot.js';
 
 export function makeChange<T = any>(
   snapshot: PatchesSnapshot<T>,
-  mutator: (draft: T, patch: JSONPatch) => void,
+  mutator: (draft: DeepRequired<T>, patch: JSONPatch) => void,
   changeMetadata?: Record<string, any>,
   maxPayloadBytes?: number
 ): Change[] {

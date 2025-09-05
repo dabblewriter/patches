@@ -139,3 +139,29 @@ export interface ListVersionsOptions {
   /** Filter by the group ID (branch ID or offline batch ID). */
   groupId?: string;
 }
+
+/**
+ * Makes optional object properties required for Proxies that allow setting deep properties.
+ */
+export type DeepRequired<T> = {
+  // Required properties: keep as-is but recurse into objects
+  [P in keyof T as undefined extends T[P] ? never : P]: T[P] extends object ? DeepRequired<T[P]> : T[P];
+} & {
+  // Optional object properties: make required and recurse
+  [P in keyof T as undefined extends T[P]
+    ? T[P] extends object | undefined
+      ? T[P] extends Function | Date | RegExp | Array<any> | null | undefined
+        ? never
+        : P
+      : never
+    : never]-?: T[P] extends object | undefined ? DeepRequired<T[P]> : T[P];
+} & {
+  // Optional primitive properties: keep optional
+  [P in keyof T as undefined extends T[P]
+    ? T[P] extends object | undefined
+      ? T[P] extends Function | Date | RegExp | Array<any> | null | undefined
+        ? P
+        : never
+      : P
+    : never]?: T[P];
+};

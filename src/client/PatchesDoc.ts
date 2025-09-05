@@ -3,7 +3,7 @@ import { makeChange } from '../algorithms/client/makeChange.js';
 import { applyChanges } from '../algorithms/shared/applyChanges.js';
 import { signal, type Unsubscriber } from '../event-signal.js';
 import type { JSONPatch } from '../json-patch/JSONPatch.js';
-import type { Change, PatchesSnapshot, SyncingState } from '../types.js';
+import type { Change, DeepRequired, PatchesSnapshot, SyncingState } from '../types.js';
 
 /**
  * Options for creating a PatchesDoc instance
@@ -115,7 +115,7 @@ export class PatchesDoc<T extends object = object> {
    * @param mutator Function modifying a draft state.
    * @returns The generated Change object or null if no changes occurred.
    */
-  change(mutator: (draft: T, patch: JSONPatch) => void): Change[] {
+  change(mutator: (draft: DeepRequired<T>, patch: JSONPatch) => void): Change[] {
     const changes = makeChange(this._snapshot, mutator, this._changeMetadata, this._maxPayloadBytes);
     if (changes.length === 0) {
       return changes;

@@ -1,3 +1,4 @@
+import type { DeepRequired } from '../types.js';
 import { JSONPatch } from './JSONPatch.js';
 import { createPatchProxy } from './patchProxy.js';
 
@@ -34,7 +35,7 @@ import { createPatchProxy } from './patchProxy.js';
  * // ]
  * ```
  */
-export function createJSONPatch<T>(target: T, updater: (proxy: T, patch: JSONPatch) => void): JSONPatch {
+export function createJSONPatch<T>(target: T, updater: (proxy: DeepRequired<T>, patch: JSONPatch) => void): JSONPatch {
   const patch = new JSONPatch();
   // Use the specific overload of createPatchProxy that takes target and patch
   updater(createPatchProxy(target, patch), patch);

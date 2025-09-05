@@ -1,5 +1,5 @@
-import type { JSONPatchOp } from './json-patch/types.js';
 import type { JSONPatch } from './json-patch/JSONPatch.js';
+import type { JSONPatchOp } from './json-patch/types.js';
 
 export interface Change {
   /** Unique identifier for the change, generated client-side. */
@@ -155,4 +155,4 @@ export type PathProxy<T> = {
  * The mutator receives a JSONPatch instance and a PathProxy for type-safe path creation.
  * All modifications must be done through explicit patch operations.
  */
-export type ChangeMutator<T> = (patch: JSONPatch, path: PathProxy<T>) => void;
+export type ChangeMutator<T> = (patch: JSONPatch, root: PathProxy<T>) => void;

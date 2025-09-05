@@ -114,7 +114,7 @@ export class PatchesServer {
    */
   async change<T = Record<string, any>>(
     docId: string,
-    mutator: (patch: JSONPatch, path: PathProxy<T>) => void,
+    mutator: (patch: JSONPatch, root: PathProxy<T>) => void,
     metadata?: Record<string, any>
   ): Promise<Change | null> {
     const { state, rev } = await this.getDoc(docId);

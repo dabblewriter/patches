@@ -135,8 +135,9 @@ export class JSONPatch {
   /**
    * Creates a patch from an object partial, updating each field. Set a field to undefined to delete it.
    */
-  addUpdates(updates: { [key: string]: any }, path = '/') {
-    if (path[path.length - 1] !== '/') path += '/';
+  addUpdates(updates: { [key: string]: any }, path: PathLike = '/') {
+    path = checkPath(path);
+    if ((path as string)[(path as string).length - 1] !== '/') path += '/';
     Object.keys(updates).forEach(key => {
       const value = updates[key];
       if (value == undefined) {
@@ -145,22 +146,6 @@ export class JSONPatch {
         this.replace(path + key, value);
       }
     });
-    return this;
-  }
-
-  /**
-   * This will ensure an "add empty object" operation is created for each property along the path that does not exist.
-   */
-  addObjectsInPath(obj: any, path: PathLike) {
-    path = checkPath(path as string);
-    const parts = (path as string).split('/');
-    for (let i = 1; i < parts.length - 1; i++) {
-      const prop = parts[i];
-      if (!obj || !obj[prop]) {
-        this.add(parts.slice(0, i + 1).join('/'), {});
-      }
-      obj = obj && obj[prop];
-    }
     return this;
   }
 

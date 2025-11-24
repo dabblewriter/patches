@@ -3,6 +3,7 @@ export { composePatch } from './composePatch.js';
 export { invertPatch } from './invertPatch.js';
 export { applyBitmask, bitmask, combineBitmasks } from './ops/bitmask.js';
 export * as defaultOps from './ops/index.js';
+export * from './pathProxy.js';
 export { transformPatch } from './transformPatch.js';
 
 export * from './JSONPatch.js';

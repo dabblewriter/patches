@@ -22,7 +22,7 @@ const proxyFodder = {} as any;
  * @template T The type of the object to create paths for.
  * @returns A path proxy object.
  */
-export const createPathProxy = pathProxy as <T>() => PathProxy<T>;
+export const createPathProxy = pathProxy as <T = any>() => PathProxy<T>;
 
 // Internal implementation with the path parameter
 export function pathProxy<T>(path = ''): PathProxy<T> {

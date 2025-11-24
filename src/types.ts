@@ -141,14 +141,26 @@ export interface ListVersionsOptions {
   groupId?: string;
 }
 
+/** Detects if T is exactly `any` */
+type IsAny<T> = 0 extends 1 & T ? true : false;
+
+/** Untyped path proxy that allows arbitrary deep property access */
+type DeepPathProxy = { [key: string]: DeepPathProxy } & { toString: () => string };
+
 /**
  * A proxy type for creating JSON Pointer paths in a type-safe way.
  * This type makes all optional properties required to allow path navigation
  * without null checks, but should only be used for path generation, not value access.
+ *
+ * Defaults to `any`, which returns a `DeepPathProxy` allowing arbitrary deep property access.
+ * When a specific type is provided, returns a strictly typed proxy.
  */
-export type PathProxy<T> = {
-  [P in keyof T]-?: NonNullable<T[P]> extends object ? PathProxy<NonNullable<T[P]>> : { toString: () => string };
-} & { toString: () => string };
+export type PathProxy<T = any> =
+  IsAny<T> extends true
+    ? DeepPathProxy
+    : {
+        [P in keyof T]-?: NonNullable<T[P]> extends object ? PathProxy<NonNullable<T[P]>> : { toString: () => string };
+      } & { toString: () => string };
 
 /**
  * Type signature for change mutator functions that use path-only proxies.

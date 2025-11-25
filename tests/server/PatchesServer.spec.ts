@@ -133,11 +133,20 @@ describe('PatchesServer', () => {
       expect(result).toEqual([[], []]);
     });
 
-    it('should throw error for changes without baseRev', async () => {
-      const invalidChange = { ...mockChange, baseRev: undefined } as any;
-      await expect(server.commitChanges('doc1', [invalidChange])).rejects.toThrow(
-        'Client changes must include baseRev'
-      );
+    it('should fill in baseRev when missing (apply to latest)', async () => {
+      // Create a change without baseRev and without batchId (to skip offline handling)
+      const changeWithoutBaseRev = {
+        id: 'change1',
+        rev: 2,
+        ops: [{ op: 'replace', path: '/content', value: 'new content' }],
+        created: Date.now(),
+        // No baseRev - should be filled in
+        // No batchId - skip offline handling
+      } as any;
+      const result = await server.commitChanges('doc1', [changeWithoutBaseRev]);
+      // Should succeed, not throw - baseRev gets filled in with current revision
+      expect(result[1]).toHaveLength(1);
+      expect(result[1][0].baseRev).toBe(1); // Current rev from mock
     });
 
     it('should throw error for inconsistent baseRev in batch', async () => {

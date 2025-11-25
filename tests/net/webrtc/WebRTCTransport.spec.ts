@@ -45,7 +45,7 @@ describe('WebRTCTransport', () => {
         rpcEventHandlers[event] = handler;
         return vi.fn(); // Unsubscriber
       }),
-      request: vi.fn().mockResolvedValue(undefined),
+      call: vi.fn().mockResolvedValue(undefined),
     };
 
     // Mock WebSocket transport
@@ -346,7 +346,7 @@ describe('WebRTCTransport', () => {
 
       signalHandler(signalData);
 
-      expect(mockJSONRPCClient.request).toHaveBeenCalledWith('peer-signal', {
+      expect(mockJSONRPCClient.call).toHaveBeenCalledWith('peer-signal', {
         to: 'peer1',
         data: signalData,
       });

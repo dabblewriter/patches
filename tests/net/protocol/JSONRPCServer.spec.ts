@@ -209,9 +209,10 @@ describe('JSONRPCServer', () => {
       const response = await server.processMessage(request);
       const parsed = JSON.parse(response as string);
 
+      // JSON-RPC 2.0 spec: error responses include the request id
       expect(parsed).toEqual({
         jsonrpc: '2.0',
-        id: null,
+        id: 1,
         error: {
           code: -32000,
           message: "Unknown method 'unknownMethod'.",
@@ -231,9 +232,10 @@ describe('JSONRPCServer', () => {
       const response = await server.processMessage(request);
       const parsed = JSON.parse(response as string);
 
+      // JSON-RPC 2.0 spec: error responses include the request id
       expect(parsed).toEqual({
         jsonrpc: '2.0',
-        id: null,
+        id: 1,
         error: {
           code: -32000,
           message: 'Test error',
@@ -401,11 +403,10 @@ describe('JSONRPCServer', () => {
 
       expect(parsed).toEqual({
         jsonrpc: '2.0',
-        id: null,
+        id: 1,
         error: {
           code: 1001,
           message: 'Custom error',
-          data: undefined,
         },
       });
     });

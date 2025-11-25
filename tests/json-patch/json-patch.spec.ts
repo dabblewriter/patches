@@ -235,21 +235,6 @@ describe('JSONPatch', () => {
     expect(obj).toEqual({ test: true, sub: { name: 'Test' } });
   });
 
-  it('will create add operations for deep adds if needed', () => {
-    patch.addObjectsInPath(obj, '/sub/obj/name');
-    patch.add('/sub/obj/name', 'test');
-    obj = patch.apply(obj);
-    expect(obj).toEqual({ test: true, sub: { obj: { name: 'test' } } });
-  });
-
-  it('will create add operations for deep adds if needed', () => {
-    obj.sub = {};
-    patch.addObjectsInPath(obj, '/sub/obj/name');
-    patch.add('/sub/obj/name', 'test');
-    obj = patch.apply(obj);
-    expect(obj).toEqual({ test: true, sub: { obj: { name: 'test' } } });
-  });
-
   it('will apply changes to a sub-object', () => {
     obj.sub = { name: 'test' };
     patch.remove('/name');

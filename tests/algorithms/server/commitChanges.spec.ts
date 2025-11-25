@@ -81,12 +81,48 @@ describe('commitChanges', () => {
     expect(mockStore.saveChanges).not.toHaveBeenCalled();
   });
 
-  it('should throw error when changes lack baseRev', async () => {
-    const changes = [{ id: '1', rev: 1, ops: [], created: Date.now() }] as any as Change[];
+  it('should fill in baseRev when missing (apply to latest)', async () => {
+    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
+      state: { baseState: true },
+      rev: 0,
+      changes: [createChange('existing', 5, 0)], // Server is at rev 5
+    });
 
-    await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis)).rejects.toThrow(
-      'Client changes must include baseRev for doc doc1.'
-    );
+    // Change without baseRev
+    const changes = [{ id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], created: Date.now() }] as Change[];
+
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+
+    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+
+    // Returned transformed changes should have baseRev filled in
+    expect(result[1]).toHaveLength(1);
+    expect(result[1][0].baseRev).toBe(5);
+  });
+
+  it('should fill in baseRev for multiple changes when all omit it', async () => {
+    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
+      state: { baseState: true },
+      rev: 0,
+      changes: [createChange('existing', 3, 0)], // Server is at rev 3
+    });
+
+    // Multiple changes without baseRev
+    const changes = [
+      { id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], created: Date.now() },
+      { id: '2', ops: [{ op: 'add', path: '/baz', value: 'qux' }], created: Date.now() },
+    ] as Change[];
+
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+
+    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+
+    // Returned transformed changes should have baseRev filled in
+    expect(result[1]).toHaveLength(2);
+    expect(result[1][0].baseRev).toBe(3);
+    expect(result[1][1].baseRev).toBe(3);
   });
 
   it('should throw error when changes have inconsistent baseRev', async () => {
@@ -156,9 +192,10 @@ describe('commitChanges', () => {
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
-    await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    expect(changes[0].created).toBeLessThanOrEqual(Date.now());
+    // Returned transformed changes should have normalized timestamps
+    expect(result[1][0].created).toBeLessThanOrEqual(Date.now());
   });
 
   it('should create version when last change is older than session timeout', async () => {

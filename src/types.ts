@@ -1,21 +1,38 @@
 import { JSONPatch } from './json-patch/JSONPatch.js';
 import type { JSONPatchOp } from './json-patch/types.js';
 
-export interface Change {
+/**
+ * A change being submitted to the server. Unlike committed Change, rev and baseRev are optional.
+ * If omitted, the server fills them in using the current latest revision (apply to latest).
+ * This is useful for server-to-server operations like migrations so that you don't need to
+ * fetch the document just to get its revision number.
+ */
+export interface ChangeInput {
   /** Unique identifier for the change, generated client-side. */
   id: string;
   /** The patch operations. */
   ops: JSONPatchOp[];
-  /** The revision number assigned on the client to the optimistic revision and updated by the server after commit. */
-  rev: number;
-  /** The server revision this change was based on. Required for client->server changes. */
-  baseRev: number;
+  /** Optional base revision. If omitted, server uses current revision (apply to latest). */
+  baseRev?: number;
+  /** Optional revision number. If omitted, server assigns based on current state. */
+  rev?: number;
   /** Client-side timestamp when the change was created. */
   created: number;
   /** Optional batch identifier for grouping changes that belong to the same client batch (for multi-batch offline/large edits). */
   batchId?: string;
   /** Optional arbitrary metadata associated with the change. */
   [metadata: string]: any;
+}
+
+/**
+ * A change that has been committed to the server with assigned revision numbers.
+ * This is the canonical form of changes stored and returned by the server.
+ */
+export interface Change extends ChangeInput {
+  /** The server revision this change was based on. */
+  baseRev: number;
+  /** The revision number assigned by the server after commit. */
+  rev: number;
 }
 
 /**

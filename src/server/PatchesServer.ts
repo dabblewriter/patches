@@ -7,7 +7,7 @@ import { createChange } from '../data/change.js';
 import { signal } from '../event-signal.js';
 import type { JSONPatch } from '../json-patch/JSONPatch.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
-import type { Change, EditableVersionMetadata, PatchesState, PathProxy } from '../types.js';
+import type { Change, ChangeInput, EditableVersionMetadata, PatchesState, PathProxy } from '../types.js';
 import type { PatchesStoreBackend } from './types.js';
 
 /**
@@ -82,7 +82,7 @@ export class PatchesServer {
    *   - committedChanges: Changes that were already committed to the server after the client's base revision
    *   - transformedChanges: The client's changes after being transformed against concurrent changes
    */
-  async commitChanges(docId: string, changes: Change[], originClientId?: string): Promise<[Change[], Change[]]> {
+  async commitChanges(docId: string, changes: ChangeInput[], originClientId?: string): Promise<[Change[], Change[]]> {
     const [committedChanges, transformedChanges] = await commitChanges(
       this.store,
       docId,

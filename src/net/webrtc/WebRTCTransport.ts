@@ -151,7 +151,7 @@ export class WebRTCTransport implements ClientTransport {
     const peer = new Peer({ initiator, trickle: false });
 
     peer.on('signal', data => {
-      this.rpc.request('peer-signal', { to: peerId, data });
+      this.rpc.call('peer-signal', { to: peerId, data });
     });
 
     peer.on('connect', () => {

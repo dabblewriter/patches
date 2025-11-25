@@ -65,7 +65,7 @@ export interface ServerTransport {
 /**
  * Represents a JSON-RPC 2.0 request object.
  */
-export interface Request {
+export interface JsonRpcRequest {
   /** JSON-RPC protocol version, always "2.0" */
   jsonrpc: '2.0';
   /** Request identifier, used to match responses to requests */
@@ -79,7 +79,7 @@ export interface Request {
 /**
  * Represents a JSON-RPC 2.0 response object.
  */
-export interface Response {
+export interface JsonRpcResponse {
   /** JSON-RPC protocol version, always "2.0" */
   jsonrpc: '2.0';
   /** Response identifier, matches the id of the corresponding request */
@@ -101,7 +101,7 @@ export interface Response {
  * Represents a JSON-RPC 2.0 notification object.
  * Notifications are one-way messages that don't expect a response.
  */
-export interface Notification {
+export interface JsonRpcNotification {
   /** JSON-RPC protocol version, always "2.0" */
   jsonrpc: '2.0';
   /** Name of the notification method */
@@ -111,7 +111,7 @@ export interface Notification {
 }
 
 /** Union type for all possible JSON-RPC message types */
-export type Message = Request | Response | Notification;
+export type Message = JsonRpcRequest | JsonRpcResponse | JsonRpcNotification;
 
 export interface ListOptions {
   startAt?: string;

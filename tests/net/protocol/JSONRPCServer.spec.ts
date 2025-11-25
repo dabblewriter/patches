@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { JSONRPCServer } from '../../../src/net/protocol/JSONRPCServer';
+import type { JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, Message } from '../../../src/net/protocol/types';
 import type { AuthContext } from '../../../src/net/websocket/AuthorizationProvider';
-import type { Request, Response, Notification, Message } from '../../../src/net/protocol/types';
 
 describe('JSONRPCServer', () => {
   let server: JSONRPCServer;
@@ -290,14 +290,14 @@ describe('JSONRPCServer', () => {
     });
 
     it('should process Message object directly', async () => {
-      const message: Request = {
+      const message: JsonRpcRequest = {
         jsonrpc: '2.0',
         id: 1,
         method: 'objectMethod',
         params: { data: 'object' },
       };
 
-      const response = (await server.processMessage(message)) as Response;
+      const response = (await server.processMessage(message)) as JsonRpcResponse;
 
       expect(response).toEqual({
         jsonrpc: '2.0',
@@ -309,7 +309,7 @@ describe('JSONRPCServer', () => {
     it('should handle invalid Message object', async () => {
       const invalidMessage = { someField: 'value' } as any;
 
-      const response = (await server.processMessage(invalidMessage)) as unknown as Response;
+      const response = (await server.processMessage(invalidMessage)) as unknown as JsonRpcResponse;
 
       expect(response).toEqual({
         jsonrpc: '2.0',
@@ -326,7 +326,7 @@ describe('JSONRPCServer', () => {
       const handler = vi.fn();
       server.on('objectNotification', handler);
 
-      const notification: Notification = {
+      const notification: JsonRpcNotification = {
         jsonrpc: '2.0',
         method: 'objectNotification',
         params: { data: 'notify' },
@@ -349,7 +349,7 @@ describe('JSONRPCServer', () => {
         metadata: { user: 'testuser' },
       };
 
-      const request: Request = {
+      const request: JsonRpcRequest = {
         jsonrpc: '2.0',
         id: 1,
         method: 'authMethod',
@@ -370,7 +370,7 @@ describe('JSONRPCServer', () => {
         metadata: { role: 'admin' },
       };
 
-      const notification: Notification = {
+      const notification: JsonRpcNotification = {
         jsonrpc: '2.0',
         method: 'authNotification',
         params: { message: 'admin action' },
@@ -414,14 +414,14 @@ describe('JSONRPCServer', () => {
       const errorWithoutMessage = {} as any;
       server.registerMethod('noMessageError', vi.fn().mockRejectedValue(errorWithoutMessage));
 
-      const request: Request = {
+      const request: JsonRpcRequest = {
         jsonrpc: '2.0',
         id: 1,
         method: 'noMessageError',
         params: {},
       };
 
-      const response = (await server.processMessage(request)) as Response;
+      const response = (await server.processMessage(request)) as JsonRpcResponse;
 
       expect(response.error?.code).toBe(-32000);
       expect(response.error?.message).toBe('Server error');
@@ -448,14 +448,14 @@ describe('JSONRPCServer', () => {
     it('should reject array parameters', async () => {
       server.registerMethod('arrayParamValidation', vi.fn());
 
-      const requestWithArrayParams: Request = {
+      const requestWithArrayParams: JsonRpcRequest = {
         jsonrpc: '2.0',
         id: 1,
         method: 'arrayParamValidation',
         params: [1, 2, 3],
       };
 
-      const response = (await server.processMessage(requestWithArrayParams)) as Response;
+      const response = (await server.processMessage(requestWithArrayParams)) as JsonRpcResponse;
 
       expect(response.error?.message).toBe("Invalid parameters for method 'arrayParamValidation'.");
     });
@@ -464,14 +464,14 @@ describe('JSONRPCServer', () => {
       const handler = vi.fn().mockResolvedValue('success');
       server.registerMethod('nullParamMethod', handler);
 
-      const requestWithNullParams: Request = {
+      const requestWithNullParams: JsonRpcRequest = {
         jsonrpc: '2.0',
         id: 1,
         method: 'nullParamMethod',
         params: null,
       };
 
-      const response = (await server.processMessage(requestWithNullParams)) as Response;
+      const response = (await server.processMessage(requestWithNullParams)) as JsonRpcResponse;
 
       expect(response.error?.message).toBe("Invalid parameters for method 'nullParamMethod'.");
     });
@@ -480,14 +480,14 @@ describe('JSONRPCServer', () => {
       const handler = vi.fn().mockResolvedValue('valid');
       server.registerMethod('validParamMethod', handler);
 
-      const requestWithObjectParams: Request = {
+      const requestWithObjectParams: JsonRpcRequest = {
         jsonrpc: '2.0',
         id: 1,
         method: 'validParamMethod',
         params: { valid: true },
       };
 
-      const response = (await server.processMessage(requestWithObjectParams)) as Response;
+      const response = (await server.processMessage(requestWithObjectParams)) as JsonRpcResponse;
 
       expect(response.result).toBe('valid');
       expect(handler).toHaveBeenCalledWith({ valid: true }, undefined);
@@ -509,9 +509,9 @@ describe('JSONRPCServer', () => {
       const responses = await Promise.all(requests.map(req => server.processMessage(req)));
 
       expect(responses).toHaveLength(3);
-      expect((responses[0] as Response).result).toBe('result1');
-      expect((responses[1] as Response).result).toBe('result2');
-      expect((responses[2] as Response).result).toBe('result3');
+      expect((responses[0] as JsonRpcResponse).result).toBe('result1');
+      expect((responses[1] as JsonRpcResponse).result).toBe('result2');
+      expect((responses[2] as JsonRpcResponse).result).toBe('result3');
     });
 
     it('should handle mixed requests and notifications', async () => {
@@ -537,14 +537,14 @@ describe('JSONRPCServer', () => {
 
   describe('edge cases and robustness', () => {
     it('should handle empty object message', async () => {
-      const response = (await server.processMessage({} as any)) as unknown as Response;
+      const response = (await server.processMessage({} as any)) as unknown as JsonRpcResponse;
 
       expect(response.error?.code).toBe(-32600);
       expect(response.error?.message).toBe('Invalid Request');
     });
 
     it('should handle null message', async () => {
-      const response = (await server.processMessage(null as any)) as unknown as Response;
+      const response = (await server.processMessage(null as any)) as unknown as JsonRpcResponse;
 
       expect(response.error?.code).toBe(-32600);
       expect(response.error?.message).toBe('Invalid Request');
@@ -564,14 +564,14 @@ describe('JSONRPCServer', () => {
 
       server.registerMethod(largeMethodName, vi.fn().mockResolvedValue('large'));
 
-      const request: Request = {
+      const request: JsonRpcRequest = {
         jsonrpc: '2.0',
         id: 1,
         method: largeMethodName,
         params: largeParams,
       };
 
-      const response = (await server.processMessage(request)) as Response;
+      const response = (await server.processMessage(request)) as JsonRpcResponse;
 
       expect(response.result).toBe('large');
     });
@@ -584,20 +584,20 @@ describe('JSONRPCServer', () => {
 
       server.registerMethod('asyncMethod', asyncHandler);
 
-      const request: Request = {
+      const request: JsonRpcRequest = {
         jsonrpc: '2.0',
         id: 1,
         method: 'asyncMethod',
         params: { data: 'test' },
       };
 
-      const response = (await server.processMessage(request)) as Response;
+      const response = (await server.processMessage(request)) as JsonRpcResponse;
 
       expect(response.result).toBe('async result: test');
     });
 
     it('should handle notification for non-subscribed method', async () => {
-      const notification: Notification = {
+      const notification: JsonRpcNotification = {
         jsonrpc: '2.0',
         method: 'unsubscribedMethod',
         params: { data: 'test' },
@@ -626,14 +626,14 @@ describe('JSONRPCServer', () => {
 
       server.registerMethod<CreateUserParams, CreateUserResult>('createUser', typedHandler);
 
-      const request: Request = {
+      const request: JsonRpcRequest = {
         jsonrpc: '2.0',
         id: 1,
         method: 'createUser',
         params: { name: 'John', email: 'john@example.com' },
       };
 
-      const response = (await server.processMessage(request)) as Response;
+      const response = (await server.processMessage(request)) as JsonRpcResponse;
 
       expect(response.result).toEqual({ id: 'user123', created: true });
       expect(typedHandler).toHaveBeenCalledWith({ name: 'John', email: 'john@example.com' }, undefined);
@@ -651,7 +651,7 @@ describe('JSONRPCServer', () => {
         typedNotificationHandler(params, clientId);
       });
 
-      const notification: Notification = {
+      const notification: JsonRpcNotification = {
         jsonrpc: '2.0',
         method: 'typedNotification',
         params: { event: 'user.login', timestamp: Date.now() },

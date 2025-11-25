@@ -1,6 +1,6 @@
 import { signal, type Signal, type Unsubscriber } from '../../event-signal.js';
 import type { AuthContext } from '../websocket/AuthorizationProvider.js';
-import type { Message, Notification, Request, Response } from './types.js';
+import type { JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, Message } from './types.js';
 
 export type ConnectionSignalSubscriber = (params: any, clientId?: string) => any;
 export type MessageHandler<P = any, R = any> = (params: P, ctx?: AuthContext) => Promise<R> | R;
@@ -28,7 +28,7 @@ export class JSONRPCServer {
   private readonly notificationSignals = new Map<string, Signal<ConnectionSignalSubscriber>>();
 
   /** Allow external callers to emit server-initiated notifications. */
-  public readonly onNotify = signal<(msg: Notification, exceptConnectionId?: string) => void>();
+  public readonly onNotify = signal<(msg: JsonRpcNotification, exceptConnectionId?: string) => void>();
 
   // -------------------------------------------------------------------------
   // Registration API
@@ -73,7 +73,7 @@ export class JSONRPCServer {
    * the connected client.
    */
   async notify(method: string, params?: any, exceptConnectionId?: string): Promise<void> {
-    const msg: Notification = { jsonrpc: '2.0', method, params };
+    const msg: JsonRpcNotification = { jsonrpc: '2.0', method, params };
     this.onNotify.emit(msg, exceptConnectionId);
   }
 
@@ -90,10 +90,10 @@ export class JSONRPCServer {
    * internally; the returned string is forwarded over the socket.
    */
   public async processMessage(raw: string, ctx?: AuthContext): Promise<string | undefined>;
-  public async processMessage(message: Message, ctx?: AuthContext): Promise<Response | undefined>;
-  public async processMessage(raw: string | Message, ctx?: AuthContext): Promise<string | Response | undefined> {
+  public async processMessage(message: Message, ctx?: AuthContext): Promise<JsonRpcResponse | undefined>;
+  public async processMessage(raw: string | Message, ctx?: AuthContext): Promise<string | JsonRpcResponse | undefined> {
     let message: Message;
-    const respond = typeof raw === 'string' ? JSON.stringify : (r: Response) => r;
+    const respond = typeof raw === 'string' ? JSON.stringify : (r: JsonRpcResponse) => r;
 
     // --- Parse & basic validation ------------------------------------------------
     if (typeof raw === 'string') {
@@ -116,12 +116,12 @@ export class JSONRPCServer {
     if ('id' in message && message.id !== undefined) {
       // -> Request ----------------------------------------------------------------
       try {
-        const result = await this._dispatch(message.method, (message as Request).params, ctx);
-        const response: Response = { jsonrpc: '2.0', id: message.id as number, result };
+        const result = await this._dispatch(message.method, (message as JsonRpcRequest).params, ctx);
+        const response: JsonRpcResponse = { jsonrpc: '2.0', id: message.id as number, result };
         return respond(response);
       } catch (err: any) {
         return respond(
-          rpcError(err?.code ?? -32000, err?.message ?? 'Server error', err?.code ? undefined : err?.stack)
+          rpcError(err?.code ?? -32000, err?.message ?? 'Server error', err?.code ? undefined : err?.stack, message.id)
         );
       }
     } else {
@@ -154,6 +154,6 @@ export class JSONRPCServer {
   }
 }
 
-function rpcError(code: number, message: string, data?: any): Response {
-  return { jsonrpc: '2.0', id: null as any, error: { code, message, data } };
+function rpcError(code: number, message: string, data?: any, id?: number): JsonRpcResponse {
+  return { jsonrpc: '2.0', id: id ?? (null as any), error: { code, message, data } };
 }

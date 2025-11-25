@@ -1,5 +1,5 @@
 import { signal, type Signal, type SignalSubscriber, type Unsubscriber } from '../../event-signal.js';
-import type { ClientTransport, Notification, Request, Response } from './types.js';
+import type { ClientTransport, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from './types.js';
 
 /**
  * Implementation of a JSON-RPC 2.0 client that communicates over a provided transport layer.
@@ -28,9 +28,9 @@ export class JSONRPCClient {
    * @returns A promise that resolves with the result of the procedure call or rejects with an error
    * @template T - The expected return type of the remote procedure
    */
-  async request<T = any>(method: string, params?: any): Promise<T> {
+  async call<T = any>(method: string, params?: any): Promise<T> {
     const id = this.nextId++;
-    const message: Request = { jsonrpc: '2.0', id, method, params };
+    const message: JsonRpcRequest = { jsonrpc: '2.0', id, method, params };
 
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -45,7 +45,7 @@ export class JSONRPCClient {
    * @param params - The parameters to pass to the remote procedure (optional)
    */
   notify(method: string, params?: any): void {
-    const message: Notification = { jsonrpc: '2.0', method, params };
+    const message: JsonRpcNotification = { jsonrpc: '2.0', method, params };
     this.transport.send(JSON.stringify(message));
   }
 
@@ -89,7 +89,7 @@ export class JSONRPCClient {
 
       // Must be a response (has id)
       if (typeof message === 'object' && message !== null && 'id' in message) {
-        const response = message as Response;
+        const response = message as JsonRpcResponse;
         const pending = this.pending.get(response.id as number);
         if (pending) {
           this.pending.delete(response.id as number);

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { JSONRPCClient } from '../../../src/net/protocol/JSONRPCClient';
 import type { ClientTransport } from '../../../src/net/protocol/types';
 
@@ -41,7 +41,7 @@ describe('JSONRPCClient', () => {
 
   describe('request method', () => {
     it('should send JSON-RPC request with auto-incrementing id', async () => {
-      const responsePromise = client.request('testMethod', { param: 'value' });
+      const responsePromise = client.call('testMethod', { param: 'value' });
 
       expect(mockTransport.send).toHaveBeenCalledTimes(1);
       const sentMessage = JSON.parse(vi.mocked(mockTransport.send).mock.calls[0][0]);
@@ -67,7 +67,7 @@ describe('JSONRPCClient', () => {
     });
 
     it('should handle request without params', async () => {
-      const responsePromise = client.request('ping');
+      const responsePromise = client.call('ping');
 
       const sentMessage = JSON.parse(vi.mocked(mockTransport.send).mock.calls[0][0]);
       expect(sentMessage).toEqual({
@@ -90,8 +90,8 @@ describe('JSONRPCClient', () => {
     });
 
     it('should auto-increment request ids', async () => {
-      const promise1 = client.request('method1');
-      const promise2 = client.request('method2');
+      const promise1 = client.call('method1');
+      const promise2 = client.call('method2');
 
       expect(mockTransport.send).toHaveBeenCalledTimes(2);
 
@@ -110,7 +110,7 @@ describe('JSONRPCClient', () => {
     });
 
     it('should handle error responses', async () => {
-      const responsePromise = client.request('errorMethod');
+      const responsePromise = client.call('errorMethod');
 
       onMessageHandler(
         JSON.stringify({
@@ -138,7 +138,7 @@ describe('JSONRPCClient', () => {
         number: 42.5,
       };
 
-      const responsePromise = client.request('complexMethod', complexParams);
+      const responsePromise = client.call('complexMethod', complexParams);
 
       const sentMessage = JSON.parse(vi.mocked(mockTransport.send).mock.calls[0][0]);
       expect(sentMessage.params).toEqual(complexParams);
@@ -166,7 +166,7 @@ describe('JSONRPCClient', () => {
         count: number;
       }
 
-      const responsePromise = client.request<TestResult>('typedMethod');
+      const responsePromise = client.call<TestResult>('typedMethod');
 
       onMessageHandler(
         JSON.stringify({
@@ -337,7 +337,7 @@ describe('JSONRPCClient', () => {
 
   describe('message handling', () => {
     it('should handle valid JSON-RPC responses', async () => {
-      const responsePromise = client.request('test');
+      const responsePromise = client.call('test');
 
       onMessageHandler(
         JSON.stringify({
@@ -352,7 +352,7 @@ describe('JSONRPCClient', () => {
     });
 
     it('should handle responses with null result', async () => {
-      const responsePromise = client.request('nullTest');
+      const responsePromise = client.call('nullTest');
 
       onMessageHandler(
         JSON.stringify({
@@ -439,7 +439,7 @@ describe('JSONRPCClient', () => {
 
   describe('error handling edge cases', () => {
     it('should handle error responses with complex error objects', async () => {
-      const responsePromise = client.request('complexError');
+      const responsePromise = client.call('complexError');
 
       const complexError = {
         code: -32603,
@@ -463,7 +463,7 @@ describe('JSONRPCClient', () => {
     });
 
     it('should handle responses that have both result and error', async () => {
-      const responsePromise = client.request('invalidResponse');
+      const responsePromise = client.call('invalidResponse');
 
       // This is technically invalid JSON-RPC, but we test how we handle it
       onMessageHandler(
@@ -483,9 +483,9 @@ describe('JSONRPCClient', () => {
     });
 
     it('should handle concurrent requests and responses', async () => {
-      const promise1 = client.request('concurrent1');
-      const promise2 = client.request('concurrent2');
-      const promise3 = client.request('concurrent3');
+      const promise1 = client.call('concurrent1');
+      const promise2 = client.call('concurrent2');
+      const promise3 = client.call('concurrent3');
 
       // Send responses out of order
       onMessageHandler(JSON.stringify({ jsonrpc: '2.0', id: 2, result: 'result2' }));
@@ -497,8 +497,8 @@ describe('JSONRPCClient', () => {
     });
 
     it('should clean up pending requests when responses are received', async () => {
-      const promise1 = client.request('cleanup1');
-      const promise2 = client.request('cleanup2');
+      const promise1 = client.call('cleanup1');
+      const promise2 = client.call('cleanup2');
 
       // Resolve first request
       onMessageHandler(JSON.stringify({ jsonrpc: '2.0', id: 1, result: 'done1' }));
@@ -544,7 +544,7 @@ describe('JSONRPCClient', () => {
       };
 
       const customClient = new JSONRPCClient(customTransport);
-      customClient.request('customMethod');
+      customClient.call('customMethod');
 
       expect(customTransport.send).toHaveBeenCalled();
       expect(customTransport.onMessage).toHaveBeenCalled();
@@ -563,7 +563,7 @@ describe('JSONRPCClient', () => {
         created: boolean;
       }
 
-      const responsePromise = client.request<UserCreateResult>('createUser', {
+      const responsePromise = client.call<UserCreateResult>('createUser', {
         name: 'John Doe',
         email: 'john@example.com',
       } as UserCreateParams);

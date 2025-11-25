@@ -1,32 +1,5 @@
 import { createId } from 'crypto-id';
-
-/**
- * Represents a JSON-RPC 2.0 request object.
- */
-export interface JsonRpcRequest {
-  /** JSON-RPC protocol version, always "2.0" */
-  jsonrpc: '2.0';
-  /** Name of the remote procedure to call */
-  method: string;
-  /** Parameters to pass to the remote procedure */
-  params?: any;
-  /** Request identifier, used to match responses to requests */
-  id?: number | string;
-}
-
-/**
- * Represents a JSON-RPC 2.0 response object.
- */
-export interface JsonRpcResponse {
-  /** JSON-RPC protocol version, always "2.0" */
-  jsonrpc: '2.0';
-  /** Result of the successful procedure call */
-  result?: any;
-  /** Error information if the procedure call failed */
-  error?: { code: number; message: string };
-  /** Response identifier, matches the id of the corresponding request */
-  id: number | string;
-}
+import type { JsonRpcRequest, JsonRpcResponse } from '../protocol/types';
 
 /** Union type for all possible JSON-RPC message types */
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcResponse;
@@ -146,7 +119,7 @@ export class SignalingService {
    * @param id - Request ID to match in the response
    * @param result - Result data to include in the response
    */
-  private respond(toId: string, id: number | string, result: any): void {
+  private respond(toId: string, id: number, result: any): void {
     const client = this.clients.get(toId);
     if (!client) return;
 
@@ -167,7 +140,7 @@ export class SignalingService {
    * @param id - Request ID to match in the response, or undefined for notifications
    * @param message - Error message to include
    */
-  private respondError(toId: string, id: number | string | undefined, message: string): void {
+  private respondError(toId: string, id: number | undefined, message: string): void {
     if (id === undefined) return;
     const client = this.clients.get(toId);
     if (!client) return;

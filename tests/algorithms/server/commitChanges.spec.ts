@@ -163,7 +163,7 @@ describe('commitChanges', () => {
     changes[0].ops = [{ op: 'add', path: '', value: {} }]; // Root creation
 
     await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis)).rejects.toThrow(
-      'Client baseRev is 0 but server has already been created for doc doc1. Client needs to load the existing document.'
+      'Document doc1 already exists at rev 1, but client is attempting to create it. Client needs to load the existing document.'
     );
   });
 

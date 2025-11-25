@@ -53,10 +53,11 @@ export async function commitChanges(
     );
   }
 
-  const partOfInitialBatch = batchId && changes[0].rev! > 1;
-  if (baseRev === 0 && currentRev > 0 && !partOfInitialBatch && changes[0].ops[0]?.path === '') {
+  // Prevent stale clients from wiping existing data with a root creation op (unless it's a batched continuation)
+  const laterPartOfAnInitialBatch = batchId && changes[0].rev! > 1;
+  if (baseRev === 0 && currentRev > 0 && !laterPartOfAnInitialBatch && changes[0].ops[0]?.path === '') {
     throw new Error(
-      `Client baseRev is 0 but server has already been created for doc ${docId}. Client needs to load the existing document.`
+      `Document ${docId} already exists at rev ${currentRev}, but client is attempting to create it. Client needs to load the existing document.`
     );
   }
 

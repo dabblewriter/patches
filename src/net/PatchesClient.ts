@@ -1,6 +1,7 @@
 import { signal } from '../event-signal.js';
 import type {
   Change,
+  ChangeInput,
   EditableVersionMetadata,
   ListVersionsOptions,
   PatchesSnapshot,
@@ -89,7 +90,7 @@ export class PatchesClient implements PatchesAPI {
    * @param changes - An array of changes to apply.
    * @returns A promise resolving with the changes as committed by the server (potentially transformed).
    */
-  async commitChanges(docId: string, changes: Change[]): Promise<Change[]> {
+  async commitChanges(docId: string, changes: ChangeInput[]): Promise<Change[]> {
     return this.rpc.call('commitChanges', { docId, changes });
   }
 

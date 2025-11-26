@@ -1,6 +1,7 @@
 import type { Unsubscriber } from '../../event-signal.js';
 import type {
   Change,
+  ChangeInput,
   EditableVersionMetadata,
   ListVersionsOptions,
   PatchesState,
@@ -146,7 +147,7 @@ export interface PatchesAPI {
   getChangesSince(docId: string, rev: number): Promise<Change[]>;
 
   /** Apply a set of changes from the client to a document. Returns the committed changes. */
-  commitChanges(docId: string, changes: Change[]): Promise<Change[]>;
+  commitChanges(docId: string, changes: ChangeInput[]): Promise<Change[]>;
 
   /** Delete a document. */
   deleteDoc(docId: string): Promise<void>;

@@ -2,6 +2,7 @@ import Peer from 'simple-peer';
 import { signal, type Unsubscriber } from '../../event-signal.js';
 import { JSONRPCClient } from '../../net/protocol/JSONRPCClient.js';
 import type { ClientTransport } from '../protocol/types.js';
+import { rpcError } from '../protocol/utils.js';
 import type { WebSocketTransport } from '../websocket/WebSocketTransport.js';
 
 /**
@@ -135,7 +136,7 @@ export class WebRTCTransport implements ClientTransport {
         try {
           info.peer.send(data);
         } catch (e) {
-          console.warn('Failed to send to peer:', e);
+          this.onMessage.emit(JSON.stringify(rpcError(-32000, (e as Error).message)), peerId!, info.peer);
         }
       }
     }
@@ -163,7 +164,7 @@ export class WebRTCTransport implements ClientTransport {
       try {
         this.onMessage.emit(raw, peerId, peer);
       } catch (e) {
-        console.error('Invalid peer data:', e);
+        this.onMessage.emit(JSON.stringify(rpcError(-32700, 'Parse error', e)), peerId, peer);
       }
     });
 
@@ -172,7 +173,7 @@ export class WebRTCTransport implements ClientTransport {
     });
 
     peer.on('error', err => {
-      console.error('Peer error:', err);
+      this.onMessage.emit(JSON.stringify(rpcError(-32000, (err as Error).message)), peerId, peer);
       this._removePeer(peerId);
     });
 

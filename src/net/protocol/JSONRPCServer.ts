@@ -1,6 +1,7 @@
 import { signal, type Signal, type Unsubscriber } from '../../event-signal.js';
 import type { AuthContext } from '../websocket/AuthorizationProvider.js';
 import type { JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, Message } from './types.js';
+import { rpcError, rpcNotification, rpcResponse } from './utils.js';
 
 export type ConnectionSignalSubscriber = (params: any, clientId?: string) => any;
 export type MessageHandler<P = any, R = any> = (params: P, ctx?: AuthContext) => Promise<R> | R;
@@ -73,7 +74,7 @@ export class JSONRPCServer {
    * the connected client.
    */
   async notify(method: string, params?: any, exceptConnectionId?: string): Promise<void> {
-    const msg: JsonRpcNotification = { jsonrpc: '2.0', method, params };
+    const msg: JsonRpcNotification = rpcNotification(method, params);
     this.onNotify.emit(msg, exceptConnectionId);
   }
 
@@ -117,7 +118,7 @@ export class JSONRPCServer {
       // -> Request ----------------------------------------------------------------
       try {
         const result = await this._dispatch(message.method, (message as JsonRpcRequest).params, ctx);
-        const response: JsonRpcResponse = { jsonrpc: '2.0', id: message.id as number, result };
+        const response = rpcResponse(result, message.id);
         return respond(response);
       } catch (err: any) {
         return respond(
@@ -152,8 +153,4 @@ export class JSONRPCServer {
     }
     return handler(params, ctx);
   }
-}
-
-function rpcError(code: number, message: string, data?: any, id?: number): JsonRpcResponse {
-  return { jsonrpc: '2.0', id: id ?? (null as any), error: { code, message, data } };
 }

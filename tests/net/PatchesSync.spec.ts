@@ -75,9 +75,9 @@ describe('PatchesSync', () => {
       onChangesCommitted: vi.fn(),
     };
 
-    // Mock constructors
-    vi.mocked(Patches).mockImplementation(() => mockPatches);
-    vi.mocked(PatchesWebSocket).mockImplementation(() => mockWebSocket);
+    // Mock constructors - use function expressions for Vitest 4 compatibility
+    vi.mocked(Patches).mockImplementation(function() { return mockPatches; });
+    vi.mocked(PatchesWebSocket).mockImplementation(function() { return mockWebSocket; });
 
     // Mock onlineState
     Object.defineProperty(vi.mocked(onlineState), 'isOnline', {

@@ -39,7 +39,7 @@ const mockAuth = {
 };
 
 vi.mock('../../../src/net/protocol/JSONRPCServer', () => ({
-  JSONRPCServer: vi.fn(() => mockJSONRPCServer),
+  JSONRPCServer: vi.fn(function() { return mockJSONRPCServer; }),
 }));
 
 describe('RPCServer', () => {

@@ -5,38 +5,40 @@ import type { Change } from '../../src/types';
 // Mock dependencies completely before importing
 vi.mock('../../src/client/PatchesDoc', () => {
   return {
-    PatchesDoc: vi.fn().mockImplementation(() => ({
-      setId: vi.fn(),
-      import: vi.fn(),
-      onChange: vi.fn().mockReturnValue(vi.fn()),
-      close: vi.fn(),
-    })),
+    PatchesDoc: vi.fn().mockImplementation(function() {
+      return {
+        setId: vi.fn(),
+        import: vi.fn(),
+        onChange: vi.fn().mockReturnValue(vi.fn()),
+        close: vi.fn(),
+      };
+    }),
   };
 });
 
 vi.mock('../../src/utils/concurrency', () => ({
-  singleInvocation: vi.fn().mockImplementation((matchOnFirstArg?: boolean) => {
+  singleInvocation: vi.fn().mockImplementation(function(matchOnFirstArg?: boolean) {
     if (typeof matchOnFirstArg === 'function') {
       return matchOnFirstArg;
     }
-    return (target: any) => target;
+    return function(target: any) { return target; };
   }),
 }));
 
 vi.mock('../../src/event-signal', () => ({
-  signal: vi.fn().mockImplementation(() => {
+  signal: vi.fn().mockImplementation(function() {
     const subscribers = new Set();
-    const mockSignal = vi.fn().mockImplementation((callback: any) => {
+    const mockSignal = vi.fn().mockImplementation(function(callback: any) {
       subscribers.add(callback);
-      return () => subscribers.delete(callback);
+      return function() { return subscribers.delete(callback); };
     }) as any;
-    mockSignal.emit = vi.fn().mockImplementation(async (...args: any[]) => {
+    mockSignal.emit = vi.fn().mockImplementation(async function(...args: any[]) {
       for (const callback of subscribers) {
         await (callback as any)(...args);
       }
     });
     mockSignal.error = vi.fn().mockReturnValue(vi.fn());
-    mockSignal.clear = vi.fn().mockImplementation(() => subscribers.clear());
+    mockSignal.clear = vi.fn().mockImplementation(function() { return subscribers.clear(); });
     return mockSignal;
   }),
 }));
@@ -85,7 +87,7 @@ describe('Patches', () => {
       onChange: vi.fn().mockReturnValue(vi.fn()),
       close: vi.fn(),
     };
-    vi.mocked(PatchesDoc).mockImplementation(() => mockDoc);
+    vi.mocked(PatchesDoc).mockImplementation(function() { return mockDoc; });
 
     patches = new Patches({ store: mockStore });
 

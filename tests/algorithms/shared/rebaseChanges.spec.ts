@@ -49,7 +49,7 @@ describe('rebaseChanges', () => {
 
     const mockTransform = vi.fn().mockReturnValue({ ops: localOnlyChange.ops });
     const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(() => mockPatch as any);
+    mockJSONPatch.mockImplementation(function() { return mockPatch as any; });
 
     const result = rebaseChanges(serverChanges, localChanges);
 
@@ -66,7 +66,7 @@ describe('rebaseChanges', () => {
     const transformedOps = [{ op: 'add', path: '/local_transformed', value: 'data' }];
     const mockTransform = vi.fn().mockReturnValue({ ops: transformedOps });
     const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(() => mockPatch as any);
+    mockJSONPatch.mockImplementation(function() { return mockPatch as any; });
 
     const result = rebaseChanges([serverChange], [localChange]);
 
@@ -88,7 +88,7 @@ describe('rebaseChanges', () => {
       .mockReturnValueOnce({ ops: [{ op: 'add', path: '/local1_t', value: 'data' }] })
       .mockReturnValueOnce({ ops: [{ op: 'add', path: '/local2_t', value: 'data' }] });
     const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(() => mockPatch as any);
+    mockJSONPatch.mockImplementation(function() { return mockPatch as any; });
 
     const result = rebaseChanges([serverChange], [localChange1, localChange2]);
 
@@ -109,7 +109,7 @@ describe('rebaseChanges', () => {
       .mockReturnValueOnce({ ops: [] }) // Empty ops - should be filtered out
       .mockReturnValueOnce({ ops: [{ op: 'add', path: '/local2_t', value: 'data' }] });
     const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(() => mockPatch as any);
+    mockJSONPatch.mockImplementation(function() { return mockPatch as any; });
 
     const result = rebaseChanges([serverChange], [localChange1, localChange2]);
 
@@ -125,7 +125,7 @@ describe('rebaseChanges', () => {
 
     const mockTransform = vi.fn().mockReturnValue({ ops: [{ op: 'add', path: '/local_t', value: 'data' }] });
     const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(() => mockPatch as any);
+    mockJSONPatch.mockImplementation(function() { return mockPatch as any; });
 
     const result = rebaseChanges([serverChange1, serverChange2], [localChange]);
 
@@ -145,7 +145,7 @@ describe('rebaseChanges', () => {
 
     const mockTransform = vi.fn().mockReturnValue({ ops: [{ op: 'add', path: '/local_t', value: 'data' }] });
     const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(() => mockPatch as any);
+    mockJSONPatch.mockImplementation(function() { return mockPatch as any; });
 
     const result = rebaseChanges(serverChanges, localChanges);
 
@@ -163,7 +163,7 @@ describe('rebaseChanges', () => {
 
     const mockTransform = vi.fn().mockReturnValue({ ops: [{ op: 'add', path: '/local_t', value: 'data' }] });
     const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(() => mockPatch as any);
+    mockJSONPatch.mockImplementation(function() { return mockPatch as any; });
 
     const result = rebaseChanges([serverChange], [localChange]);
 
@@ -189,7 +189,7 @@ describe('rebaseChanges', () => {
       .mockReturnValueOnce({ ops: [{ op: 'add', path: '/l1_t', value: 'data' }] })
       .mockReturnValueOnce({ ops: [{ op: 'add', path: '/l2_t', value: 'data' }] });
     const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(() => mockPatch as any);
+    mockJSONPatch.mockImplementation(function() { return mockPatch as any; });
 
     const result = rebaseChanges(serverChanges, localChanges);
 

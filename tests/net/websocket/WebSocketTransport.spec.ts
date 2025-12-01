@@ -145,7 +145,7 @@ describe('WebSocketTransport', () => {
     });
 
     it('should create WebSocket with correct URL', () => {
-      const spy = vi.spyOn(global, 'WebSocket').mockImplementation((url, protocol) => new MockWebSocket(url.toString(), protocol) as any);
+      const spy = vi.spyOn(global, 'WebSocket').mockImplementation(function(url, protocol) { return new MockWebSocket(url.toString(), protocol) as any; });
 
       transport.connect();
 
@@ -155,7 +155,7 @@ describe('WebSocketTransport', () => {
 
     it('should create WebSocket with protocol option', () => {
       const transportWithProtocol = new WebSocketTransport('ws://localhost:8080', { protocol: 'patches-v1' });
-      const spy = vi.spyOn(global, 'WebSocket').mockImplementation((url, protocol) => new MockWebSocket(url.toString(), protocol) as any);
+      const spy = vi.spyOn(global, 'WebSocket').mockImplementation(function(url, protocol) { return new MockWebSocket(url.toString(), protocol) as any; });
 
       transportWithProtocol.connect();
 

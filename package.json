@@ -65,19 +65,19 @@
   "dependencies": {
     "@dabble/delta": "^1.2.4",
     "alphacounter": "^2.1.1",
-    "crypto-id": "^0.3.0",
+    "crypto-id": "^0.3.1",
     "simple-peer": "^9.11.1",
     "simplified-concurrency": "^0.2.0"
   },
   "devDependencies": {
-    "@types/simple-peer": "^9.11.8",
-    "@typescript-eslint/eslint-plugin": "^8.42.0",
-    "@typescript-eslint/parser": "^8.42.0",
-    "eslint": "^9.35.0",
-    "fake-indexeddb": "^6.2.2",
-    "prettier": "^3.6.2",
+    "@types/simple-peer": "^9.11.9",
+    "@typescript-eslint/eslint-plugin": "^8.48.0",
+    "@typescript-eslint/parser": "^8.48.0",
+    "eslint": "^9.39.1",
+    "fake-indexeddb": "^6.2.5",
+    "prettier": "^3.7.3",
     "tsup": "^8.5.1",
-    "typescript": "^5.9.2",
-    "vitest": "^3.2.4"
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.14"
   }
 }

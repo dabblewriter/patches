@@ -74,6 +74,14 @@ export class PatchesSync {
   }
 
   /**
+   * Gets the JSON-RPC client for making custom RPC calls.
+   * Useful for application-specific methods not part of the Patches protocol.
+   */
+  get rpc() {
+    return this.ws.rpc;
+  }
+
+  /**
    * Updates the sync state.
    * @param update - The partial state to update.
    */

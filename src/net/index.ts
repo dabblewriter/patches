@@ -4,6 +4,7 @@ export * from './PatchesSync.js';
 export * from './protocol/JSONRPCClient.js';
 export * from './protocol/JSONRPCServer.js';
 export type * from './protocol/types.js';
+export * from './protocol/utils.js';
 export type * from './types.js';
 export * from './websocket/AuthorizationProvider.js';
 export * from './websocket/onlineState.js';

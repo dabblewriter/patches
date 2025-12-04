@@ -153,7 +153,7 @@ export class Patches {
     }
     // Mark document as deleted in store (adds a tombstone until sync commits it)
     await this.store.deleteDoc(docId);
-    this.onDeleteDoc.emit(docId);
+    await this.onDeleteDoc.emit(docId);
   }
 
   /**

@@ -34,7 +34,7 @@ export class FetchTransport implements ClientTransport {
     } catch (error) {
       // ensure the error is associated with the request that was sent
       const message = JSON.parse(raw) as JsonRpcRequest;
-      this.onMessage.emit(JSON.stringify(rpcError(-32000, (error as Error).message, message.id)));
+      this.onMessage.emit(JSON.stringify(rpcError(-32000, (error as Error).message, undefined, message.id)));
     }
   }
 }

@@ -310,7 +310,11 @@ describe('PatchesSync', () => {
     it('should update open document syncing state', async () => {
       const mockDoc = {
         updateSyncing: vi.fn(),
+        import: vi.fn(),
       };
+
+      const snapshot = { state: { content: 'new' }, rev: 1 };
+      mockWebSocket.getDoc.mockResolvedValue(snapshot);
 
       mockPatches.getOpenDoc.mockReturnValue(mockDoc);
       mockStore.getPendingChanges.mockResolvedValue([]);
@@ -320,6 +324,24 @@ describe('PatchesSync', () => {
 
       expect(mockDoc.updateSyncing).toHaveBeenCalledWith('updating');
       expect(mockDoc.updateSyncing).toHaveBeenCalledWith(null);
+    });
+
+    it('should import snapshot into open doc when no committed rev', async () => {
+      const mockDoc = {
+        updateSyncing: vi.fn(),
+        import: vi.fn(),
+      };
+
+      const snapshot = { state: { content: 'new' }, rev: 1 };
+      mockWebSocket.getDoc.mockResolvedValue(snapshot);
+
+      mockPatches.getOpenDoc.mockReturnValue(mockDoc);
+      mockStore.getPendingChanges.mockResolvedValue([]);
+      mockStore.getLastRevs.mockResolvedValue([0, 0]);
+
+      await sync['syncDoc']('doc1');
+
+      expect(mockDoc.import).toHaveBeenCalledWith({ ...snapshot, changes: [] });
     });
 
     it('should not sync if not connected', async () => {

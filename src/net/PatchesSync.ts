@@ -202,6 +202,9 @@ export class PatchesSync {
         } else {
           const snapshot = await this.ws.getDoc(docId);
           await this.store.saveDoc(docId, snapshot);
+          if (doc) {
+            doc.import({ ...snapshot, changes: [] });
+          }
         }
       }
       if (doc) {

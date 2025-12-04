@@ -1,5 +1,5 @@
 import { signal } from '../../event-signal.js';
-import type { ClientTransport } from '../protocol/types.js';
+import type { ClientTransport, JsonRpcRequest } from '../protocol/types.js';
 import { rpcError } from '../protocol/utils.js';
 
 /**
@@ -32,7 +32,9 @@ export class FetchTransport implements ClientTransport {
       this.headers = undefined;
       this.onMessage.emit(await response.text());
     } catch (error) {
-      this.onMessage.emit(JSON.stringify(rpcError(-32000, (error as Error).message)));
+      // ensure the error is associated with the request that was sent
+      const message = JSON.parse(raw) as JsonRpcRequest;
+      this.onMessage.emit(JSON.stringify(rpcError(-32000, (error as Error).message, message.id)));
     }
   }
 }

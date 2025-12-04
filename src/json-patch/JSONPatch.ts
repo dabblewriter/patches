@@ -79,6 +79,7 @@ export class JSONPatch {
    */
   replace(path: PathLike, value: any, options?: WriteOptions) {
     if (value && value.toJSON) value = value.toJSON();
+    if (value === undefined) return this.remove(path);
     return this.op('replace', path, value, undefined, options?.soft);
   }
 

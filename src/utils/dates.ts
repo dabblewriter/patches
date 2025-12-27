@@ -11,7 +11,7 @@
  */
 export function createClientTimestamp(): string {
   const now = new Date();
-  return formatWithOffset(now, getLocalTimezoneOffset());
+  return formatDateWithOffset(now, getLocalTimezoneOffset());
 }
 
 /**
@@ -65,14 +65,14 @@ export function clampTimestamp(timestamp: string, limit: string): string {
 
   // Clamp to limit but preserve original timezone offset
   const offset = extractTimezoneOffset(timestamp);
-  return formatWithOffset(limitDate, offset);
+  return formatDateWithOffset(limitDate, offset);
 }
 
 /**
  * Formats a Date with a specific timezone offset string.
  * The date is adjusted to display the correct local time for that offset.
  */
-export function formatWithOffset(date: Date, offset: string): string {
+export function formatDateWithOffset(date: Date, offset: string): string {
   if (offset === 'Z') {
     return date.toISOString();
   }

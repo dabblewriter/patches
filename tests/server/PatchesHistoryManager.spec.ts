@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PatchesHistoryManager } from '../../src/server/PatchesHistoryManager';
 import { PatchesServer } from '../../src/server/PatchesServer';
 import type { PatchesStoreBackend } from '../../src/server/types';
@@ -9,7 +9,7 @@ import type {
   ListVersionsOptions,
   VersionMetadata,
 } from '../../src/types';
-import { createClientTimestamp, createServerTimestamp } from '../../src/utils/dates';
+import { getISO, getLocalISO } from '../../src/utils/dates';
 
 // Mock the PatchesServer module
 vi.mock('../../src/server/PatchesServer', async () => {
@@ -63,8 +63,8 @@ describe('PatchesHistoryManager', () => {
         groupId: 'group1',
         origin: 'main',
         branchName: undefined,
-        startedAt: createServerTimestamp(),
-        endedAt: createServerTimestamp(),
+        startedAt: getISO(),
+        endedAt: getISO(),
         rev: 5,
         baseRev: 1,
         name: 'Version 1',
@@ -76,8 +76,8 @@ describe('PatchesHistoryManager', () => {
         groupId: 'group1',
         origin: 'main',
         branchName: undefined,
-        startedAt: createServerTimestamp(),
-        endedAt: createServerTimestamp(),
+        startedAt: getISO(),
+        endedAt: getISO(),
         rev: 10,
         baseRev: 5,
         name: 'Version 2',
@@ -247,8 +247,8 @@ describe('PatchesHistoryManager', () => {
         rev: 2,
         baseRev: 1,
         ops: [{ op: 'add', path: '/title', value: 'Test' }],
-        createdAt: createClientTimestamp(),
-        committedAt: createServerTimestamp(),
+        createdAt: getLocalISO(),
+        committedAt: getISO(),
         metadata: {},
       },
       {
@@ -256,8 +256,8 @@ describe('PatchesHistoryManager', () => {
         rev: 3,
         baseRev: 2,
         ops: [{ op: 'replace', path: '/content', value: 'Updated content' }],
-        createdAt: createClientTimestamp(),
-        committedAt: createServerTimestamp(),
+        createdAt: getLocalISO(),
+        committedAt: getISO(),
         metadata: {},
       },
     ];
@@ -306,8 +306,8 @@ describe('PatchesHistoryManager', () => {
         rev: 1,
         baseRev: 0,
         ops: [{ op: 'add', path: '', value: { title: 'New Doc' } }],
-        createdAt: createClientTimestamp(),
-        committedAt: createServerTimestamp(),
+        createdAt: getLocalISO(),
+        committedAt: getISO(),
         metadata: {},
       },
       {
@@ -315,8 +315,8 @@ describe('PatchesHistoryManager', () => {
         rev: 2,
         baseRev: 1,
         ops: [{ op: 'replace', path: '/title', value: 'Updated Doc' }],
-        createdAt: createClientTimestamp(),
-        committedAt: createServerTimestamp(),
+        createdAt: getLocalISO(),
+        committedAt: getISO(),
         metadata: {},
       },
     ];
@@ -380,8 +380,8 @@ describe('PatchesHistoryManager', () => {
           groupId: 'group1',
           origin: 'main' as const,
           branchName: undefined,
-          startedAt: createServerTimestamp(),
-          endedAt: createServerTimestamp(),
+          startedAt: getISO(),
+          endedAt: getISO(),
           rev: 5,
           baseRev: 1,
           name: 'Feature Complete',
@@ -408,8 +408,8 @@ describe('PatchesHistoryManager', () => {
           rev: 1,
           baseRev: 0,
           ops: [{ op: 'add', path: '', value: mockState }],
-          createdAt: createClientTimestamp(),
-          committedAt: createServerTimestamp(),
+          createdAt: getLocalISO(),
+          committedAt: getISO(),
           metadata: {},
         },
       ];

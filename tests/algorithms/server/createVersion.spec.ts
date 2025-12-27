@@ -12,8 +12,8 @@ describe('createVersion', () => {
   const mockCreateVersionMetadata = vi.mocked(versionModule.createVersionMetadata);
   let mockStore: PatchesStoreBackend;
 
-  // Helper to create ISO timestamp
-  const toISO = (timestamp: number) => new Date(timestamp).toISOString();
+  // Helper to create ISO timestamp without milliseconds
+  const toISO = (timestamp: number) => new Date(timestamp).toISOString().replace(/\.\d{3}/, '');
 
   beforeEach(() => {
     vi.clearAllMocks();

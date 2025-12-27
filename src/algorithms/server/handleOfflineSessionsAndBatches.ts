@@ -2,7 +2,7 @@ import { createSortableId } from 'crypto-id';
 import { createVersionMetadata } from '../../data/version.js';
 import type { PatchesStoreBackend } from '../../server/types.js';
 import type { Change } from '../../types.js';
-import { timestampDiff } from '../../utils/dates.js';
+import { getISO, timestampDiff } from '../../utils/dates.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { getStateAtRevision } from './getStateAtRevision.js';
 
@@ -57,7 +57,8 @@ export async function handleOfflineSessionsAndBatches(
       const sessionChanges = changes.slice(sessionStartIndex, i);
       if (sessionChanges.length > 0) {
         // Check if this is a continuation of the previous session (merge/extend)
-        const isContinuation = !!lastVersion && timestampDiff(sessionChanges[0].createdAt, lastVersion.endedAt) <= sessionTimeoutMillis;
+        const isContinuation =
+          !!lastVersion && timestampDiff(sessionChanges[0].createdAt, lastVersion.endedAt) <= sessionTimeoutMillis;
 
         if (isContinuation) {
           // Merge/extend the existing version
@@ -75,8 +76,8 @@ export async function handleOfflineSessionsAndBatches(
             groupId,
             origin: 'offline',
             // Convert client timestamps to UTC for version metadata (enables lexicographic sorting)
-            startedAt: new Date(sessionChanges[0].createdAt).toISOString(),
-            endedAt: new Date(sessionChanges[sessionChanges.length - 1].createdAt).toISOString(),
+            startedAt: getISO(sessionChanges[0].createdAt),
+            endedAt: getISO(sessionChanges[sessionChanges.length - 1].createdAt),
             rev: sessionChanges[sessionChanges.length - 1].rev,
             baseRev,
           });

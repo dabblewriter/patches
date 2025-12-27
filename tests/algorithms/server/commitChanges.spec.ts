@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { commitChanges } from '../../../src/algorithms/server/commitChanges';
 import type { PatchesStoreBackend } from '../../../src/server/types';
 import type { Change } from '../../../src/types';
-import { createClientTimestamp, createServerTimestamp } from '../../../src/utils/dates';
+import { getISO, getLocalISO } from '../../../src/utils/dates';
 
 // Mock the dependencies
 vi.mock('../../../src/algorithms/shared/applyChanges');
@@ -21,13 +21,13 @@ describe('commitChanges', () => {
     return new Date(Date.now() + offsetMs).toISOString().replace('Z', '+00:00');
   };
 
-  const createChange = (id: string, rev: number, baseRev: number, createdAt: string = createClientTimestamp()): Change => ({
+  const createChange = (id: string, rev: number, baseRev: number, createdAt: string = getLocalISO()): Change => ({
     id,
     rev,
     baseRev,
     ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
     createdAt,
-    committedAt: createServerTimestamp(),
+    committedAt: getISO(),
   });
 
   beforeEach(async () => {
@@ -60,9 +60,8 @@ describe('commitChanges', () => {
     });
 
     // Mock handleOfflineSessionsAndBatches
-    const { handleOfflineSessionsAndBatches } = await import(
-      '../../../src/algorithms/server/handleOfflineSessionsAndBatches'
-    );
+    const { handleOfflineSessionsAndBatches } =
+      await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
     vi.mocked(handleOfflineSessionsAndBatches).mockImplementation(async (store, timeout, docId, changes) => changes);
 
     // Mock transformIncomingChanges
@@ -97,7 +96,9 @@ describe('commitChanges', () => {
     });
 
     // Change without baseRev
-    const changes = [{ id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: createClientTimestamp() }] as Change[];
+    const changes = [
+      { id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: getLocalISO() },
+    ] as Change[];
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
@@ -118,8 +119,8 @@ describe('commitChanges', () => {
 
     // Multiple changes without baseRev
     const changes = [
-      { id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: createClientTimestamp() },
-      { id: '2', ops: [{ op: 'add', path: '/baz', value: 'qux' }], createdAt: createClientTimestamp() },
+      { id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: getLocalISO() },
+      { id: '2', ops: [{ op: 'add', path: '/baz', value: 'qux' }], createdAt: getLocalISO() },
     ] as Change[];
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
@@ -280,9 +281,8 @@ describe('commitChanges', () => {
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    const { handleOfflineSessionsAndBatches } = await import(
-      '../../../src/algorithms/server/handleOfflineSessionsAndBatches'
-    );
+    const { handleOfflineSessionsAndBatches } =
+      await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
     expect(handleOfflineSessionsAndBatches).toHaveBeenCalledWith(
       mockStore,
       sessionTimeoutMillis,
@@ -301,9 +301,8 @@ describe('commitChanges', () => {
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    const { handleOfflineSessionsAndBatches } = await import(
-      '../../../src/algorithms/server/handleOfflineSessionsAndBatches'
-    );
+    const { handleOfflineSessionsAndBatches } =
+      await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
     expect(handleOfflineSessionsAndBatches).toHaveBeenCalledWith(
       mockStore,
       sessionTimeoutMillis,
@@ -414,9 +413,8 @@ describe('commitChanges', () => {
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
 
-    const { handleOfflineSessionsAndBatches } = await import(
-      '../../../src/algorithms/server/handleOfflineSessionsAndBatches'
-    );
+    const { handleOfflineSessionsAndBatches } =
+      await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
     vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue(processedChanges);
 
     const { transformIncomingChanges } = await import('../../../src/algorithms/server/transformIncomingChanges');

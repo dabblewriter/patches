@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { handleOfflineSessionsAndBatches } from '../../../src/algorithms/server/handleOfflineSessionsAndBatches';
 import type { PatchesStoreBackend } from '../../../src/server/types';
 import type { Change } from '../../../src/types';
-import { createServerTimestamp } from '../../../src/utils/dates';
+import { getISO } from '../../../src/utils/dates';
 
 // Mock the dependencies
 vi.mock('crypto-id');
@@ -23,7 +23,7 @@ describe('handleOfflineSessionsAndBatches', () => {
     baseRev: rev - 1,
     ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
     createdAt: toISO(createdAtMs),
-    committedAt: createServerTimestamp(),
+    committedAt: getISO(),
   });
 
   beforeEach(async () => {
@@ -206,12 +206,14 @@ describe('handleOfflineSessionsAndBatches', () => {
     await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
 
     const { createVersionMetadata: createVersion } = await import('../../../src/data/version');
+    // toISO strips milliseconds
+    const toUTC = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}/, '');
     expect(createVersion).toHaveBeenCalledWith({
       parentId: undefined,
       groupId: 'generated-group-id',
       origin: 'offline',
-      startedAt: new Date(1000).toISOString(),
-      endedAt: new Date(2000).toISOString(),
+      startedAt: toUTC(1000),
+      endedAt: toUTC(2000),
       rev: 7,
       baseRev: 5,
     });

@@ -4,7 +4,7 @@ import { JSONPatch } from '../../src/json-patch/JSONPatch';
 import { PatchesServer, assertVersionMetadata } from '../../src/server/PatchesServer';
 import type { PatchesStoreBackend } from '../../src/server/types';
 import type { Change, EditableVersionMetadata } from '../../src/types';
-import { createClientTimestamp, createServerTimestamp } from '../../src/utils/dates';
+import { getISO, getLocalISO } from '../../src/utils/dates';
 
 // Mock the algorithm modules
 vi.mock('../../src/algorithms/server/getSnapshotAtRevision');
@@ -109,8 +109,8 @@ describe('PatchesServer', () => {
       rev: 2,
       batchId: 'batch1',
       ops: [{ op: 'replace', path: '/content', value: 'new content' }],
-      createdAt: createClientTimestamp(),
-      committedAt: createServerTimestamp(),
+      createdAt: getLocalISO(),
+      committedAt: getISO(),
     } as Change;
 
     beforeEach(() => {
@@ -141,7 +141,7 @@ describe('PatchesServer', () => {
         id: 'change1',
         rev: 2,
         ops: [{ op: 'replace', path: '/content', value: 'new content' }],
-        createdAt: createClientTimestamp(),
+        createdAt: getLocalISO(),
         // No baseRev - should be filled in
         // No batchId - skip offline handling
       } as any;
@@ -277,8 +277,8 @@ describe('PatchesServer', () => {
         baseRev: 1,
         rev: 2,
         ops: mockPatch.ops,
-        createdAt: createClientTimestamp(),
-        committedAt: createServerTimestamp(),
+        createdAt: getLocalISO(),
+        committedAt: getISO(),
       } as Change);
 
       const commitSpy = vi.spyOn(server, 'commitChanges').mockResolvedValue([[], []]);
@@ -332,8 +332,8 @@ describe('PatchesServer', () => {
       const mockVersion = {
         id: 'version1',
         origin: 'main' as const,
-        startedAt: createServerTimestamp(),
-        endedAt: createServerTimestamp(),
+        startedAt: getISO(),
+        endedAt: getISO(),
         rev: 5,
         baseRev: 1,
       };
@@ -341,7 +341,15 @@ describe('PatchesServer', () => {
       vi.mocked(getSnapshotAtRevision).mockResolvedValue({
         state: { content: 'test' },
         rev: 5,
-        changes: [{ id: 'change1', rev: 5, baseRev: 1, createdAt: createClientTimestamp(), committedAt: createServerTimestamp() } as Change],
+        changes: [
+          {
+            id: 'change1',
+            rev: 5,
+            baseRev: 1,
+            createdAt: getLocalISO(),
+            committedAt: getISO(),
+          } as Change,
+        ],
       });
       vi.mocked(applyChanges).mockReturnValue({ content: 'test' });
       vi.mocked(createVersionAlgorithm).mockResolvedValue(mockVersion);

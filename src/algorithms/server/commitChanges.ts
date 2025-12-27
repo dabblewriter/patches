@@ -1,6 +1,6 @@
 import type { PatchesStoreBackend } from '../../server/types.js';
 import type { Change, ChangeInput } from '../../types.js';
-import { clampTimestamp, createServerTimestamp, timestampDiff } from '../../utils/dates.js';
+import { clampTimestamp, getISO, timestampDiff } from '../../utils/dates.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { createVersion } from './createVersion.js';
 import { getSnapshotAtRevision } from './getSnapshotAtRevision.js';
@@ -36,7 +36,7 @@ export async function commitChanges(
   const baseRev = changes[0].baseRev ?? currentRev;
 
   // Ensure baseRev and rev are set, add committedAt, and clamp createdAt
-  const serverNow = createServerTimestamp();
+  const serverNow = getISO();
   let rev = baseRev + 1;
   changes.forEach(c => {
     if (c.baseRev == null) c.baseRev = baseRev;

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { commitChanges } from '../../../src/algorithms/server/commitChanges';
 import type { PatchesStoreBackend } from '../../../src/server/types';
 import type { Change } from '../../../src/types';
+import { createClientTimestamp, createServerTimestamp } from '../../../src/utils/dates';
 
 // Mock the dependencies
 vi.mock('../../../src/algorithms/shared/applyChanges');
@@ -15,12 +16,18 @@ describe('commitChanges', () => {
   let mockStore: PatchesStoreBackend;
   const sessionTimeoutMillis = 300000; // 5 minutes
 
-  const createChange = (id: string, rev: number, baseRev: number, created: number = Date.now()): Change => ({
+  /** Creates an ISO timestamp offset by the given milliseconds from now */
+  const createTimestamp = (offsetMs: number = 0): string => {
+    return new Date(Date.now() + offsetMs).toISOString().replace('Z', '+00:00');
+  };
+
+  const createChange = (id: string, rev: number, baseRev: number, createdAt: string = createClientTimestamp()): Change => ({
     id,
     rev,
     baseRev,
     ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
-    created,
+    createdAt,
+    committedAt: createServerTimestamp(),
   });
 
   beforeEach(async () => {
@@ -90,7 +97,7 @@ describe('commitChanges', () => {
     });
 
     // Change without baseRev
-    const changes = [{ id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], created: Date.now() }] as Change[];
+    const changes = [{ id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: createClientTimestamp() }] as Change[];
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
@@ -111,8 +118,8 @@ describe('commitChanges', () => {
 
     // Multiple changes without baseRev
     const changes = [
-      { id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], created: Date.now() },
-      { id: '2', ops: [{ op: 'add', path: '/baz', value: 'qux' }], created: Date.now() },
+      { id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: createClientTimestamp() },
+      { id: '2', ops: [{ op: 'add', path: '/baz', value: 'qux' }], createdAt: createClientTimestamp() },
     ] as Change[];
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
@@ -186,20 +193,21 @@ describe('commitChanges', () => {
     expect(result[1]).toHaveLength(1); // Should have transformed changes
   });
 
-  it('should normalize created timestamps to be in the past', async () => {
-    const futureTime = Date.now() + 10000;
+  it('should normalize createdAt timestamps to be in the past', async () => {
+    const futureTime = createTimestamp(10000); // 10 seconds in the future
     const changes = [createChange('1', 1, 0, futureTime)];
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    // Returned transformed changes should have normalized timestamps
-    expect(result[1][0].created).toBeLessThanOrEqual(Date.now());
+    // Returned transformed changes should have normalized timestamps (clamped to server time)
+    const resultTime = new Date(result[1][0].createdAt).getTime();
+    expect(resultTime).toBeLessThanOrEqual(Date.now());
   });
 
   it('should create version when last change is older than session timeout', async () => {
-    const oldTime = Date.now() - sessionTimeoutMillis - 1000;
+    const oldTime = createTimestamp(-sessionTimeoutMillis - 1000);
     const lastChange = createChange('old', 1, 0, oldTime);
 
     const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
@@ -286,7 +294,7 @@ describe('commitChanges', () => {
   });
 
   it('should handle offline changes when timestamp is older than session timeout', async () => {
-    const oldTime = Date.now() - sessionTimeoutMillis - 1000;
+    const oldTime = createTimestamp(-sessionTimeoutMillis - 1000);
     const changes = [createChange('1', 1, 0, oldTime)];
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
@@ -388,8 +396,8 @@ describe('commitChanges', () => {
   });
 
   it('should handle complex scenario with multiple changes and offline processing', async () => {
-    const oldTime = Date.now() - sessionTimeoutMillis - 1000;
-    const recentTime = Date.now() - 1000;
+    const oldTime = createTimestamp(-sessionTimeoutMillis - 1000);
+    const recentTime = createTimestamp(-1000);
 
     const committedChange = createChange('committed', 2, 0, oldTime);
     const incomingChanges = [createChange('incoming1', 1, 0, oldTime), createChange('incoming2', 2, 0, recentTime)];

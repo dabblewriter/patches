@@ -128,7 +128,7 @@ Got a client submitting a ton of changes (maybe after being offline)? They can s
 
 ### Offline Snapshots
 
-When a client submits changes after working offline (detected by time gaps between `created` timestamps), the server generates snapshots to preserve the document state at key points in time.
+When a client submits changes after working offline (detected by time gaps between `createdAt` timestamps), the server generates snapshots to preserve the document state at key points in time.
 
 ### Online Snapshots
 
@@ -172,7 +172,7 @@ const offlineVersions = await server.listVersions(docId, {
   origin: 'offline',
   limit: 10,
   reverse: true, // Latest first
-  orderBy: 'startDate',
+  orderBy: 'startedAt',
 });
 ```
 

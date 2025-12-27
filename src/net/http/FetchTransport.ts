@@ -20,7 +20,7 @@ export class FetchTransport implements ClientTransport {
 
   async send(raw: string): Promise<void> {
     try {
-      const response = await fetch(this.url, {
+      const response = await globalThis.fetch(this.url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

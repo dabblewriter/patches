@@ -203,7 +203,8 @@ interface Change {
   ops: Operation[]; // Array of operations (add, remove, replace, etc.)
   baseRev: number; // Server revision this change is based on
   rev: number; // Server-assigned revision after applying this change
-  created: number; // Timestamp when this change was created
+  createdAt: string; // ISO timestamp when this change was created (with client timezone)
+  committedAt: string; // ISO timestamp when the server committed this change (UTC)
   batchId?: string; // Optional group ID for related changes
 }
 ```

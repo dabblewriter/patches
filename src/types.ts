@@ -16,8 +16,8 @@ export interface ChangeInput {
   baseRev?: number;
   /** Optional revision number. If omitted, server assigns based on current state. */
   rev?: number;
-  /** Client-side timestamp when the change was created. */
-  created: number;
+  /** Client-side ISO timestamp when the change was created (with timezone offset). */
+  createdAt: string;
   /** Optional batch identifier for grouping changes that belong to the same client batch (for multi-batch offline/large edits). */
   batchId?: string;
   /** Optional arbitrary metadata associated with the change. */
@@ -33,6 +33,8 @@ export interface Change extends ChangeInput {
   baseRev: number;
   /** The revision number assigned by the server after commit. */
   rev: number;
+  /** Server-side ISO timestamp when the change was committed (UTC with Z). */
+  committedAt: string;
 }
 
 /**
@@ -74,8 +76,8 @@ export interface Branch {
   branchedFromId: string;
   /** The revision number on the source document where the branch occurred. */
   branchedRev: number;
-  /** Server-side timestamp when the branch record was created. */
-  created: number;
+  /** Server-side ISO timestamp when the branch was created (UTC with Z). */
+  createdAt: string;
   /** Optional user-friendly name for the branch. */
   name?: string;
   /** Current status of the branch. */
@@ -84,7 +86,7 @@ export interface Branch {
   [metadata: string]: any;
 }
 
-export type EditableBranchMetadata = Disallowed<Branch, 'id' | 'branchedFromId' | 'branchedRev' | 'created' | 'status'>;
+export type EditableBranchMetadata = Disallowed<Branch, 'id' | 'branchedFromId' | 'branchedRev' | 'createdAt' | 'status'>;
 
 /**
  * Metadata, state snapshot, and included changes for a specific version.
@@ -101,10 +103,10 @@ export interface VersionMetadata {
   origin: 'main' | 'offline' | 'branch';
   /** User-defined name if origin is 'branch'. */
   branchName?: string;
-  /** Timestamp marking the beginning of the changes included in this version (e.g., first change in session). */
-  startDate: number;
-  /** Timestamp marking the end of the changes included in this version (e.g., last change in session). */
-  endDate: number;
+  /** Server-side ISO timestamp of version start (UTC with Z). */
+  startedAt: string;
+  /** Server-side ISO timestamp of version end (UTC with Z). */
+  endedAt: string;
   /** The revision number this version was created at. */
   rev: number;
   /** The revision number on the main timeline before the changes that created this version. If this is an offline/branch version, this is the revision number of the source document where the branch was created and not . */
@@ -119,7 +121,7 @@ type Disallowed<T, K extends keyof T> = Pick<T, Exclude<keyof T, K>> & {
 
 export type EditableVersionMetadata = Disallowed<
   VersionMetadata,
-  'id' | 'parentId' | 'groupId' | 'origin' | 'branchName' | 'startDate' | 'endDate' | 'rev' | 'baseRev'
+  'id' | 'parentId' | 'groupId' | 'origin' | 'branchName' | 'startedAt' | 'endedAt' | 'rev' | 'baseRev'
 >;
 
 /**
@@ -143,13 +145,13 @@ export interface ListChangesOptions {
  */
 export interface ListVersionsOptions {
   /** List versions whose orderBy field is *after* this value. */
-  startAfter?: number;
+  startAfter?: number | string;
   /** List versions whose orderBy field is strictly *before* this value. */
-  endBefore?: number;
+  endBefore?: number | string;
   /** Maximum number of versions to return. */
   limit?: number;
-  /** Sort by start date, rev, or baseRev. Defaults to 'rev'. */
-  orderBy?: 'startDate' | 'rev' | 'baseRev';
+  /** Sort by startedAt, rev, or baseRev. Defaults to 'rev'. */
+  orderBy?: 'startedAt' | 'rev' | 'baseRev';
   /** Return versions in descending order. Defaults to false (ascending). When reversed, startAfter and endBefore apply to the *reversed* list. */
   reverse?: boolean;
   /** Filter by the origin type. */

@@ -1,5 +1,6 @@
 import type { PatchesStoreBackend } from '../../server/types.js';
 import type { Change, ChangeInput } from '../../types.js';
+import { clampTimestamp, createServerTimestamp, timestampDiff } from '../../utils/dates.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { createVersion } from './createVersion.js';
 import { getSnapshotAtRevision } from './getSnapshotAtRevision.js';
@@ -34,7 +35,8 @@ export async function commitChanges(
   const currentRev = currentChanges.at(-1)?.rev ?? initialRev;
   const baseRev = changes[0].baseRev ?? currentRev;
 
-  // Ensure all new changes' `created` field is in the past and that `baseRev` and `rev` are set
+  // Ensure baseRev and rev are set, add committedAt, and clamp createdAt
+  const serverNow = createServerTimestamp();
   let rev = baseRev + 1;
   changes.forEach(c => {
     if (c.baseRev == null) c.baseRev = baseRev;
@@ -43,7 +45,10 @@ export async function commitChanges(
     }
     if (c.rev == null) c.rev = rev++;
     else rev = c.rev + 1;
-    c.created = Math.min(c.created, Date.now());
+    // Set server commit time
+    (c as Change).committedAt = serverNow;
+    // Clamp createdAt to not be after committedAt (preserves timezone offset)
+    c.createdAt = clampTimestamp(c.createdAt, serverNow);
   });
 
   // Basic validation
@@ -63,7 +68,7 @@ export async function commitChanges(
 
   // 2. Check if we need to create a new version - if the last change was created more than a session ago
   const lastChange = currentChanges[currentChanges.length - 1];
-  if (lastChange && lastChange.created < Date.now() - sessionTimeoutMillis) {
+  if (lastChange && timestampDiff(serverNow, lastChange.createdAt) > sessionTimeoutMillis) {
     await createVersion(store, docId, currentState, currentChanges);
   }
 
@@ -84,7 +89,7 @@ export async function commitChanges(
   // 4. Handle offline-session versioning:
   // - batchId present (multi-batch uploads)
   // - or the first change is older than the session timeout (single-batch offline)
-  const isOfflineTimestamp = incomingChanges[0].created < Date.now() - sessionTimeoutMillis;
+  const isOfflineTimestamp = timestampDiff(serverNow, incomingChanges[0].createdAt) > sessionTimeoutMillis;
   if (isOfflineTimestamp || batchId) {
     incomingChanges = await handleOfflineSessionsAndBatches(
       store,

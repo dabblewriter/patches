@@ -3,6 +3,7 @@ import { PatchesBranchManager, assertBranchMetadata } from '../../src/server/Pat
 import { PatchesServer } from '../../src/server/PatchesServer';
 import type { BranchingStoreBackend } from '../../src/server/types';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata, VersionMetadata } from '../../src/types';
+import { createClientTimestamp, createServerTimestamp } from '../../src/utils/dates';
 
 // Mock the dependencies
 vi.mock('crypto-id', () => ({
@@ -63,7 +64,7 @@ describe('PatchesBranchManager', () => {
           id: 'branch1',
           branchedFromId: 'doc1',
           branchedRev: 5,
-          created: 1000,
+          createdAt: createServerTimestamp(),
           status: 'open',
           name: 'Feature Branch',
         },
@@ -71,7 +72,7 @@ describe('PatchesBranchManager', () => {
           id: 'branch2',
           branchedFromId: 'doc1',
           branchedRev: 3,
-          created: 2000,
+          createdAt: createServerTimestamp(),
           status: 'merged',
           name: 'Bug Fix Branch',
         },
@@ -96,11 +97,11 @@ describe('PatchesBranchManager', () => {
 
   describe('createBranch', () => {
     const mockState = { title: 'Document', content: 'Content' };
-    const mockVersion = {
+    const mockVersion: VersionMetadata = {
       id: 'version1',
       origin: 'main' as const,
-      startDate: 1000,
-      endDate: 1000,
+      startedAt: createServerTimestamp(),
+      endedAt: createServerTimestamp(),
       rev: 5,
       baseRev: 5,
       groupId: 'generated-id',
@@ -128,8 +129,8 @@ describe('PatchesBranchManager', () => {
       expect(mockServer.getStateAtRevision).toHaveBeenCalledWith('doc1', 5);
       expect(createVersionMetadata).toHaveBeenCalledWith({
         origin: 'main',
-        startDate: expect.any(Number),
-        endDate: expect.any(Number),
+        startedAt: expect.any(String),
+        endedAt: expect.any(String),
         rev: 5,
         baseRev: 5,
         name: 'Test Branch',
@@ -143,7 +144,7 @@ describe('PatchesBranchManager', () => {
         id: 'generated-id',
         branchedFromId: 'doc1',
         branchedRev: 5,
-        created: expect.any(Number),
+        createdAt: expect.any(String),
         status: 'open',
       });
       expect(result).toBe('generated-id');
@@ -157,7 +158,7 @@ describe('PatchesBranchManager', () => {
         id: 'generated-id',
         branchedFromId: 'doc1',
         branchedRev: 3,
-        created: expect.any(Number),
+        createdAt: expect.any(String),
         status: 'open',
       });
     });
@@ -167,7 +168,7 @@ describe('PatchesBranchManager', () => {
         id: 'branch1',
         branchedFromId: 'original-doc',
         branchedRev: 1,
-        created: 1000,
+        createdAt: createServerTimestamp(),
         status: 'open',
       };
 
@@ -230,7 +231,7 @@ describe('PatchesBranchManager', () => {
       id: 'branch1',
       branchedFromId: 'doc1',
       branchedRev: 5,
-      created: 1000,
+      createdAt: createServerTimestamp(),
       status: 'open',
       name: 'Feature Branch',
     };
@@ -241,7 +242,8 @@ describe('PatchesBranchManager', () => {
         rev: 1,
         baseRev: 0,
         ops: [{ op: 'replace', path: '/title', value: 'New Title' }],
-        created: 1100,
+        createdAt: createClientTimestamp(),
+        committedAt: createServerTimestamp(),
         metadata: {},
       },
       {
@@ -249,7 +251,8 @@ describe('PatchesBranchManager', () => {
         rev: 2,
         baseRev: 1,
         ops: [{ op: 'add', path: '/section', value: 'New Section' }],
-        created: 1200,
+        createdAt: createClientTimestamp(),
+        committedAt: createServerTimestamp(),
         metadata: {},
       },
     ];
@@ -261,8 +264,8 @@ describe('PatchesBranchManager', () => {
         groupId: 'branch1',
         origin: 'main',
         branchName: 'Feature Branch',
-        startDate: 1000,
-        endDate: 1200,
+        startedAt: createServerTimestamp(),
+        endedAt: createServerTimestamp(),
         rev: 2,
         baseRev: 0,
       },
@@ -287,7 +290,8 @@ describe('PatchesBranchManager', () => {
           { op: 'replace', path: '/title', value: 'New Title' },
           { op: 'add', path: '/section', value: 'New Section' },
         ],
-        created: expect.any(Number),
+        createdAt: createClientTimestamp(),
+        committedAt: createServerTimestamp(),
         metadata: {},
       };
 
@@ -346,7 +350,8 @@ describe('PatchesBranchManager', () => {
         baseRev: 5,
         rev: 7,
         ops: [],
-        created: Date.now(),
+        createdAt: createClientTimestamp(),
+        committedAt: createServerTimestamp(),
         metadata: {},
       });
       vi.mocked(mockServer.commitChanges).mockRejectedValue(commitError);
@@ -368,8 +373,8 @@ describe('PatchesBranchManager', () => {
           groupId: 'branch1',
           origin: 'main',
           branchName: 'Feature Branch',
-          startDate: 1000,
-          endDate: 1100,
+          startedAt: createServerTimestamp(),
+          endedAt: createServerTimestamp(),
           rev: 1,
           baseRev: 0,
         },
@@ -379,8 +384,8 @@ describe('PatchesBranchManager', () => {
           groupId: 'branch1',
           origin: 'main',
           branchName: 'Feature Branch',
-          startDate: 1100,
-          endDate: 1200,
+          startedAt: createServerTimestamp(),
+          endedAt: createServerTimestamp(),
           rev: 2,
           baseRev: 1,
         },
@@ -392,8 +397,8 @@ describe('PatchesBranchManager', () => {
           id: 'new-version1',
           origin: 'branch',
           parentId: undefined,
-          startDate: 1000,
-          endDate: 1100,
+          startedAt: createServerTimestamp(),
+          endedAt: createServerTimestamp(),
           rev: 1,
           baseRev: 5,
         })
@@ -401,8 +406,8 @@ describe('PatchesBranchManager', () => {
           id: 'new-version2',
           origin: 'branch',
           parentId: 'new-version1',
-          startDate: 1100,
-          endDate: 1200,
+          startedAt: createServerTimestamp(),
+          endedAt: createServerTimestamp(),
           rev: 2,
           baseRev: 5,
         });
@@ -411,7 +416,8 @@ describe('PatchesBranchManager', () => {
         baseRev: 5,
         rev: 7,
         ops: [],
-        created: Date.now(),
+        createdAt: createClientTimestamp(),
+        committedAt: createServerTimestamp(),
         metadata: {},
       });
       vi.mocked(mockServer.commitChanges).mockResolvedValue([[], []]);
@@ -455,7 +461,7 @@ describe('assertBranchMetadata', () => {
   });
 
   it('should throw error for non-modifiable fields', () => {
-    const invalidFields = ['id', 'branchedFromId', 'branchedRev', 'created', 'status'];
+    const invalidFields = ['id', 'branchedFromId', 'branchedRev', 'createdAt', 'status'];
 
     invalidFields.forEach(field => {
       const metadata = { [field]: 'value' } as any;

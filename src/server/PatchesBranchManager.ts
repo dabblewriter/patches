@@ -2,6 +2,7 @@ import { createId } from 'crypto-id';
 import { createChange } from '../data/change.js';
 import { createVersionMetadata } from '../data/version.js';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata } from '../types.js';
+import { createServerTimestamp } from '../utils/dates.js';
 import type { PatchesServer } from './PatchesServer.js';
 import type { BranchingStoreBackend } from './types.js';
 
@@ -42,12 +43,12 @@ export class PatchesBranchManager {
     // 1. Get the state at the branch point
     const stateAtRev = (await this.patchesServer.getStateAtRevision(docId, rev)).state;
     const branchDocId = createId();
-    const now = Date.now();
+    const now = createServerTimestamp();
     // Create an initial version at the branch point rev (for snapshotting/large docs)
     const initialVersionMetadata = createVersionMetadata({
       origin: 'main', // Branch doc versions are 'main' until merged
-      startDate: now,
-      endDate: now,
+      startedAt: now,
+      endedAt: now,
       rev,
       baseRev: rev,
       name: metadata?.name,
@@ -61,7 +62,7 @@ export class PatchesBranchManager {
       id: branchDocId,
       branchedFromId: docId,
       branchedRev: rev,
-      created: now,
+      createdAt: now,
       status: 'open',
     };
     await this.store.createBranch(branch);
@@ -150,7 +151,7 @@ export class PatchesBranchManager {
   }
 }
 
-const nonModifiableMetadataFields = new Set(['id', 'branchedFromId', 'branchedRev', 'created', 'status']);
+const nonModifiableMetadataFields = new Set(['id', 'branchedFromId', 'branchedRev', 'createdAt', 'status']);
 
 export function assertBranchMetadata(metadata?: EditableBranchMetadata) {
   if (!metadata) return;

@@ -54,7 +54,7 @@ console.log(`Found ${versions.length} versions!`);
 // Each version has useful metadata:
 versions.forEach(version => {
   console.log(`Version: ${version.name || 'Unnamed'}`);
-  console.log(`  Created: ${new Date(version.startDate).toLocaleString()}`);
+  console.log(`  Created: ${new Date(version.startedAt).toLocaleString()}`);
   console.log(`  Changes: ${version.changes.length}`);
   console.log(`  Author: ${version.metadata?.author || 'Unknown'}`);
 });
@@ -186,7 +186,7 @@ class DocumentHistoryExplorer {
     await this.history.listVersions({
       limit: 20,
       reverse: true,
-      orderBy: 'startDate',
+      orderBy: 'startedAt',
     });
   }
 

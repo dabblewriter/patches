@@ -145,7 +145,9 @@ describe('WebSocketTransport', () => {
     });
 
     it('should create WebSocket with correct URL', () => {
-      const spy = vi.spyOn(global, 'WebSocket').mockImplementation(function(url, protocol) { return new MockWebSocket(url.toString(), protocol) as any; });
+      const spy = vi.spyOn(global, 'WebSocket').mockImplementation(function (url, protocol) {
+        return new MockWebSocket(url.toString(), protocol) as any;
+      });
 
       transport.connect();
 
@@ -155,7 +157,9 @@ describe('WebSocketTransport', () => {
 
     it('should create WebSocket with protocol option', () => {
       const transportWithProtocol = new WebSocketTransport('ws://localhost:8080', { protocol: 'patches-v1' });
-      const spy = vi.spyOn(global, 'WebSocket').mockImplementation(function(url, protocol) { return new MockWebSocket(url.toString(), protocol) as any; });
+      const spy = vi.spyOn(global, 'WebSocket').mockImplementation(function (url, protocol) {
+        return new MockWebSocket(url.toString(), protocol) as any;
+      });
 
       transportWithProtocol.connect();
 
@@ -274,41 +278,6 @@ describe('WebSocketTransport', () => {
 
       // Clean up
       mockedOnlineState.isOffline = false;
-    });
-  });
-
-  describe.skip('error handling', () => {
-    it('should handle WebSocket constructor errors', async () => {
-      global.WebSocket = class {
-        constructor() {
-          throw new Error('WebSocket constructor failed');
-        }
-      } as any;
-
-      const transport = new WebSocketTransport('ws://localhost:8080');
-      const connectPromise = transport.connect();
-
-      await expect(connectPromise).rejects.toThrow('WebSocket constructor failed');
-      expect(transport.state).toBe('error');
-    });
-
-    it('should log errors', async () => {
-      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-      const connectPromise = transport.connect();
-      const ws = (transport as any).ws as MockWebSocket;
-      ws.simulateError();
-
-      // Properly handle the promise to prevent unhandled rejection
-      try {
-        await connectPromise;
-      } catch {
-        // Expected to fail
-      }
-
-      expect(consoleErrorSpy).toHaveBeenCalledWith('WebSocket error:', expect.any(MockEvent));
-
-      consoleErrorSpy.mockRestore();
     });
   });
 });

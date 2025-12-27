@@ -27,8 +27,9 @@ export async function createVersion(
 
   const sessionMetadata = createVersionMetadata({
     origin: 'main',
-    startDate: changes[0].created,
-    endDate: changes[changes.length - 1].created,
+    // Convert client timestamps to UTC for version metadata (enables lexicographic sorting)
+    startedAt: new Date(changes[0].createdAt).toISOString(),
+    endedAt: new Date(changes[changes.length - 1].createdAt).toISOString(),
     rev: changes[changes.length - 1].rev,
     baseRev,
     ...metadata,

@@ -168,8 +168,8 @@ const nonModifiableMetadataFields = new Set([
   'groupId',
   'origin',
   'branchName',
-  'startDate',
-  'endDate',
+  'startedAt',
+  'endedAt',
   'rev',
   'baseRev',
 ]);

@@ -168,14 +168,14 @@ class DocumentHistoryExplorer {
     // Get all versions, newest first
     const versions = await this.historyManager.listVersions(this.docId, {
       reverse: true,
-      orderBy: 'startDate',
+      orderBy: 'startedAt',
     });
 
     // Format them for display
     return versions.map(version => ({
       id: version.id,
-      name: version.name || `Version at ${new Date(version.startDate).toLocaleString()}`,
-      date: new Date(version.startDate),
+      name: version.name || `Version at ${new Date(version.startedAt).toLocaleString()}`,
+      date: new Date(version.startedAt),
       changeCount: version.changes.length,
     }));
   }
@@ -213,7 +213,7 @@ class DocumentHistoryExplorer {
     return changes.map(change => ({
       id: change.id,
       rev: change.rev,
-      date: new Date(change.created),
+      date: new Date(change.createdAt),
       operations: change.ops.length,
       // Extract author info if available
       author: change.metadata?.user?.name || 'Unknown',

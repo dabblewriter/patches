@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { handleOfflineSessionsAndBatches } from '../../../src/algorithms/server/handleOfflineSessionsAndBatches';
 import type { PatchesStoreBackend } from '../../../src/server/types';
 import type { Change } from '../../../src/types';
+import { createServerTimestamp } from '../../../src/utils/dates';
 
 // Mock the dependencies
 vi.mock('crypto-id');
@@ -13,12 +14,16 @@ describe('handleOfflineSessionsAndBatches', () => {
   let mockStore: PatchesStoreBackend;
   const sessionTimeoutMillis = 300000; // 5 minutes
 
-  const createChange = (id: string, rev: number, created: number): Change => ({
+  /** Creates an ISO timestamp from milliseconds since epoch */
+  const toISO = (ms: number): string => new Date(ms).toISOString().replace('Z', '+00:00');
+
+  const createChange = (id: string, rev: number, createdAtMs: number): Change => ({
     id,
     rev,
     baseRev: rev - 1,
     ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
-    created,
+    createdAt: toISO(createdAtMs),
+    committedAt: createServerTimestamp(),
   });
 
   beforeEach(async () => {
@@ -102,9 +107,9 @@ describe('handleOfflineSessionsAndBatches', () => {
     const existingVersion = {
       id: 'existing-version',
       parentId: 'parent-version',
-      endDate: 1000,
+      endedAt: toISO(1000),
       origin: 'offline' as const,
-      startDate: 900,
+      startedAt: toISO(900),
       rev: 1,
       baseRev: 0,
     };
@@ -125,9 +130,9 @@ describe('handleOfflineSessionsAndBatches', () => {
     const existingVersion = {
       id: 'existing-version',
       parentId: 'parent-version',
-      endDate: 1000,
+      endedAt: toISO(1000),
       origin: 'offline' as const,
-      startDate: 900,
+      startedAt: toISO(900),
       rev: 1,
       baseRev: 0,
     };
@@ -205,8 +210,8 @@ describe('handleOfflineSessionsAndBatches', () => {
       parentId: undefined,
       groupId: 'generated-group-id',
       origin: 'offline',
-      startDate: 1000,
-      endDate: 2000,
+      startedAt: new Date(1000).toISOString(),
+      endedAt: new Date(2000).toISOString(),
       rev: 7,
       baseRev: 5,
     });

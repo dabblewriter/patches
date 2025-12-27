@@ -9,6 +9,7 @@ import type {
   ListVersionsOptions,
   VersionMetadata,
 } from '../../src/types';
+import { createClientTimestamp, createServerTimestamp } from '../../src/utils/dates';
 
 // Mock the PatchesServer module
 vi.mock('../../src/server/PatchesServer', async () => {
@@ -62,8 +63,8 @@ describe('PatchesHistoryManager', () => {
         groupId: 'group1',
         origin: 'main',
         branchName: undefined,
-        startDate: 1000,
-        endDate: 2000,
+        startedAt: createServerTimestamp(),
+        endedAt: createServerTimestamp(),
         rev: 5,
         baseRev: 1,
         name: 'Version 1',
@@ -75,8 +76,8 @@ describe('PatchesHistoryManager', () => {
         groupId: 'group1',
         origin: 'main',
         branchName: undefined,
-        startDate: 3000,
-        endDate: 4000,
+        startedAt: createServerTimestamp(),
+        endedAt: createServerTimestamp(),
         rev: 10,
         baseRev: 5,
         name: 'Version 2',
@@ -90,7 +91,7 @@ describe('PatchesHistoryManager', () => {
       const result = await historyManager.listVersions('doc1');
 
       expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
-        orderBy: 'startDate',
+        orderBy: 'startedAt',
       });
       expect(result).toEqual(mockVersions);
     });
@@ -100,7 +101,7 @@ describe('PatchesHistoryManager', () => {
         limit: 10,
         reverse: true,
         origin: 'branch',
-        orderBy: 'startDate',
+        orderBy: 'startedAt',
       };
 
       vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
@@ -123,7 +124,7 @@ describe('PatchesHistoryManager', () => {
 
       expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
         ...options,
-        orderBy: 'startDate',
+        orderBy: 'startedAt',
       });
     });
 
@@ -246,7 +247,8 @@ describe('PatchesHistoryManager', () => {
         rev: 2,
         baseRev: 1,
         ops: [{ op: 'add', path: '/title', value: 'Test' }],
-        created: 1000,
+        createdAt: createClientTimestamp(),
+        committedAt: createServerTimestamp(),
         metadata: {},
       },
       {
@@ -254,7 +256,8 @@ describe('PatchesHistoryManager', () => {
         rev: 3,
         baseRev: 2,
         ops: [{ op: 'replace', path: '/content', value: 'Updated content' }],
-        created: 2000,
+        createdAt: createClientTimestamp(),
+        committedAt: createServerTimestamp(),
         metadata: {},
       },
     ];
@@ -303,7 +306,8 @@ describe('PatchesHistoryManager', () => {
         rev: 1,
         baseRev: 0,
         ops: [{ op: 'add', path: '', value: { title: 'New Doc' } }],
-        created: 1000,
+        createdAt: createClientTimestamp(),
+        committedAt: createServerTimestamp(),
         metadata: {},
       },
       {
@@ -311,7 +315,8 @@ describe('PatchesHistoryManager', () => {
         rev: 2,
         baseRev: 1,
         ops: [{ op: 'replace', path: '/title', value: 'Updated Doc' }],
-        created: 2000,
+        createdAt: createClientTimestamp(),
+        committedAt: createServerTimestamp(),
         metadata: {},
       },
     ];
@@ -368,15 +373,15 @@ describe('PatchesHistoryManager', () => {
       vi.mocked(mockServer.captureCurrentVersion).mockResolvedValue('new-version-id');
 
       // Mock listing
-      const versions = [
+      const versions: VersionMetadata[] = [
         {
           id: 'new-version-id',
           parentId: undefined,
           groupId: 'group1',
           origin: 'main' as const,
           branchName: undefined,
-          startDate: 1000,
-          endDate: 2000,
+          startedAt: createServerTimestamp(),
+          endedAt: createServerTimestamp(),
           rev: 5,
           baseRev: 1,
           name: 'Feature Complete',
@@ -403,7 +408,8 @@ describe('PatchesHistoryManager', () => {
           rev: 1,
           baseRev: 0,
           ops: [{ op: 'add', path: '', value: mockState }],
-          created: 1000,
+          createdAt: createClientTimestamp(),
+          committedAt: createServerTimestamp(),
           metadata: {},
         },
       ];

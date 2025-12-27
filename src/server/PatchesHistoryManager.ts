@@ -27,7 +27,7 @@ export class PatchesHistoryManager {
    */
   async listVersions(docId: string, options: ListVersionsOptions = {}): Promise<VersionMetadata[]> {
     if (!options.orderBy) {
-      options.orderBy = 'startDate';
+      options.orderBy = 'startedAt';
     }
     return await this.store.listVersions(docId, options);
   }

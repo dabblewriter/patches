@@ -247,7 +247,7 @@ describe('PatchesServer', () => {
     it('should emit onChangesCommitted signal after successful commit', async () => {
       const emitSpy = vi.spyOn(server.onChangesCommitted, 'emit').mockResolvedValue();
 
-      await server.commitChanges('doc1', [mockChange], 'client1');
+      await server.commitChanges('doc1', [mockChange], undefined, 'client1');
 
       expect(emitSpy).toHaveBeenCalledWith('doc1', expect.any(Array), 'client1');
     });

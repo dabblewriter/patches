@@ -95,7 +95,7 @@ describe('RPCServer', () => {
       const result = await rpcServer.commitChanges({ docId: 'doc1', changes }, mockCtx);
 
       expect(mockAuth.canAccess).toHaveBeenCalledWith(mockCtx, 'doc1', 'write', 'commitChanges', { docId: 'doc1', changes });
-      expect(mockPatches.commitChanges).toHaveBeenCalledWith('doc1', changes, 'client1');
+      expect(mockPatches.commitChanges).toHaveBeenCalledWith('doc1', changes, undefined, 'client1');
       expect(result).toEqual([...priorChanges, ...newChanges]);
     });
 

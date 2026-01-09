@@ -69,7 +69,7 @@ Implement your business logic once, run it over any transport.
 |              | `unsubscribe`       | `{ ids }`                                |                                                                |
 | Docs         | `getDoc`            | `{ docId, atRev? }`                      |                                                                |
 |              | `getChangesSince`   | `{ docId, rev }`                         |                                                                |
-|              | `commitChanges`     | `{ docId, changes }`                     | Returns _all_ changes the server now knows about after merging |
+|              | `commitChanges`     | `{ docId, changes, options? }`           | Returns _all_ changes the server now knows about after merging. Use `options.forceCommit: true` for migrations. |
 |              | `deleteDoc`         | `{ docId }`                              |                                                                |
 | Versions\*   | `createVersion`     | `{ docId, name }`                        | Requires `PatchesHistoryManager` configured                    |
 |              | `listVersions`      | `{ docId, options? }`                    |                                                                |

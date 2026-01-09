@@ -113,7 +113,7 @@ Here are the key methods that make `PatchesWebSocket` so handy:
 ### Document Operations
 
 - `getDoc(docId)` - Fetch the latest state and revision
-- `commitChanges(docId, changes)` - Send your changes to everyone
+- `commitChanges(docId, changes, options?)` - Send your changes to everyone (use `{ forceCommit: true }` for migrations)
 - `onChangesCommitted` - Get notified when someone makes changes
 
 ### Versioning (Your Personal Time Machine)

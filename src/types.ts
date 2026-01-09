@@ -86,7 +86,10 @@ export interface Branch {
   [metadata: string]: any;
 }
 
-export type EditableBranchMetadata = Disallowed<Branch, 'id' | 'branchedFromId' | 'branchedRev' | 'createdAt' | 'status'>;
+export type EditableBranchMetadata = Disallowed<
+  Branch,
+  'id' | 'branchedFromId' | 'branchedRev' | 'createdAt' | 'status'
+>;
 
 /**
  * Metadata, state snapshot, and included changes for a specific version.
@@ -123,6 +126,17 @@ export type EditableVersionMetadata = Disallowed<
   VersionMetadata,
   'id' | 'parentId' | 'groupId' | 'origin' | 'branchName' | 'startedAt' | 'endedAt' | 'rev' | 'baseRev'
 >;
+
+/**
+ * Options for committing changes.
+ */
+export interface CommitChangesOptions {
+  /**
+   * If true, save changes even if they result in no state modification.
+   * Useful for migrations where change history must be preserved exactly.
+   */
+  forceCommit?: boolean;
+}
 
 /**
  * Options for listing committed server changes. *Always* ordered by revision number.

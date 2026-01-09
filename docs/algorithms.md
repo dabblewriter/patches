@@ -86,7 +86,7 @@ src/algorithms/
 
 ### `commitChanges.ts`
 
-- **`commitChanges(store, docId, changes, sessionTimeoutMillis)`**: The complete workflow for committing client changes to the server. This algorithm handles the entire change commit process: validation, idempotency checks, offline session management, version creation, operational transformation against concurrent changes, and persistence. Returns both committed changes found on the server and the newly transformed changes. This is the brain behind `PatchesServer.commitChanges()`.
+- **`commitChanges(store, docId, changes, sessionTimeoutMillis, options?)`**: The complete workflow for committing client changes to the server. This algorithm handles the entire change commit process: validation, idempotency checks, offline session management, version creation, operational transformation against concurrent changes, and persistence. Returns both committed changes found on the server and the newly transformed changes. Pass `options.forceCommit: true` to preserve changes even if they result in no state modification (useful for migrations). This is the brain behind `PatchesServer.commitChanges()`.
 
 ### `createVersion.ts`
 
@@ -94,7 +94,7 @@ src/algorithms/
 
 ### `transformIncomingChanges.ts`
 
-- **`transformIncomingChanges(changes, stateAtBaseRev, committedChanges, currentRev)`**: The heart of server-side Operational Transformation. Takes incoming client changes and transforms them against any changes that were committed since the client's base revision. This ensures proper conflict resolution and sequential revision assignment. Core to the `commitChanges` workflow.
+- **`transformIncomingChanges(changes, stateAtBaseRev, committedChanges, currentRev, forceCommit?)`**: The heart of server-side Operational Transformation. Takes incoming client changes and transforms them against any changes that were committed since the client's base revision. This ensures proper conflict resolution and sequential revision assignment. When `forceCommit` is true, changes are preserved even if they result in no state modification or have empty ops (useful for migrations). Core to the `commitChanges` workflow.
 
 ### `getSnapshotAtRevision.ts` & `getStateAtRevision.ts`
 

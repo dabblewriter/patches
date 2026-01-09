@@ -9,7 +9,7 @@ import type {
   VersionMetadata,
 } from '../types.js';
 import { JSONRPCClient } from './protocol/JSONRPCClient.js';
-import type { ClientTransport, PatchesAPI, PatchesNotificationParams } from './protocol/types.js';
+import type { ClientTransport, CommitChangesOptions, PatchesAPI, PatchesNotificationParams } from './protocol/types.js';
 
 /**
  * High-level client for the Patches real-time collaboration service.
@@ -88,10 +88,11 @@ export class PatchesClient implements PatchesAPI {
    * Applies a set of client-generated changes to a document on the server.
    * @param docId - The ID of the document.
    * @param changes - An array of changes to apply.
+   * @param options - Optional commit settings (e.g., forceCommit for migrations).
    * @returns A promise resolving with the changes as committed by the server (potentially transformed).
    */
-  async commitChanges(docId: string, changes: ChangeInput[]): Promise<Change[]> {
-    return this.rpc.call('commitChanges', { docId, changes });
+  async commitChanges(docId: string, changes: ChangeInput[], options?: CommitChangesOptions): Promise<Change[]> {
+    return this.rpc.call('commitChanges', { docId, changes, options });
   }
 
   /**

@@ -9,13 +9,15 @@ import type { Change } from '../../types.js';
  * @param stateAtBaseRev The server state *at the client's baseRev*.
  * @param committedChanges The committed changes that happened *after* the client's baseRev.
  * @param currentRev The current/latest revision number (these changes will have their `rev` set > `currentRev`).
+ * @param forceCommit If true, skip filtering of no-op changes (useful for migrations).
  * @returns The transformed changes.
  */
 export function transformIncomingChanges(
   changes: Change[],
   stateAtBaseRev: any,
   committedChanges: Change[],
-  currentRev: number
+  currentRev: number,
+  forceCommit = false
 ): Change[] {
   const committedOps = committedChanges.flatMap(c => c.ops);
   let state = stateAtBaseRev;
@@ -26,19 +28,21 @@ export function transformIncomingChanges(
     .map(change => {
       // Transform the incoming change's ops against the ops committed since baseRev
       const transformedOps = transformPatch(stateAtBaseRev, committedOps, change.ops);
-      if (transformedOps.length === 0) {
+      if (transformedOps.length === 0 && !forceCommit) {
         return null; // Change is obsolete after transformation
       }
-      try {
-        const previous = state;
-        state = applyPatch(state, transformedOps, { strict: true });
-        if (previous === state) {
-          // Changes were no-ops, we can skip this change
+      if (transformedOps.length > 0) {
+        try {
+          const previous = state;
+          state = applyPatch(state, transformedOps, { strict: true });
+          if (previous === state && !forceCommit) {
+            // Changes were no-ops, we can skip this change
+            return null;
+          }
+        } catch (error) {
+          console.error(`Error applying change ${change.id} to state:`, error);
           return null;
         }
-      } catch (error) {
-        console.error(`Error applying change ${change.id} to state:`, error);
-        return null;
       }
       // Return a new change object with transformed ops and original metadata
       return { ...change, rev: rev++, ops: transformedOps };

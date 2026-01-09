@@ -1,4 +1,5 @@
-import { commitChanges } from '../algorithms/server/commitChanges.js';
+import { commitChanges, type CommitChangesOptions } from '../algorithms/server/commitChanges.js';
+export type { CommitChangesOptions } from '../algorithms/server/commitChanges.js';
 import { createVersion } from '../algorithms/server/createVersion.js';
 import { getSnapshotAtRevision } from '../algorithms/server/getSnapshotAtRevision.js';
 import { getStateAtRevision } from '../algorithms/server/getStateAtRevision.js';
@@ -76,17 +77,24 @@ export class PatchesServer {
    * Commits a set of changes to a document, applying operational transformation as needed.
    * @param docId - The ID of the document.
    * @param changes - The changes to commit.
-   * @param originClientId - The ID of the client that initiated the commit.
+   * @param options - Optional commit settings (e.g., forceCommit for migrations).
+   * @param originClientId - The ID of the client that initiated the commit (used by transport layer for broadcast filtering).
    * @returns A tuple of [committedChanges, transformedChanges] where:
    *   - committedChanges: Changes that were already committed to the server after the client's base revision
    *   - transformedChanges: The client's changes after being transformed against concurrent changes
    */
-  async commitChanges(docId: string, changes: ChangeInput[], originClientId?: string): Promise<[Change[], Change[]]> {
+  async commitChanges(
+    docId: string,
+    changes: ChangeInput[],
+    options?: CommitChangesOptions,
+    originClientId?: string
+  ): Promise<[Change[], Change[]]> {
     const [committedChanges, transformedChanges] = await commitChanges(
       this.store,
       docId,
       changes,
-      this.sessionTimeoutMillis
+      this.sessionTimeoutMillis,
+      options
     );
 
     // Persist and notify about newly transformed changes atomically

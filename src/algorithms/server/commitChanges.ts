@@ -1,5 +1,5 @@
 import type { PatchesStoreBackend } from '../../server/types.js';
-import type { Change, ChangeInput } from '../../types.js';
+import type { Change, ChangeInput, CommitChangesOptions } from '../../types.js';
 import { clampTimestamp, getISO, timestampDiff } from '../../utils/dates.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { createVersion } from './createVersion.js';
@@ -8,11 +8,15 @@ import { getStateAtRevision } from './getStateAtRevision.js';
 import { handleOfflineSessionsAndBatches } from './handleOfflineSessionsAndBatches.js';
 import { transformIncomingChanges } from './transformIncomingChanges.js';
 
+// Re-export for backwards compatibility
+export type { CommitChangesOptions } from '../../types.js';
+
 /**
  * Commits a set of changes to a document, applying operational transformation as needed.
  * @param docId - The ID of the document.
  * @param changes - The changes to commit.
  * @param originClientId - The ID of the client that initiated the commit.
+ * @param options - Optional commit settings.
  * @returns A tuple of [committedChanges, transformedChanges] where:
  *   - committedChanges: Changes that were already committed to the server after the client's base revision
  *   - transformedChanges: The client's changes after being transformed against concurrent changes
@@ -21,7 +25,8 @@ export async function commitChanges(
   store: PatchesStoreBackend,
   docId: string,
   changes: ChangeInput[],
-  sessionTimeoutMillis: number
+  sessionTimeoutMillis: number,
+  options?: CommitChangesOptions
 ): Promise<[Change[], Change[]]> {
   if (changes.length === 0) {
     return [[], []];
@@ -105,7 +110,13 @@ export async function commitChanges(
   //    against committed changes that happened *after* the client's baseRev.
   //    The state used for transformation should be the server state *at the client's baseRev*.
   const stateAtBaseRev = (await getStateAtRevision(store, docId, baseRev)).state;
-  const transformedChanges = transformIncomingChanges(incomingChanges, stateAtBaseRev, committedChanges, currentRev);
+  const transformedChanges = transformIncomingChanges(
+    incomingChanges,
+    stateAtBaseRev,
+    committedChanges,
+    currentRev,
+    options?.forceCommit
+  );
 
   if (transformedChanges.length > 0) {
     await store.saveChanges(docId, transformedChanges);

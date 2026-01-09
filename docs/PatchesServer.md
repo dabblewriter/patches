@@ -51,7 +51,11 @@ const server = new PatchesServer(store, options);
 This is where the **magic happens**! When clients send changes, this method processes them, transforms them against concurrent changes, and makes sure everything stays in sync.
 
 ```typescript
-async commitChanges(docId: string, changes: Change[]): Promise<[Change[], Change[]]> {
+async commitChanges(
+  docId: string,
+  changes: Change[],
+  options?: CommitChangesOptions
+): Promise<[Change[], Change[]]> {
     // ... implementation ...
 }
 ```
@@ -60,6 +64,8 @@ async commitChanges(docId: string, changes: Change[]): Promise<[Change[], Change
 
 - **`docId`**: Which document are we changing?
 - **`changes`**: An array of `Change` objects from a client with a `baseRev` property telling us what server revision they were based on
+- **`options`**: Optional commit settings:
+  - **`forceCommit`**: If `true`, save changes even if they result in no state modification. Useful for migrations where change history must be preserved exactly.
 
 ### What Happens Inside
 

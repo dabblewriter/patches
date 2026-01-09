@@ -215,4 +215,95 @@ describe('transformIncomingChanges', () => {
       incomingChanges[0].ops
     );
   });
+
+  describe('forceCommit option', () => {
+    it('should preserve no-op changes when forceCommit is true', () => {
+      const initialState = { text: 'hello', count: 0 };
+      const incomingChanges = [
+        createChange(1, 0, [{ op: 'replace', path: '/text', value: 'hello' }]), // No-op
+        createChange(1, 0, [{ op: 'replace', path: '/count', value: 5 }]),
+      ];
+
+      const transformedOps = [{ op: 'replace', path: '/text', value: 'hello' }];
+      mockTransformPatch
+        .mockReturnValueOnce(transformedOps)
+        .mockReturnValueOnce([{ op: 'replace', path: '/count', value: 5 }]);
+
+      // First apply returns same state (no-op), second apply changes state
+      mockApplyPatch
+        .mockReturnValueOnce(initialState) // Same state = no-op
+        .mockReturnValueOnce({ text: 'hello', count: 5 });
+
+      const result = transformIncomingChanges(incomingChanges, initialState, [], 1, true);
+
+      // Both changes should be preserved with forceCommit
+      expect(result).toHaveLength(2);
+      expect(result[0].rev).toBe(2);
+      expect(result[0].ops).toEqual(transformedOps);
+      expect(result[1].rev).toBe(3);
+    });
+
+    it('should preserve changes with empty ops when forceCommit is true', () => {
+      const initialState = { text: 'hello' };
+      const incomingChanges = [
+        createChange(1, 0, []), // Empty ops
+        createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }]),
+      ];
+
+      // First change has empty ops, second change is valid
+      mockTransformPatch
+        .mockReturnValueOnce([]) // Empty ops
+        .mockReturnValueOnce([{ op: 'replace', path: '/text', value: 'world' }]);
+
+      mockApplyPatch.mockReturnValue({ text: 'world' });
+
+      const result = transformIncomingChanges(incomingChanges, initialState, [], 1, true);
+
+      // Both changes should be preserved with forceCommit
+      expect(result).toHaveLength(2);
+      expect(result[0].rev).toBe(2);
+      expect(result[0].ops).toEqual([]);
+      expect(result[1].rev).toBe(3);
+      expect(result[1].ops).toEqual([{ op: 'replace', path: '/text', value: 'world' }]);
+    });
+
+    it('should still filter out changes with empty ops when forceCommit is false', () => {
+      const initialState = { text: 'hello' };
+      const incomingChanges = [
+        createChange(1, 0, []), // Empty ops
+        createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }]),
+      ];
+
+      mockTransformPatch
+        .mockReturnValueOnce([])
+        .mockReturnValueOnce([{ op: 'replace', path: '/text', value: 'world' }]);
+
+      mockApplyPatch.mockReturnValue({ text: 'world' });
+
+      const result = transformIncomingChanges(incomingChanges, initialState, [], 1, false);
+
+      // Only the second change should be included
+      expect(result).toHaveLength(1);
+      expect(result[0].rev).toBe(2);
+    });
+
+    it('should still apply errors cause changes to be filtered even with forceCommit', () => {
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const initialState = { text: 'hello' };
+      const incomingChanges = [
+        createChange(1, 0, [{ op: 'replace', path: '/invalid', value: 'test' }]),
+      ];
+
+      mockTransformPatch.mockReturnValue([{ op: 'replace', path: '/invalid', value: 'test' }]);
+      mockApplyPatch.mockImplementation(() => { throw new Error('Invalid path'); });
+
+      const result = transformIncomingChanges(incomingChanges, initialState, [], 1, true);
+
+      // Even with forceCommit, apply errors should filter out the change
+      expect(result).toHaveLength(0);
+      expect(consoleErrorSpy).toHaveBeenCalled();
+
+      consoleErrorSpy.mockRestore();
+    });
+  });
 });

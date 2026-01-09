@@ -333,7 +333,24 @@ describe('commitChanges', () => {
       incomingChanges,
       expect.objectContaining({ stateAtBaseRev: true }),
       [committedChange],
-      2
+      2,
+      undefined
+    );
+  });
+
+  it('should pass forceCommit option to transformIncomingChanges', async () => {
+    const changes = [createChange('1', 1, 0)];
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+
+    await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis, { forceCommit: true });
+
+    const { transformIncomingChanges } = await import('../../../src/algorithms/server/transformIncomingChanges');
+    expect(transformIncomingChanges).toHaveBeenCalledWith(
+      changes,
+      expect.any(Object),
+      [],
+      0,
+      true
     );
   });
 
@@ -423,7 +440,7 @@ describe('commitChanges', () => {
     const result = await commitChanges(mockStore, 'doc1', incomingChanges, sessionTimeoutMillis);
 
     expect(handleOfflineSessionsAndBatches).toHaveBeenCalled();
-    expect(transformIncomingChanges).toHaveBeenCalledWith(processedChanges, expect.any(Object), [committedChange], 2);
+    expect(transformIncomingChanges).toHaveBeenCalledWith(processedChanges, expect.any(Object), [committedChange], 2, undefined);
     expect(mockStore.saveChanges).toHaveBeenCalledWith('doc1', transformedChanges);
     expect(result[0]).toEqual([committedChange]);
     expect(result[1]).toEqual(transformedChanges);

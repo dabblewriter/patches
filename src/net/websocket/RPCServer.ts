@@ -4,6 +4,7 @@ import type { PatchesServer } from '../../server/PatchesServer.js';
 import type { Change, EditableVersionMetadata, ListChangesOptions, ListVersionsOptions } from '../../types.js';
 import { StatusError } from '../error.js';
 import { JSONRPCServer } from '../protocol/JSONRPCServer.js';
+import type { CommitChangesOptions } from '../protocol/types.js';
 import { denyAll, type AuthContext, type AuthorizationProvider } from './AuthorizationProvider.js';
 
 /**
@@ -108,11 +109,12 @@ export class RPCServer {
    * @param params - The change parameters
    * @param params.docId - The ID of the document
    * @param params.changes - An array of changes to apply
+   * @param params.options - Optional commit settings (e.g., forceCommit for migrations)
    */
-  async commitChanges(params: { docId: string; changes: Change[] }, ctx?: AuthContext) {
-    const { docId, changes } = params;
+  async commitChanges(params: { docId: string; changes: Change[]; options?: CommitChangesOptions }, ctx?: AuthContext) {
+    const { docId, changes, options } = params;
     await this.assertWrite(ctx, docId, 'commitChanges', params);
-    const [priorChanges, newChanges] = await this.patches.commitChanges(docId, changes, ctx?.clientId);
+    const [priorChanges, newChanges] = await this.patches.commitChanges(docId, changes, options, ctx?.clientId);
 
     return [...priorChanges, ...newChanges];
   }

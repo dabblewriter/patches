@@ -50,6 +50,7 @@ export function timestampDiff(a: string, b: string): number {
  *   result:    "2025-12-26T14:00:00+04:00" (clamped, same instant as limit)
  */
 export function clampTimestamp(timestamp: string, limit: string): string {
+  if (!timestamp || !limit) throw new Error('Timestamp and limit are required');
   const timestampDate = new Date(timestamp);
   const limitDate = new Date(limit);
 
@@ -67,6 +68,7 @@ export function clampTimestamp(timestamp: string, limit: string): string {
  * Returns "+04:00", "-05:00", or "Z".
  */
 export function extractTimezoneOffset(iso: string): string {
+  if (!iso) return 'Z';
   const match = iso.match(/([+-]\d{2}:\d{2}|Z)$/);
   return match ? match[1] : 'Z';
 }

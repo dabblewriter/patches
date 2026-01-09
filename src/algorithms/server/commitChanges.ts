@@ -48,7 +48,7 @@ export async function commitChanges(
     // Set server commit time
     (c as Change).committedAt = serverNow;
     // Clamp createdAt to not be after committedAt (preserves timezone offset)
-    c.createdAt = clampTimestamp(c.createdAt, serverNow);
+    c.createdAt = c.createdAt ? clampTimestamp(c.createdAt, serverNow) : serverNow;
   });
 
   // Basic validation

@@ -38,8 +38,8 @@ describe('handleOfflineSessionsAndBatches', () => {
     vi.mocked(createVersion).mockImplementation((data: any) => ({
       id: 'version-id',
       origin: 'offline' as const,
-      startDate: Date.now(),
-      endDate: Date.now(),
+      startedAt: new Date().toISOString(),
+      endedAt: new Date().toISOString(),
       rev: 1,
       baseRev: 0,
       ...(data || {}),

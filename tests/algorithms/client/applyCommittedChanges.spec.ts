@@ -8,7 +8,8 @@ describe('applyCommittedChanges', () => {
     rev,
     baseRev: rev - 1,
     ops,
-    created: Date.now(),
+    createdAt: '2024-01-01T00:00:00.000Z',
+    committedAt: '2024-01-01T00:00:00.000Z',
   });
 
   const createSnapshot = (state: any, rev: number, changes: Change[] = []): PatchesSnapshot => ({

@@ -1,10 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import {
-  SignalingService,
-  type JsonRpcRequest,
-  type JsonRpcResponse,
-  type SendFn,
-} from '../../../src/net/websocket/SignalingService';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { JsonRpcRequest } from '../../../src/net';
+import { SignalingService, type SendFn } from '../../../src/net/websocket/SignalingService';
 
 describe('SignalingService', () => {
   let service: SignalingService;

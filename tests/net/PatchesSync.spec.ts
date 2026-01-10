@@ -267,7 +267,7 @@ describe('PatchesSync', () => {
     });
 
     it('should sync document with pending changes', async () => {
-      const pendingChanges: Change[] = [{ id: 'c1', rev: 1, baseRev: 0, ops: [], created: Date.now() }];
+      const pendingChanges: Change[] = [{ id: 'c1', rev: 1, baseRev: 0, ops: [], createdAt: '2024-01-01T00:00:00.000Z', committedAt: '2024-01-01T00:00:00.000Z' }];
 
       mockStore.getPendingChanges.mockResolvedValue(pendingChanges);
 
@@ -282,7 +282,7 @@ describe('PatchesSync', () => {
       mockStore.getPendingChanges.mockResolvedValue([]);
       mockStore.getLastRevs.mockResolvedValue([5, 3]);
 
-      const serverChanges: Change[] = [{ id: 'c2', rev: 6, baseRev: 5, ops: [], created: Date.now() }];
+      const serverChanges: Change[] = [{ id: 'c2', rev: 6, baseRev: 5, ops: [], createdAt: '2024-01-01T00:00:00.000Z', committedAt: '2024-01-01T00:00:00.000Z' }];
 
       mockWebSocket.getChangesSince.mockResolvedValue(serverChanges);
 
@@ -379,8 +379,8 @@ describe('PatchesSync', () => {
 
     it('should flush pending changes in batches', async () => {
       const pendingChanges: Change[] = [
-        { id: 'c1', rev: 1, baseRev: 0, ops: [], created: Date.now() },
-        { id: 'c2', rev: 2, baseRev: 1, ops: [], created: Date.now() },
+        { id: 'c1', rev: 1, baseRev: 0, ops: [], createdAt: '2024-01-01T00:00:00.000Z', committedAt: '2024-01-01T00:00:00.000Z' },
+        { id: 'c2', rev: 2, baseRev: 1, ops: [], createdAt: '2024-01-01T00:00:01.000Z', committedAt: '2024-01-01T00:00:01.000Z' },
       ];
 
       mockStore.getPendingChanges
@@ -401,7 +401,7 @@ describe('PatchesSync', () => {
 
   describe('_applyServerChangesToDoc method', () => {
     it('should apply server changes to document', async () => {
-      const serverChanges: Change[] = [{ id: 'c1', rev: 6, baseRev: 5, ops: [], created: Date.now() }];
+      const serverChanges: Change[] = [{ id: 'c1', rev: 6, baseRev: 5, ops: [], createdAt: '2024-01-01T00:00:00.000Z', committedAt: '2024-01-01T00:00:00.000Z' }];
 
       const currentSnapshot = {
         state: { content: 'current' },
@@ -553,7 +553,7 @@ describe('PatchesSync', () => {
       const changesHandler = vi.mocked(mockWebSocket.onChangesCommitted).mock.calls[0][0];
       const applySpy = vi.spyOn(sync as any, '_applyServerChangesToDoc').mockResolvedValue(undefined);
 
-      const serverChanges: Change[] = [{ id: 'c1', rev: 6, baseRev: 5, ops: [], created: Date.now() }];
+      const serverChanges: Change[] = [{ id: 'c1', rev: 6, baseRev: 5, ops: [], createdAt: '2024-01-01T00:00:00.000Z', committedAt: '2024-01-01T00:00:00.000Z' }];
 
       await changesHandler('doc1', serverChanges);
 

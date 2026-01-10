@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PatchesAPI } from '../../src/net/protocol/types';
-import type { Change, VersionMetadata, EditableVersionMetadata } from '../../src/types';
+import type { Change, EditableVersionMetadata, VersionMetadata } from '../../src/types';
+import { getISO } from '../../src/utils/dates';
 
 // Mock dependencies completely before importing
 vi.mock('../../src/algorithms/shared/applyChanges', () => ({
@@ -41,8 +42,8 @@ describe('PatchesHistoryClient', () => {
     rev,
     baseRev: rev - 1,
     origin: 'main' as const,
-    startDate: Date.now() - 1000,
-    endDate: Date.now(),
+    startedAt: getISO(new Date(Date.now() - 1000)),
+    endedAt: getISO(),
     parentId,
     groupId: 'group1',
     name: `Version ${id}`,
@@ -54,7 +55,8 @@ describe('PatchesHistoryClient', () => {
     rev,
     baseRev: rev - 1,
     ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
-    created: Date.now(),
+    createdAt: getISO(),
+    committedAt: getISO(),
   });
 
   beforeEach(() => {

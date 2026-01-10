@@ -22,8 +22,8 @@ describe('getStateAtRevision', () => {
     const versionState = { text: 'hello', count: 0 };
     const finalState = { text: 'world', count: 5 };
     const changes = [
-      { id: 'c1', rev: 6, baseRev: 5, created: 1100, ops: [{ op: 'replace', path: '/text', value: 'world' }] },
-      { id: 'c2', rev: 7, baseRev: 6, created: 1200, ops: [{ op: 'replace', path: '/count', value: 5 }] },
+      { id: 'c1', rev: 6, baseRev: 5, createdAt: '2024-01-01T00:00:01.000Z', committedAt: '2024-01-01T00:00:01.000Z', ops: [{ op: 'replace', path: '/text', value: 'world' }] },
+      { id: 'c2', rev: 7, baseRev: 6, createdAt: '2024-01-01T00:00:02.000Z', committedAt: '2024-01-01T00:00:02.000Z', ops: [{ op: 'replace', path: '/count', value: 5 }] },
     ];
 
     mockGetSnapshotAtRevision.mockResolvedValue({
@@ -45,7 +45,7 @@ describe('getStateAtRevision', () => {
 
   it('should handle null version state', async () => {
     const finalState = { text: 'hello' };
-    const changes = [{ id: 'c1', rev: 1, baseRev: 0, created: 1100, ops: [{ op: 'add', path: '/text', value: 'hello' }] }];
+    const changes = [{ id: 'c1', rev: 1, baseRev: 0, createdAt: '2024-01-01T00:00:01.000Z', committedAt: '2024-01-01T00:00:01.000Z', ops: [{ op: 'add', path: '/text', value: 'hello' }] }];
 
     mockGetSnapshotAtRevision.mockResolvedValue({
       state: null,
@@ -86,8 +86,8 @@ describe('getStateAtRevision', () => {
     const versionState = { users: [], posts: [] };
     const finalState = { users: [{ name: 'John' }], posts: [{ title: 'Hello' }] };
     const changes = [
-      { id: 'c1', rev: 11, baseRev: 10, created: 1100, ops: [{ op: 'add', path: '/users/0', value: { name: 'John' } }] },
-      { id: 'c2', rev: 12, baseRev: 11, created: 1200, ops: [{ op: 'add', path: '/posts/0', value: { title: 'Hello' } }] },
+      { id: 'c1', rev: 11, baseRev: 10, createdAt: '2024-01-01T00:00:01.000Z', committedAt: '2024-01-01T00:00:01.000Z', ops: [{ op: 'add', path: '/users/0', value: { name: 'John' } }] },
+      { id: 'c2', rev: 12, baseRev: 11, createdAt: '2024-01-01T00:00:02.000Z', committedAt: '2024-01-01T00:00:02.000Z', ops: [{ op: 'add', path: '/posts/0', value: { title: 'Hello' } }] },
     ];
 
     mockGetSnapshotAtRevision.mockResolvedValue({
@@ -109,7 +109,7 @@ describe('getStateAtRevision', () => {
   it('should handle version state without nested state property', async () => {
     const versionState = { text: 'hello' };
     const finalState = { text: 'world' };
-    const changes = [{ id: 'c1', rev: 2, baseRev: 1, created: 1100, ops: [{ op: 'replace', path: '/text', value: 'world' }] }];
+    const changes = [{ id: 'c1', rev: 2, baseRev: 1, createdAt: '2024-01-01T00:00:01.000Z', committedAt: '2024-01-01T00:00:01.000Z', ops: [{ op: 'replace', path: '/text', value: 'world' }] }];
 
     mockGetSnapshotAtRevision.mockResolvedValue({
       state: versionState, // Direct state, not wrapped in { state: ... }
@@ -162,11 +162,11 @@ describe('getStateAtRevision', () => {
     };
 
     const changes = [
-      { id: 'c1', rev: 21, baseRev: 20, created: 1100, ops: [{ op: 'replace', path: '/users/0/name', value: 'John Doe' }] },
-      { id: 'c2', rev: 22, baseRev: 21, created: 1200, ops: [{ op: 'add', path: '/users/1', value: { id: 2, name: 'Jane', status: 'pending' } }] },
-      { id: 'c3', rev: 23, baseRev: 22, created: 1300, ops: [{ op: 'replace', path: '/settings/theme', value: 'dark' }] },
-      { id: 'c4', rev: 24, baseRev: 23, created: 1400, ops: [{ op: 'replace', path: '/counters/posts', value: 2 }] },
-      { id: 'c5', rev: 25, baseRev: 24, created: 1500, ops: [{ op: 'replace', path: '/counters/views', value: 150 }] },
+      { id: 'c1', rev: 21, baseRev: 20, createdAt: '2024-01-01T00:00:01.000Z', committedAt: '2024-01-01T00:00:01.000Z', ops: [{ op: 'replace', path: '/users/0/name', value: 'John Doe' }] },
+      { id: 'c2', rev: 22, baseRev: 21, createdAt: '2024-01-01T00:00:02.000Z', committedAt: '2024-01-01T00:00:02.000Z', ops: [{ op: 'add', path: '/users/1', value: { id: 2, name: 'Jane', status: 'pending' } }] },
+      { id: 'c3', rev: 23, baseRev: 22, createdAt: '2024-01-01T00:00:03.000Z', committedAt: '2024-01-01T00:00:03.000Z', ops: [{ op: 'replace', path: '/settings/theme', value: 'dark' }] },
+      { id: 'c4', rev: 24, baseRev: 23, createdAt: '2024-01-01T00:00:04.000Z', committedAt: '2024-01-01T00:00:04.000Z', ops: [{ op: 'replace', path: '/counters/posts', value: 2 }] },
+      { id: 'c5', rev: 25, baseRev: 24, createdAt: '2024-01-01T00:00:05.000Z', committedAt: '2024-01-01T00:00:05.000Z', ops: [{ op: 'replace', path: '/counters/views', value: 150 }] },
     ];
 
     mockGetSnapshotAtRevision.mockResolvedValue({

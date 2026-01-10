@@ -14,7 +14,8 @@ describe('applyChanges', () => {
     rev,
     baseRev: rev - 1,
     ops,
-    created: Date.now(),
+    createdAt: new Date().toISOString(),
+    committedAt: new Date().toISOString(),
   });
 
   beforeEach(() => {

@@ -172,7 +172,8 @@ describe('PatchesStore interface', () => {
           rev: 1,
           baseRev: 0,
           ops: [{ op: 'add', path: '/test', value: 'data' }],
-          created: Date.now(),
+          createdAt: '2024-01-01T00:00:00.000Z',
+          committedAt: '2024-01-01T00:00:00.000Z',
         },
       ];
 
@@ -187,7 +188,8 @@ describe('PatchesStore interface', () => {
           rev: 1,
           baseRev: 0,
           ops: [{ op: 'add', path: '/test', value: 'data' }],
-          created: Date.now(),
+          createdAt: '2024-01-01T00:00:00.000Z',
+          committedAt: '2024-01-01T00:00:00.000Z',
         },
       ];
 
@@ -206,7 +208,8 @@ describe('PatchesStore interface', () => {
           rev: 1,
           baseRev: 0,
           ops: [{ op: 'add', path: '/test', value: 'data' }],
-          created: Date.now(),
+          createdAt: '2024-01-01T00:00:00.000Z',
+          committedAt: '2024-01-01T00:00:00.000Z',
         },
       ];
 
@@ -318,7 +321,8 @@ describe('PatchesStore interface', () => {
           rev: 2,
           baseRev: 1,
           ops: [{ op: 'replace', path: '/content', value: 'updated' }],
-          created: Date.now(),
+          createdAt: '2024-01-01T00:00:00.000Z',
+          committedAt: '2024-01-01T00:00:00.000Z',
         },
       ];
 

@@ -87,9 +87,9 @@ describe('RPCServer', () => {
     });
 
     it('should handle commitChanges with authorization', async () => {
-      const changes = [{ id: 'change1', ops: [], rev: 1, baseRev: 0, created: Date.now() }];
+      const changes = [{ id: 'change1', ops: [], rev: 1, baseRev: 0, createdAt: '2024-01-01T00:00:00.000Z', committedAt: '2024-01-01T00:00:00.000Z' }];
       const priorChanges: any[] = [];
-      const newChanges = [{ id: 'change2', ops: [], rev: 2, baseRev: 1, created: Date.now() }];
+      const newChanges = [{ id: 'change2', ops: [], rev: 2, baseRev: 1, createdAt: '2024-01-01T00:00:01.000Z', committedAt: '2024-01-01T00:00:01.000Z' }];
       mockPatches.commitChanges.mockResolvedValue([priorChanges, newChanges]);
 
       const result = await rpcServer.commitChanges({ docId: 'doc1', changes }, mockCtx);

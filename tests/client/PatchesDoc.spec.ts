@@ -15,7 +15,8 @@ vi.mock('../../src/algorithms/client/makeChange', () => ({
         rev: snapshot.rev + 1,
         baseRev: snapshot.rev,
         ops: [{ op: 'add', path: '/test', value: 'mock' }],
-        created: Date.now(),
+        createdAt: new Date().toISOString(),
+        committedAt: new Date().toISOString(),
         ...metadata,
       },
     ];
@@ -54,14 +55,15 @@ const { makeChange } = await import('../../src/algorithms/client/makeChange');
 const { applyChanges } = await import('../../src/algorithms/shared/applyChanges');
 
 describe('PatchesDoc', () => {
-  let doc: InstanceType<typeof PatchesDoc>;
+  let doc: InstanceType<typeof PatchesDoc<any>>;
 
   const createChange = (id: string, rev: number, baseRev?: number): Change => ({
     id,
     rev,
     baseRev: baseRev ?? rev - 1,
     ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
-    created: Date.now(),
+    createdAt: new Date().toISOString(),
+    committedAt: new Date().toISOString(),
   });
 
   const createSnapshot = (state: any, rev: number, changes: Change[] = []): PatchesSnapshot<any> => ({
@@ -301,7 +303,8 @@ describe('PatchesDoc', () => {
           rev: 1,
           baseRev: 0,
           ops: [{ op: 'add', path: '/test', value: 'added' }],
-          created: Date.now(),
+          createdAt: new Date().toISOString(),
+          committedAt: new Date().toISOString(),
         },
       ]);
 

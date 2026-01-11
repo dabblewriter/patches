@@ -289,7 +289,8 @@ describe('commitChanges', () => {
       'doc1',
       changes,
       0,
-      'offline-batch'
+      'offline-batch',
+      'offline'
     );
   });
 
@@ -309,7 +310,8 @@ describe('commitChanges', () => {
       'doc1',
       changes,
       0,
-      undefined
+      undefined,
+      'offline'
     );
   });
 

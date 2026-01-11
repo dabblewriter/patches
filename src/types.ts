@@ -136,6 +136,13 @@ export interface CommitChangesOptions {
    * Useful for migrations where change history must be preserved exactly.
    */
   forceCommit?: boolean;
+  /**
+   * Enable historical import mode for migrations. When true:
+   * - Preserves `committedAt` if provided (otherwise sets to serverNow)
+   * - Uses first incoming change's timestamp for session gap detection (not serverNow)
+   * - Creates versions with origin: 'main' instead of 'offline'
+   */
+  historicalImport?: boolean;
 }
 
 /**

@@ -13,6 +13,7 @@ import { getStateAtRevision } from './getStateAtRevision.js';
  * @param changes The incoming changes (all with the same batchId)
  * @param baseRev The base revision for the batch
  * @param batchId The batch identifier
+ * @param origin The origin to use for created versions (default: 'offline')
  * @returns The collapsed changes for transformation
  */
 export async function handleOfflineSessionsAndBatches(
@@ -21,7 +22,8 @@ export async function handleOfflineSessionsAndBatches(
   docId: string,
   changes: Change[],
   baseRev: number,
-  batchId?: string
+  batchId?: string,
+  origin: 'main' | 'offline' = 'offline'
 ) {
   // Use batchId as groupId for multi-batch uploads; default offline sessions have no groupId
   const groupId = batchId ?? createSortableId();
@@ -74,7 +76,7 @@ export async function handleOfflineSessionsAndBatches(
           const sessionMetadata = createVersionMetadata({
             parentId,
             groupId,
-            origin: 'offline',
+            origin,
             // Convert client timestamps to UTC for version metadata (enables lexicographic sorting)
             startedAt: getISO(sessionChanges[0].createdAt),
             endedAt: getISO(sessionChanges[sessionChanges.length - 1].createdAt),

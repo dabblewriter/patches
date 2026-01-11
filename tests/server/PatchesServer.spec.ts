@@ -216,7 +216,8 @@ describe('PatchesServer', () => {
         'doc1',
         [mockChange],
         1,
-        'batch1'
+        'batch1',
+        'offline'
       );
     });
 

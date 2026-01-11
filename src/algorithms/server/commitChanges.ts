@@ -50,8 +50,10 @@ export async function commitChanges(
     }
     if (c.rev == null) c.rev = rev++;
     else rev = c.rev + 1;
-    // Set server commit time
-    (c as Change).committedAt = serverNow;
+    // Set server commit time (preserve existing in historicalImport mode)
+    if (!options?.historicalImport || !(c as Change).committedAt) {
+      (c as Change).committedAt = serverNow;
+    }
     // Clamp createdAt to not be after committedAt (preserves timezone offset)
     c.createdAt = c.createdAt ? clampTimestamp(c.createdAt, serverNow) : serverNow;
   });
@@ -72,8 +74,10 @@ export async function commitChanges(
   }
 
   // 2. Check if we need to create a new version - if the last change was created more than a session ago
+  // In historicalImport mode, use incoming change timestamp instead of serverNow for accurate gap detection
   const lastChange = currentChanges[currentChanges.length - 1];
-  if (lastChange && timestampDiff(serverNow, lastChange.createdAt) > sessionTimeoutMillis) {
+  const compareTime = options?.historicalImport ? changes[0].createdAt : serverNow;
+  if (lastChange && timestampDiff(compareTime, lastChange.createdAt) > sessionTimeoutMillis) {
     await createVersion(store, docId, currentState, currentChanges);
   }
 
@@ -94,15 +98,18 @@ export async function commitChanges(
   // 4. Handle offline-session versioning:
   // - batchId present (multi-batch uploads)
   // - or the first change is older than the session timeout (single-batch offline)
+  // In historicalImport mode, use 'main' origin instead of 'offline'
   const isOfflineTimestamp = timestampDiff(serverNow, incomingChanges[0].createdAt) > sessionTimeoutMillis;
   if (isOfflineTimestamp || batchId) {
+    const origin = options?.historicalImport ? 'main' : 'offline';
     incomingChanges = await handleOfflineSessionsAndBatches(
       store,
       sessionTimeoutMillis,
       docId,
       incomingChanges,
       baseRev,
-      batchId
+      batchId,
+      origin
     );
   }
 

@@ -102,8 +102,10 @@ export interface VersionMetadata {
   parentId?: string;
   /** Identifier linking versions from the same offline batch or branch. */
   groupId?: string;
-  /** Indicates how the version was created ('main', 'offline', 'branch'). */
-  origin: 'main' | 'offline' | 'branch';
+  /** Indicates how the version was created ('main', 'offline-branch', 'branch'). */
+  origin: 'main' | 'offline-branch' | 'branch';
+  /** Was this version created while offline? Tracks creation context separately from timeline position. */
+  isOffline?: boolean;
   /** User-defined name if origin is 'branch'. */
   branchName?: string;
   /** Server-side ISO timestamp of version start (UTC with Z). */
@@ -176,7 +178,7 @@ export interface ListVersionsOptions {
   /** Return versions in descending order. Defaults to false (ascending). When reversed, startAfter and endBefore apply to the *reversed* list. */
   reverse?: boolean;
   /** Filter by the origin type. */
-  origin?: 'main' | 'offline' | 'branch';
+  origin?: 'main' | 'offline-branch' | 'branch';
   /** Filter by the group ID (branch ID or offline batch ID). */
   groupId?: string;
 }

@@ -105,6 +105,7 @@ export class PatchesBranchManager {
     }
     const sourceDocId = branch.branchedFromId;
     const branchStartRevOnSource = branch.branchedRev;
+
     // 2. Get all committed server changes made on the branch document since it was created.
     const branchChanges = await this.store.listChanges(branchId, {});
     if (branchChanges.length === 0) {
@@ -112,17 +113,27 @@ export class PatchesBranchManager {
       await this.closeBranch(branchId, 'merged');
       return [];
     }
-    // 3. Get all versions from the branch doc (skip offline versions)
+
+    // 3. Check if we can fast-forward (no concurrent changes on source since branch)
+    const sourceChanges = await this.store.listChanges(sourceDocId, {
+      startAfter: branchStartRevOnSource,
+    });
+    const canFastForward = sourceChanges.length === 0;
+
+    // 4. Get all versions from the branch doc (skip offline-branch versions)
     const branchVersions = await this.store.listVersions(branchId, { origin: 'main' });
-    // 4. For each version, create a corresponding version in the main doc with updated fields
+
+    // 5. For each version, create a corresponding version in the main doc
+    //    Use 'main' origin if fast-forward, 'branch' if divergent
+    const versionOrigin = canFastForward ? 'main' : 'branch';
     let lastVersionId: string | undefined;
     for (const v of branchVersions) {
       const newVersionMetadata = createVersionMetadata({
         ...v,
-        origin: 'branch',
+        origin: versionOrigin,
         baseRev: branchStartRevOnSource,
         groupId: branchId,
-        branchName: branch.name,
+        branchName: branch.name, // Keep branchName for traceability
         parentId: lastVersionId,
       });
       const state = await this.store.loadVersionState(branchId, v.id);
@@ -130,21 +141,33 @@ export class PatchesBranchManager {
       await this.store.createVersion(sourceDocId, newVersionMetadata, state, changes);
       lastVersionId = newVersionMetadata.id;
     }
-    // 5. Flatten all branch changes into a single change for the main doc
-    const rev = branchStartRevOnSource + branchChanges.length;
-    const flattenedChange = createChange(
-      branchStartRevOnSource,
-      rev,
-      branchChanges.flatMap(c => c.ops)
-    );
-    // 6. Commit the flattened change to the main doc
+
+    // 6. Commit changes to source doc
     let committedMergeChanges: Change[] = [];
     try {
-      [, committedMergeChanges] = await this.patchesServer.commitChanges(sourceDocId, [flattenedChange]);
+      if (canFastForward) {
+        // Fast-forward: commit branch changes individually with adjusted revs
+        const adjustedChanges = branchChanges.map(c => ({
+          ...c,
+          baseRev: branchStartRevOnSource,
+          rev: undefined, // Let commitChanges assign sequential revs
+        }));
+        [, committedMergeChanges] = await this.patchesServer.commitChanges(sourceDocId, adjustedChanges);
+      } else {
+        // Divergent: flatten and transform (current behavior)
+        const rev = branchStartRevOnSource + branchChanges.length;
+        const flattenedChange = createChange(
+          branchStartRevOnSource,
+          rev,
+          branchChanges.flatMap(c => c.ops)
+        );
+        [, committedMergeChanges] = await this.patchesServer.commitChanges(sourceDocId, [flattenedChange]);
+      }
     } catch (error) {
       console.error(`Failed to merge branch ${branchId} into ${sourceDocId}:`, error);
       throw new Error(`Merge failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+
     // 7. Merge succeeded. Update the branch status.
     await this.closeBranch(branchId, 'merged');
     return committedMergeChanges;

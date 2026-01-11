@@ -98,10 +98,14 @@ export async function commitChanges(
   // 4. Handle offline-session versioning:
   // - batchId present (multi-batch uploads)
   // - or the first change is older than the session timeout (single-batch offline)
-  // In historicalImport mode, use 'main' origin instead of 'offline'
   const isOfflineTimestamp = timestampDiff(serverNow, incomingChanges[0].createdAt) > sessionTimeoutMillis;
   if (isOfflineTimestamp || batchId) {
-    const origin = options?.historicalImport ? 'main' : 'offline';
+    // Determine if we can fast-forward (no concurrent changes to transform over)
+    const canFastForward = committedChanges.length === 0;
+    // In historicalImport mode, always use 'main' origin
+    const origin = options?.historicalImport ? 'main' : canFastForward ? 'main' : 'offline-branch';
+
+    // Create versions for offline sessions (with isOffline metadata)
     incomingChanges = await handleOfflineSessionsAndBatches(
       store,
       sessionTimeoutMillis,
@@ -109,8 +113,15 @@ export async function commitChanges(
       incomingChanges,
       baseRev,
       batchId,
-      origin
+      origin,
+      true // isOffline
     );
+
+    // Fast-forward: no transformation needed, save changes directly
+    if (canFastForward) {
+      await store.saveChanges(docId, incomingChanges);
+      return [[], incomingChanges];
+    }
   }
 
   // 5. Transform the *entire batch* of incoming (and potentially collapsed offline) changes

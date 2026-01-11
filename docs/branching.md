@@ -24,13 +24,13 @@ When someone hits that "New Branch" button, here's what happens behind the scene
 
 When you create a branch, we store some super important metadata that helps us keep everything organized:
 
-| Field        | What it means in the branch                       | What it means after merging back                   |
-| ------------ | ------------------------------------------------- | -------------------------------------------------- |
-| `origin`     | Set to `"main"` (branch acts like a normal doc)   | Set to `"branch"` (shows these came from a branch) |
-| `rev`        | Continues from branch point (e.g., 43, 44, 45...) | Same numbers (no translation needed)               |
-| `baseRev`    | Normal (each change's previous rev)               | Set to the branch point revision (e.g., 42)        |
-| `groupId`    | The branch's document ID                          | The branch's document ID                           |
-| `branchName` | The human-readable branch name                    | The human-readable branch name                     |
+| Field        | What it means in the branch                       | What it means after merging back                                  |
+| ------------ | ------------------------------------------------- | ----------------------------------------------------------------- |
+| `origin`     | Set to `"main"` (branch acts like a normal doc)   | `"main"` if fast-forward, `"branch"` if divergent                 |
+| `rev`        | Continues from branch point (e.g., 43, 44, 45...) | Same numbers (no translation needed)                              |
+| `baseRev`    | Normal (each change's previous rev)               | Set to the branch point revision (e.g., 42)                       |
+| `groupId`    | The branch's document ID                          | The branch's document ID                                          |
+| `branchName` | The human-readable branch name                    | The human-readable branch name (preserved for traceability)       |
 
 This metadata is our bread crumbs 🥖 that help us keep track of what came from where, which is essential when merging time comes!
 
@@ -39,23 +39,38 @@ This metadata is our bread crumbs 🥖 that help us keep track of what came from
 Ready to bring those experimental changes back to the main document? Here's what happens when you merge:
 
 1. 📦 We gather up all the versions created in the branch
-2. 🔄 We flip their `origin` from `"main"` to `"branch"` so everyone knows they came from a branch
-3. 🔗 We set their `baseRev` to the original branching point
-4. 📊 We add the branch ID and name so you can filter and group these changes later
-5. 🏭 We flatten all the branch's changes into one mega-change (for performance reasons)
-6. 📝 We update the branch status to `"merged"` so everyone knows this branch's changes are now in the main doc
+2. 🔍 We check if there were any changes on the main document since the branch was created
+3. 📊 We add the branch ID and name so you can filter and group these changes later
+4. Based on whether there were concurrent changes:
 
-### Wait, Flattening Changes? 🤔
+**Fast-forward merge** (no changes on main since branching):
+- 🔄 Versions keep `origin: "main"` (they're now part of the main timeline!)
+- 📝 Each change is committed individually to the main document
+- This is the cleanest case - like the branch never diverged at all
 
-Yep! Instead of copying every single tiny change from the branch to the main document (which could be hundreds or thousands of operations), we smoosh them all together into one change. This:
+**Divergent merge** (main has new changes since branching):
+- 🔄 We flip their `origin` to `"branch"` so everyone knows they came from a branch
+- 🔗 We set their `baseRev` to the original branching point
+- 🏭 We flatten all the branch's changes into one mega-change (for transformation)
+- This flattened change gets transformed against the concurrent main changes
+
+5. 📝 We update the branch status to `"merged"` so everyone knows this branch's changes are now in the main doc
+
+### Why Flatten Changes for Divergent Merges? 🤔
+
+When there are concurrent changes to deal with, instead of transforming every single tiny change from the branch against the main changes (which could be hundreds or thousands of operations), we smoosh them all together into one change first. This:
 
 - ⚡ Makes merging MUCH faster
 - 💾 Saves tons of storage space
 - 🧠 Keeps the main document's history cleaner and easier to understand
 
-But don't worry - we still preserve all the original versions and their metadata, so you don't lose any important history!
+But don't worry - we still preserve all the original versions and their metadata with `origin: "branch"`, so you don't lose any important history!
 
-_Want to know a secret?_ 🤫 Offline sessions are treated _exactly_ the same way. They are basically auto-branches. Their versions are saved as they appeared to the user when they made the changes offline, but when they merge they are collapsed into one change.
+### The Fast-Forward Advantage 🚀
+
+When there are no concurrent changes on main, we skip the flattening entirely. The branch changes become part of the main timeline seamlessly, preserving your complete editing history without any transformation needed. It's like the branch was always part of main!
+
+_Want to know a secret?_ 🤫 Offline sessions are treated _exactly_ the same way. They are basically auto-branches. Their versions are saved as they appeared to the user when they made the changes offline. If there were no server changes while offline, those versions simply become part of the main timeline. If there were concurrent changes, the offline versions are marked with `origin: "offline-branch"` and the changes get collapsed into one for transformation.
 
 ## Why We Made These Design Choices 🧐
 

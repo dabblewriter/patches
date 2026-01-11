@@ -73,8 +73,8 @@ const versionsInRange = await historyManager.listVersions('project-proposal-fina
 });
 
 // Versions with a specific origin
-const offlineVersions = await historyManager.listVersions('project-proposal-final', {
-  origin: 'offline', // Filter by origin type ('main', 'offline', or 'branch')
+const offlineBranchVersions = await historyManager.listVersions('project-proposal-final', {
+  origin: 'offline-branch', // Filter by origin type ('main', 'offline-branch', or 'branch')
   groupId: 'batch-123', // Optional: filter by group ID (for offline batches or branches)
 });
 ```

@@ -95,9 +95,11 @@ The heavy lifting is handled by the `commitChanges` algorithm in `src/algorithms
 
    - Did the client make these changes offline? Group them by time gaps
    - Create version snapshots for each offline session
-   - Collapse offline changes for transformation
+   - Check if there are concurrent server changes to transform against:
+     - **No concurrent changes (fast-forward):** Save changes directly with `origin: 'main'`
+     - **Has concurrent changes (divergent):** Collapse offline changes and transform
 
-6. **Transform Against Concurrent Changes**
+6. **Transform Against Concurrent Changes** (if divergent)
 
    - Get any changes committed since `baseRev`
    - Transform the incoming ops against already-committed ops
@@ -136,6 +138,9 @@ Got a client submitting a ton of changes (maybe after being offline)? They can s
 
 When a client submits changes after working offline (detected by time gaps between `createdAt` timestamps), the server generates snapshots to preserve the document state at key points in time.
 
+- **Fast-forward (no concurrent changes):** Versions are created with `origin: 'main'` and `isOffline: true`. The offline changes become a seamless part of the main timeline.
+- **Divergent (has concurrent changes):** Versions are created with `origin: 'offline-branch'` to indicate they diverged from main and required transformation.
+
 ### Online Snapshots
 
 Each time the server processes changes, it checks if enough time has passed since the last change (based on `sessionTimeoutMinutes`). If so, it creates a new version snapshot.
@@ -173,9 +178,9 @@ const versionState = await server.getVersionState(docId, specificVersionId);
 List version metadata with tons of filtering options.
 
 ```typescript
-// Get the last 10 offline version snapshots
-const offlineVersions = await server.listVersions(docId, {
-  origin: 'offline',
+// Get the last 10 divergent offline version snapshots (had concurrent changes)
+const offlineBranchVersions = await server.listVersions(docId, {
+  origin: 'offline-branch',
   limit: 10,
   reverse: true, // Latest first
   orderBy: 'startedAt',

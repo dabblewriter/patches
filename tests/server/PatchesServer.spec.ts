@@ -204,9 +204,11 @@ describe('PatchesServer', () => {
       expect(mockStore.saveChanges).not.toHaveBeenCalled();
     });
 
-    it('should handle offline sessions with batchId', async () => {
+    it('should handle offline sessions with batchId (fast-forward)', async () => {
       const offlineChanges = [mockChange];
       vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue(offlineChanges);
+      // No committed changes = fast-forward
+      vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
       await server.commitChanges('doc1', [mockChange]);
 
@@ -217,27 +219,59 @@ describe('PatchesServer', () => {
         [mockChange],
         1,
         'batch1',
-        'offline'
+        'main', // Fast-forward: origin is 'main'
+        true // isOffline
+      );
+    });
+
+    it('should handle offline sessions with batchId (divergent)', async () => {
+      const offlineChanges = [mockChange];
+      const committedChange = { ...mockChange, id: 'committed' } as Change;
+      vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue(offlineChanges);
+      // Has committed changes = divergent
+      vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
+
+      await server.commitChanges('doc1', [mockChange]);
+
+      expect(handleOfflineSessionsAndBatches).toHaveBeenCalledWith(
+        mockStore,
+        expect.any(Number), // sessionTimeoutMillis
+        'doc1',
+        [mockChange],
+        1,
+        'batch1',
+        'offline-branch', // Divergent: origin is 'offline-branch'
+        true // isOffline
       );
     });
 
     it('should handle transformation that results in no-op changes', async () => {
+      // Need committed changes to trigger transformation path (not fast-forward)
+      const committedChange = { ...mockChange, id: 'committed' } as Change;
+      vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
+      // Change without batchId to avoid offline handling
+      const changeWithoutBatch = { ...mockChange, batchId: undefined } as Change;
       vi.mocked(transformPatch).mockReturnValue([]);
 
-      const result = await server.commitChanges('doc1', [mockChange]);
+      const result = await server.commitChanges('doc1', [changeWithoutBatch]);
 
       expect(result[1]).toEqual([]); // No transformed changes
       expect(mockStore.saveChanges).not.toHaveBeenCalled();
     });
 
     it('should handle apply patch errors gracefully', async () => {
+      // Need committed changes to trigger transformation path (not fast-forward)
+      const committedChange = { ...mockChange, id: 'committed' } as Change;
+      vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
+      // Change without batchId to avoid offline handling
+      const changeWithoutBatch = { ...mockChange, batchId: undefined } as Change;
       vi.mocked(applyPatch).mockImplementation(() => {
         throw new Error('Apply patch failed');
       });
 
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-      const result = await server.commitChanges('doc1', [mockChange]);
+      const result = await server.commitChanges('doc1', [changeWithoutBatch]);
 
       expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Error applying change'), expect.any(Error));
       expect(result[1]).toEqual([]);

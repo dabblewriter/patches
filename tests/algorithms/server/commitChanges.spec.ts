@@ -273,10 +273,11 @@ describe('commitChanges', () => {
     expect(mockStore.saveChanges).not.toHaveBeenCalled();
   });
 
-  it('should handle offline changes when batchId is present', async () => {
+  it('should handle offline changes when batchId is present (fast-forward)', async () => {
     const changes = [createChange('1', 1, 0)];
     changes[0].batchId = 'offline-batch';
 
+    // No committed changes = fast-forward with origin 'main'
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
@@ -290,14 +291,40 @@ describe('commitChanges', () => {
       changes,
       0,
       'offline-batch',
-      'offline'
+      'main', // Fast-forward: origin is 'main'
+      true // isOffline
     );
   });
 
-  it('should handle offline changes when timestamp is older than session timeout', async () => {
+  it('should handle offline changes when batchId is present (divergent)', async () => {
+    const changes = [createChange('1', 1, 0)];
+    changes[0].batchId = 'offline-batch';
+    const committedChange = createChange('committed', 1, 0);
+
+    // Has committed changes = divergent with origin 'offline-branch'
+    vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
+
+    await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+
+    const { handleOfflineSessionsAndBatches } =
+      await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
+    expect(handleOfflineSessionsAndBatches).toHaveBeenCalledWith(
+      mockStore,
+      sessionTimeoutMillis,
+      'doc1',
+      changes,
+      0,
+      'offline-batch',
+      'offline-branch', // Divergent: origin is 'offline-branch'
+      true // isOffline
+    );
+  });
+
+  it('should handle offline changes when timestamp is older than session timeout (fast-forward)', async () => {
     const oldTime = createTimestamp(-sessionTimeoutMillis - 1000);
     const changes = [createChange('1', 1, 0, oldTime)];
 
+    // No committed changes = fast-forward with origin 'main'
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
@@ -311,7 +338,32 @@ describe('commitChanges', () => {
       changes,
       0,
       undefined,
-      'offline'
+      'main', // Fast-forward: origin is 'main'
+      true // isOffline
+    );
+  });
+
+  it('should handle offline changes when timestamp is older than session timeout (divergent)', async () => {
+    const oldTime = createTimestamp(-sessionTimeoutMillis - 1000);
+    const changes = [createChange('1', 1, 0, oldTime)];
+    const committedChange = createChange('committed', 1, 0);
+
+    // Has committed changes = divergent with origin 'offline-branch'
+    vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
+
+    await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+
+    const { handleOfflineSessionsAndBatches } =
+      await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
+    expect(handleOfflineSessionsAndBatches).toHaveBeenCalledWith(
+      mockStore,
+      sessionTimeoutMillis,
+      'doc1',
+      changes,
+      0,
+      undefined,
+      'offline-branch', // Divergent: origin is 'offline-branch'
+      true // isOffline
     );
   });
 

@@ -37,7 +37,7 @@ describe('handleOfflineSessionsAndBatches', () => {
     const { createVersionMetadata: createVersion } = await import('../../../src/data/version');
     vi.mocked(createVersion).mockImplementation((data: any) => ({
       id: 'version-id',
-      origin: 'offline' as const,
+      origin: 'offline-branch' as const,
       startedAt: new Date().toISOString(),
       endedAt: new Date().toISOString(),
       rev: 1,
@@ -109,7 +109,7 @@ describe('handleOfflineSessionsAndBatches', () => {
       id: 'existing-version',
       parentId: 'parent-version',
       endedAt: toISO(1000),
-      origin: 'offline' as const,
+      origin: 'offline-branch' as const,
       startedAt: toISO(900),
       rev: 1,
       baseRev: 0,
@@ -141,7 +141,7 @@ describe('handleOfflineSessionsAndBatches', () => {
       id: 'existing-version',
       parentId: 'parent-version',
       endedAt: toISO(1000),
-      origin: 'offline' as const,
+      origin: 'offline-branch' as const,
       startedAt: toISO(900),
       rev: 1,
       baseRev: 0,
@@ -221,7 +221,8 @@ describe('handleOfflineSessionsAndBatches', () => {
     expect(createVersion).toHaveBeenCalledWith({
       parentId: undefined,
       groupId: 'generated-group-id',
-      origin: 'offline',
+      origin: 'offline-branch',
+      isOffline: true,
       startedAt: toUTC(1000),
       endedAt: toUTC(2000),
       rev: 7,

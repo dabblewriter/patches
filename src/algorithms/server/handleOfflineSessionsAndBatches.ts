@@ -13,8 +13,9 @@ import { getStateAtRevision } from './getStateAtRevision.js';
  * @param changes The incoming changes (all with the same batchId)
  * @param baseRev The base revision for the batch
  * @param batchId The batch identifier
- * @param origin The origin to use for created versions (default: 'offline')
- * @returns The collapsed changes for transformation
+ * @param origin The origin to use for created versions (default: 'offline-branch')
+ * @param isOffline Whether these changes were created offline (metadata flag)
+ * @returns The changes (collapsed into one if divergent, unchanged if fast-forward)
  */
 export async function handleOfflineSessionsAndBatches(
   store: PatchesStoreBackend,
@@ -23,7 +24,8 @@ export async function handleOfflineSessionsAndBatches(
   changes: Change[],
   baseRev: number,
   batchId?: string,
-  origin: 'main' | 'offline' = 'offline'
+  origin: 'main' | 'offline-branch' = 'offline-branch',
+  isOffline: boolean = true
 ) {
   // Use batchId as groupId for multi-batch uploads; default offline sessions have no groupId
   const groupId = batchId ?? createSortableId();
@@ -78,6 +80,7 @@ export async function handleOfflineSessionsAndBatches(
             parentId,
             groupId,
             origin,
+            isOffline,
             // Convert client timestamps to UTC for version metadata (enables lexicographic sorting)
             startedAt: getISO(sessionChanges[0].createdAt),
             endedAt: getISO(sessionChanges[sessionChanges.length - 1].createdAt),
@@ -92,11 +95,15 @@ export async function handleOfflineSessionsAndBatches(
     }
   }
 
-  // Collapse all changes into one for transformation
-  return [
-    changes.reduce((firstChange, nextChange) => {
-      firstChange.ops = [...firstChange.ops, ...nextChange.ops];
-      return firstChange;
-    }),
-  ];
+  // Only collapse changes into one if divergent (need transformation)
+  // For fast-forward (origin: 'main'), return unchanged - caller saves them directly
+  if (origin === 'offline-branch') {
+    return [
+      changes.reduce((firstChange, nextChange) => {
+        firstChange.ops = [...firstChange.ops, ...nextChange.ops];
+        return firstChange;
+      }),
+    ];
+  }
+  return changes;
 }

@@ -63,6 +63,7 @@ describe('handleOfflineSessionsAndBatches', () => {
       listVersions: vi.fn(),
       createVersion: vi.fn(),
       updateVersion: vi.fn(),
+      appendVersionChanges: vi.fn(),
       loadVersionState: vi.fn(),
       saveChanges: vi.fn(),
     } as any;
@@ -123,7 +124,16 @@ describe('handleOfflineSessionsAndBatches', () => {
     await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
 
     expect(mockStore.loadVersionState).toHaveBeenCalledWith('doc1', 'existing-version');
-    expect(mockStore.updateVersion).toHaveBeenCalledWith('doc1', 'existing-version', {});
+    expect(mockStore.appendVersionChanges).toHaveBeenCalledWith(
+      'doc1',
+      'existing-version',
+      changes,
+      expect.any(String), // newEndedAt
+      6, // newRev from the change
+      expect.any(Object) // mergedState
+    );
+    expect(mockStore.updateVersion).not.toHaveBeenCalled();
+    expect(mockStore.saveChanges).not.toHaveBeenCalled();
   });
 
   it('should create new session when timeout exceeded', async () => {

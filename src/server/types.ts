@@ -34,6 +34,19 @@ export interface PatchesStoreBackend {
   /** Update a version's metadata. */
   updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void>;
 
+  /**
+   * Appends changes to an existing version, updating its state snapshot, endedAt, and rev.
+   * Used when a session spans multiple batch submissions.
+   */
+  appendVersionChanges(
+    docId: string,
+    versionId: string,
+    changes: Change[],
+    newEndedAt: string,
+    newRev: number,
+    newState: any
+  ): Promise<void>;
+
   /** Lists version metadata based on filtering/sorting options. */
   listVersions(docId: string, options: ListVersionsOptions): Promise<VersionMetadata[]>;
 

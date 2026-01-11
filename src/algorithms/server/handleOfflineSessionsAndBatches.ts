@@ -63,10 +63,11 @@ export async function handleOfflineSessionsAndBatches(
           !!lastVersion && timestampDiff(sessionChanges[0].createdAt, lastVersion.endedAt) <= sessionTimeoutMillis;
 
         if (isContinuation) {
-          // Merge/extend the existing version
+          // Append to the existing version
           const mergedState = applyChanges(offlineBaseState, sessionChanges);
-          await store.saveChanges(docId, sessionChanges);
-          await store.updateVersion(docId, lastVersion.id, {}); // metadata already updated above
+          const newEndedAt = getISO(sessionChanges[sessionChanges.length - 1].createdAt);
+          const newRev = sessionChanges[sessionChanges.length - 1].rev;
+          await store.appendVersionChanges(docId, lastVersion.id, sessionChanges, newEndedAt, newRev, mergedState);
           offlineBaseState = mergedState;
           parentId = lastVersion.parentId;
         } else {

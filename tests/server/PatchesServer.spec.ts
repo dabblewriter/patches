@@ -220,7 +220,8 @@ describe('PatchesServer', () => {
         1,
         'batch1',
         'main', // Fast-forward: origin is 'main'
-        true // isOffline
+        true, // isOffline
+        undefined // maxPayloadBytes
       );
     });
 
@@ -241,7 +242,8 @@ describe('PatchesServer', () => {
         1,
         'batch1',
         'offline-branch', // Divergent: origin is 'offline-branch'
-        true // isOffline
+        true, // isOffline
+        undefined // maxPayloadBytes
       );
     });
 

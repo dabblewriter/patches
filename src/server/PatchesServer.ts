@@ -20,6 +20,12 @@ export interface PatchesServerOptions {
    * Defaults to 30 minutes.
    */
   sessionTimeoutMinutes?: number;
+  /**
+   * Maximum size in bytes for a single change's JSON representation.
+   * If a flattened/collapsed change exceeds this, it will be split into multiple changes.
+   * Useful for databases with row size limits.
+   */
+  maxPayloadBytes?: number;
 }
 
 /**
@@ -29,6 +35,7 @@ export interface PatchesServerOptions {
  */
 export class PatchesServer {
   private readonly sessionTimeoutMillis: number;
+  private readonly maxPayloadBytes?: number;
 
   /** Notifies listeners whenever a batch of changes is *successfully* committed. */
   public readonly onChangesCommitted = signal<(docId: string, changes: Change[], originClientId?: string) => void>();
@@ -41,6 +48,7 @@ export class PatchesServer {
     options: PatchesServerOptions = {}
   ) {
     this.sessionTimeoutMillis = (options.sessionTimeoutMinutes ?? 30) * 60 * 1000;
+    this.maxPayloadBytes = options.maxPayloadBytes;
   }
 
   /**
@@ -94,7 +102,8 @@ export class PatchesServer {
       docId,
       changes,
       this.sessionTimeoutMillis,
-      options
+      options,
+      this.maxPayloadBytes
     );
 
     // Persist and notify about newly transformed changes atomically

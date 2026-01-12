@@ -229,4 +229,99 @@ describe('handleOfflineSessionsAndBatches', () => {
       baseRev: 5,
     });
   });
+
+  it('should break collapsed changes when maxPayloadBytes is set and exceeded', async () => {
+    // Create changes with large ops that when collapsed will exceed the limit
+    const createLargeChange = (id: string, rev: number, createdAtMs: number): Change => ({
+      id,
+      rev,
+      baseRev: rev - 1,
+      ops: [{ op: 'add', path: `/change-${id}`, value: 'x'.repeat(200) }],
+      createdAt: toISO(createdAtMs),
+      committedAt: getISO(),
+    });
+
+    const changes = [
+      createLargeChange('1', 6, 1000),
+      createLargeChange('2', 7, 1100),
+      createLargeChange('3', 8, 1200),
+    ];
+
+    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
+
+    // Set a maxPayloadBytes that will be exceeded by the collapsed change
+    const maxPayloadBytes = 400; // Small enough to trigger breaking
+    const result = await handleOfflineSessionsAndBatches(
+      mockStore,
+      sessionTimeoutMillis,
+      'doc1',
+      changes,
+      5,
+      undefined,
+      'offline-branch',
+      true,
+      maxPayloadBytes
+    );
+
+    // Should return multiple changes since the collapsed one was too large
+    expect(result.length).toBeGreaterThan(1);
+    // Each resulting change should be smaller than maxPayloadBytes
+    for (const change of result) {
+      expect(JSON.stringify(change).length).toBeLessThanOrEqual(maxPayloadBytes);
+    }
+  });
+
+  it('should not break collapsed changes when maxPayloadBytes is not set', async () => {
+    const createLargeChange = (id: string, rev: number, createdAtMs: number): Change => ({
+      id,
+      rev,
+      baseRev: rev - 1,
+      ops: [{ op: 'add', path: `/change-${id}`, value: 'x'.repeat(200) }],
+      createdAt: toISO(createdAtMs),
+      committedAt: getISO(),
+    });
+
+    const changes = [
+      createLargeChange('1', 6, 1000),
+      createLargeChange('2', 7, 1100),
+      createLargeChange('3', 8, 1200),
+    ];
+
+    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
+
+    // No maxPayloadBytes set
+    const result = await handleOfflineSessionsAndBatches(
+      mockStore,
+      sessionTimeoutMillis,
+      'doc1',
+      changes,
+      5
+    );
+
+    // Should return single collapsed change
+    expect(result).toHaveLength(1);
+    expect(result[0].ops).toHaveLength(3);
+  });
+
+  it('should return unchanged changes when origin is main (fast-forward)', async () => {
+    const changes = [createChange('1', 6, 1000), createChange('2', 7, 1100)];
+
+    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
+
+    const result = await handleOfflineSessionsAndBatches(
+      mockStore,
+      sessionTimeoutMillis,
+      'doc1',
+      changes,
+      5,
+      undefined,
+      'main', // Fast-forward case
+      true
+    );
+
+    // Should return unchanged changes (not collapsed)
+    expect(result).toHaveLength(2);
+    expect(result[0]).toBe(changes[0]);
+    expect(result[1]).toBe(changes[1]);
+  });
 });

@@ -26,7 +26,8 @@ export async function commitChanges(
   docId: string,
   changes: ChangeInput[],
   sessionTimeoutMillis: number,
-  options?: CommitChangesOptions
+  options?: CommitChangesOptions,
+  maxPayloadBytes?: number
 ): Promise<[Change[], Change[]]> {
   if (changes.length === 0) {
     return [[], []];
@@ -114,7 +115,8 @@ export async function commitChanges(
       baseRev,
       batchId,
       origin,
-      true // isOffline
+      true, // isOffline
+      maxPayloadBytes
     );
 
     // Fast-forward: no transformation needed, save changes directly

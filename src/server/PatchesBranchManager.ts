@@ -1,4 +1,5 @@
 import { createId } from 'crypto-id';
+import { breakChange } from '../algorithms/client/breakChange.js';
 import { createChange } from '../data/change.js';
 import { createVersionMetadata } from '../data/version.js';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata } from '../types.js';
@@ -14,7 +15,8 @@ import type { BranchingStoreBackend } from './types.js';
 export class PatchesBranchManager {
   constructor(
     private readonly store: BranchingStoreBackend,
-    private readonly patchesServer: PatchesServer
+    private readonly patchesServer: PatchesServer,
+    private readonly maxPayloadBytes?: number
   ) {}
 
   /**
@@ -161,7 +163,14 @@ export class PatchesBranchManager {
           rev,
           branchChanges.flatMap(c => c.ops)
         );
-        [, committedMergeChanges] = await this.patchesServer.commitChanges(sourceDocId, [flattenedChange]);
+
+        // Break oversized flattened change if needed
+        let changesToCommit = [flattenedChange];
+        if (this.maxPayloadBytes) {
+          changesToCommit = breakChange(flattenedChange, this.maxPayloadBytes);
+        }
+
+        [, committedMergeChanges] = await this.patchesServer.commitChanges(sourceDocId, changesToCommit);
       }
     } catch (error) {
       console.error(`Failed to merge branch ${branchId} into ${sourceDocId}:`, error);

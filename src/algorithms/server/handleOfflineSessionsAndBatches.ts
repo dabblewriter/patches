@@ -3,6 +3,7 @@ import { createVersionMetadata } from '../../data/version.js';
 import type { PatchesStoreBackend } from '../../server/types.js';
 import type { Change } from '../../types.js';
 import { getISO, timestampDiff } from '../../utils/dates.js';
+import { breakChange } from '../client/breakChange.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { getStateAtRevision } from './getStateAtRevision.js';
 
@@ -15,6 +16,7 @@ import { getStateAtRevision } from './getStateAtRevision.js';
  * @param batchId The batch identifier
  * @param origin The origin to use for created versions (default: 'offline-branch')
  * @param isOffline Whether these changes were created offline (metadata flag)
+ * @param maxPayloadBytes If set, break collapsed changes that exceed this size
  * @returns The changes (collapsed into one if divergent, unchanged if fast-forward)
  */
 export async function handleOfflineSessionsAndBatches(
@@ -25,7 +27,8 @@ export async function handleOfflineSessionsAndBatches(
   baseRev: number,
   batchId?: string,
   origin: 'main' | 'offline-branch' = 'offline-branch',
-  isOffline: boolean = true
+  isOffline: boolean = true,
+  maxPayloadBytes?: number
 ) {
   // Use batchId as groupId for multi-batch uploads; default offline sessions have no groupId
   const groupId = batchId ?? createSortableId();
@@ -98,12 +101,16 @@ export async function handleOfflineSessionsAndBatches(
   // Only collapse changes into one if divergent (need transformation)
   // For fast-forward (origin: 'main'), return unchanged - caller saves them directly
   if (origin === 'offline-branch') {
-    return [
-      changes.reduce((firstChange, nextChange) => {
-        firstChange.ops = [...firstChange.ops, ...nextChange.ops];
-        return firstChange;
-      }),
-    ];
+    const collapsed = changes.reduce((firstChange, nextChange) => {
+      firstChange.ops = [...firstChange.ops, ...nextChange.ops];
+      return firstChange;
+    });
+
+    // Break oversized collapsed changes if maxPayloadBytes is set
+    if (maxPayloadBytes) {
+      return breakChange(collapsed, maxPayloadBytes);
+    }
+    return [collapsed];
   }
   return changes;
 }

@@ -292,7 +292,8 @@ describe('commitChanges', () => {
       0,
       'offline-batch',
       'main', // Fast-forward: origin is 'main'
-      true // isOffline
+      true, // isOffline
+      undefined // maxPayloadBytes
     );
   });
 
@@ -316,7 +317,8 @@ describe('commitChanges', () => {
       0,
       'offline-batch',
       'offline-branch', // Divergent: origin is 'offline-branch'
-      true // isOffline
+      true, // isOffline
+      undefined // maxPayloadBytes
     );
   });
 
@@ -339,7 +341,8 @@ describe('commitChanges', () => {
       0,
       undefined,
       'main', // Fast-forward: origin is 'main'
-      true // isOffline
+      true, // isOffline
+      undefined // maxPayloadBytes
     );
   });
 
@@ -363,7 +366,8 @@ describe('commitChanges', () => {
       0,
       undefined,
       'offline-branch', // Divergent: origin is 'offline-branch'
-      true // isOffline
+      true, // isOffline
+      undefined // maxPayloadBytes
     );
   });
 

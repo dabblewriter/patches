@@ -1,36 +1,54 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JsonRpcRequest } from '../../../src/net';
-import { SignalingService, type SendFn } from '../../../src/net/websocket/SignalingService';
+import { SignalingService, type JsonRpcMessage } from '../../../src/net/websocket/SignalingService';
+
+/**
+ * Concrete implementation of SignalingService for testing.
+ * Tracks all messages sent to each client.
+ */
+class TestSignalingService extends SignalingService {
+  /** Messages sent to each client, keyed by client ID */
+  sentMessages = new Map<string, JsonRpcMessage[]>();
+
+  send(id: string, message: JsonRpcMessage): void {
+    const messages = this.sentMessages.get(id) ?? [];
+    messages.push(message);
+    this.sentMessages.set(id, messages);
+  }
+
+  /** Helper to get messages sent to a specific client */
+  getMessages(id: string): JsonRpcMessage[] {
+    return this.sentMessages.get(id) ?? [];
+  }
+
+  /** Helper to clear all tracked messages */
+  clearMessages(): void {
+    this.sentMessages.clear();
+  }
+}
 
 describe('SignalingService', () => {
-  let service: SignalingService;
-  let mockSendFn: SendFn;
-  let sentMessages: any[];
+  let service: TestSignalingService;
 
   beforeEach(() => {
-    service = new SignalingService();
-    sentMessages = [];
-    mockSendFn = vi.fn(message => {
-      sentMessages.push(message);
-    });
+    service = new TestSignalingService();
   });
 
   describe('onClientConnected', () => {
-    it('should register a new client and assign an ID', () => {
-      const clientId = service.onClientConnected(mockSendFn);
+    it('should register a new client and assign an ID', async () => {
+      const clientId = await service.onClientConnected();
 
       expect(clientId).toBeDefined();
       expect(typeof clientId).toBe('string');
       expect(clientId.length).toBeGreaterThan(0);
     });
 
-    it('should send peer-welcome message to new client', () => {
-      const clientId = service.onClientConnected(mockSendFn);
+    it('should send peer-welcome message to new client', async () => {
+      const clientId = await service.onClientConnected();
 
-      expect(mockSendFn).toHaveBeenCalledTimes(1);
-      const welcomeMessage = sentMessages[0];
-
-      expect(welcomeMessage).toEqual({
+      const messages = service.getMessages(clientId);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toEqual({
         jsonrpc: '2.0',
         method: 'peer-welcome',
         params: {
@@ -40,139 +58,110 @@ describe('SignalingService', () => {
       });
     });
 
-    it('should include existing peers in welcome message', () => {
-      // Add first client
-      const client1Id = service.onClientConnected(vi.fn());
+    it('should include existing peers in welcome message', async () => {
+      const client1Id = await service.onClientConnected();
+      const client2Id = await service.onClientConnected();
 
-      // Add second client
-      sentMessages.length = 0; // Clear previous messages
-      const client2Id = service.onClientConnected(mockSendFn);
-
-      const welcomeMessage = sentMessages[0];
-      expect(welcomeMessage.params.peers).toEqual([client1Id]);
+      const messages = service.getMessages(client2Id);
+      expect(messages[0].params.peers).toEqual([client1Id]);
     });
 
-    it('should use provided client ID if given', () => {
+    it('should use provided client ID if given', async () => {
       const customId = 'custom-client-id';
-      const clientId = service.onClientConnected(mockSendFn, customId);
+      const clientId = await service.onClientConnected(customId);
 
       expect(clientId).toBe(customId);
-      expect(sentMessages[0].params.id).toBe(customId);
+      const messages = service.getMessages(customId);
+      expect(messages[0].params.id).toBe(customId);
     });
 
-    it('should handle multiple clients correctly', () => {
-      const client1Send = vi.fn();
-      const client2Send = vi.fn();
-      const client3Send = vi.fn();
-
-      const client1Id = service.onClientConnected(client1Send);
-      const client2Id = service.onClientConnected(client2Send);
-      const client3Id = service.onClientConnected(client3Send);
+    it('should handle multiple clients correctly', async () => {
+      const client1Id = await service.onClientConnected();
+      const client2Id = await service.onClientConnected();
+      const client3Id = await service.onClientConnected();
 
       // Each client should have received a welcome message
-      expect(client1Send).toHaveBeenCalledTimes(1);
-      expect(client2Send).toHaveBeenCalledTimes(1);
-      expect(client3Send).toHaveBeenCalledTimes(1);
+      expect(service.getMessages(client1Id)).toHaveLength(1);
+      expect(service.getMessages(client2Id)).toHaveLength(1);
+      expect(service.getMessages(client3Id)).toHaveLength(1);
 
       // Third client should see first two clients in peers list
-      const client3Welcome = client3Send.mock.calls[0][0];
+      const client3Welcome = service.getMessages(client3Id)[0];
       expect(client3Welcome.params.peers).toEqual(expect.arrayContaining([client1Id, client2Id]));
     });
   });
 
   describe('onClientDisconnected', () => {
-    it('should remove client and broadcast disconnection', () => {
-      const client1Send = vi.fn();
-      const client2Send = vi.fn();
+    it('should remove client and broadcast disconnection', async () => {
+      const client1Id = await service.onClientConnected();
+      const client2Id = await service.onClientConnected();
 
-      const client1Id = service.onClientConnected(client1Send);
-      const client2Id = service.onClientConnected(client2Send);
+      service.clearMessages();
 
-      // Clear previous calls
-      vi.mocked(client1Send).mockClear();
-      vi.mocked(client2Send).mockClear();
-
-      // Disconnect client1
-      service.onClientDisconnected(client1Id);
+      await service.onClientDisconnected(client1Id);
 
       // Client2 should receive disconnection notification
-      expect(client2Send).toHaveBeenCalledWith({
+      const client2Messages = service.getMessages(client2Id);
+      expect(client2Messages).toContainEqual({
         jsonrpc: '2.0',
         method: 'peer-disconnected',
         params: { id: client1Id },
       });
 
       // Client1 should not receive notification (already disconnected)
-      expect(client1Send).not.toHaveBeenCalled();
+      expect(service.getMessages(client1Id)).toHaveLength(0);
     });
 
-    it('should handle disconnection of non-existent client', () => {
-      const client1Send = vi.fn();
-      service.onClientConnected(client1Send);
-
-      client1Send.mockClear();
+    it('should handle disconnection of non-existent client', async () => {
+      const client1Id = await service.onClientConnected();
+      service.clearMessages();
 
       // Try to disconnect non-existent client
-      service.onClientDisconnected('non-existent-id');
+      await service.onClientDisconnected('non-existent-id');
 
       // Should broadcast disconnection message even for non-existent clients
-      expect(client1Send).toHaveBeenCalledWith({
+      expect(service.getMessages(client1Id)).toContainEqual({
         jsonrpc: '2.0',
         method: 'peer-disconnected',
         params: { id: 'non-existent-id' },
       });
     });
 
-    it('should not send disconnection to the disconnecting client', () => {
-      const client1Send = vi.fn();
-      const client2Send = vi.fn();
-      const client3Send = vi.fn();
+    it('should not send disconnection to the disconnecting client', async () => {
+      const client1Id = await service.onClientConnected();
+      const client2Id = await service.onClientConnected();
+      const client3Id = await service.onClientConnected();
 
-      const client1Id = service.onClientConnected(client1Send);
-      const client2Id = service.onClientConnected(client2Send);
-      const client3Id = service.onClientConnected(client3Send);
+      service.clearMessages();
 
-      // Clear previous calls
-      vi.mocked(client1Send).mockClear();
-      vi.mocked(client2Send).mockClear();
-      client3Send.mockClear();
-
-      // Disconnect client2
-      service.onClientDisconnected(client2Id);
+      await service.onClientDisconnected(client2Id);
 
       // Only client1 and client3 should receive notification
-      expect(client1Send).toHaveBeenCalledWith({
+      expect(service.getMessages(client1Id)).toContainEqual({
         jsonrpc: '2.0',
         method: 'peer-disconnected',
         params: { id: client2Id },
       });
-      expect(client3Send).toHaveBeenCalledWith({
+      expect(service.getMessages(client3Id)).toContainEqual({
         jsonrpc: '2.0',
         method: 'peer-disconnected',
         params: { id: client2Id },
       });
-      expect(client2Send).not.toHaveBeenCalled();
+      expect(service.getMessages(client2Id)).toHaveLength(0);
     });
   });
 
   describe('handleClientMessage', () => {
-    let client1Send: SendFn;
-    let client2Send: SendFn;
     let client1Id: string;
     let client2Id: string;
 
-    beforeEach(() => {
-      client1Send = vi.fn();
-      client2Send = vi.fn();
-      client1Id = service.onClientConnected(client1Send);
-      client2Id = service.onClientConnected(client2Send);
-
-      // Clear welcome messages
-      vi.mocked(client1Send).mockClear();
-      vi.mocked(client2Send).mockClear();
+    beforeEach(async () => {
+      client1Id = await service.onClientConnected();
+      client2Id = await service.onClientConnected();
+      service.clearMessages();
     });
 
-    it('should handle valid peer-signal messages', () => {
+    it('should handle valid peer-signal messages', async () => {
       const signalMessage: JsonRpcRequest = {
         jsonrpc: '2.0',
         method: 'peer-signal',
@@ -183,10 +172,10 @@ describe('SignalingService', () => {
         },
       };
 
-      const result = service.handleClientMessage(client1Id, signalMessage);
+      const result = await service.handleClientMessage(client1Id, signalMessage);
 
       expect(result).toBe(true);
-      expect(client2Send).toHaveBeenCalledWith({
+      expect(service.getMessages(client2Id)).toContainEqual({
         jsonrpc: '2.0',
         method: 'signal',
         params: {
@@ -196,7 +185,7 @@ describe('SignalingService', () => {
       });
     });
 
-    it('should send success response for valid signaling messages with ID', () => {
+    it('should send success response for valid signaling messages with ID', async () => {
       const signalMessage: JsonRpcRequest = {
         jsonrpc: '2.0',
         method: 'peer-signal',
@@ -207,16 +196,16 @@ describe('SignalingService', () => {
         },
       };
 
-      service.handleClientMessage(client1Id, signalMessage);
+      await service.handleClientMessage(client1Id, signalMessage);
 
-      expect(client1Send).toHaveBeenCalledWith({
+      expect(service.getMessages(client1Id)).toContainEqual({
         jsonrpc: '2.0',
         result: 'ok',
         id: 123,
       });
     });
 
-    it('should not send response for signaling messages without ID', () => {
+    it('should not send response for signaling messages without ID', async () => {
       const signalMessage: JsonRpcRequest = {
         jsonrpc: '2.0',
         method: 'peer-signal',
@@ -226,14 +215,14 @@ describe('SignalingService', () => {
         },
       };
 
-      service.handleClientMessage(client1Id, signalMessage);
+      await service.handleClientMessage(client1Id, signalMessage);
 
-      // Should only call client2Send (target), not client1Send (sender response)
-      expect(client1Send).not.toHaveBeenCalled();
-      expect(client2Send).toHaveBeenCalledTimes(1);
+      // Should only send to client2 (target), not client1 (sender response)
+      expect(service.getMessages(client1Id)).toHaveLength(0);
+      expect(service.getMessages(client2Id)).toHaveLength(1);
     });
 
-    it('should handle string messages by parsing JSON', () => {
+    it('should handle string messages by parsing JSON', async () => {
       const signalMessage = JSON.stringify({
         jsonrpc: '2.0',
         method: 'peer-signal',
@@ -244,35 +233,35 @@ describe('SignalingService', () => {
         },
       });
 
-      const result = service.handleClientMessage(client1Id, signalMessage);
+      const result = await service.handleClientMessage(client1Id, signalMessage);
 
       expect(result).toBe(true);
-      expect(client2Send).toHaveBeenCalled();
+      expect(service.getMessages(client2Id)).toHaveLength(1);
     });
 
-    it('should return false for invalid JSON strings', () => {
-      const result = service.handleClientMessage(client1Id, 'invalid json');
+    it('should return false for invalid JSON strings', async () => {
+      const result = await service.handleClientMessage(client1Id, 'invalid json');
 
       expect(result).toBe(false);
-      expect(client1Send).not.toHaveBeenCalled();
-      expect(client2Send).not.toHaveBeenCalled();
+      expect(service.getMessages(client1Id)).toHaveLength(0);
+      expect(service.getMessages(client2Id)).toHaveLength(0);
     });
 
-    it('should return false for non-signaling messages', () => {
+    it('should return false for non-signaling messages', async () => {
       const nonSignalMessage: JsonRpcRequest = {
         jsonrpc: '2.0',
         method: 'other-method',
         params: {},
       };
 
-      const result = service.handleClientMessage(client1Id, nonSignalMessage);
+      const result = await service.handleClientMessage(client1Id, nonSignalMessage);
 
       expect(result).toBe(false);
-      expect(client1Send).not.toHaveBeenCalled();
-      expect(client2Send).not.toHaveBeenCalled();
+      expect(service.getMessages(client1Id)).toHaveLength(0);
+      expect(service.getMessages(client2Id)).toHaveLength(0);
     });
 
-    it('should return false for malformed signaling messages', () => {
+    it('should return false for malformed signaling messages', async () => {
       const malformedMessage = {
         jsonrpc: '2.0',
         method: 'peer-signal',
@@ -280,12 +269,12 @@ describe('SignalingService', () => {
         params: { data: {} },
       };
 
-      const result = service.handleClientMessage(client1Id, malformedMessage as JsonRpcRequest);
+      const result = await service.handleClientMessage(client1Id, malformedMessage as JsonRpcRequest);
 
       expect(result).toBe(false);
     });
 
-    it('should handle signaling to non-existent target', () => {
+    it('should handle signaling to non-existent target', async () => {
       const signalMessage: JsonRpcRequest = {
         jsonrpc: '2.0',
         method: 'peer-signal',
@@ -296,17 +285,17 @@ describe('SignalingService', () => {
         },
       };
 
-      const result = service.handleClientMessage(client1Id, signalMessage);
+      const result = await service.handleClientMessage(client1Id, signalMessage);
 
       expect(result).toBe(true); // Still a valid signaling message
-      expect(client1Send).toHaveBeenCalledWith({
+      expect(service.getMessages(client1Id)).toContainEqual({
         jsonrpc: '2.0',
         error: { code: -32000, message: 'Target not connected' },
         id: 1,
       });
     });
 
-    it('should not send error response for notifications to non-existent target', () => {
+    it('should not send error response for notifications to non-existent target', async () => {
       const signalNotification: JsonRpcRequest = {
         jsonrpc: '2.0',
         method: 'peer-signal',
@@ -317,100 +306,77 @@ describe('SignalingService', () => {
         },
       };
 
-      const result = service.handleClientMessage(client1Id, signalNotification);
+      const result = await service.handleClientMessage(client1Id, signalNotification);
 
       expect(result).toBe(true);
-      expect(client1Send).not.toHaveBeenCalled(); // No response for notifications
+      expect(service.getMessages(client1Id)).toHaveLength(0); // No response for notifications
     });
 
-    it('should handle wrong JSON-RPC version', () => {
+    it('should handle wrong JSON-RPC version', async () => {
       const wrongVersionMessage = {
         jsonrpc: '1.0', // Wrong version
         method: 'peer-signal',
         params: { to: client2Id, data: {} },
       };
 
-      const result = service.handleClientMessage(client1Id, wrongVersionMessage as JsonRpcRequest);
+      const result = await service.handleClientMessage(client1Id, wrongVersionMessage as JsonRpcRequest);
 
       expect(result).toBe(false);
     });
 
-    it('should handle missing method', () => {
+    it('should handle missing method', async () => {
       const noMethodMessage = {
         jsonrpc: '2.0',
         params: { to: client2Id, data: {} },
       };
 
-      const result = service.handleClientMessage(client1Id, noMethodMessage as JsonRpcRequest);
+      const result = await service.handleClientMessage(client1Id, noMethodMessage as JsonRpcRequest);
 
       expect(result).toBe(false);
     });
   });
 
   describe('error handling', () => {
-    it('should handle send function errors gracefully', () => {
-      // The SignalingService doesn't currently handle send errors gracefully
-      // This test documents the current behavior
-      const errorSendFn = vi.fn().mockImplementation(() => {
-        throw new Error('Send failed');
-      });
+    it('should handle send function errors gracefully', async () => {
+      class ErrorSignalingService extends SignalingService {
+        send(): void {
+          throw new Error('Send failed');
+        }
+      }
+
+      const errorService = new ErrorSignalingService();
 
       // onClientConnected calls send immediately, which will throw
-      expect(() => {
-        service.onClientConnected(errorSendFn);
-      }).toThrow('Send failed');
-    });
-
-    it('should handle errors in broadcast', () => {
-      // This test documents that the current SignalingService doesn't handle broadcast errors
-      const errorSendFn = vi.fn().mockImplementation(() => {
-        throw new Error('Broadcast failed');
-      });
-      const normalSendFn = vi.fn();
-
-      // onClientConnected will throw for the error client
-      expect(() => {
-        service.onClientConnected(errorSendFn);
-      }).toThrow('Broadcast failed');
-
-      // But normal client should work fine
-      const normalClientId = service.onClientConnected(normalSendFn);
-      expect(normalClientId).toBeDefined();
+      await expect(errorService.onClientConnected()).rejects.toThrow('Send failed');
     });
   });
 
   describe('edge cases', () => {
-    it('should handle rapid connect/disconnect cycles', () => {
-      const sends: SendFn[] = [];
+    it('should handle rapid connect/disconnect cycles', async () => {
       const ids: string[] = [];
 
       // Connect multiple clients rapidly
       for (let i = 0; i < 10; i++) {
-        const sendFn = vi.fn();
-        sends.push(sendFn);
-        ids.push(service.onClientConnected(sendFn));
+        ids.push(await service.onClientConnected());
       }
 
       // Disconnect half of them
       for (let i = 0; i < 5; i++) {
-        service.onClientDisconnected(ids[i]);
+        await service.onClientDisconnected(ids[i]);
       }
 
       // Connect a new client - should see remaining peers
-      const newSend = vi.fn();
-      service.onClientConnected(newSend);
+      service.clearMessages();
+      const newClientId = await service.onClientConnected();
 
-      const welcomeMessage = newSend.mock.calls[0][0];
+      const welcomeMessage = service.getMessages(newClientId)[0];
       expect(welcomeMessage.params.peers).toHaveLength(5); // Remaining 5 clients
     });
 
-    it('should handle empty signaling data', () => {
-      const client1Send = vi.fn();
-      const client2Send = vi.fn();
-      const client1Id = service.onClientConnected(client1Send);
-      const client2Id = service.onClientConnected(client2Send);
-
-      client2Send.mockClear();
+    it('should handle empty signaling data', async () => {
+      const client1Id = await service.onClientConnected();
+      const client2Id = await service.onClientConnected();
+      service.clearMessages();
 
       const signalMessage: JsonRpcRequest = {
         jsonrpc: '2.0',
@@ -421,10 +387,10 @@ describe('SignalingService', () => {
         },
       };
 
-      const result = service.handleClientMessage(client1Id, signalMessage);
+      const result = await service.handleClientMessage(client1Id, signalMessage);
 
       expect(result).toBe(true);
-      expect(client2Send).toHaveBeenCalledWith({
+      expect(service.getMessages(client2Id)).toContainEqual({
         jsonrpc: '2.0',
         method: 'signal',
         params: {
@@ -434,12 +400,12 @@ describe('SignalingService', () => {
       });
     });
 
-    it('should maintain unique client IDs', () => {
-      const ids = new Set();
+    it('should maintain unique client IDs', async () => {
+      const ids = new Set<string>();
 
       // Create many clients
       for (let i = 0; i < 100; i++) {
-        const id = service.onClientConnected(vi.fn());
+        const id = await service.onClientConnected();
         expect(ids.has(id)).toBe(false); // Should be unique
         ids.add(id);
       }
@@ -447,19 +413,12 @@ describe('SignalingService', () => {
       expect(ids.size).toBe(100);
     });
 
-    it('should handle concurrent operations', () => {
-      const client1Send = vi.fn();
-      const client2Send = vi.fn();
-      const client3Send = vi.fn();
+    it('should handle concurrent operations', async () => {
+      const client1Id = await service.onClientConnected();
+      const client2Id = await service.onClientConnected();
+      const client3Id = await service.onClientConnected();
 
-      const client1Id = service.onClientConnected(client1Send);
-      const client2Id = service.onClientConnected(client2Send);
-      const client3Id = service.onClientConnected(client3Send);
-
-      // Clear setup calls
-      vi.mocked(client1Send).mockClear();
-      vi.mocked(client2Send).mockClear();
-      client3Send.mockClear();
+      service.clearMessages();
 
       // Simulate concurrent signaling
       const signal1to2: JsonRpcRequest = {
@@ -484,31 +443,77 @@ describe('SignalingService', () => {
       };
 
       // Process signals "simultaneously"
-      service.handleClientMessage(client1Id, signal1to2);
-      service.handleClientMessage(client2Id, signal2to3);
-      service.handleClientMessage(client3Id, signal3to1);
+      await service.handleClientMessage(client1Id, signal1to2);
+      await service.handleClientMessage(client2Id, signal2to3);
+      await service.handleClientMessage(client3Id, signal3to1);
 
       // Each client should receive their targeted signal
-      expect(client2Send).toHaveBeenCalledWith(
+      expect(service.getMessages(client2Id)).toContainEqual(
         expect.objectContaining({
           method: 'signal',
           params: expect.objectContaining({ data: { from: '1to2' } }),
         })
       );
 
-      expect(client3Send).toHaveBeenCalledWith(
+      expect(service.getMessages(client3Id)).toContainEqual(
         expect.objectContaining({
           method: 'signal',
           params: expect.objectContaining({ data: { from: '2to3' } }),
         })
       );
 
-      expect(client1Send).toHaveBeenCalledWith(
+      expect(service.getMessages(client1Id)).toContainEqual(
         expect.objectContaining({
           method: 'signal',
           params: expect.objectContaining({ data: { from: '3to1' } }),
         })
       );
+    });
+  });
+
+  describe('getClients/setClients', () => {
+    it('should return current clients via getClients', async () => {
+      const client1Id = await service.onClientConnected();
+      const client2Id = await service.onClientConnected();
+
+      const clients = await service.getClients();
+      expect(clients.has(client1Id)).toBe(true);
+      expect(clients.has(client2Id)).toBe(true);
+      expect(clients.size).toBe(2);
+    });
+
+    it('should allow overriding getClients/setClients for persistence', async () => {
+      // Simulate a persistent store
+      const persistentStorage = new Set<string>();
+
+      class PersistentSignalingService extends SignalingService {
+        send(id: string, message: JsonRpcMessage): void {
+          // Track messages (simplified)
+        }
+
+        async getClients(): Promise<Set<string>> {
+          return new Set(persistentStorage);
+        }
+
+        async setClients(clients: Set<string>): Promise<void> {
+          persistentStorage.clear();
+          for (const id of clients) {
+            persistentStorage.add(id);
+          }
+        }
+      }
+
+      const persistentService = new PersistentSignalingService();
+
+      const clientId = await persistentService.onClientConnected('test-client');
+
+      // Client should be in persistent storage
+      expect(persistentStorage.has('test-client')).toBe(true);
+
+      await persistentService.onClientDisconnected('test-client');
+
+      // Client should be removed from persistent storage
+      expect(persistentStorage.has('test-client')).toBe(false);
     });
   });
 });

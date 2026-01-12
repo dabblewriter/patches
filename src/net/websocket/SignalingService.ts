@@ -4,45 +4,53 @@ import type { JsonRpcRequest, JsonRpcResponse } from '../protocol/types';
 /** Union type for all possible JSON-RPC message types */
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcResponse;
 
-/** Function type for sending JSON-RPC messages */
-export type SendFn = (message: JsonRpcMessage) => void;
-
-/**
- * Represents a connected client in the signaling service.
- */
-interface Client {
-  /** Function to send messages to this client */
-  send: SendFn;
-}
-
 /**
  * Service that facilitates WebRTC connection establishment by relaying signaling messages.
  * Acts as a central hub for WebRTC peers to exchange connection information.
  */
-export class SignalingService {
-  private clients = new Map<string, Client>();
+export abstract class SignalingService {
+  protected clients = new Set<string>();
+
+  abstract send(id: string, message: JsonRpcMessage): void | Promise<void>;
+
+  /**
+   * Returns the list of all connected client IDs.
+   * @returns Array of client IDs
+   */
+  async getClients(): Promise<Set<string>> {
+    return new Set(this.clients);
+  }
+
+  /**
+   * Sets the list of all connected client IDs.
+   * @param clients - Set of client IDs
+   */
+  async setClients(clients: Set<string>): Promise<void> {
+    this.clients = clients;
+  }
 
   /**
    * Registers a new client connection with the signaling service.
    * Assigns a unique ID to the client and informs them of other connected peers.
    *
-   * @param send - Function to send messages to this client
    * @param id - Optional client ID (generated if not provided)
    * @returns The client's assigned ID
    */
-  onClientConnected(send: SendFn, id: string = createId(14)): string {
-    this.clients.set(id, { send });
+  async onClientConnected(id: string = createId(14)): Promise<string> {
+    const clients = await this.getClients();
+    clients.add(id);
+    await this.setClients(clients);
 
     const welcome: JsonRpcRequest = {
       jsonrpc: '2.0',
       method: 'peer-welcome',
       params: {
         id,
-        peers: Array.from(this.clients.keys()).filter(pid => pid !== id),
+        peers: Array.from(this.clients).filter(pid => pid !== id),
       },
     };
 
-    send(welcome);
+    this.send(id, welcome);
     return id;
   }
 
@@ -52,15 +60,19 @@ export class SignalingService {
    *
    * @param id - ID of the disconnected client
    */
-  onClientDisconnected(id: string): void {
-    this.clients.delete(id);
+  async onClientDisconnected(id: string): Promise<void> {
+    const clients = await this.getClients();
+    clients.delete(id);
+    await this.setClients(clients);
 
-    // Broadcast to all others
-    this.broadcast({
+    // Notify others
+    const message: JsonRpcRequest = {
       jsonrpc: '2.0',
       method: 'peer-disconnected',
       params: { id },
-    });
+    };
+
+    await Promise.all(Array.from(clients).map(clientId => this.send(clientId, message)));
   }
 
   /**
@@ -71,7 +83,7 @@ export class SignalingService {
    * @param message - The JSON-RPC message or its string representation
    * @returns True if the message was a valid signaling message and was handled, false otherwise
    */
-  handleClientMessage(fromId: string, message: string | JsonRpcRequest): boolean {
+  async handleClientMessage(fromId: string, message: string | JsonRpcRequest): Promise<boolean> {
     let parsed: JsonRpcRequest;
 
     try {
@@ -86,8 +98,8 @@ export class SignalingService {
 
     const { to, data } = params as { to: string; data: any };
 
-    const target = this.clients.get(to);
-    if (!target) {
+    const clients = await this.getClients();
+    if (!clients.has(to)) {
       this.respondError(fromId, id, 'Target not connected');
       // Was a signaling message, even if the target is not connected
       return true;
@@ -102,10 +114,10 @@ export class SignalingService {
       },
     };
 
-    target.send(outbound);
+    await this.send(to, outbound);
 
     if (id !== undefined) {
-      this.respond(fromId, id, 'ok');
+      await this.respond(fromId, id, 'ok');
     }
 
     return true;
@@ -114,14 +126,14 @@ export class SignalingService {
   /**
    * Sends a successful JSON-RPC response to a client.
    *
-   * @private
+   * @protected
    * @param toId - ID of the client to send the response to
    * @param id - Request ID to match in the response
    * @param result - Result data to include in the response
    */
-  private respond(toId: string, id: number, result: any): void {
-    const client = this.clients.get(toId);
-    if (!client) return;
+  protected async respond(toId: string, id: number, result: any): Promise<void> {
+    const clients = await this.getClients();
+    if (!clients.has(toId)) return;
 
     const response: JsonRpcResponse = {
       jsonrpc: '2.0',
@@ -129,21 +141,21 @@ export class SignalingService {
       id,
     };
 
-    client.send(response);
+    await this.send(toId, response);
   }
 
   /**
    * Sends an error JSON-RPC response to a client.
    *
-   * @private
+   * @protected
    * @param toId - ID of the client to send the error response to
    * @param id - Request ID to match in the response, or undefined for notifications
    * @param message - Error message to include
    */
-  private respondError(toId: string, id: number | undefined, message: string): void {
+  protected async respondError(toId: string, id: number | undefined, message: string): Promise<void> {
     if (id === undefined) return;
-    const client = this.clients.get(toId);
-    if (!client) return;
+    const clients = await this.getClients();
+    if (!clients.has(toId)) return;
 
     const response: JsonRpcResponse = {
       jsonrpc: '2.0',
@@ -151,21 +163,6 @@ export class SignalingService {
       id,
     };
 
-    client.send(response);
-  }
-
-  /**
-   * Broadcasts a message to all connected clients, optionally excluding one.
-   *
-   * @private
-   * @param message - The message to broadcast
-   * @param excludeId - Optional ID of a client to exclude from the broadcast
-   */
-  private broadcast(message: JsonRpcMessage, excludeId?: string) {
-    for (const [id, client] of this.clients.entries()) {
-      if (id !== excludeId) {
-        client.send(message);
-      }
-    }
+    await this.send(toId, response);
   }
 }

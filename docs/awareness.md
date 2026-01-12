@@ -215,6 +215,61 @@ awareness.onUpdate(states => {
 });
 ```
 
+## The Server Side: SignalingService
+
+WebRTC is peer-to-peer, but peers need help finding each other. That's where `SignalingService` comes in. It's a lightweight server-side helper that:
+
+1. Tracks which clients are connected
+2. Tells new clients about existing peers
+3. Relays WebRTC signaling messages (offers, answers, ICE candidates) between peers
+
+Once peers establish a direct WebRTC connection, the server is out of the picture for awareness data. It only handles the initial handshake.
+
+### Basic Server Setup
+
+`SignalingService` is an abstract class. You extend it and implement one method: `send()`.
+
+```typescript
+import { SignalingService, type JsonRpcMessage } from '@dabble/patches/net';
+
+class WebSocketSignalingService extends SignalingService {
+  private sockets = new Map<string, WebSocket>();
+
+  send(id: string, message: JsonRpcMessage): void {
+    const ws = this.sockets.get(id);
+    if (ws) ws.send(JSON.stringify(message));
+  }
+
+  addClient(ws: WebSocket): Promise<string> {
+    const id = await this.onClientConnected();
+    this.sockets.set(id, ws);
+    return id;
+  }
+
+  removeClient(id: string): Promise<void> {
+    this.sockets.delete(id);
+    return this.onClientDisconnected(id);
+  }
+}
+
+const signaling = new WebSocketSignalingService();
+
+websocket.on('connection', async ws => {
+  const clientId = await signaling.addClient(ws);
+
+  ws.on('message', async data => {
+    const handled = await signaling.handleClientMessage(clientId, data.toString());
+    if (!handled) {
+      // Not a signaling message - handle it yourself
+    }
+  });
+
+  ws.on('close', () => signaling.removeClient(clientId));
+});
+```
+
+Three methods do the heavy lifting: `onClientConnected()`, `handleClientMessage()`, `onClientDisconnected()`. Your `send()` implementation handles the actual message delivery.
+
 ## Why Awareness Makes Your App 10x Cooler
 
 With awareness, your collaborative app transforms from "a document multiple people can edit" to "a shared space where people work together." It's the difference between a static document and a living, breathing collaborative environment.

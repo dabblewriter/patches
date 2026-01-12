@@ -1,5 +1,5 @@
 import { createId } from 'crypto-id';
-import { breakChange } from '../algorithms/client/breakChange.js';
+import { breakChanges } from '../algorithms/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import { createVersionMetadata } from '../data/version.js';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata } from '../types.js';
@@ -167,7 +167,7 @@ export class PatchesBranchManager {
         // Break oversized flattened change if needed
         let changesToCommit = [flattenedChange];
         if (this.maxPayloadBytes) {
-          changesToCommit = breakChange(flattenedChange, this.maxPayloadBytes);
+          changesToCommit = breakChanges(changesToCommit, this.maxPayloadBytes);
         }
 
         [, committedMergeChanges] = await this.patchesServer.commitChanges(sourceDocId, changesToCommit);

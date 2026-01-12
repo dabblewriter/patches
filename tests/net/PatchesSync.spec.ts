@@ -20,8 +20,8 @@ vi.mock('../../src/algorithms/client/applyCommittedChanges', () => ({
     changes: [],
   })),
 }));
-vi.mock('../../src/algorithms/client/batching', () => ({
-  breakIntoBatches: vi.fn(changes => [changes]),
+vi.mock('../../src/algorithms/shared/changeBatching', () => ({
+  breakChangesIntoBatches: vi.fn(changes => [changes]),
 }));
 
 describe('PatchesSync', () => {

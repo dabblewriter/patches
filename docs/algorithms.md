@@ -28,10 +28,7 @@ Here's how we've laid out the `src/algorithms/` directory:
 src/algorithms/
 ├── client/                     # Client-side smarts
 │   ├── applyCommittedChanges.ts  # Logic for when server changes land
-│   ├── batching.ts             # Bundling up changes for sending
-│   ├── breakChange.ts          # Chopping up big changes
 │   ├── createStateFromSnapshot.ts # Building current state from history
-│   ├── getJSONByteSize.ts      # Estimating change size
 │   └── makeChange.ts             # Crafting new local changes
 ├── server/                     # Server-side algorithms
 │   ├── commitChanges.ts          # Complete change commit workflow
@@ -42,6 +39,7 @@ src/algorithms/
 │   └── transformIncomingChanges.ts # Core OT transformation logic
 ├── shared/                     # Bits everyone can use
 │   ├── applyChanges.ts         # Applying a list of changes to a state
+│   ├── changeBatching.ts       # Bundling and splitting changes for network
 │   └── rebaseChanges.ts        # The core OT rebasing dance
 └── index.ts                    # The friendly neighborhood exporter
 ```
@@ -52,31 +50,27 @@ src/algorithms/
 
 - **`applyCommittedChanges(snapshot, committedChanges)`**: This is your go-to when the server sends down a fresh batch of confirmed changes. It takes the current document snapshot (base state + pending changes) and the server's changes, then intelligently merges them. It'll rebase your pending changes so they play nice with what the server said. Super important for keeping everyone on the same page.
 
-### `batching.ts`
-
-- **`breakIntoBatches(changes, maxPayloadBytes?)`**: Got a bunch of changes to send? This function wraps them up into neat batches, respecting any `maxPayloadBytes` you set. Keeps your network calls efficient.
-
-### `breakChange.ts`
-
-- **`breakChange(change, maxBytes)`**: Sometimes a single change is just too big for one network message. This function is the heavy lifter that splits a single, oversized `Change` object into smaller, more manageable `Change` objects. It first tries to split by individual JSON Patch operations. If an op itself (like a massive text insert) is still too big, `breakChange` will even attempt to break that specific operation down further.
-
 ### `createStateFromSnapshot.ts`
 
 - **`createStateFromSnapshot(snapshot)`**: Takes a `PatchesSnapshot` (which includes a base state and a list of pending changes) and computes the live, in-memory state of the document by applying those pending changes to the base state.
 
-### `getJSONByteSize.ts`
-
-- **`getJSONByteSize(data)`**: A handy utility to get a rough estimate of how big a piece of data will be when turned into a JSON string. Crucial for `breakChange` and `breakIntoBatches`.
-
 ### `makeChange.ts`
 
-- **`makeChange(snapshot, mutator, changeMetadata?, maxPayloadBytes?)`**: This is what `PatchesDoc.change()` uses under the hood. You give it the current snapshot, a mutator function (how you want to change the doc), and it figures out the JSON Patch operations. It then creates the actual `Change` object(s). If the resulting change is too big (based on `maxPayloadBytes`), it'll use `breakChange` to split it up automatically.
+- **`makeChange(snapshot, mutator, changeMetadata?, maxPayloadBytes?)`**: This is what `PatchesDoc.change()` uses under the hood. You give it the current snapshot, a mutator function (how you want to change the doc), and it figures out the JSON Patch operations. It then creates the actual `Change` object(s). If the resulting change is too big (based on `maxPayloadBytes`), it'll use `breakChanges` to split it up automatically.
 
 ## Shared Algorithms: The Common Ground
 
 ### `applyChanges.ts`
 
 - **`applyChanges(state, changes)`**: Simple but vital. Takes a state object and an array of `Change` objects, and applies each change's operations to the state, one by one. This is how you get from one version of your data to the next.
+
+### `changeBatching.ts`
+
+- **`breakChanges(changes, maxBytes)`**: Sometimes changes are just too big for one network message. This function takes an array of changes and splits any oversized ones into smaller, more manageable pieces. It first tries to split by individual JSON Patch operations. If an op itself (like a massive text insert) is still too big, it'll even attempt to break that specific operation down further.
+
+- **`breakChangesIntoBatches(changes, maxPayloadBytes?)`**: Got a bunch of changes to send? This function wraps them up into neat batches, respecting any `maxPayloadBytes` you set. Keeps your network calls efficient.
+
+- **`getJSONByteSize(data)`**: A handy utility to get a rough estimate of how big a piece of data will be when turned into a JSON string. Crucial for the batching functions above.
 
 ### `rebaseChanges.ts`
 

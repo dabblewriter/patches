@@ -1,7 +1,7 @@
 import { createChange } from '../../data/change.js';
 import { createJSONPatch } from '../../json-patch/createJSONPatch.js';
 import type { Change, ChangeMutator, PatchesSnapshot } from '../../types.js';
-import { breakChange } from './breakChange.js';
+import { breakChanges } from '../shared/changeBatching.js';
 import { createStateFromSnapshot } from './createStateFromSnapshot.js';
 
 export function makeChange<T = any>(
@@ -38,9 +38,9 @@ export function makeChange<T = any>(
 
   if (maxPayloadBytes) {
     // If the single change (or its parts) exceed maxPayloadBytes, break it down.
-    // breakChange will handle creating multiple Change objects if necessary,
+    // breakChanges will handle creating multiple Change objects if necessary,
     // maintaining the original baseRev but incrementing revs for the pieces.
-    newChangesArray = breakChange(newChangesArray[0], maxPayloadBytes);
+    newChangesArray = breakChanges(newChangesArray, maxPayloadBytes);
   }
   // PatchesDoc.change will take this returned array and push its contents onto its internal snapshot.
   return newChangesArray;

@@ -1,16 +1,86 @@
+import { createId } from 'crypto-id';
 import { createChange } from '../../data/change.js';
 import type { JSONPatchOp } from '../../json-patch/types.js';
 import type { Change } from '../../types.js';
-import { getJSONByteSize } from './getJSONByteSize.js';
+
+/** Estimate JSON string byte size. */
+export function getJSONByteSize(data: unknown): number {
+  try {
+    const stringified = JSON.stringify(data);
+    return stringified ? new TextEncoder().encode(stringified).length : 0;
+  } catch (e) {
+    // Handle circular structures (from JSON.stringify) or other errors.
+    console.error('Error calculating JSON size:', e);
+    throw new Error('Error calculating JSON size: ' + e);
+  }
+}
 
 /**
- * Break a single Change into multiple Changes so that the JSON string size never exceeds `maxBytes`.
+ * Break changes into smaller changes so that each change's JSON string size never exceeds `maxBytes`.
  *
  * - Splits first by JSON-Patch *ops*
  * - If an individual op is still too big and is a "@txt" op,
  *   split its Delta payload into smaller Deltas
  */
-export function breakChange(orig: Change, maxBytes: number): Change[] {
+export function breakChanges(changes: Change[], maxBytes: number): Change[] {
+  const results: Change[] = [];
+  for (const change of changes) {
+    results.push(...breakSingleChange(change, maxBytes));
+  }
+  return results;
+}
+
+/** Break changes into batches based on maxPayloadBytes. */
+export function breakChangesIntoBatches(changes: Change[], maxPayloadBytes?: number): Change[][] {
+  if (!maxPayloadBytes || getJSONByteSize(changes) < maxPayloadBytes) {
+    return [changes];
+  }
+
+  const batchId = createId(12);
+  const batches: Change[][] = [];
+  let currentBatch: Change[] = [];
+  let currentSize = 2; // Account for [] wrapper
+
+  for (const change of changes) {
+    // Add batchId if breaking up
+    const changeWithBatchId = { ...change, batchId };
+    const individualActualSize = getJSONByteSize(changeWithBatchId);
+    let itemsToProcess: Change[];
+
+    if (individualActualSize > maxPayloadBytes) {
+      // Break the change, then ensure batchId is on each piece
+      itemsToProcess = breakSingleChange(changeWithBatchId, maxPayloadBytes).map(c => ({ ...c, batchId }));
+    } else {
+      itemsToProcess = [changeWithBatchId];
+    }
+
+    for (const item of itemsToProcess) {
+      const itemActualSize = getJSONByteSize(item);
+      const itemSizeForBatching = itemActualSize + (currentBatch.length > 0 ? 1 : 0);
+
+      if (currentBatch.length > 0 && currentSize + itemSizeForBatching > maxPayloadBytes) {
+        batches.push(currentBatch);
+        currentBatch = [];
+        currentSize = 2;
+      }
+
+      const actualItemContribution = itemActualSize + (currentBatch.length > 0 ? 1 : 0);
+      currentBatch.push(item);
+      currentSize += actualItemContribution;
+    }
+  }
+
+  if (currentBatch.length > 0) {
+    batches.push(currentBatch);
+  }
+
+  return batches;
+}
+
+/**
+ * Break a single Change into multiple Changes so that the JSON string size never exceeds `maxBytes`.
+ */
+function breakSingleChange(orig: Change, maxBytes: number): Change[] {
   if (getJSONByteSize(orig) <= maxBytes) return [orig];
 
   // First pass: split by ops

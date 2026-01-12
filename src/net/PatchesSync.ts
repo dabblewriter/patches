@@ -1,6 +1,6 @@
 import { isEqual } from '@dabble/delta';
 import { applyCommittedChanges } from '../algorithms/client/applyCommittedChanges.js';
-import { breakIntoBatches } from '../algorithms/client/batching.js';
+import { breakChangesIntoBatches } from '../algorithms/shared/changeBatching.js';
 import { Patches } from '../client/Patches.js';
 import type { PatchesStore, TrackedDoc } from '../client/PatchesStore.js';
 import { signal } from '../event-signal.js';
@@ -238,7 +238,7 @@ export class PatchesSync {
         return; // Nothing to flush
       }
 
-      const batches = breakIntoBatches(pending, this.maxPayloadBytes);
+      const batches = breakChangesIntoBatches(pending, this.maxPayloadBytes);
 
       for (const batch of batches) {
         if (!this.state.connected) {

@@ -68,11 +68,11 @@ The codebase is divided into client-side and server-side components:
    - `makeChange`: Creates change objects from mutations
    - `applyCommittedChanges`: Merges server updates with local state
    - `createStateFromSnapshot`: Builds current state from snapshots
-   - `breakChange`, `breakIntoBatches`: Handles large change splitting
 
 2. **Shared Algorithms**: Core OT logic used by both client and server
    - `applyChanges`: Applies change sequences to states
    - `rebaseChanges`: Core operational transformation logic
+   - `breakChanges`, `breakChangesIntoBatches`: Handles large change splitting for network transmission
 
 3. **Server Algorithms**: Server-specific state management
    - `getStateAtRevision`, `getSnapshotAtRevision`: Historical state retrieval

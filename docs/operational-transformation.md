@@ -103,8 +103,8 @@ Here's what happens under the hood:
 
 ```typescript
 // PatchesSync batches and sends changes
-// Uses breakIntoBatches algorithm if needed
-const batches = breakIntoBatches(pendingChanges, maxPayloadBytes);
+// Uses breakChangesIntoBatches algorithm if needed
+const batches = breakChangesIntoBatches(pendingChanges, maxPayloadBytes);
 for (const batch of batches) {
   await websocket.send('commitChanges', { docId, changes: batch });
 }
@@ -228,13 +228,13 @@ The heart of the OT system - pure functions that handle the mathematical operati
 - **`makeChange(snapshot, mutator, metadata?, maxBytes?)`**: Creates change objects from mutations
 - **`applyCommittedChanges(snapshot, serverChanges)`**: Merges server changes with local state
 - **`createStateFromSnapshot(snapshot)`**: Builds current state from committed + pending
-- **`breakChange(change, maxBytes)`**: Splits large changes into smaller ones
-- **`breakIntoBatches(changes, maxBytes?)`**: Groups changes into network-sized batches
 
 ### Shared Algorithms
 
 - **`applyChanges(state, changes)`**: Applies a list of changes to state
 - **`rebaseChanges(serverChanges, localChanges)`**: The core OT transformation logic
+- **`breakChanges(changes, maxBytes)`**: Splits large changes into smaller ones
+- **`breakChangesIntoBatches(changes, maxBytes?)`**: Groups changes into network-sized batches
 
 ### Server-Side Algorithms
 

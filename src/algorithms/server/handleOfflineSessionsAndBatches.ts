@@ -3,8 +3,8 @@ import { createVersionMetadata } from '../../data/version.js';
 import type { PatchesStoreBackend } from '../../server/types.js';
 import type { Change } from '../../types.js';
 import { getISO, timestampDiff } from '../../utils/dates.js';
-import { breakChange } from '../client/breakChange.js';
 import { applyChanges } from '../shared/applyChanges.js';
+import { breakChanges } from '../shared/changeBatching.js';
 import { getStateAtRevision } from './getStateAtRevision.js';
 
 /**
@@ -108,7 +108,7 @@ export async function handleOfflineSessionsAndBatches(
 
     // Break oversized collapsed changes if maxPayloadBytes is set
     if (maxPayloadBytes) {
-      return breakChange(collapsed, maxPayloadBytes);
+      return breakChanges([collapsed], maxPayloadBytes);
     }
     return [collapsed];
   }

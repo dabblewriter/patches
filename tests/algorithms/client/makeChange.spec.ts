@@ -7,7 +7,7 @@ import type { Change, PatchesSnapshot } from '../../../src/types';
 vi.mock('../../../src/algorithms/client/createStateFromSnapshot');
 vi.mock('../../../src/json-patch/createJSONPatch');
 vi.mock('../../../src/data/change');
-vi.mock('../../../src/algorithms/client/breakChange');
+vi.mock('../../../src/algorithms/shared/changeBatching');
 
 describe('makeChange', () => {
   const createSnapshot = <T>(state: T, rev: number, changes: Change[] = []): PatchesSnapshot<T> => ({
@@ -83,12 +83,12 @@ describe('makeChange', () => {
     const { createStateFromSnapshot } = await import('../../../src/algorithms/client/createStateFromSnapshot');
     const { createJSONPatch } = await import('../../../src/json-patch/createJSONPatch');
     const { createChange: createChangeFunc } = await import('../../../src/data/change');
-    const { breakChange } = await import('../../../src/algorithms/client/breakChange');
+    const { breakChanges } = await import('../../../src/algorithms/shared/changeBatching');
 
     const mockCreateStateFromSnapshot = vi.mocked(createStateFromSnapshot);
     const mockCreateJSONPatch = vi.mocked(createJSONPatch);
     const mockCreateChange = vi.mocked(createChangeFunc);
-    const mockBreakChange = vi.mocked(breakChange);
+    const mockBreakChanges = vi.mocked(breakChanges);
 
     const snapshot = createSnapshot({ text: 'hello' }, 5, []);
     const mockPatch = new JSONPatch([{ op: 'replace', path: '/text', value: 'world' }]);
@@ -103,12 +103,12 @@ describe('makeChange', () => {
     mockCreateStateFromSnapshot.mockReturnValue({ text: 'hello' });
     mockCreateJSONPatch.mockReturnValue(mockPatch);
     mockCreateChange.mockReturnValue(originalChange);
-    mockBreakChange.mockReturnValue(brokenChanges);
+    mockBreakChanges.mockReturnValue(brokenChanges);
 
     const mutator = vi.fn();
     const result = makeChange(snapshot, mutator, {}, 100);
 
-    expect(mockBreakChange).toHaveBeenCalledWith(originalChange, 100);
+    expect(mockBreakChanges).toHaveBeenCalledWith([originalChange], 100);
     expect(result).toBe(brokenChanges);
   });
 

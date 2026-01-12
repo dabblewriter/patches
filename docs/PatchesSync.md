@@ -99,7 +99,7 @@ Behind the scenes:
 1. `PatchesDoc` uses the `makeChange` algorithm to create change objects
 2. `PatchesDoc` emits a change event
 3. `PatchesSync` hears this event and queues the changes for sending
-4. `PatchesSync` batches changes using the `breakIntoBatches` algorithm
+4. `PatchesSync` batches changes using the `breakChangesIntoBatches` algorithm
 5. Changes are sent to the server via WebSocket
 
 ### 2. Server Changes Flow In

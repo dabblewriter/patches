@@ -225,8 +225,8 @@ describe('handleOfflineSessionsAndBatches', () => {
       isOffline: true,
       startedAt: toUTC(1000),
       endedAt: toUTC(2000),
-      rev: 7,
-      baseRev: 5,
+      endRev: 7,
+      startRev: 5,
     });
   });
 

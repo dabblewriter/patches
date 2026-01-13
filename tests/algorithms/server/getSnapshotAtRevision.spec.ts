@@ -18,11 +18,11 @@ describe('getSnapshotAtRevision', () => {
   it('should get latest snapshot when no revision specified', async () => {
     const mockVersions = [{
       id: 'v1',
-      rev: 10,
+      endRev: 10,
       origin: 'main' as const,
       startedAt: '2024-01-01T00:00:01.000Z',
       endedAt: '2024-01-01T00:00:02.000Z',
-      baseRev: 0
+      startRev: 0
     }];
     const mockState = { text: 'hello', count: 5 };
     const mockChanges = [
@@ -41,7 +41,7 @@ describe('getSnapshotAtRevision', () => {
       reverse: true,
       startAfter: undefined,
       origin: 'main',
-      orderBy: 'rev',
+      orderBy: 'endRev',
     });
     expect(mockStore.loadVersionState).toHaveBeenCalledWith('doc1', 'v1');
     expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', {
@@ -59,11 +59,11 @@ describe('getSnapshotAtRevision', () => {
   it('should get snapshot at specific revision', async () => {
     const mockVersions = [{
       id: 'v1',
-      rev: 5,
+      endRev: 5,
       origin: 'main' as const,
       startedAt: '2024-01-01T00:00:01.000Z',
       endedAt: '2024-01-01T00:00:02.000Z',
-      baseRev: 0
+      startRev: 0
     }];
     const mockState = { text: 'hello' };
     const mockChanges = [
@@ -82,7 +82,7 @@ describe('getSnapshotAtRevision', () => {
       reverse: true,
       startAfter: 8, // rev + 1
       origin: 'main',
-      orderBy: 'rev',
+      orderBy: 'endRev',
     });
     expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', {
       startAfter: 5,
@@ -120,11 +120,11 @@ describe('getSnapshotAtRevision', () => {
   it('should handle case with no version state', async () => {
     const mockVersions = [{
       id: 'v1',
-      rev: 10,
+      endRev: 10,
       origin: 'main' as const,
       startedAt: '2024-01-01T00:00:01.000Z',
       endedAt: '2024-01-01T00:00:02.000Z',
-      baseRev: 0
+      startRev: 0
     }];
     const mockChanges = [{ id: 'c1', rev: 11, baseRev: 10, createdAt: '2024-01-01T00:00:01.100Z', committedAt: '2024-01-01T00:00:01.100Z', ops: [{ op: 'add', path: '/text', value: 'hello' }] }];
 
@@ -144,11 +144,11 @@ describe('getSnapshotAtRevision', () => {
   it('should handle empty changes list', async () => {
     const mockVersions = [{
       id: 'v1',
-      rev: 10,
+      endRev: 10,
       origin: 'main' as const,
       startedAt: '2024-01-01T00:00:01.000Z',
       endedAt: '2024-01-01T00:00:02.000Z',
-      baseRev: 0
+      startRev: 0
     }];
     const mockState = { text: 'hello' };
 
@@ -178,7 +178,7 @@ describe('getSnapshotAtRevision', () => {
       reverse: true,
       startAfter: undefined, // When rev is 0, startAfter should be undefined
       origin: 'main',
-      orderBy: 'rev',
+      orderBy: 'endRev',
     });
     expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', {
       startAfter: 0,
@@ -195,11 +195,11 @@ describe('getSnapshotAtRevision', () => {
   it('should handle complex scenario with multiple versions', async () => {
     const mockVersions = [{
       id: 'v2',
-      rev: 15,
+      endRev: 15,
       origin: 'main' as const,
       startedAt: '2024-01-01T00:00:01.000Z',
       endedAt: '2024-01-01T00:00:02.000Z',
-      baseRev: 0
+      startRev: 0
     }]; // Latest version before rev 20
     const mockState = { users: [{ name: 'John' }], settings: { theme: 'dark' } };
     const mockChanges = [
@@ -219,7 +219,7 @@ describe('getSnapshotAtRevision', () => {
       reverse: true,
       startAfter: 19,
       origin: 'main',
-      orderBy: 'rev',
+      orderBy: 'endRev',
     });
     expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', {
       startAfter: 15,

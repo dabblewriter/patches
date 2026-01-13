@@ -35,7 +35,7 @@ export interface PatchesStoreBackend {
   updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void>;
 
   /**
-   * Appends changes to an existing version, updating its state snapshot, endedAt, and rev.
+   * Appends changes to an existing version, updating its state snapshot, endedAt, and endRev.
    * Used when a session spans multiple batch submissions.
    */
   appendVersionChanges(
@@ -43,7 +43,7 @@ export interface PatchesStoreBackend {
     versionId: string,
     changes: Change[],
     newEndedAt: string,
-    newRev: number,
+    newEndRev: number,
     newState: any
   ): Promise<void>;
 

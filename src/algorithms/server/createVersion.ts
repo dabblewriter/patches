@@ -21,8 +21,8 @@ export async function createVersion(
 ): Promise<VersionMetadata | undefined> {
   if (changes.length === 0) return;
 
-  const baseRev = changes[0].baseRev;
-  if (baseRev === undefined) {
+  const startRev = changes[0].baseRev;
+  if (startRev === undefined) {
     throw new Error(`Client changes must include baseRev for doc ${docId}.`);
   }
 
@@ -31,8 +31,8 @@ export async function createVersion(
     // Convert client timestamps to UTC for version metadata (enables lexicographic sorting)
     startedAt: getISO(changes[0].createdAt),
     endedAt: getISO(changes[changes.length - 1].createdAt),
-    rev: changes[changes.length - 1].rev,
-    baseRev,
+    endRev: changes[changes.length - 1].rev,
+    startRev,
     ...metadata,
   });
 

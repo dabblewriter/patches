@@ -112,10 +112,10 @@ export interface VersionMetadata {
   startedAt: string;
   /** Server-side ISO timestamp of version end (UTC with Z). */
   endedAt: string;
-  /** The revision number this version was created at. */
-  rev: number;
-  /** The revision number on the main timeline before the changes that created this version. If this is an offline/branch version, this is the revision number of the source document where the branch was created and not . */
-  baseRev: number;
+  /** The ending revision number of this version (the last change's rev). */
+  endRev: number;
+  /** The starting revision number of this version (the first change's baseRev). If this is an offline/branch version, this is the revision number of the source document where the branch was created. */
+  startRev: number;
   /** Optional arbitrary metadata associated with the version. */
   [metadata: string]: any;
 }
@@ -126,7 +126,7 @@ type Disallowed<T, K extends keyof T> = Pick<T, Exclude<keyof T, K>> & {
 
 export type EditableVersionMetadata = Disallowed<
   VersionMetadata,
-  'id' | 'parentId' | 'groupId' | 'origin' | 'branchName' | 'startedAt' | 'endedAt' | 'rev' | 'baseRev'
+  'id' | 'parentId' | 'groupId' | 'origin' | 'branchName' | 'startedAt' | 'endedAt' | 'endRev' | 'startRev'
 >;
 
 /**
@@ -173,8 +173,8 @@ export interface ListVersionsOptions {
   endBefore?: number | string;
   /** Maximum number of versions to return. */
   limit?: number;
-  /** Sort by startedAt, rev, or baseRev. Defaults to 'rev'. */
-  orderBy?: 'startedAt' | 'rev' | 'baseRev';
+  /** Sort by startedAt, endRev, or startRev. Defaults to 'endRev'. */
+  orderBy?: 'startedAt' | 'endRev' | 'startRev';
   /** Return versions in descending order. Defaults to false (ascending). When reversed, startAfter and endBefore apply to the *reversed* list. */
   reverse?: boolean;
   /** Filter by the origin type. */

@@ -102,8 +102,8 @@ describe('PatchesBranchManager', () => {
       origin: 'main' as const,
       startedAt: getISO(),
       endedAt: getISO(),
-      rev: 5,
-      baseRev: 5,
+      endRev: 5,
+      startRev: 5,
       groupId: 'generated-id',
       branchName: 'Test Branch',
     };
@@ -131,8 +131,8 @@ describe('PatchesBranchManager', () => {
         origin: 'main',
         startedAt: expect.any(String),
         endedAt: expect.any(String),
-        rev: 5,
-        baseRev: 5,
+        endRev: 5,
+        startRev: 5,
         name: 'Test Branch',
         groupId: 'generated-id',
         branchName: 'Test Branch',
@@ -266,8 +266,8 @@ describe('PatchesBranchManager', () => {
         branchName: 'Feature Branch',
         startedAt: getISO(),
         endedAt: getISO(),
-        rev: 2,
-        baseRev: 0,
+        endRev: 2,
+        startRev: 0,
       },
     ];
 
@@ -375,8 +375,8 @@ describe('PatchesBranchManager', () => {
           branchName: 'Feature Branch',
           startedAt: getISO(),
           endedAt: getISO(),
-          rev: 1,
-          baseRev: 0,
+          endRev: 1,
+          startRev: 0,
         },
         {
           id: 'version2',
@@ -408,8 +408,8 @@ describe('PatchesBranchManager', () => {
           parentId: 'new-version1',
           startedAt: getISO(),
           endedAt: getISO(),
-          rev: 2,
-          baseRev: 5,
+          endRev: 2,
+          startRev: 5,
         });
       vi.mocked(createChange).mockReturnValue({
         id: 'merged-change',
@@ -428,7 +428,7 @@ describe('PatchesBranchManager', () => {
       expect(createVersionMetadata).toHaveBeenNthCalledWith(1, {
         ...multipleVersions[0],
         origin: 'branch',
-        baseRev: 5,
+        startRev: 5,
         groupId: 'branch1',
         branchName: 'Feature Branch',
         parentId: undefined,
@@ -436,7 +436,7 @@ describe('PatchesBranchManager', () => {
       expect(createVersionMetadata).toHaveBeenNthCalledWith(2, {
         ...multipleVersions[1],
         origin: 'branch',
-        baseRev: 5,
+        startRev: 5,
         groupId: 'branch1',
         branchName: 'Feature Branch',
         parentId: 'new-version1',

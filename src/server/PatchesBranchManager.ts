@@ -51,8 +51,8 @@ export class PatchesBranchManager {
       origin: 'main', // Branch doc versions are 'main' until merged
       startedAt: now,
       endedAt: now,
-      rev,
-      baseRev: rev,
+      endRev: rev,
+      startRev: rev,
       name: metadata?.name,
       groupId: branchDocId,
       branchName: metadata?.name,
@@ -133,7 +133,7 @@ export class PatchesBranchManager {
       const newVersionMetadata = createVersionMetadata({
         ...v,
         origin: versionOrigin,
-        baseRev: branchStartRevOnSource,
+        startRev: branchStartRevOnSource,
         groupId: branchId,
         branchName: branch.name, // Keep branchName for traceability
         parentId: lastVersionId,

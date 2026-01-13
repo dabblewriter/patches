@@ -87,8 +87,8 @@ export async function handleOfflineSessionsAndBatches(
             // Convert client timestamps to UTC for version metadata (enables lexicographic sorting)
             startedAt: getISO(sessionChanges[0].createdAt),
             endedAt: getISO(sessionChanges[sessionChanges.length - 1].createdAt),
-            rev: sessionChanges[sessionChanges.length - 1].rev,
-            baseRev,
+            endRev: sessionChanges[sessionChanges.length - 1].rev,
+            startRev: baseRev,
           });
           await store.createVersion(docId, sessionMetadata, offlineBaseState, sessionChanges);
           parentId = sessionMetadata.id;

@@ -36,8 +36,8 @@ describe('createVersion', () => {
       origin: main,
       startedAt: toISO(1000), // Converted to UTC
       endedAt: toISO(2000),
-      rev: 2,
-      baseRev: 0,
+      endRev: 2,
+      startRev: 0,
     };
 
     const mockVersion = { ...expectedVersionData, id: 'version-123' };
@@ -65,8 +65,8 @@ describe('createVersion', () => {
       origin: main,
       startedAt: toISO(5000),
       endedAt: toISO(5000),
-      rev: 6,
-      baseRev: 5,
+      endRev: 6,
+      startRev: 5,
       name: 'My Version',
       description: 'Important milestone',
       tags: ['release', 'stable'],
@@ -111,8 +111,8 @@ describe('createVersion', () => {
       origin: main,
       startedAt: toISO(7500),
       endedAt: toISO(7500),
-      rev: 11,
-      baseRev: 10,
+      endRev: 11,
+      startRev: 10,
     };
 
     const mockVersion = { ...expectedVersionData, id: 'version-789' };
@@ -143,8 +143,8 @@ describe('createVersion', () => {
       origin: main,
       startedAt: toISO(1000), // First change timestamp
       endedAt: toISO(2000), // Last change timestamp
-      rev: 4,
-      baseRev: 0,
+      endRev: 4,
+      startRev: 0,
     };
 
     const mockVersion = { ...expectedVersionData, id: 'version-multi' };
@@ -172,8 +172,8 @@ describe('createVersion', () => {
       origin: main,
       startedAt: toISO(9000),
       endedAt: toISO(9000),
-      rev: 2,
-      baseRev: 1,
+      endRev: 2,
+      startRev: 1,
       name: 'Custom Version',
     };
 
@@ -191,7 +191,7 @@ describe('createVersion', () => {
     const changes = [createChange(0, 1, [{ op: 'add', path: '/text', value: 'hello' }])];
     changes[0].createdAt = '1970-01-01T00:00:01.000+00:00';
 
-    const mockVersion = { id: 'version-123', origin: main, startedAt: toISO(1000), endedAt: toISO(1000), rev: 1, baseRev: 0 };
+    const mockVersion = { id: 'version-123', origin: main, startedAt: toISO(1000), endedAt: toISO(1000), endRev: 1, startRev: 0 };
     mockCreateVersionMetadata.mockReturnValue(mockVersion);
 
     const storeError = new Error('Storage failure');

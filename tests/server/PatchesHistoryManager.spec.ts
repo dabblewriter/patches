@@ -65,8 +65,8 @@ describe('PatchesHistoryManager', () => {
         branchName: undefined,
         startedAt: getISO(),
         endedAt: getISO(),
-        rev: 5,
-        baseRev: 1,
+        endRev: 5,
+        startRev: 1,
         name: 'Version 1',
         description: 'First version',
       },
@@ -78,8 +78,8 @@ describe('PatchesHistoryManager', () => {
         branchName: undefined,
         startedAt: getISO(),
         endedAt: getISO(),
-        rev: 10,
-        baseRev: 5,
+        endRev: 10,
+        startRev: 5,
         name: 'Version 2',
         description: 'Second version',
       },
@@ -130,7 +130,7 @@ describe('PatchesHistoryManager', () => {
 
     it('should preserve existing orderBy in options', async () => {
       const options: ListVersionsOptions = {
-        orderBy: 'rev',
+        orderBy: 'endRev',
         limit: 3,
       };
 
@@ -382,8 +382,8 @@ describe('PatchesHistoryManager', () => {
           branchName: undefined,
           startedAt: getISO(),
           endedAt: getISO(),
-          rev: 5,
-          baseRev: 1,
+          endRev: 5,
+          startRev: 1,
           name: 'Feature Complete',
           description: 'All features implemented',
         },

@@ -18,11 +18,11 @@ export async function getSnapshotAtRevision(
     reverse: true,
     startAfter: rev ? rev + 1 : undefined,
     origin: 'main',
-    orderBy: 'rev',
+    orderBy: 'endRev',
   });
   const latestMainVersion = versions[0];
   const versionState = (latestMainVersion && (await store.loadVersionState(docId, latestMainVersion.id))) || null;
-  const versionRev = latestMainVersion?.rev ?? 0;
+  const versionRev = latestMainVersion?.endRev ?? 0;
 
   // Get *all* changes since that version up to the target revision (if specified)
   const changesSinceVersion = await store.listChanges(docId, {

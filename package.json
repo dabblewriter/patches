@@ -29,6 +29,10 @@
     "./webrtc": {
       "import": "./dist/net/webrtc/index.js",
       "types": "./dist/net/webrtc/index.d.ts"
+    },
+    "./compression": {
+      "import": "./dist/compression/index.js",
+      "types": "./dist/compression/index.d.ts"
     }
   },
   "files": [

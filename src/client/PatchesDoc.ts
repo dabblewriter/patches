@@ -1,6 +1,7 @@
 import { createStateFromSnapshot } from '../algorithms/client/createStateFromSnapshot.js';
 import { makeChange } from '../algorithms/client/makeChange.js';
 import { applyChanges } from '../algorithms/shared/applyChanges.js';
+import type { SizeCalculator } from '../algorithms/shared/changeBatching.js';
 import { signal, type Unsubscriber } from '../event-signal.js';
 import type { Change, ChangeMutator, PatchesSnapshot, SyncingState } from '../types.js';
 
@@ -9,10 +10,20 @@ import type { Change, ChangeMutator, PatchesSnapshot, SyncingState } from '../ty
  */
 export interface PatchesDocOptions {
   /**
-   * Maximum size in bytes for a single payload (network message).
-   * Changes exceeding this will be split into multiple smaller changes.
+   * Maximum size in bytes for a single change's storage representation.
+   * Changes exceeding this will be split. Used for backends with row size limits.
    */
-  maxPayloadBytes?: number;
+  maxStorageBytes?: number;
+  /**
+   * Custom size calculator for storage limit checks.
+   * Import from '@dabble/patches/compression' for actual compression measurement,
+   * or provide your own function (e.g., ratio estimate).
+   *
+   * @example
+   * import { compressedSizeBase64 } from '@dabble/patches/compression';
+   * { sizeCalculator: compressedSizeBase64, maxStorageBytes: 1_000_000 }
+   */
+  sizeCalculator?: SizeCalculator;
 }
 
 /**
@@ -26,7 +37,8 @@ export class PatchesDoc<T extends object = object> {
   protected _snapshot: PatchesSnapshot<T>;
   protected _changeMetadata: Record<string, any> = {};
   protected _syncing: SyncingState = null;
-  protected readonly _maxPayloadBytes?: number;
+  protected readonly _maxStorageBytes?: number;
+  protected readonly _sizeCalculator?: SizeCalculator;
 
   /** Subscribe to be notified before local state changes. */
   readonly onBeforeChange = signal<(change: Change) => void>();
@@ -47,7 +59,8 @@ export class PatchesDoc<T extends object = object> {
     this._state = structuredClone(initialState);
     this._snapshot = { state: this._state, rev: 0, changes: [] };
     this._changeMetadata = initialMetadata;
-    this._maxPayloadBytes = options.maxPayloadBytes;
+    this._maxStorageBytes = options.maxStorageBytes;
+    this._sizeCalculator = options.sizeCalculator;
   }
 
   /** The unique identifier for this document, once assigned. */
@@ -115,7 +128,7 @@ export class PatchesDoc<T extends object = object> {
    * @returns The generated Change objects.
    */
   change(mutator: ChangeMutator<T>): Change[] {
-    const changes = makeChange(this._snapshot, mutator, this._changeMetadata, this._maxPayloadBytes);
+    const changes = makeChange(this._snapshot, mutator, this._changeMetadata, this._maxStorageBytes, this._sizeCalculator);
     if (changes.length === 0) {
       return changes;
     }

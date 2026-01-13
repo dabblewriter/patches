@@ -98,7 +98,7 @@ describe('PatchesDoc', () => {
     it('should initialize with provided state and metadata', () => {
       const initialState = { title: 'Test Doc', content: 'Hello world' };
       const metadata = { userId: 'user1', sessionId: 'session1' };
-      const options = { maxPayloadBytes: 1000 };
+      const options = { maxStorageBytes: 1000 };
 
       const testDoc = new PatchesDoc(initialState, metadata, options);
 
@@ -174,7 +174,7 @@ describe('PatchesDoc', () => {
 
       doc.change(() => {});
 
-      expect(makeChange).toHaveBeenCalledWith(expect.any(Object), expect.any(Function), newMetadata, undefined);
+      expect(makeChange).toHaveBeenCalledWith(expect.any(Object), expect.any(Function), newMetadata, undefined, undefined);
     });
   });
 
@@ -266,6 +266,7 @@ describe('PatchesDoc', () => {
         expect.objectContaining({ rev: 0 }),
         mutator,
         { userId: 'user1' },
+        undefined,
         undefined
       );
       expect(applyChanges).toHaveBeenCalled();
@@ -314,12 +315,13 @@ describe('PatchesDoc', () => {
       expect(doc.getPendingChanges()).toHaveLength(1);
     });
 
-    it('should pass maxPayloadBytes to makeChange', () => {
-      const docWithLimit = new PatchesDoc({}, {}, { maxPayloadBytes: 500 });
+    it('should pass maxStorageBytes and sizeCalculator to makeChange', () => {
+      const mockSizeCalculator = (data: unknown) => JSON.stringify(data).length;
+      const docWithLimit = new PatchesDoc({}, {}, { maxStorageBytes: 500, sizeCalculator: mockSizeCalculator });
 
       docWithLimit.change(() => {});
 
-      expect(makeChange).toHaveBeenCalledWith(expect.any(Object), expect.any(Function), {}, 500);
+      expect(makeChange).toHaveBeenCalledWith(expect.any(Object), expect.any(Function), {}, 500, mockSizeCalculator);
     });
   });
 

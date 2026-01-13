@@ -1,6 +1,6 @@
 import { isEqual } from '@dabble/delta';
 import { applyCommittedChanges } from '../algorithms/client/applyCommittedChanges.js';
-import { breakChangesIntoBatches } from '../algorithms/shared/changeBatching.js';
+import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/shared/changeBatching.js';
 import { Patches } from '../client/Patches.js';
 import type { PatchesStore, TrackedDoc } from '../client/PatchesStore.js';
 import { signal } from '../event-signal.js';
@@ -20,6 +20,12 @@ export interface PatchesSyncState {
 export interface PatchesSyncOptions {
   subscribeFilter?: (docIds: string[]) => string[];
   websocket?: WebSocketOptions;
+  /** Wire batch limit for network transmission. Defaults to 1MB. */
+  maxPayloadBytes?: number;
+  /** Per-change storage limit for backend. Falls back to patches.docOptions.maxStorageBytes. */
+  maxStorageBytes?: number;
+  /** Custom size calculator for storage limit. Falls back to patches.docOptions.sizeCalculator. */
+  sizeCalculator?: SizeCalculator;
 }
 
 /**
@@ -31,6 +37,8 @@ export class PatchesSync {
   protected patches: Patches;
   protected store: PatchesStore;
   protected maxPayloadBytes?: number;
+  protected maxStorageBytes?: number;
+  protected sizeCalculator?: SizeCalculator;
   protected trackedDocs: Set<string>;
   protected _state: PatchesSyncState = { online: false, connected: false, syncing: null };
 
@@ -50,7 +58,10 @@ export class PatchesSync {
   ) {
     this.patches = patches;
     this.store = patches.store;
-    this.maxPayloadBytes = patches.docOptions?.maxPayloadBytes;
+    // Use options if provided, otherwise fall back to patches.docOptions
+    this.maxPayloadBytes = options?.maxPayloadBytes;
+    this.maxStorageBytes = options?.maxStorageBytes ?? patches.docOptions?.maxStorageBytes;
+    this.sizeCalculator = options?.sizeCalculator ?? patches.docOptions?.sizeCalculator;
     this.ws = new PatchesWebSocket(url, options?.websocket);
     this._state.online = onlineState.isOnline;
     this.trackedDocs = new Set(patches.trackedDocs);
@@ -238,7 +249,11 @@ export class PatchesSync {
         return; // Nothing to flush
       }
 
-      const batches = breakChangesIntoBatches(pending, this.maxPayloadBytes);
+      const batches = breakChangesIntoBatches(pending, {
+        maxPayloadBytes: this.maxPayloadBytes,
+        maxStorageBytes: this.maxStorageBytes,
+        sizeCalculator: this.sizeCalculator,
+      });
 
       for (const batch of batches) {
         if (!this.state.connected) {

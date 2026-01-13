@@ -16,7 +16,7 @@ import { getStateAtRevision } from './getStateAtRevision.js';
  * @param batchId The batch identifier
  * @param origin The origin to use for created versions (default: 'offline-branch')
  * @param isOffline Whether these changes were created offline (metadata flag)
- * @param maxPayloadBytes If set, break collapsed changes that exceed this size
+ * @param maxStorageBytes If set, break collapsed changes that exceed this size
  * @returns The changes (collapsed into one if divergent, unchanged if fast-forward)
  */
 export async function handleOfflineSessionsAndBatches(
@@ -28,7 +28,7 @@ export async function handleOfflineSessionsAndBatches(
   batchId?: string,
   origin: 'main' | 'offline-branch' = 'offline-branch',
   isOffline: boolean = true,
-  maxPayloadBytes?: number
+  maxStorageBytes?: number
 ) {
   // Use batchId as groupId for multi-batch uploads; default offline sessions have no groupId
   const groupId = batchId ?? createSortableId();
@@ -106,9 +106,9 @@ export async function handleOfflineSessionsAndBatches(
       return firstChange;
     });
 
-    // Break oversized collapsed changes if maxPayloadBytes is set
-    if (maxPayloadBytes) {
-      return breakChanges([collapsed], maxPayloadBytes);
+    // Break oversized collapsed changes if maxStorageBytes is set
+    if (maxStorageBytes) {
+      return breakChanges([collapsed], maxStorageBytes);
     }
     return [collapsed];
   }

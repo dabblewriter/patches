@@ -1,5 +1,6 @@
 import { commitChanges, type CommitChangesOptions } from '../algorithms/server/commitChanges.js';
 export type { CommitChangesOptions } from '../algorithms/server/commitChanges.js';
+import type { OpsCompressor } from '../compression/index.js';
 import { createVersion } from '../algorithms/server/createVersion.js';
 import { getSnapshotAtRevision } from '../algorithms/server/getSnapshotAtRevision.js';
 import { getStateAtRevision } from '../algorithms/server/getStateAtRevision.js';
@@ -8,6 +9,7 @@ import { createChange } from '../data/change.js';
 import { signal } from '../event-signal.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { Change, ChangeInput, ChangeMutator, EditableVersionMetadata, PatchesState } from '../types.js';
+import { CompressedStoreBackend } from './CompressedStoreBackend.js';
 import type { PatchesStoreBackend } from './types.js';
 
 /**
@@ -21,11 +23,20 @@ export interface PatchesServerOptions {
    */
   sessionTimeoutMinutes?: number;
   /**
-   * Maximum size in bytes for a single change's JSON representation.
-   * If a flattened/collapsed change exceeds this, it will be split into multiple changes.
+   * Maximum size in bytes for a single change's storage representation.
+   * If a change exceeds this after compression (if enabled), it will be split.
    * Useful for databases with row size limits.
    */
-  maxPayloadBytes?: number;
+  maxStorageBytes?: number;
+  /**
+   * Compressor for storing changes. When provided, the ops field
+   * of changes will be compressed before storage and decompressed on load.
+   *
+   * @example
+   * import { base64Compressor } from '@dabble/patches/compression';
+   * new PatchesServer(store, { compressor: base64Compressor });
+   */
+  compressor?: OpsCompressor;
 }
 
 /**
@@ -35,7 +46,8 @@ export interface PatchesServerOptions {
  */
 export class PatchesServer {
   private readonly sessionTimeoutMillis: number;
-  private readonly maxPayloadBytes?: number;
+  private readonly maxStorageBytes?: number;
+  readonly store: PatchesStoreBackend;
 
   /** Notifies listeners whenever a batch of changes is *successfully* committed. */
   public readonly onChangesCommitted = signal<(docId: string, changes: Change[], originClientId?: string) => void>();
@@ -43,12 +55,16 @@ export class PatchesServer {
   /** Notifies listeners when a document is deleted. */
   public readonly onDocDeleted = signal<(docId: string, originClientId?: string) => void>();
 
-  constructor(
-    readonly store: PatchesStoreBackend,
-    options: PatchesServerOptions = {}
-  ) {
+  constructor(store: PatchesStoreBackend, options: PatchesServerOptions = {}) {
     this.sessionTimeoutMillis = (options.sessionTimeoutMinutes ?? 30) * 60 * 1000;
-    this.maxPayloadBytes = options.maxPayloadBytes;
+    this.maxStorageBytes = options.maxStorageBytes;
+
+    // Wrap store with compression if enabled
+    if (options.compressor) {
+      this.store = new CompressedStoreBackend(store, options.compressor);
+    } else {
+      this.store = store;
+    }
   }
 
   /**
@@ -103,7 +119,7 @@ export class PatchesServer {
       changes,
       this.sessionTimeoutMillis,
       options,
-      this.maxPayloadBytes
+      this.maxStorageBytes
     );
 
     // Persist and notify about newly transformed changes atomically

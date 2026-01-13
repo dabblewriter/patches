@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { breakChanges, breakChangesIntoBatches, getJSONByteSize } from '../../../src/algorithms/shared/changeBatching';
+import {
+  breakChanges,
+  breakChangesIntoBatches,
+  getJSONByteSize,
+} from '../../../src/algorithms/shared/changeBatching';
+import { compressedSizeBase64, compressedSizeUint8 } from '../../../src/compression';
 import type { Change } from '../../../src/types';
 
 describe('getJSONByteSize', () => {
@@ -292,5 +297,175 @@ describe('breakChangesIntoBatches', () => {
     expect(result.length).toBeGreaterThanOrEqual(2);
     // All changes should have batchId since we're breaking
     expect(result.flat().every(c => c.batchId)).toBe(true);
+  });
+
+  it('should accept options object with maxPayloadBytes', () => {
+    const changes = [createChange('1'), createChange('2')];
+    const maxPayloadBytes = getJSONByteSize(changes) + 100;
+
+    const result = breakChangesIntoBatches(changes, { maxPayloadBytes });
+
+    expect(result).toEqual([changes]);
+  });
+
+  it('should use maxStorageBytes to split individual changes', () => {
+    const largeChange = createChange('1', [
+      { op: 'add', path: '/a', value: 'x'.repeat(200) },
+      { op: 'add', path: '/b', value: 'y'.repeat(200) },
+    ]);
+
+    // maxStorageBytes forces per-change splitting
+    const result = breakChangesIntoBatches([largeChange], {
+      maxStorageBytes: 250,
+      maxPayloadBytes: 10000, // Large enough to not batch
+    });
+
+    // Should have split due to maxStorageBytes
+    expect(result.flat().length).toBeGreaterThan(1);
+  });
+
+  it('should use sizeCalculator for storage size calculation when specified', () => {
+    // Repetitive data compresses well
+    const repetitiveChange = createChange('1', [{ op: 'add', path: '/data', value: 'a'.repeat(500) }]);
+
+    const uncompressedSize = getJSONByteSize(repetitiveChange);
+    const compressedSize = compressedSizeBase64(repetitiveChange);
+
+    // Compressed should be smaller for repetitive data
+    expect(compressedSize).toBeLessThan(uncompressedSize);
+
+    // With sizeCalculator, a smaller limit can still fit the change
+    const result = breakChangesIntoBatches([repetitiveChange], {
+      maxStorageBytes: compressedSize + 50,
+      sizeCalculator: compressedSizeBase64,
+    });
+
+    // Should fit in one batch since compressed size is under limit
+    expect(result.flat()).toHaveLength(1);
+  });
+});
+
+describe('compressedSizeBase64 and compressedSizeUint8', () => {
+  it('should return compressed size for base64 format', () => {
+    const data = { text: 'hello world' };
+    const compressedSize = compressedSizeBase64(data);
+
+    expect(compressedSize).toBeGreaterThan(0);
+    expect(typeof compressedSize).toBe('number');
+  });
+
+  it('should return compressed size for uint8 format', () => {
+    const data = { text: 'hello world' };
+    const compressedSize = compressedSizeUint8(data);
+
+    expect(compressedSize).toBeGreaterThan(0);
+  });
+
+  it('should return smaller size for repetitive data', () => {
+    const repetitiveData = { text: 'a'.repeat(1000) };
+    const uncompressedSize = getJSONByteSize(repetitiveData);
+    const compressedSize = compressedSizeBase64(repetitiveData);
+
+    expect(compressedSize).toBeLessThan(uncompressedSize);
+  });
+
+  it('should return 0 for undefined', () => {
+    expect(compressedSizeBase64(undefined)).toBe(0);
+  });
+
+  it('should return 0 for circular structures', () => {
+    const circular: any = { foo: 'bar' };
+    circular.self = circular;
+
+    // New API returns 0 instead of throwing
+    expect(compressedSizeBase64(circular)).toBe(0);
+  });
+
+  it('should return uint8 size smaller than base64 size', () => {
+    const data = { items: Array.from({ length: 100 }, (_, i) => ({ id: i, value: 'test' })) };
+
+    const base64Size = compressedSizeBase64(data);
+    const uint8Size = compressedSizeUint8(data);
+
+    // Binary should be smaller than base64 (no encoding overhead)
+    expect(uint8Size).toBeLessThan(base64Size);
+  });
+
+  it('should handle arrays correctly', () => {
+    const data = [1, 2, 3, 4, 5];
+    const size = compressedSizeBase64(data);
+
+    expect(size).toBeGreaterThan(0);
+  });
+});
+
+describe('breakChanges with sizeCalculator', () => {
+  const createChange = (rev: number, ops: any[], baseRev = 0): Change => ({
+    id: `change-${rev}`,
+    rev,
+    baseRev,
+    ops,
+    createdAt: '2024-01-01T00:00:00.000Z',
+    committedAt: '2024-01-01T00:00:00.000Z',
+  });
+
+  it('should use compressed size when sizeCalculator is provided', () => {
+    // Create a change with repetitive data that compresses well
+    const repetitiveOps = [{ op: 'add', path: '/data', value: 'a'.repeat(500) }];
+    const change = createChange(1, repetitiveOps);
+
+    const uncompressedSize = getJSONByteSize(change);
+    const compressedSize = compressedSizeBase64(change);
+
+    // With uncompressed limit smaller than uncompressed size, it should split
+    const resultWithoutCompression = breakChanges([change], uncompressedSize - 50);
+    expect(resultWithoutCompression.length).toBeGreaterThan(1);
+
+    // With compressed limit larger than compressed size, it should NOT split
+    const resultWithSizeCalculator = breakChanges([change], compressedSize + 50, compressedSizeBase64);
+    expect(resultWithSizeCalculator).toHaveLength(1);
+  });
+
+  it('should split based on compressed size when sizeCalculator is enabled', () => {
+    const change = createChange(1, [
+      { op: 'add', path: '/a', value: 'x'.repeat(200) },
+      { op: 'add', path: '/b', value: 'y'.repeat(200) },
+    ]);
+
+    // Get the compressed size of a single-op change
+    const singleOpChange = createChange(1, [change.ops[0]]);
+    const compressedSingleOpSize = compressedSizeBase64(singleOpChange);
+
+    // Set limit just above single op compressed size
+    const result = breakChanges([change], compressedSingleOpSize + 10, compressedSizeBase64);
+
+    // Should split into 2 changes
+    expect(result.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('should work with uint8 size calculator', () => {
+    const repetitiveOps = [{ op: 'add', path: '/data', value: 'b'.repeat(500) }];
+    const change = createChange(1, repetitiveOps);
+
+    const compressedSize = compressedSizeUint8(change);
+
+    // Should not split when limit is above compressed size
+    const result = breakChanges([change], compressedSize + 50, compressedSizeUint8);
+    expect(result).toHaveLength(1);
+  });
+
+  it('should allow custom ratio-based size calculator', () => {
+    // Example: estimate 50% compression ratio
+    const ratioEstimate = (data: unknown) => getJSONByteSize(data) * 0.5;
+
+    const change = createChange(1, [{ op: 'add', path: '/data', value: 'test' }]);
+    const uncompressedSize = getJSONByteSize(change);
+    const estimatedSize = ratioEstimate(change);
+
+    expect(estimatedSize).toBe(uncompressedSize * 0.5);
+
+    // Should use the custom calculator
+    const result = breakChanges([change], estimatedSize + 10, ratioEstimate);
+    expect(result).toHaveLength(1);
   });
 });

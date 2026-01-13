@@ -3,6 +3,21 @@ import { createChange } from '../../data/change.js';
 import type { JSONPatchOp } from '../../json-patch/types.js';
 import type { Change } from '../../types.js';
 
+/**
+ * Function that calculates the storage size of data.
+ * Used by change batching to determine if changes need to be split.
+ *
+ * Import pre-built calculators from '@dabble/patches/compression':
+ * - `compressedSizeBase64` - Uses actual LZ compression + base64
+ * - `compressedSizeUint8` - Uses actual LZ compression to binary
+ *
+ * Or provide your own (e.g., ratio estimate):
+ * ```typescript
+ * const ratioEstimate = (data) => getJSONByteSize(data) * 0.5;
+ * ```
+ */
+export type SizeCalculator = (data: unknown) => number;
+
 /** Estimate JSON string byte size. */
 export function getJSONByteSize(data: unknown): number {
   try {
@@ -16,24 +31,69 @@ export function getJSONByteSize(data: unknown): number {
 }
 
 /**
- * Break changes into smaller changes so that each change's JSON string size never exceeds `maxBytes`.
+ * Break changes into smaller changes so that each change's storage size never exceeds `maxBytes`.
  *
  * - Splits first by JSON-Patch *ops*
  * - If an individual op is still too big and is a "@txt" op,
  *   split its Delta payload into smaller Deltas
+ *
+ * @param changes - The changes to break apart
+ * @param maxBytes - Maximum storage size in bytes per change
+ * @param sizeCalculator - Custom size calculator (e.g., for compressed size)
  */
-export function breakChanges(changes: Change[], maxBytes: number): Change[] {
+export function breakChanges(changes: Change[], maxBytes: number, sizeCalculator?: SizeCalculator): Change[] {
   const results: Change[] = [];
   for (const change of changes) {
-    results.push(...breakSingleChange(change, maxBytes));
+    results.push(...breakSingleChange(change, maxBytes, sizeCalculator));
   }
   return results;
 }
 
-/** Break changes into batches based on maxPayloadBytes. */
-export function breakChangesIntoBatches(changes: Change[], maxPayloadBytes?: number): Change[][] {
-  if (!maxPayloadBytes || getJSONByteSize(changes) < maxPayloadBytes) {
-    return [changes];
+/** Default wire batch size limit (1MB) */
+const DEFAULT_MAX_PAYLOAD_BYTES = 1_000_000;
+
+/**
+ * Options for breaking changes into batches.
+ */
+export interface BreakChangesIntoBatchesOptions {
+  /** Batch limit for wire (uncompressed JSON). Defaults to 1MB. */
+  maxPayloadBytes?: number;
+  /** Per-change storage limit. If exceeded, individual changes are split. */
+  maxStorageBytes?: number;
+  /** Custom size calculator for storage limit (e.g., compressed size). */
+  sizeCalculator?: SizeCalculator;
+}
+
+/**
+ * Break changes into batches for network transmission.
+ *
+ * Two distinct limits:
+ * - `maxPayloadBytes`: Controls batch size for wire transmission (uses uncompressed JSON size)
+ * - `maxStorageBytes`: Controls per-change splitting for backend storage (uses sizeCalculator if provided)
+ *
+ * @param changes - The changes to batch
+ * @param options - Batching options (or just maxPayloadBytes for backward compatibility)
+ */
+export function breakChangesIntoBatches(
+  changes: Change[],
+  options?: BreakChangesIntoBatchesOptions | number
+): Change[][] {
+  // Support both old signature (number) and new signature (options object)
+  const opts: BreakChangesIntoBatchesOptions =
+    typeof options === 'number' ? { maxPayloadBytes: options } : options ?? {};
+
+  const maxPayloadBytes = opts.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
+  const { maxStorageBytes, sizeCalculator } = opts;
+
+  // First, split individual changes if they exceed storage limit
+  let processedChanges = changes;
+  if (maxStorageBytes) {
+    processedChanges = breakChanges(changes, maxStorageBytes, sizeCalculator);
+  }
+
+  // If all changes fit in one batch, return as-is
+  if (getJSONByteSize(processedChanges) < maxPayloadBytes) {
+    return [processedChanges];
   }
 
   const batchId = createId(12);
@@ -41,14 +101,15 @@ export function breakChangesIntoBatches(changes: Change[], maxPayloadBytes?: num
   let currentBatch: Change[] = [];
   let currentSize = 2; // Account for [] wrapper
 
-  for (const change of changes) {
+  for (const change of processedChanges) {
     // Add batchId if breaking up
     const changeWithBatchId = { ...change, batchId };
     const individualActualSize = getJSONByteSize(changeWithBatchId);
     let itemsToProcess: Change[];
 
+    // If individual change exceeds wire limit (shouldn't happen if maxStorageBytes < maxPayloadBytes)
     if (individualActualSize > maxPayloadBytes) {
-      // Break the change, then ensure batchId is on each piece
+      // Break using wire limit (uncompressed)
       itemsToProcess = breakSingleChange(changeWithBatchId, maxPayloadBytes).map(c => ({ ...c, batchId }));
     } else {
       itemsToProcess = [changeWithBatchId];
@@ -78,10 +139,22 @@ export function breakChangesIntoBatches(changes: Change[], maxPayloadBytes?: num
 }
 
 /**
- * Break a single Change into multiple Changes so that the JSON string size never exceeds `maxBytes`.
+ * Get the size of data for storage limit checking.
+ * If a sizeCalculator is provided, uses it; otherwise returns JSON size.
  */
-function breakSingleChange(orig: Change, maxBytes: number): Change[] {
-  if (getJSONByteSize(orig) <= maxBytes) return [orig];
+function getSizeForStorage(data: unknown, sizeCalculator?: SizeCalculator): number {
+  if (sizeCalculator) {
+    return sizeCalculator(data);
+  }
+  return getJSONByteSize(data);
+}
+
+/**
+ * Break a single Change into multiple Changes so that the storage size never exceeds `maxBytes`.
+ * @param sizeCalculator - Custom size calculator (e.g., for compressed size)
+ */
+function breakSingleChange(orig: Change, maxBytes: number, sizeCalculator?: SizeCalculator): Change[] {
+  if (getSizeForStorage(orig, sizeCalculator) <= maxBytes) return [orig];
 
   // First pass: split by ops
   const byOps: Change[] = [];
@@ -96,13 +169,13 @@ function breakSingleChange(orig: Change, maxBytes: number): Change[] {
 
   for (const op of orig.ops) {
     const tentative = group.concat(op);
-    if (getJSONByteSize({ ...orig, ops: tentative }) > maxBytes) flush();
+    if (getSizeForStorage({ ...orig, ops: tentative }, sizeCalculator) > maxBytes) flush();
 
     // Handle the case where a single op is too large
-    if (group.length === 0 && getJSONByteSize({ ...orig, ops: [op] }) > maxBytes) {
+    if (group.length === 0 && getSizeForStorage({ ...orig, ops: [op] }, sizeCalculator) > maxBytes) {
       // We have a single op that's too big - can only be @txt op with large delta
       if (op.op === '@txt' && op.value) {
-        const pieces = breakTextOp(orig, op, maxBytes, rev);
+        const pieces = breakTextOp(orig, op, maxBytes, rev, sizeCalculator);
         byOps.push(...pieces);
         // Only update rev if we got results from breakTextOp
         if (pieces.length > 0) {
@@ -111,7 +184,7 @@ function breakSingleChange(orig: Change, maxBytes: number): Change[] {
         continue;
       } else if (op.op === 'replace' || op.op === 'add') {
         // For replace/add operations with large value payloads, try to split the value if it's a string or array
-        const pieces = breakLargeValueOp(orig, op, maxBytes, rev);
+        const pieces = breakLargeValueOp(orig, op, maxBytes, rev, sizeCalculator);
         byOps.push(...pieces);
         if (pieces.length > 0) {
           rev = pieces[pieces.length - 1].rev + 1;
@@ -134,12 +207,19 @@ function breakSingleChange(orig: Change, maxBytes: number): Change[] {
 
 /**
  * Break a large @txt operation into multiple smaller operations
+ * @param sizeCalculator - Custom size calculator (e.g., for compressed size)
  */
-function breakTextOp(origChange: Change, textOp: JSONPatchOp, maxBytes: number, startRev: number): Change[] {
+function breakTextOp(
+  origChange: Change,
+  textOp: JSONPatchOp,
+  maxBytes: number,
+  startRev: number,
+  sizeCalculator?: SizeCalculator
+): Change[] {
   const results: Change[] = [];
   let rev = startRev;
 
-  const baseSize = getJSONByteSize({ ...origChange, ops: [{ ...textOp, value: '' }] });
+  const baseSize = getSizeForStorage({ ...origChange, ops: [{ ...textOp, value: '' }] }, sizeCalculator);
   const budget = maxBytes - baseSize;
   const buffer = 20;
   const maxLength = Math.max(1, budget - buffer);
@@ -185,7 +265,7 @@ function breakTextOp(origChange: Change, textOp: JSONPatchOp, maxBytes: number, 
       testBatchOps.push({ retain: retainToPrefixCurrentPiece });
     }
     testBatchOps.push(op);
-    const testBatchSize = getJSONByteSize({ ...origChange, ops: [{ ...textOp, value: testBatchOps }] });
+    const testBatchSize = getSizeForStorage({ ...origChange, ops: [{ ...textOp, value: testBatchOps }] }, sizeCalculator);
 
     if (currentOpsForNextChangePiece.length > 0 && testBatchSize > maxBytes) {
       flushCurrentChangePiece();
@@ -194,7 +274,10 @@ function breakTextOp(origChange: Change, textOp: JSONPatchOp, maxBytes: number, 
 
     // Check if the op itself (with its prefix) is too large for a new piece
     const opStandaloneOps = retainToPrefixCurrentPiece > 0 ? [{ retain: retainToPrefixCurrentPiece }, op] : [op];
-    const opStandaloneSize = getJSONByteSize({ ...origChange, ops: [{ ...textOp, value: opStandaloneOps }] });
+    const opStandaloneSize = getSizeForStorage(
+      { ...origChange, ops: [{ ...textOp, value: opStandaloneOps }] },
+      sizeCalculator
+    );
 
     if (currentOpsForNextChangePiece.length === 0 && opStandaloneSize > maxBytes) {
       if (op.insert && typeof op.insert === 'string') {
@@ -253,12 +336,19 @@ function splitLargeInsertText(text: string, maxChunkLength: number, attributes?:
 
 /**
  * Attempt to break a large value in a replace/add operation
+ * @param sizeCalculator - Custom size calculator (e.g., for compressed size)
  */
-function breakLargeValueOp(origChange: Change, op: JSONPatchOp, maxBytes: number, startRev: number): Change[] {
+function breakLargeValueOp(
+  origChange: Change,
+  op: JSONPatchOp,
+  maxBytes: number,
+  startRev: number,
+  sizeCalculator?: SizeCalculator
+): Change[] {
   const results: Change[] = [];
   let rev = startRev;
-  const baseOpSize = getJSONByteSize({ ...op, value: '' });
-  const baseChangeSize = getJSONByteSize({ ...origChange, ops: [{ ...op, value: '' }] }) - baseOpSize;
+  const baseOpSize = getSizeForStorage({ ...op, value: '' }, sizeCalculator);
+  const baseChangeSize = getSizeForStorage({ ...origChange, ops: [{ ...op, value: '' }] }, sizeCalculator) - baseOpSize;
   const valueBudget = maxBytes - baseChangeSize - 50;
 
   if (typeof op.value === 'string' && op.value.length > 100) {
@@ -289,7 +379,7 @@ function breakLargeValueOp(origChange: Change, op: JSONPatchOp, maxBytes: number
       const item = originalArray[i];
       const tentativeChunk = [...currentChunk, item];
       const tentativeOp = { ...op, value: tentativeChunk };
-      const tentativeChangeSize = getJSONByteSize({ ...origChange, ops: [tentativeOp] });
+      const tentativeChangeSize = getSizeForStorage({ ...origChange, ops: [tentativeOp] }, sizeCalculator);
       if (currentChunk.length > 0 && tentativeChangeSize > maxBytes) {
         const chunkOp: any = {};
         if (chunkStartIndex === 0) {

@@ -1,14 +1,15 @@
 import { createChange } from '../../data/change.js';
 import { createJSONPatch } from '../../json-patch/createJSONPatch.js';
 import type { Change, ChangeMutator, PatchesSnapshot } from '../../types.js';
-import { breakChanges } from '../shared/changeBatching.js';
+import { breakChanges, type SizeCalculator } from '../shared/changeBatching.js';
 import { createStateFromSnapshot } from './createStateFromSnapshot.js';
 
 export function makeChange<T = any>(
   snapshot: PatchesSnapshot<T>,
   mutator: ChangeMutator<T>,
   changeMetadata?: Record<string, any>,
-  maxPayloadBytes?: number
+  maxStorageBytes?: number,
+  sizeCalculator?: SizeCalculator
 ): Change[] {
   const pendingChanges = snapshot.changes;
   const pendingRev = pendingChanges[pendingChanges.length - 1]?.rev ?? snapshot.rev;
@@ -36,11 +37,12 @@ export function makeChange<T = any>(
     throw new Error(`Failed to apply change to state during makeChange: ${error}`);
   }
 
-  if (maxPayloadBytes) {
-    // If the single change (or its parts) exceed maxPayloadBytes, break it down.
+  if (maxStorageBytes) {
+    // If the single change (or its parts) exceed maxStorageBytes, break it down.
     // breakChanges will handle creating multiple Change objects if necessary,
     // maintaining the original baseRev but incrementing revs for the pieces.
-    newChangesArray = breakChanges(newChangesArray, maxPayloadBytes);
+    // If sizeCalculator is set, uses it for limit check (e.g., compressed size).
+    newChangesArray = breakChanges(newChangesArray, maxStorageBytes, sizeCalculator);
   }
   // PatchesDoc.change will take this returned array and push its contents onto its internal snapshot.
   return newChangesArray;

@@ -79,7 +79,7 @@ describe('makeChange', () => {
     expect(result).toEqual([]);
   });
 
-  it('should break change when maxPayloadBytes is specified', async () => {
+  it('should break change when maxStorageBytes is specified', async () => {
     const { createStateFromSnapshot } = await import('../../../src/algorithms/client/createStateFromSnapshot');
     const { createJSONPatch } = await import('../../../src/json-patch/createJSONPatch');
     const { createChange: createChangeFunc } = await import('../../../src/data/change');
@@ -106,9 +106,9 @@ describe('makeChange', () => {
     mockBreakChanges.mockReturnValue(brokenChanges);
 
     const mutator = vi.fn();
-    const result = makeChange(snapshot, mutator, {}, 100);
+    const result = makeChange(snapshot, mutator, {}, 100, 'base64');
 
-    expect(mockBreakChanges).toHaveBeenCalledWith([originalChange], 100);
+    expect(mockBreakChanges).toHaveBeenCalledWith([originalChange], 100, 'base64');
     expect(result).toBe(brokenChanges);
   });
 

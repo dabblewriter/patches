@@ -44,7 +44,9 @@ export class PatchesBranchManager {
     }
     // 1. Get the state at the branch point
     const stateAtRev = (await this.patchesServer.getStateAtRevision(docId, rev)).state;
-    const branchDocId = createId();
+    const branchDocId = this.store.createBranchId
+      ? await Promise.resolve(this.store.createBranchId(docId))
+      : createId(22);
     const now = getISO();
     // Create an initial version at the branch point rev (for snapshotting/large docs)
     const initialVersionMetadata = createVersionMetadata({

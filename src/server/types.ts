@@ -64,6 +64,13 @@ export interface PatchesStoreBackend {
  * Extends PatchesStoreBackend with methods specifically for managing branches.
  */
 export interface BranchingStoreBackend extends PatchesStoreBackend {
+  /**
+   * Generates a unique ID for a new branch document.
+   * If not provided, a random 22-character ID is generated using createId().
+   * @param docId - The source document ID being branched from
+   */
+  createBranchId?(docId: string): Promise<string> | string;
+
   /** Lists metadata records for branches originating from a document. */
   listBranches(docId: string): Promise<Branch[]>;
 

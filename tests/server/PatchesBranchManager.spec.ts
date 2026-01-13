@@ -184,6 +184,43 @@ describe('PatchesBranchManager', () => {
 
       await expect(branchManager.createBranch('doc1', 5)).rejects.toThrow('State not found');
     });
+
+    it('should use store.createBranchId when provided', async () => {
+      const customBranchId = 'docs/doc1/branches/custom-123';
+      mockStore.createBranchId = vi.fn().mockReturnValue(customBranchId);
+
+      const customVersion: VersionMetadata = {
+        ...mockVersion,
+        groupId: customBranchId,
+      };
+      vi.mocked(createVersionMetadata).mockReturnValue(customVersion);
+
+      const result = await branchManager.createBranch('doc1', 5);
+
+      expect(mockStore.createBranchId).toHaveBeenCalledWith('doc1');
+      expect(createId).not.toHaveBeenCalled();
+      expect(mockStore.createVersion).toHaveBeenCalledWith(customBranchId, customVersion, mockState, []);
+      expect(mockStore.createBranch).toHaveBeenCalledWith(
+        expect.objectContaining({ id: customBranchId })
+      );
+      expect(result).toBe(customBranchId);
+    });
+
+    it('should support async createBranchId', async () => {
+      const customBranchId = 'docs/doc1/branches/async-456';
+      mockStore.createBranchId = vi.fn().mockResolvedValue(customBranchId);
+
+      const customVersion: VersionMetadata = {
+        ...mockVersion,
+        groupId: customBranchId,
+      };
+      vi.mocked(createVersionMetadata).mockReturnValue(customVersion);
+
+      const result = await branchManager.createBranch('doc1', 5);
+
+      expect(mockStore.createBranchId).toHaveBeenCalledWith('doc1');
+      expect(result).toBe(customBranchId);
+    });
   });
 
   describe('updateBranch', () => {
@@ -229,8 +266,8 @@ describe('PatchesBranchManager', () => {
   describe('mergeBranch', () => {
     const mockBranch: Branch = {
       id: 'branch1',
-      branchedFromId: 'doc1',
-      branchedRev: 5,
+      docId: 'doc1',
+      branchedAtRev: 5,
       createdAt: getISO(),
       status: 'open',
       name: 'Feature Branch',
@@ -386,8 +423,8 @@ describe('PatchesBranchManager', () => {
           branchName: 'Feature Branch',
           startedAt: getISO(),
           endedAt: getISO(),
-          rev: 2,
-          baseRev: 1,
+          endRev: 2,
+          startRev: 1,
         },
       ];
 
@@ -399,8 +436,8 @@ describe('PatchesBranchManager', () => {
           parentId: undefined,
           startedAt: getISO(),
           endedAt: getISO(),
-          rev: 1,
-          baseRev: 5,
+          endRev: 1,
+          startRev: 5,
         })
         .mockReturnValueOnce({
           id: 'new-version2',
@@ -461,7 +498,7 @@ describe('assertBranchMetadata', () => {
   });
 
   it('should throw error for non-modifiable fields', () => {
-    const invalidFields = ['id', 'branchedFromId', 'branchedRev', 'createdAt', 'status'];
+    const invalidFields = ['id', 'docId', 'branchedAtRev', 'createdAt', 'status'];
 
     invalidFields.forEach(field => {
       const metadata = { [field]: 'value' } as any;

@@ -62,16 +62,16 @@ describe('PatchesBranchManager', () => {
       const mockBranches: Branch[] = [
         {
           id: 'branch1',
-          branchedFromId: 'doc1',
-          branchedRev: 5,
+          docId: 'doc1',
+          branchedAtRev: 5,
           createdAt: getISO(),
           status: 'open',
           name: 'Feature Branch',
         },
         {
           id: 'branch2',
-          branchedFromId: 'doc1',
-          branchedRev: 3,
+          docId: 'doc1',
+          branchedAtRev: 3,
           createdAt: getISO(),
           status: 'merged',
           name: 'Bug Fix Branch',
@@ -142,8 +142,8 @@ describe('PatchesBranchManager', () => {
         name: 'Test Branch',
         description: 'A test branch',
         id: 'generated-id',
-        branchedFromId: 'doc1',
-        branchedRev: 5,
+        docId: 'doc1',
+        branchedAtRev: 5,
         createdAt: expect.any(String),
         status: 'open',
       });
@@ -156,8 +156,8 @@ describe('PatchesBranchManager', () => {
       expect(result).toBe('generated-id');
       expect(mockStore.createBranch).toHaveBeenCalledWith({
         id: 'generated-id',
-        branchedFromId: 'doc1',
-        branchedRev: 3,
+        docId: 'doc1',
+        branchedAtRev: 3,
         createdAt: expect.any(String),
         status: 'open',
       });
@@ -166,8 +166,8 @@ describe('PatchesBranchManager', () => {
     it('should throw error when trying to branch from a branch', async () => {
       const existingBranch: Branch = {
         id: 'branch1',
-        branchedFromId: 'original-doc',
-        branchedRev: 1,
+        docId: 'original-doc',
+        branchedAtRev: 1,
         createdAt: getISO(),
         status: 'open',
       };

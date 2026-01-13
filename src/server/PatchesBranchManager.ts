@@ -62,8 +62,8 @@ export class PatchesBranchManager {
     const branch: Branch = {
       ...metadata,
       id: branchDocId,
-      branchedFromId: docId,
-      branchedRev: rev,
+      docId: docId,
+      branchedAtRev: rev,
       createdAt: now,
       status: 'open',
     };
@@ -105,8 +105,8 @@ export class PatchesBranchManager {
     if (branch.status !== 'open') {
       throw new Error(`Branch ${branchId} is not open (status: ${branch.status}). Cannot merge.`);
     }
-    const sourceDocId = branch.branchedFromId;
-    const branchStartRevOnSource = branch.branchedRev;
+    const sourceDocId = branch.docId;
+    const branchStartRevOnSource = branch.branchedAtRev;
 
     // 2. Get all committed server changes made on the branch document since it was created.
     const branchChanges = await this.store.listChanges(branchId, {});
@@ -183,7 +183,7 @@ export class PatchesBranchManager {
   }
 }
 
-const nonModifiableMetadataFields = new Set(['id', 'branchedFromId', 'branchedRev', 'createdAt', 'status']);
+const nonModifiableMetadataFields = new Set(['id', 'docId', 'branchedAtRev', 'createdAt', 'status']);
 
 export function assertBranchMetadata(metadata?: EditableBranchMetadata) {
   if (!metadata) return;

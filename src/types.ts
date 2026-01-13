@@ -73,9 +73,9 @@ export interface Branch {
   /** The ID of the branch document. */
   id: string;
   /** The ID of the document this document was branched from. */
-  branchedFromId: string;
+  docId: string;
   /** The revision number on the source document where the branch occurred. */
-  branchedRev: number;
+  branchedAtRev: number;
   /** Server-side ISO timestamp when the branch was created (UTC with Z). */
   createdAt: string;
   /** Optional user-friendly name for the branch. */
@@ -88,7 +88,7 @@ export interface Branch {
 
 export type EditableBranchMetadata = Disallowed<
   Branch,
-  'id' | 'branchedFromId' | 'branchedRev' | 'createdAt' | 'status'
+  'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'status'
 >;
 
 /**

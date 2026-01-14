@@ -45,7 +45,7 @@ export type SizeCalculator = (data: unknown) => number;
  * Calculate size after base64 LZ compression.
  * Use this when your server uses base64 compression format.
  */
-export const compressedSizeBase64: SizeCalculator = (data) => {
+export const compressedSizeBase64: SizeCalculator = data => {
   if (data === undefined) return 0;
   try {
     const json = JSON.stringify(data);
@@ -60,7 +60,7 @@ export const compressedSizeBase64: SizeCalculator = (data) => {
  * Calculate size after uint8array LZ compression.
  * Use this when your server uses binary compression format.
  */
-export const compressedSizeUint8: SizeCalculator = (data) => {
+export const compressedSizeUint8: SizeCalculator = data => {
   if (data === undefined) return 0;
   try {
     const json = JSON.stringify(data);
@@ -93,8 +93,8 @@ export interface OpsCompressor {
  * Works with any storage backend that supports strings.
  */
 export const base64Compressor: OpsCompressor = {
-  compress: (ops) => compressToBase64(JSON.stringify(ops)),
-  decompress: (compressed) => JSON.parse(decompressFromBase64(compressed as string) || '[]'),
+  compress: ops => compressToBase64(JSON.stringify(ops)),
+  decompress: compressed => JSON.parse(decompressFromBase64(compressed as string) || '[]'),
   isCompressed: (ops): ops is string => typeof ops === 'string',
 };
 
@@ -103,8 +103,8 @@ export const base64Compressor: OpsCompressor = {
  * More efficient storage but requires backend that supports binary data.
  */
 export const uint8Compressor: OpsCompressor = {
-  compress: (ops) => compressToUint8Array(JSON.stringify(ops)),
-  decompress: (compressed) => JSON.parse(decompressFromUint8Array(compressed as Uint8Array) || '[]'),
+  compress: ops => compressToUint8Array(JSON.stringify(ops)),
+  decompress: compressed => JSON.parse(decompressFromUint8Array(compressed as Uint8Array) || '[]'),
   isCompressed: (ops): ops is Uint8Array => ops instanceof Uint8Array,
 };
 

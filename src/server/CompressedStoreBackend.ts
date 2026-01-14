@@ -71,12 +71,7 @@ export class CompressedStoreBackend implements PatchesStoreBackend {
 
   // === Version Operations (compress changes and state ops) ===
 
-  async createVersion(
-    docId: string,
-    metadata: VersionMetadata,
-    state: any,
-    changes: Change[]
-  ): Promise<void> {
+  async createVersion(docId: string, metadata: VersionMetadata, state: any, changes: Change[]): Promise<void> {
     const compressedChanges = changes.map(c => this.compressChange(c));
     return this.store.createVersion(docId, metadata, state, compressedChanges as unknown as Change[]);
   }

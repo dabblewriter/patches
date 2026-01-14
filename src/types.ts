@@ -86,10 +86,7 @@ export interface Branch {
   [metadata: string]: any;
 }
 
-export type EditableBranchMetadata = Disallowed<
-  Branch,
-  'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'status'
->;
+export type EditableBranchMetadata = Disallowed<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'status'>;
 
 /**
  * Metadata, state snapshot, and included changes for a specific version.

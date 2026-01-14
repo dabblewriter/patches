@@ -80,7 +80,7 @@ export function breakChangesIntoBatches(
 ): Change[][] {
   // Support both old signature (number) and new signature (options object)
   const opts: BreakChangesIntoBatchesOptions =
-    typeof options === 'number' ? { maxPayloadBytes: options } : options ?? {};
+    typeof options === 'number' ? { maxPayloadBytes: options } : (options ?? {});
 
   const maxPayloadBytes = opts.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
   const { maxStorageBytes, sizeCalculator } = opts;
@@ -265,7 +265,10 @@ function breakTextOp(
       testBatchOps.push({ retain: retainToPrefixCurrentPiece });
     }
     testBatchOps.push(op);
-    const testBatchSize = getSizeForStorage({ ...origChange, ops: [{ ...textOp, value: testBatchOps }] }, sizeCalculator);
+    const testBatchSize = getSizeForStorage(
+      { ...origChange, ops: [{ ...textOp, value: testBatchOps }] },
+      sizeCalculator
+    );
 
     if (currentOpsForNextChangePiece.length > 0 && testBatchSize > maxBytes) {
       flushCurrentChangePiece();

@@ -71,7 +71,7 @@ export function decompressFromUint8Array(compressed: Uint8Array | null): string 
     }
 
     const result: string[] = [];
-    buf.forEach((c) => result.push(f(c)));
+    buf.forEach(c => result.push(f(c)));
     return decompress(result.join(''));
   }
 }
@@ -102,11 +102,7 @@ function getBaseValue(alphabet: string, character: string): number {
   return baseReverseDic[alphabet][character];
 }
 
-function _compress(
-  uncompressed: string | null,
-  bitsPerChar: number,
-  getCharFromInt: (a: number) => string
-): string {
+function _compress(uncompressed: string | null, bitsPerChar: number, getCharFromInt: (a: number) => string): string {
   if (uncompressed == null) return '';
   let i: number;
   let value: number;
@@ -324,11 +320,7 @@ interface DecompressData {
   index: number;
 }
 
-function _decompress(
-  length: number,
-  resetValue: number,
-  getNextValue: (index: number) => number
-): string | null {
+function _decompress(length: number, resetValue: number, getNextValue: (index: number) => number): string | null {
   const dictionary: (number | string)[] = [];
   let enlargeIn = 4;
   let dictSize = 4;

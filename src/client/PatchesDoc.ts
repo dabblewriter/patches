@@ -128,7 +128,13 @@ export class PatchesDoc<T extends object = object> {
    * @returns The generated Change objects.
    */
   change(mutator: ChangeMutator<T>): Change[] {
-    const changes = makeChange(this._snapshot, mutator, this._changeMetadata, this._maxStorageBytes, this._sizeCalculator);
+    const changes = makeChange(
+      this._snapshot,
+      mutator,
+      this._changeMetadata,
+      this._maxStorageBytes,
+      this._sizeCalculator
+    );
     if (changes.length === 0) {
       return changes;
     }

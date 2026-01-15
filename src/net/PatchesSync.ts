@@ -78,6 +78,24 @@ export class PatchesSync {
   }
 
   /**
+   * Gets the URL of the WebSocket connection.
+   */
+  get url(): string {
+    return this.ws.transport.url;
+  }
+
+  /**
+   * Sets the URL of the WebSocket connection.
+   */
+  set url(url: string) {
+    this.ws.transport.url = url;
+    if (this.state.connected) {
+      this.ws.disconnect();
+      this.ws.connect();
+    }
+  }
+
+  /**
    * Gets the current sync state.
    */
   get state(): PatchesSyncState {

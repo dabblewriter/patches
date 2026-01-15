@@ -13,16 +13,16 @@ export interface WebSocketOptions {
  * Includes automatic reconnection with exponential backoff.
  */
 export class WebSocketTransport implements ClientTransport {
-  private _state: ConnectionState = 'disconnected';
-  private ws: WebSocket | null = null;
-  private reconnectTimer: any = null;
-  private backoff = 1000;
-  private connecting: boolean = false;
-  private connectionDeferred: Deferred | null = null;
-  private onlineUnsubscriber: Unsubscriber | null = null;
+  protected _state: ConnectionState = 'disconnected';
+  protected ws: WebSocket | null = null;
+  protected reconnectTimer: any = null;
+  protected backoff = 1000;
+  protected connecting: boolean = false;
+  protected connectionDeferred: Deferred | null = null;
+  protected onlineUnsubscriber: Unsubscriber | null = null;
 
   /** Flag representing the *intent* to be connected. It is set by `connect()` and cleared by `disconnect()`. */
-  private shouldBeConnected = false;
+  protected shouldBeConnected = false;
 
   /**
    * Signal that emits when the connection state changes.
@@ -42,8 +42,8 @@ export class WebSocketTransport implements ClientTransport {
    * @param wsOptions - Optional configuration for the WebSocket connection
    */
   constructor(
-    private url: string,
-    private wsOptions?: WebSocketOptions
+    public url: string,
+    public wsOptions?: WebSocketOptions
   ) {}
 
   /**
@@ -206,9 +206,9 @@ export class WebSocketTransport implements ClientTransport {
   /**
    * Schedules a reconnection attempt using exponential backoff.
    * The backoff time increases with each failed attempt, up to a maximum of 30 seconds.
-   * @private
+   * @protected
    */
-  private _scheduleReconnect(): void {
+  protected _scheduleReconnect(): void {
     // Only schedule a reconnect if the caller still wants to be connected.
     if (!this.shouldBeConnected || onlineState.isOffline) {
       return;
@@ -233,7 +233,7 @@ export class WebSocketTransport implements ClientTransport {
    * events so we can automatically attempt to connect when the network comes
    * back and forcibly close when it goes away.
    */
-  private _ensureOnlineOfflineListeners(): void {
+  protected _ensureOnlineOfflineListeners(): void {
     if (!this.onlineUnsubscriber) {
       this.onlineUnsubscriber = onlineState.onOnlineChange(isOnline => {
         if (isOnline && this.shouldBeConnected && !this.connecting && this.state !== 'connected') {
@@ -248,7 +248,7 @@ export class WebSocketTransport implements ClientTransport {
   }
 
   /** Removes previously registered online/offline listeners (if any) */
-  private _removeOnlineOfflineListeners(): void {
+  protected _removeOnlineOfflineListeners(): void {
     if (this.onlineUnsubscriber) {
       this.onlineUnsubscriber();
       this.onlineUnsubscriber = null;

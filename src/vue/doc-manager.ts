@@ -84,7 +84,7 @@ export class DocManager {
     if (currentCount === 1) {
       // Last reference - actually close the doc
       this.refCounts.delete(docId);
-      await patches.closeDoc(docId);
+      await patches.closeDoc(docId, { untrack: true });
     } else {
       // Still have other references - just decrement
       this.refCounts.set(docId, currentCount - 1);

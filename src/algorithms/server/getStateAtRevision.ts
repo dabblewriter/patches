@@ -18,8 +18,8 @@ export async function getStateAtRevision(
   // We need to apply the changes to get the state *at* the target revision.
   const { state: versionState, rev: snapshotRev, changes } = await getSnapshotAtRevision(store, docId, rev);
   return {
-    // Ensure null is passed if versionState or versionState.state is null/undefined
-    state: applyChanges(versionState?.state ?? null, changes),
+    // Ensure null is passed if versionState is null/undefined
+    state: applyChanges(versionState ?? null, changes),
     rev: changes.at(-1)?.rev ?? snapshotRev,
   };
 }

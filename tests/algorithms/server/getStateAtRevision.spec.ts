@@ -41,7 +41,7 @@ describe('getStateAtRevision', () => {
     ];
 
     mockGetSnapshotAtRevision.mockResolvedValue({
-      state: { state: versionState },
+      state: versionState,
       rev: 5,
       changes,
     });
@@ -90,7 +90,7 @@ describe('getStateAtRevision', () => {
     const versionState = { text: 'hello', count: 0 };
 
     mockGetSnapshotAtRevision.mockResolvedValue({
-      state: { state: versionState },
+      state: versionState,
       rev: 5,
       changes: [],
     });
@@ -128,7 +128,7 @@ describe('getStateAtRevision', () => {
     ];
 
     mockGetSnapshotAtRevision.mockResolvedValue({
-      state: { state: versionState },
+      state: versionState,
       rev: 10,
       changes,
     });
@@ -143,7 +143,7 @@ describe('getStateAtRevision', () => {
     });
   });
 
-  it('should handle version state without nested state property', async () => {
+  it('should pass version state directly to applyChanges', async () => {
     const versionState = { text: 'hello' };
     const finalState = { text: 'world' };
     const changes = [
@@ -158,7 +158,7 @@ describe('getStateAtRevision', () => {
     ];
 
     mockGetSnapshotAtRevision.mockResolvedValue({
-      state: versionState, // Direct state, not wrapped in { state: ... }
+      state: versionState,
       rev: 1,
       changes,
     });
@@ -166,7 +166,7 @@ describe('getStateAtRevision', () => {
 
     const result = await getStateAtRevision(mockStore, 'doc1', 2);
 
-    expect(mockApplyChanges).toHaveBeenCalledWith(null, changes); // versionState.state is undefined, so null is used
+    expect(mockApplyChanges).toHaveBeenCalledWith(versionState, changes);
     expect(result).toEqual({
       state: finalState,
       rev: 2,
@@ -177,7 +177,7 @@ describe('getStateAtRevision', () => {
     const versionState = { text: 'hello' };
 
     mockGetSnapshotAtRevision.mockResolvedValue({
-      state: { state: versionState },
+      state: versionState,
       rev: 10,
       changes: [],
     });
@@ -251,7 +251,7 @@ describe('getStateAtRevision', () => {
     ];
 
     mockGetSnapshotAtRevision.mockResolvedValue({
-      state: { state: versionState },
+      state: versionState,
       rev: 20,
       changes,
     });

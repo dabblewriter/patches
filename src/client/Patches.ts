@@ -68,7 +68,7 @@ export class Patches {
 
   /**
    * Untracks the given document IDs, removing them from the set of tracked documents and notifying listeners.
-   * Untracked docs will no longer be kept in sync with the server, even if not open locally.
+   * Untracked docs will no longer be kept in sync with the server.
    * Closes any open docs and removes them from the store.
    * @param docIds - Array of document IDs to untrack.
    */

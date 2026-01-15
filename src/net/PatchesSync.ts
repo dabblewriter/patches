@@ -75,6 +75,7 @@ export class PatchesSync {
     patches.onTrackDocs(this._handleDocsTracked.bind(this));
     patches.onUntrackDocs(this._handleDocsUntracked.bind(this));
     patches.onDeleteDoc(this._handleDocDeleted.bind(this));
+    patches.onChange(this._handleDocChange.bind(this));
   }
 
   /**
@@ -432,5 +433,11 @@ export class PatchesSync {
         console.warn(`Failed to unsubscribe docs: ${existingIds.join(', ')}`, err);
       }
     }
+  }
+
+  protected async _handleDocChange(docId: string, _changes: Change[]): Promise<void> {
+    if (!this.state.connected) return;
+    if (!this.trackedDocs.has(docId)) return;
+    await this.flushDoc(docId);
   }
 }

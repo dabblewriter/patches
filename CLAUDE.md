@@ -193,3 +193,7 @@ npm run test -- -t "test description pattern"
 ## Vue 3 Integration
 
 Patches includes first-class Vue 3 Composition API support via `@dabble/patches/vue`. See [src/vue/README.md](src/vue/README.md) for comprehensive documentation, examples, and best practices.
+
+## Solid.js Integration
+
+Patches includes first-class Solid.js support via `@dabble/patches/solid`. See [src/solid/README.md](src/solid/README.md) for comprehensive documentation, examples, and best practices.

@@ -1,10 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  base64Compressor,
-  uint8Compressor,
-  compressedSizeBase64,
-  compressedSizeUint8,
-} from '../../src/compression';
+import { base64Compressor, uint8Compressor, compressedSizeBase64, compressedSizeUint8 } from '../../src/compression';
 import type { JSONPatchOp } from '../../src/json-patch/types';
 
 describe('OpsCompressor', () => {

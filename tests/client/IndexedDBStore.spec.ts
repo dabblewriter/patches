@@ -105,7 +105,9 @@ describe('IndexedDBStore', () => {
     vi.mocked(transformPatch).mockImplementation((state, patch, ops) => ops);
 
     const { blockable } = await import('../../src/utils/concurrency');
-    vi.mocked(blockable).mockImplementation((() => (target: any, propertyKey: any, descriptor: any) => descriptor) as any);
+    vi.mocked(blockable).mockImplementation(
+      (() => (target: any, propertyKey: any, descriptor: any) => descriptor) as any
+    );
 
     // Mock the transaction method to return our mocked stores
     store = new IndexedDBStore('test-db');

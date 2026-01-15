@@ -63,23 +63,23 @@ Implement your business logic once, run it over any transport.
 
 ## Method Cheat-Sheet 📚
 
-| Category     | Method              | Params                                   | Notes                                                          |
-| ------------ | ------------------- | ---------------------------------------- | -------------------------------------------------------------- |
-| Subscription | `subscribe`         | `{ ids }`                                | Returns list of docs actually subscribed (auth may filter)     |
-|              | `unsubscribe`       | `{ ids }`                                |                                                                |
-| Docs         | `getDoc`            | `{ docId, atRev? }`                      |                                                                |
-|              | `getChangesSince`   | `{ docId, rev }`                         |                                                                |
+| Category     | Method              | Params                                   | Notes                                                                                                           |
+| ------------ | ------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Subscription | `subscribe`         | `{ ids }`                                | Returns list of docs actually subscribed (auth may filter)                                                      |
+|              | `unsubscribe`       | `{ ids }`                                |                                                                                                                 |
+| Docs         | `getDoc`            | `{ docId, atRev? }`                      |                                                                                                                 |
+|              | `getChangesSince`   | `{ docId, rev }`                         |                                                                                                                 |
 |              | `commitChanges`     | `{ docId, changes, options? }`           | Returns _all_ changes the server now knows about after merging. Use `options.forceCommit: true` for migrations. |
-|              | `deleteDoc`         | `{ docId }`                              |                                                                |
-| Versions\*   | `createVersion`     | `{ docId, name }`                        | Requires `PatchesHistoryManager` configured                    |
-|              | `listVersions`      | `{ docId, options? }`                    |                                                                |
-|              | `updateVersion`     | `{ docId, versionId, name }`             |                                                                |
-|              | `getVersionState`   | `{ docId, versionId }`                   |                                                                |
-|              | `getVersionChanges` | `{ docId, versionId }`                   |                                                                |
-| Branches\*   | `listBranches`      | `{ docId }`                              | Requires `PatchesBranchManager` configured                     |
-|              | `createBranch`      | `{ docId, rev, branchName?, metadata? }` |                                                                |
-|              | `closeBranch`       | `{ branchId, status? }`                  |                                                                |
-|              | `mergeBranch`       | `{ branchId }`                           |                                                                |
+|              | `deleteDoc`         | `{ docId }`                              |                                                                                                                 |
+| Versions\*   | `createVersion`     | `{ docId, name }`                        | Requires `PatchesHistoryManager` configured                                                                     |
+|              | `listVersions`      | `{ docId, options? }`                    |                                                                                                                 |
+|              | `updateVersion`     | `{ docId, versionId, name }`             |                                                                                                                 |
+|              | `getVersionState`   | `{ docId, versionId }`                   |                                                                                                                 |
+|              | `getVersionChanges` | `{ docId, versionId }`                   |                                                                                                                 |
+| Branches\*   | `listBranches`      | `{ docId }`                              | Requires `PatchesBranchManager` configured                                                                      |
+|              | `createBranch`      | `{ docId, rev, branchName?, metadata? }` |                                                                                                                 |
+|              | `closeBranch`       | `{ branchId, status? }`                  |                                                                                                                 |
+|              | `mergeBranch`       | `{ branchId }`                           |                                                                                                                 |
 
 📝 _Version & branch calls are automatically wired when you pass the respective manager objects into `WebSocketServer`._
 

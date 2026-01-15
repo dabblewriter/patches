@@ -14,11 +14,15 @@ const mockRPCInstance = {
 };
 
 vi.mock('../../../src/net/websocket/WebSocketTransport', () => ({
-  WebSocketTransport: vi.fn(function() { return mockTransportInstance; }),
+  WebSocketTransport: vi.fn(function () {
+    return mockTransportInstance;
+  }),
 }));
 
 vi.mock('../../../src/net/protocol/JSONRPCClient', () => ({
-  JSONRPCClient: vi.fn(function() { return mockRPCInstance; }),
+  JSONRPCClient: vi.fn(function () {
+    return mockRPCInstance;
+  }),
 }));
 
 describe('PatchesWebSocket', () => {

@@ -72,27 +72,22 @@ async commitChanges(
 The heavy lifting is handled by the `commitChanges` algorithm in `src/algorithms/server/commitChanges.ts`. Here's the workflow:
 
 1. **Validation First!**
-
    - Is the changes array empty? (Returns `[]` if so)
    - Do all changes have the same `baseRev`?
    - Is the `baseRev` valid? (Not greater than the current server revision)
 
 2. **Clean Up Changes**
-
    - Make sure no timestamps are from the future
    - Update each change's `rev` to be sequential (baseRev + 1, baseRev + 2, etc.)
    - Set the correct `baseRev` on each change
 
 3. **Check for Version Snapshots**
-
    - Were these changes made after a long idle period? Create a new version if so!
 
 4. **Filter Out Duplicates**
-
    - Have we already seen any of these changes? (Checked using their `id`)
 
 5. **Handle Offline Work**
-
    - Did the client make these changes offline? Group them by time gaps
    - Create version snapshots for each offline session
    - Check if there are concurrent server changes to transform against:
@@ -100,7 +95,6 @@ The heavy lifting is handled by the `commitChanges` algorithm in `src/algorithms
      - **Has concurrent changes (divergent):** Collapse offline changes and transform
 
 6. **Transform Against Concurrent Changes** (if divergent)
-
    - Get any changes committed since `baseRev`
    - Transform the incoming ops against already-committed ops
    - This is where OT saves the day!

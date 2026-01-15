@@ -49,11 +49,11 @@ import { Patches, InMemoryStore } from '@dabble/patches';
 import { PatchesSync } from '@dabble/patches/net';
 
 // First, create your Patches instance
-const patches = new Patches({ 
+const patches = new Patches({
   store: new InMemoryStore(),
   metadata: {
-    user: { id: 'user-123', name: 'Alice' }
-  }
+    user: { id: 'user-123', name: 'Alice' },
+  },
 });
 
 // Then create PatchesSync with your server URL
@@ -70,14 +70,14 @@ await sync.connect();
 ```typescript
 const sync = new PatchesSync(patches, url, {
   // WebSocket connection options
-  reconnectInterval: 1000,     // How long to wait before reconnecting
-  maxReconnectAttempts: 10,    // Max reconnection attempts
-  pingInterval: 30000,         // Heartbeat interval
-  
+  reconnectInterval: 1000, // How long to wait before reconnecting
+  maxReconnectAttempts: 10, // Max reconnection attempts
+  pingInterval: 30000, // Heartbeat interval
+
   // Custom headers for authentication
   headers: {
-    'Authorization': 'Bearer your-token-here'
-  }
+    Authorization: 'Bearer your-token-here',
+  },
 });
 ```
 
@@ -96,6 +96,7 @@ doc.change(draft => {
 ```
 
 Behind the scenes:
+
 1. `PatchesDoc` uses the `makeChange` algorithm to create change objects
 2. `PatchesDoc` emits a change event
 3. `PatchesSync` hears this event and queues the changes for sending
@@ -128,8 +129,8 @@ When conflicts happen (you and someone else edit the same thing):
 
 ```typescript
 interface PatchesSyncState {
-  online: boolean;      // Are we connected to the internet?
-  connected: boolean;   // Are we connected to the server?
+  online: boolean; // Are we connected to the internet?
+  connected: boolean; // Are we connected to the server?
   syncing: SyncingState; // Are we currently syncing? (null | 'syncing' | Error)
 }
 
@@ -176,11 +177,11 @@ sync.onError((error, context) => {
 const sync = new PatchesSync(patches, url, {
   // Batch changes for efficiency
   maxBatchSize: 1024 * 1024, // 1MB max per batch
-  batchDelay: 100,           // Wait 100ms to batch changes together
-  
+  batchDelay: 100, // Wait 100ms to batch changes together
+
   // Connection tuning
-  reconnectInterval: 2000,    // Wait 2s between reconnection attempts
-  maxReconnectAttempts: 5,    // Give up after 5 attempts
+  reconnectInterval: 2000, // Wait 2s between reconnection attempts
+  maxReconnectAttempts: 5, // Give up after 5 attempts
 });
 ```
 
@@ -226,21 +227,17 @@ class CollaborativeApp {
       },
       docOptions: {
         maxPayloadBytes: 1024 * 1024, // 1MB max changes
-      }
+      },
     });
 
     // Set up sync
-    this.sync = new PatchesSync(
-      this.patches,
-      'wss://api.myapp.com/sync',
-      {
-        headers: {
-          'Authorization': `Bearer ${this.getAuthToken()}`,
-        },
-        reconnectInterval: 2000,
-        maxReconnectAttempts: 10,
-      }
-    );
+    this.sync = new PatchesSync(this.patches, 'wss://api.myapp.com/sync', {
+      headers: {
+        Authorization: `Bearer ${this.getAuthToken()}`,
+      },
+      reconnectInterval: 2000,
+      maxReconnectAttempts: 10,
+    });
 
     this.setupEventListeners();
   }
@@ -303,14 +300,30 @@ class CollaborativeApp {
   }
 
   // Helper methods
-  private getCurrentUser() { /* ... */ }
-  private getDeviceId() { /* ... */ }
-  private getAuthToken() { /* ... */ }
-  private getUserRecentDocs() { /* ... */ }
-  private updateUI(state: any) { /* ... */ }
-  private renderDocument(docId: string, state: any) { /* ... */ }
-  private updateDocumentSyncStatus(docId: string, syncState: any) { /* ... */ }
-  private showNotification(notification: any) { /* ... */ }
+  private getCurrentUser() {
+    /* ... */
+  }
+  private getDeviceId() {
+    /* ... */
+  }
+  private getAuthToken() {
+    /* ... */
+  }
+  private getUserRecentDocs() {
+    /* ... */
+  }
+  private updateUI(state: any) {
+    /* ... */
+  }
+  private renderDocument(docId: string, state: any) {
+    /* ... */
+  }
+  private updateDocumentSyncStatus(docId: string, syncState: any) {
+    /* ... */
+  }
+  private showNotification(notification: any) {
+    /* ... */
+  }
 }
 
 // Usage
@@ -323,7 +336,7 @@ app.makeDocumentChange('project-notes', draft => {
   draft.title = 'Updated Project Notes';
   draft.sections.push({
     id: 'new-section',
-    content: 'This change will sync automatically!'
+    content: 'This change will sync automatically!',
   });
 });
 ```

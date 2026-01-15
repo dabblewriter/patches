@@ -191,7 +191,14 @@ describe('createVersion', () => {
     const changes = [createChange(0, 1, [{ op: 'add', path: '/text', value: 'hello' }])];
     changes[0].createdAt = '1970-01-01T00:00:01.000+00:00';
 
-    const mockVersion = { id: 'version-123', origin: main, startedAt: toISO(1000), endedAt: toISO(1000), endRev: 1, startRev: 0 };
+    const mockVersion = {
+      id: 'version-123',
+      origin: main,
+      startedAt: toISO(1000),
+      endedAt: toISO(1000),
+      endRev: 1,
+      startRev: 0,
+    };
     mockCreateVersionMetadata.mockReturnValue(mockVersion);
 
     const storeError = new Error('Storage failure');

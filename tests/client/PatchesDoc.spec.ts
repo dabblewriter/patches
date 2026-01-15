@@ -174,7 +174,13 @@ describe('PatchesDoc', () => {
 
       doc.change(() => {});
 
-      expect(makeChange).toHaveBeenCalledWith(expect.any(Object), expect.any(Function), newMetadata, undefined, undefined);
+      expect(makeChange).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.any(Function),
+        newMetadata,
+        undefined,
+        undefined
+      );
     });
   });
 

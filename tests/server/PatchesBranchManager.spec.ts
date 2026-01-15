@@ -200,9 +200,7 @@ describe('PatchesBranchManager', () => {
       expect(mockStore.createBranchId).toHaveBeenCalledWith('doc1');
       expect(createId).not.toHaveBeenCalled();
       expect(mockStore.createVersion).toHaveBeenCalledWith(customBranchId, customVersion, mockState, []);
-      expect(mockStore.createBranch).toHaveBeenCalledWith(
-        expect.objectContaining({ id: customBranchId })
-      );
+      expect(mockStore.createBranch).toHaveBeenCalledWith(expect.objectContaining({ id: customBranchId }));
       expect(result).toBe(customBranchId);
     });
 

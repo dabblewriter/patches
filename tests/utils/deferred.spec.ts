@@ -4,7 +4,7 @@ import { deferred } from '../../src/utils/deferred';
 describe('deferred', () => {
   it('should create a deferred object with promise, resolve, reject, and status', () => {
     const def = deferred<string>();
-    
+
     expect(def).toHaveProperty('promise');
     expect(def).toHaveProperty('resolve');
     expect(def).toHaveProperty('reject');
@@ -23,9 +23,9 @@ describe('deferred', () => {
   it('should resolve the promise and update status to fulfilled', async () => {
     const def = deferred<string>();
     const testValue = 'test value';
-    
+
     def.resolve(testValue);
-    
+
     expect(def.status).toBe('fulfilled');
     const result = await def.promise;
     expect(result).toBe(testValue);
@@ -34,18 +34,18 @@ describe('deferred', () => {
   it('should reject the promise and update status to rejected', async () => {
     const def = deferred<string>();
     const testError = new Error('test error');
-    
+
     def.reject(testError);
-    
+
     expect(def.status).toBe('rejected');
     await expect(def.promise).rejects.toBe(testError);
   });
 
   it('should handle resolve with undefined for void type', async () => {
     const def = deferred<void>();
-    
+
     def.resolve(undefined);
-    
+
     expect(def.status).toBe('fulfilled');
     const result = await def.promise;
     expect(result).toBeUndefined();
@@ -53,19 +53,19 @@ describe('deferred', () => {
 
   it('should handle reject without reason', async () => {
     const def = deferred();
-    
+
     def.reject();
-    
+
     expect(def.status).toBe('rejected');
     await expect(def.promise).rejects.toBeUndefined();
   });
 
   it('should handle multiple resolve calls (first one wins)', async () => {
     const def = deferred<string>();
-    
+
     def.resolve('first');
     def.resolve('second'); // Should be ignored
-    
+
     expect(def.status).toBe('fulfilled');
     const result = await def.promise;
     expect(result).toBe('first');
@@ -75,20 +75,20 @@ describe('deferred', () => {
     const def = deferred<string>();
     const firstError = new Error('first error');
     const secondError = new Error('second error');
-    
+
     def.reject(firstError);
     def.reject(secondError); // Should be ignored
-    
+
     expect(def.status).toBe('rejected');
     await expect(def.promise).rejects.toBe(firstError);
   });
 
   it('should handle resolve then reject (first one wins)', async () => {
     const def = deferred<string>();
-    
+
     def.resolve('success');
     def.reject(new Error('should be ignored'));
-    
+
     expect(def.status).toBe('rejected'); // Status changes, but promise result doesn't
     const result = await def.promise;
     expect(result).toBe('success'); // Promise still resolves with first value
@@ -97,10 +97,10 @@ describe('deferred', () => {
   it('should handle reject then resolve (first one wins)', async () => {
     const def = deferred<string>();
     const testError = new Error('test error');
-    
+
     def.reject(testError);
     def.resolve('should be ignored');
-    
+
     expect(def.status).toBe('fulfilled'); // Status changes, but promise result doesn't
     await expect(def.promise).rejects.toBe(testError); // Promise still rejects with first error
   });
@@ -111,16 +111,16 @@ describe('deferred', () => {
       name: string;
       items: string[];
     }
-    
+
     const def = deferred<TestData>();
     const testData: TestData = {
       id: 1,
       name: 'test',
-      items: ['a', 'b', 'c']
+      items: ['a', 'b', 'c'],
     };
-    
+
     def.resolve(testData);
-    
+
     expect(def.status).toBe('fulfilled');
     const result = await def.promise;
     expect(result).toEqual(testData);
@@ -129,25 +129,25 @@ describe('deferred', () => {
   it('should work with null and boolean values', async () => {
     const defNull = deferred<null>();
     const defBoolean = deferred<boolean>();
-    
+
     defNull.resolve(null);
     defBoolean.resolve(false);
-    
+
     expect(defNull.status).toBe('fulfilled');
     expect(defBoolean.status).toBe('fulfilled');
-    
+
     const nullResult = await defNull.promise;
     const booleanResult = await defBoolean.promise;
-    
+
     expect(nullResult).toBeNull();
     expect(booleanResult).toBe(false);
   });
 
   it('should work with number zero', async () => {
     const def = deferred<number>();
-    
+
     def.resolve(0);
-    
+
     expect(def.status).toBe('fulfilled');
     const result = await def.promise;
     expect(result).toBe(0);
@@ -155,23 +155,23 @@ describe('deferred', () => {
 
   it('should handle promise chaining', async () => {
     const def = deferred<string>();
-    
+
     const chainedPromise = def.promise.then(value => value.toUpperCase());
-    
+
     def.resolve('hello');
-    
+
     const result = await chainedPromise;
     expect(result).toBe('HELLO');
   });
 
   it('should handle async/await properly', async () => {
     const def = deferred<number>();
-    
+
     // Simulate async operation
     setTimeout(() => {
       def.resolve(42);
     }, 10);
-    
+
     const result = await def.promise;
     expect(result).toBe(42);
   });

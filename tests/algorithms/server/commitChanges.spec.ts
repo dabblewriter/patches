@@ -403,13 +403,7 @@ describe('commitChanges', () => {
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis, { forceCommit: true });
 
     const { transformIncomingChanges } = await import('../../../src/algorithms/server/transformIncomingChanges');
-    expect(transformIncomingChanges).toHaveBeenCalledWith(
-      changes,
-      expect.any(Object),
-      [],
-      0,
-      true
-    );
+    expect(transformIncomingChanges).toHaveBeenCalledWith(changes, expect.any(Object), [], 0, true);
   });
 
   it('should save transformed changes to store', async () => {
@@ -498,7 +492,13 @@ describe('commitChanges', () => {
     const result = await commitChanges(mockStore, 'doc1', incomingChanges, sessionTimeoutMillis);
 
     expect(handleOfflineSessionsAndBatches).toHaveBeenCalled();
-    expect(transformIncomingChanges).toHaveBeenCalledWith(processedChanges, expect.any(Object), [committedChange], 2, undefined);
+    expect(transformIncomingChanges).toHaveBeenCalledWith(
+      processedChanges,
+      expect.any(Object),
+      [committedChange],
+      2,
+      undefined
+    );
     expect(mockStore.saveChanges).toHaveBeenCalledWith('doc1', transformedChanges);
     expect(result[0]).toEqual([committedChange]);
     expect(result[1]).toEqual(transformedChanges);

@@ -55,21 +55,25 @@ When the server confirms a change, it assigns the next available revision number
 With the refactor, we've separated concerns beautifully:
 
 ### Orchestration Layer
+
 - **Patches:** Main coordinator and public API
 - **PatchesSync:** Sync coordinator between client and server
 - **PatchesDoc:** Document interface and local state manager
 - **PatchesServer:** Server-side request handler
 
 ### Algorithm Layer
+
 - **Client algorithms:** `makeChange`, `applyCommittedChanges`, `createStateFromSnapshot`, etc.
 - **Shared algorithms:** `applyChanges`, `rebaseChanges` (the core OT logic)
 - **Server algorithms:** Functions for server-side state management
 
 ### Storage & Transport
+
 - **PatchesStore:** Persistence interface
 - **WebSocket/WebRTC:** Network transport
 
 This separation means:
+
 1. **Pure algorithms** are easy to test and reason about
 2. **Main classes** focus on coordination and user interface
 3. **OT logic** is centralized and reusable
@@ -138,10 +142,7 @@ This is where the `applyCommittedChanges` algorithm shines:
 ```typescript
 // In PatchesSync when server changes arrive
 const currentSnapshot = await store.getDoc(docId);
-const { state, rev, changes: rebasedPending } = applyCommittedChanges(
-  currentSnapshot, 
-  serverChanges
-);
+const { state, rev, changes: rebasedPending } = applyCommittedChanges(currentSnapshot, serverChanges);
 
 // Update storage and notify open documents
 await store.saveCommittedChanges(docId, serverChanges);
@@ -154,11 +155,13 @@ if (doc) {
 ```
 
 Alice's `PatchesSync`:
+
 - Uses `applyCommittedChanges` to merge Bob's change with her pending changes
 - The algorithm calls `rebaseChanges` internally to transform her pending changes
 - Updates her `PatchesDoc` with the new state
 
 Bob's `PatchesSync`:
+
 - Receives Alice's change and applies it normally
 - If he has pending changes, they get rebased automatically
 
@@ -301,12 +304,12 @@ export function rebaseChanges(serverChanges: Change[], localChanges: Change[]): 
   // Transform each local change against all server changes
   return localChanges.map(localChange => {
     let transformedOps = localChange.ops;
-    
+
     // Transform against each server change
     for (const serverChange of serverChanges) {
       transformedOps = transformPatch(transformedOps, serverChange.ops);
     }
-    
+
     // Return new change with transformed operations
     return { ...localChange, ops: transformedOps };
   });
@@ -355,17 +358,17 @@ export function applyCommittedChanges<T>(
   // Apply server changes to committed state
   const newCommittedState = applyChanges(snapshot.state, serverChanges);
   const newRev = serverChanges[serverChanges.length - 1]?.rev ?? snapshot.rev;
-  
+
   // Rebase pending changes on top of new committed state
   const rebasedPending = rebaseChanges(serverChanges, snapshot.changes);
-  
+
   // Create final state (committed + rebased pending)
   const finalState = applyChanges(newCommittedState, rebasedPending);
-  
+
   return {
     state: finalState,
     rev: newRev,
-    changes: rebasedPending
+    changes: rebasedPending,
   };
 }
 ```

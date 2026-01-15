@@ -24,13 +24,13 @@ When someone hits that "New Branch" button, here's what happens behind the scene
 
 When you create a branch, we store some super important metadata that helps us keep everything organized:
 
-| Field        | What it means in the branch                       | What it means after merging back                                  |
-| ------------ | ------------------------------------------------- | ----------------------------------------------------------------- |
-| `origin`     | Set to `"main"` (branch acts like a normal doc)   | `"main"` if fast-forward, `"branch"` if divergent                 |
-| `rev`        | Continues from branch point (e.g., 43, 44, 45...) | Same numbers (no translation needed)                              |
-| `baseRev`    | Normal (each change's previous rev)               | Set to the branch point revision (e.g., 42)                       |
-| `groupId`    | The branch's document ID                          | The branch's document ID                                          |
-| `branchName` | The human-readable branch name                    | The human-readable branch name (preserved for traceability)       |
+| Field        | What it means in the branch                       | What it means after merging back                            |
+| ------------ | ------------------------------------------------- | ----------------------------------------------------------- |
+| `origin`     | Set to `"main"` (branch acts like a normal doc)   | `"main"` if fast-forward, `"branch"` if divergent           |
+| `rev`        | Continues from branch point (e.g., 43, 44, 45...) | Same numbers (no translation needed)                        |
+| `baseRev`    | Normal (each change's previous rev)               | Set to the branch point revision (e.g., 42)                 |
+| `groupId`    | The branch's document ID                          | The branch's document ID                                    |
+| `branchName` | The human-readable branch name                    | The human-readable branch name (preserved for traceability) |
 
 This metadata is our bread crumbs 🥖 that help us keep track of what came from where, which is essential when merging time comes!
 
@@ -44,11 +44,13 @@ Ready to bring those experimental changes back to the main document? Here's what
 4. Based on whether there were concurrent changes:
 
 **Fast-forward merge** (no changes on main since branching):
+
 - 🔄 Versions keep `origin: "main"` (they're now part of the main timeline!)
 - 📝 Each change is committed individually to the main document
 - This is the cleanest case - like the branch never diverged at all
 
 **Divergent merge** (main has new changes since branching):
+
 - 🔄 We flip their `origin` to `"branch"` so everyone knows they came from a branch
 - 🔗 We set their `baseRev` to the original branching point
 - 🏭 We flatten all the branch's changes into one mega-change (for transformation)
@@ -93,7 +95,6 @@ Here's a simple example of how it all works:
 2. **Create a branch**: We create "Experimental Feature" branch at revision 10
 
 3. **Work on the branch**:
-
    - Make change → revision 11 in branch
    - Make another change → revision 12 in branch
    - And another → revision 13 in branch

@@ -1,9 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import {
-  breakChanges,
-  breakChangesIntoBatches,
-  getJSONByteSize,
-} from '../../../src/algorithms/shared/changeBatching';
+import { breakChanges, breakChangesIntoBatches, getJSONByteSize } from '../../../src/algorithms/shared/changeBatching';
 import { compressedSizeBase64, compressedSizeUint8 } from '../../../src/compression';
 import type { Change } from '../../../src/types';
 

@@ -28,6 +28,7 @@ Here's what it actually does:
 - **Event Emission:** Lets you know when things change so your UI can update
 
 Here's what it does NOT do anymore:
+
 - ❌ Operational Transformation (that's in the algorithms now)
 - ❌ Server communication (that's PatchesSync's job)
 - ❌ Complex rebasing logic (also in algorithms)
@@ -51,13 +52,17 @@ If you really need to create one directly (rare!):
 ```typescript
 import { PatchesDoc } from '@dabble/patches/client';
 
-const doc = new PatchesDoc<MyDocType>({
-  /* initial state */
-}, {
-  /* initial metadata */
-}, {
-  maxPayloadBytes: 1024 * 1024 // 1MB max per change
-});
+const doc = new PatchesDoc<MyDocType>(
+  {
+    /* initial state */
+  },
+  {
+    /* initial metadata */
+  },
+  {
+    maxPayloadBytes: 1024 * 1024, // 1MB max per change
+  }
+);
 ```
 
 ## State Management Made Simple
@@ -65,12 +70,15 @@ const doc = new PatchesDoc<MyDocType>({
 `PatchesDoc` manages a simple but powerful state model:
 
 ### Current State
+
 What you see via `doc.state` - this includes all confirmed server changes PLUS your local pending changes. This makes your app feel super responsive since you see your changes immediately.
 
 ### Pending Changes
+
 Your local edits that haven't been confirmed by the server yet. These live in the document's internal snapshot and get handled by the sync layer.
 
 ### Metadata
+
 Information about the document's revision, sync status, and change metadata.
 
 The beauty is that you don't need to think about the complexity. Just make changes and check the status!
@@ -144,9 +152,13 @@ const snapshot = doc.export();
 
 // Import a document snapshot (e.g., when loading from storage)
 doc.import({
-  state: { /* ... */ },
+  state: {
+    /* ... */
+  },
   rev: 42,
-  changes: [ /* pending changes */ ]
+  changes: [
+    /* pending changes */
+  ],
 });
 ```
 
@@ -279,7 +291,7 @@ function TodoApp() {
   return (
     <div>
       <h1>Collaborative Todo List</h1>
-      
+
       {/* Status indicators */}
       {syncError && (
         <div className="error">Sync error: {syncError.message}</div>

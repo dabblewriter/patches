@@ -39,7 +39,9 @@ const mockAuth = {
 };
 
 vi.mock('../../../src/net/protocol/JSONRPCServer', () => ({
-  JSONRPCServer: vi.fn(function() { return mockJSONRPCServer; }),
+  JSONRPCServer: vi.fn(function () {
+    return mockJSONRPCServer;
+  }),
 }));
 
 describe('RPCServer', () => {
@@ -47,7 +49,7 @@ describe('RPCServer', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    
+
     // Reset mock implementations
     mockAuth.canAccess.mockResolvedValue(true);
 
@@ -87,14 +89,35 @@ describe('RPCServer', () => {
     });
 
     it('should handle commitChanges with authorization', async () => {
-      const changes = [{ id: 'change1', ops: [], rev: 1, baseRev: 0, createdAt: '2024-01-01T00:00:00.000Z', committedAt: '2024-01-01T00:00:00.000Z' }];
+      const changes = [
+        {
+          id: 'change1',
+          ops: [],
+          rev: 1,
+          baseRev: 0,
+          createdAt: '2024-01-01T00:00:00.000Z',
+          committedAt: '2024-01-01T00:00:00.000Z',
+        },
+      ];
       const priorChanges: any[] = [];
-      const newChanges = [{ id: 'change2', ops: [], rev: 2, baseRev: 1, createdAt: '2024-01-01T00:00:01.000Z', committedAt: '2024-01-01T00:00:01.000Z' }];
+      const newChanges = [
+        {
+          id: 'change2',
+          ops: [],
+          rev: 2,
+          baseRev: 1,
+          createdAt: '2024-01-01T00:00:01.000Z',
+          committedAt: '2024-01-01T00:00:01.000Z',
+        },
+      ];
       mockPatches.commitChanges.mockResolvedValue([priorChanges, newChanges]);
 
       const result = await rpcServer.commitChanges({ docId: 'doc1', changes }, mockCtx);
 
-      expect(mockAuth.canAccess).toHaveBeenCalledWith(mockCtx, 'doc1', 'write', 'commitChanges', { docId: 'doc1', changes });
+      expect(mockAuth.canAccess).toHaveBeenCalledWith(mockCtx, 'doc1', 'write', 'commitChanges', {
+        docId: 'doc1',
+        changes,
+      });
       expect(mockPatches.commitChanges).toHaveBeenCalledWith('doc1', changes, undefined, 'client1');
       expect(result).toEqual([...priorChanges, ...newChanges]);
     });
@@ -102,8 +125,9 @@ describe('RPCServer', () => {
     it('should throw authorization errors', async () => {
       mockAuth.canAccess.mockResolvedValue(false);
 
-      await expect(rpcServer.getDoc({ docId: 'doc1' }, mockCtx))
-        .rejects.toThrow(new StatusError(401, 'READ_FORBIDDEN:doc1'));
+      await expect(rpcServer.getDoc({ docId: 'doc1' }, mockCtx)).rejects.toThrow(
+        new StatusError(401, 'READ_FORBIDDEN:doc1')
+      );
     });
   });
 
@@ -111,15 +135,17 @@ describe('RPCServer', () => {
     it('should check if history is enabled', async () => {
       const rpcServerNoHistory = new RPCServer({ patches: mockPatches as any });
 
-      await expect(rpcServerNoHistory.listVersions({ docId: 'doc1' }))
-        .rejects.toThrow(new StatusError(404, 'History is not enabled'));
+      await expect(rpcServerNoHistory.listVersions({ docId: 'doc1' })).rejects.toThrow(
+        new StatusError(404, 'History is not enabled')
+      );
     });
 
     it('should check if branching is enabled', async () => {
       const rpcServerNoBranches = new RPCServer({ patches: mockPatches as any });
 
-      await expect(rpcServerNoBranches.listBranches({ docId: 'doc1' }))
-        .rejects.toThrow(new StatusError(404, 'Branching is not enabled'));
+      await expect(rpcServerNoBranches.listBranches({ docId: 'doc1' })).rejects.toThrow(
+        new StatusError(404, 'Branching is not enabled')
+      );
     });
   });
 
@@ -128,9 +154,9 @@ describe('RPCServer', () => {
 
     it('should handle version operations with authorization', async () => {
       mockHistory.listVersions.mockResolvedValue([]);
-      
+
       await rpcServer.listVersions({ docId: 'doc1' }, mockCtx);
-      
+
       expect(mockAuth.canAccess).toHaveBeenCalledWith(mockCtx, 'doc1', 'read', 'listVersions', { docId: 'doc1' });
       expect(mockHistory.listVersions).toHaveBeenCalledWith('doc1', {});
     });
@@ -141,9 +167,9 @@ describe('RPCServer', () => {
 
     it('should handle branch operations with authorization', async () => {
       mockBranches.listBranches.mockResolvedValue([]);
-      
+
       await rpcServer.listBranches({ docId: 'doc1' }, mockCtx);
-      
+
       expect(mockAuth.canAccess).toHaveBeenCalledWith(mockCtx, 'doc1', 'read', 'listBranches', { docId: 'doc1' });
       expect(mockBranches.listBranches).toHaveBeenCalledWith('doc1');
     });
@@ -160,11 +186,9 @@ describe('RPCServer', () => {
     it('should fail authorization checks', async () => {
       mockAuth.canAccess.mockResolvedValue(false);
 
-      await expect(rpcServer.assertRead(mockCtx, 'doc1', 'getDoc'))
-        .rejects.toThrow('READ_FORBIDDEN:doc1');
-      
-      await expect(rpcServer.assertWrite(mockCtx, 'doc1', 'commitChanges'))
-        .rejects.toThrow('WRITE_FORBIDDEN:doc1');
+      await expect(rpcServer.assertRead(mockCtx, 'doc1', 'getDoc')).rejects.toThrow('READ_FORBIDDEN:doc1');
+
+      await expect(rpcServer.assertWrite(mockCtx, 'doc1', 'commitChanges')).rejects.toThrow('WRITE_FORBIDDEN:doc1');
     });
   });
 });

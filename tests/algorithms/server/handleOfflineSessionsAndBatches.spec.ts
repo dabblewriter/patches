@@ -241,11 +241,7 @@ describe('handleOfflineSessionsAndBatches', () => {
       committedAt: getISO(),
     });
 
-    const changes = [
-      createLargeChange('1', 6, 1000),
-      createLargeChange('2', 7, 1100),
-      createLargeChange('3', 8, 1200),
-    ];
+    const changes = [createLargeChange('1', 6, 1000), createLargeChange('2', 7, 1100), createLargeChange('3', 8, 1200)];
 
     vi.mocked(mockStore.listVersions).mockResolvedValue([]);
 
@@ -281,22 +277,12 @@ describe('handleOfflineSessionsAndBatches', () => {
       committedAt: getISO(),
     });
 
-    const changes = [
-      createLargeChange('1', 6, 1000),
-      createLargeChange('2', 7, 1100),
-      createLargeChange('3', 8, 1200),
-    ];
+    const changes = [createLargeChange('1', 6, 1000), createLargeChange('2', 7, 1100), createLargeChange('3', 8, 1200)];
 
     vi.mocked(mockStore.listVersions).mockResolvedValue([]);
 
     // No maxPayloadBytes set
-    const result = await handleOfflineSessionsAndBatches(
-      mockStore,
-      sessionTimeoutMillis,
-      'doc1',
-      changes,
-      5
-    );
+    const result = await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
 
     // Should return single collapsed change
     expect(result).toHaveLength(1);

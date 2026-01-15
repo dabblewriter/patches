@@ -9,7 +9,7 @@ let mockPeerFactory: (() => any) | undefined;
 // Mock simple-peer with a proper constructor function
 vi.mock('simple-peer', () => {
   return {
-    default: vi.fn(function() {
+    default: vi.fn(function () {
       return mockPeerFactory ? mockPeerFactory() : {};
     }),
   };
@@ -44,14 +44,14 @@ describe('WebRTCTransport', () => {
 
     // Reset mock peer event handlers
     peerEventHandlers = {};
-    currentMockPeerInstance.on.mockImplementation(function(event: string, handler: any) {
+    currentMockPeerInstance.on.mockImplementation(function (event: string, handler: any) {
       peerEventHandlers[event] = handler;
     });
 
     // Mock RPC event handlers
     rpcEventHandlers = {};
     mockJSONRPCClient = {
-      on: vi.fn().mockImplementation(function(event: string, handler: any) {
+      on: vi.fn().mockImplementation(function (event: string, handler: any) {
         rpcEventHandlers[event] = handler;
         return vi.fn(); // Unsubscriber
       }),
@@ -68,7 +68,9 @@ describe('WebRTCTransport', () => {
       state: 'disconnected',
     };
 
-    vi.mocked(JSONRPCClient).mockImplementation(function() { return mockJSONRPCClient; });
+    vi.mocked(JSONRPCClient).mockImplementation(function () {
+      return mockJSONRPCClient;
+    });
 
     transport = new WebRTCTransport(mockWebSocketTransport);
   });
@@ -219,11 +221,7 @@ describe('WebRTCTransport', () => {
 
       // Implementation emits an RPC error on failure instead of logging
       // Note: peerId is undefined when sending to all peers (no specific target)
-      expect(messageSpy).toHaveBeenCalledWith(
-        expect.stringContaining('"error"'),
-        undefined,
-        currentMockPeerInstance
-      );
+      expect(messageSpy).toHaveBeenCalledWith(expect.stringContaining('"error"'), undefined, currentMockPeerInstance);
     });
 
     it('should skip peers that do not match target peerId', () => {
@@ -434,11 +432,7 @@ describe('WebRTCTransport', () => {
       errorHandler(error);
 
       // The implementation emits an RPC error and removes the peer
-      expect(messageSpy).toHaveBeenCalledWith(
-        expect.stringContaining('"error"'),
-        'peer1',
-        currentMockPeerInstance
-      );
+      expect(messageSpy).toHaveBeenCalledWith(expect.stringContaining('"error"'), 'peer1', currentMockPeerInstance);
       expect(transport['peers'].has('peer1')).toBe(false);
       expect(disconnectSpy).toHaveBeenCalledWith('peer1', currentMockPeerInstance);
       expect(currentMockPeerInstance.destroy).toHaveBeenCalled();

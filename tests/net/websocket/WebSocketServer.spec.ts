@@ -28,10 +28,10 @@ describe('WebSocketServer', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    
+
     // Reset mock implementations
     mockAuth.canAccess.mockResolvedValue(true);
-    
+
     webSocketServer = new WebSocketServer(mockTransport as any, mockRPCServer as any);
   });
 
@@ -61,7 +61,7 @@ describe('WebSocketServer', () => {
 
     it('should filter unauthorized documents', async () => {
       mockAuth.canAccess
-        .mockResolvedValueOnce(true)   // doc1 allowed
+        .mockResolvedValueOnce(true) // doc1 allowed
         .mockResolvedValueOnce(false); // doc2 denied
 
       mockTransport.addSubscription.mockResolvedValue(['doc1']);
@@ -101,7 +101,7 @@ describe('WebSocketServer', () => {
 
       const mockMessage = {
         method: 'changesCommitted',
-        params: { docId: 'doc1', changes: [] }
+        params: { docId: 'doc1', changes: [] },
       };
 
       await notifyHandler(mockMessage);
@@ -116,7 +116,7 @@ describe('WebSocketServer', () => {
 
       const mockMessage = {
         method: 'someMethod',
-        params: { otherField: 'value' }
+        params: { otherField: 'value' },
       };
 
       await notifyHandler(mockMessage);
@@ -142,8 +142,7 @@ describe('WebSocketServer', () => {
       const error = new Error('Transport error');
       mockTransport.addSubscription.mockRejectedValue(error);
 
-      await expect(webSocketServer.subscribe({ ids: 'doc1' }, mockCtx))
-        .rejects.toThrow('Transport error');
+      await expect(webSocketServer.subscribe({ ids: 'doc1' }, mockCtx)).rejects.toThrow('Transport error');
     });
   });
 });

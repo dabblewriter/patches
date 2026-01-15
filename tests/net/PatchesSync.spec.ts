@@ -56,6 +56,7 @@ describe('PatchesSync', () => {
       onTrackDocs: vi.fn(),
       onUntrackDocs: vi.fn(),
       onDeleteDoc: vi.fn(),
+      onChange: vi.fn(),
     };
 
     // Mock PatchesWebSocket

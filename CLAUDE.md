@@ -25,6 +25,7 @@ The library uses subpath exports. Use these import paths:
 - Server components: `@dabble/patches/server`
 - Networking: `@dabble/patches/net`
 - WebRTC: `@dabble/patches/webrtc`
+- Vue 3 integration: `@dabble/patches/vue`
 
 ### Key Features
 
@@ -94,7 +95,7 @@ The system uses JSON Patch operations (RFC 6902) with custom OT transformations 
 - `/src/server`: Server-side implementation
 - `/src/algorithms`: Pure algorithm functions for OT and sync operations
   - `/client`: Client-specific algorithms
-  - `/server`: Server-specific algorithms  
+  - `/server`: Server-specific algorithms
   - `/shared`: Common algorithms used by both client and server
 - `/src/net`: Networking and transport layer
 - `/src/json-patch`: JSON Patch operations and transformations
@@ -103,7 +104,6 @@ The system uses JSON Patch operations (RFC 6902) with custom OT transformations 
 ## Important Implementation Details
 
 1. **Change Processing Flow**:
-
    - Client calls `doc.change()` → `makeChange` algorithm creates change objects
    - Change applied locally (optimistic update)
    - `PatchesSync` batches and sends changes to server
@@ -113,19 +113,16 @@ The system uses JSON Patch operations (RFC 6902) with custom OT transformations 
    - Updated state propagated to `PatchesDoc` and UI
 
 2. **Versioning**:
-
    - System creates snapshots after 30 minutes of inactivity
    - Each version may represent one or many changes
    - Allows efficient loading of large documents with many changes
 
 3. **State Handling**:
-
    - Document state is immutable
    - Changes are made through proxy in `doc.change(state => state.prop = 'new value')`
    - Uses immutable-style updates for performance and consistency
 
 4. **Performance Characteristics**:
-
    - Handles documents with over 480k operations
    - Load time: 1-2ms for large documents
    - Change application: 0.2ms per operation
@@ -137,13 +134,13 @@ The system uses JSON Patch operations (RFC 6902) with custom OT transformations 
    // Client-side
    import { Patches, InMemoryStore } from '@dabble/patches/client';
    import { PatchesSync } from '@dabble/patches/net';
-   
+
    const patches = new Patches({ store: new InMemoryStore() });
    const sync = new PatchesSync(patches, 'wss://server.com');
 
    // Server-side
    import { PatchesServer } from '@dabble/patches/server';
-   
+
    const server = new PatchesServer(store);
    ```
 
@@ -171,21 +168,18 @@ npm run test -- -t "test description pattern"
 ### Architectural Insights
 
 1. **Four-Layer Architecture**:
-
    - **Application Layer**: Patches, PatchesDoc for user-facing API
    - **Orchestration Layer**: PatchesSync coordinates between layers
    - **Algorithm Layer**: Pure functions handle OT and state operations
    - **Transport Layer**: Pluggable networking (WebSocket/WebRTC)
 
 2. **State Management Approach**:
-
    - Immutable state with proxy-based change tracking
    - Optimistic client updates with server reconciliation
    - Algorithm functions handle state transformations
    - Linear history with snapshot-based versioning
 
 3. **Separation of Concerns**:
-
    - **Pure algorithms** for testable, reusable OT logic
    - **Orchestration classes** handle coordination and events
    - **Clean interfaces** between layers
@@ -195,3 +189,7 @@ npm run test -- -t "test description pattern"
    - Centralized server arbitrates operation order
    - Client-side rebasing for pending changes
    - Event-driven architecture with signal patterns
+
+## Vue 3 Integration
+
+Patches includes first-class Vue 3 Composition API support via `@dabble/patches/vue`. See [src/vue/README.md](src/vue/README.md) for comprehensive documentation, examples, and best practices.

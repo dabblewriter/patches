@@ -1,4 +1,3 @@
-import { createSortableId } from 'crypto-id';
 import { createVersionMetadata } from '../../data/version.js';
 import type { PatchesStoreBackend } from '../../server/types.js';
 import type { Change } from '../../types.js';
@@ -30,11 +29,9 @@ export async function handleOfflineSessionsAndBatches(
   isOffline: boolean = true,
   maxStorageBytes?: number
 ) {
-  // Use batchId as groupId for multi-batch uploads; default offline sessions have no groupId
-  const groupId = batchId ?? createSortableId();
   // Find the last version for this groupId (if any)
   const [lastVersion] = await store.listVersions(docId, {
-    groupId,
+    groupId: batchId,
     reverse: true,
     limit: 1,
   });
@@ -59,10 +56,12 @@ export async function handleOfflineSessionsAndBatches(
     const isLastChange = i === changes.length;
     const timeDiff = isLastChange ? Infinity : timestampDiff(changes[i].createdAt, changes[i - 1].createdAt);
 
+    // TODO check the logic of this
     // Session ends if timeout exceeded OR it's the last change in the batch
     if (timeDiff > sessionTimeoutMillis || isLastChange) {
       const sessionChanges = changes.slice(sessionStartIndex, i);
       if (sessionChanges.length > 0) {
+        // TODO check the logic of this
         // Check if this is a continuation of the previous session (merge/extend)
         const isContinuation =
           !!lastVersion && timestampDiff(sessionChanges[0].createdAt, lastVersion.endedAt) <= sessionTimeoutMillis;
@@ -81,7 +80,7 @@ export async function handleOfflineSessionsAndBatches(
 
           const sessionMetadata = createVersionMetadata({
             parentId,
-            groupId,
+            groupId: batchId,
             origin,
             isOffline,
             // Convert client timestamps to UTC for version metadata (enables lexicographic sorting)

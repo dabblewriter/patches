@@ -46,7 +46,7 @@ export async function commitChanges(
   let rev = baseRev + 1;
   changes.forEach(c => {
     if (c.baseRev == null) c.baseRev = baseRev;
-    else if (c.baseRev !== baseRev) {
+    else if (c.baseRev !== baseRev && !options?.historicalImport) {
       throw new Error(`Client changes must have consistent baseRev in all changes for doc ${docId}.`);
     }
     if (c.rev == null) c.rev = rev++;

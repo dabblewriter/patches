@@ -37,7 +37,7 @@ describe('createVersion', () => {
       startedAt: toISO(1000), // Converted to UTC
       endedAt: toISO(2000),
       endRev: 2,
-      startRev: 0,
+      startRev: 1,
     };
 
     const mockVersion = { ...expectedVersionData, id: 'version-123' };
@@ -66,7 +66,7 @@ describe('createVersion', () => {
       startedAt: toISO(5000),
       endedAt: toISO(5000),
       endRev: 6,
-      startRev: 5,
+      startRev: 6,
       name: 'My Version',
       description: 'Important milestone',
       tags: ['release', 'stable'],
@@ -90,12 +90,12 @@ describe('createVersion', () => {
     expect(mockStore.createVersion).not.toHaveBeenCalled();
   });
 
-  it('should throw error if baseRev is undefined', async () => {
+  it('should throw error if rev is undefined', async () => {
     const changes = [createChange(0, 1, [{ op: 'add', path: '/text', value: 'hello' }])];
-    changes[0].baseRev = undefined as any;
+    changes[0].rev = undefined as any;
 
     await expect(createVersion(mockStore, 'doc1', { text: 'hello' }, changes)).rejects.toThrow(
-      'Client changes must include baseRev for doc doc1.'
+      'Client changes must include rev for doc doc1.'
     );
 
     expect(mockCreateVersionMetadata).not.toHaveBeenCalled();
@@ -112,7 +112,7 @@ describe('createVersion', () => {
       startedAt: toISO(7500),
       endedAt: toISO(7500),
       endRev: 11,
-      startRev: 10,
+      startRev: 11,
     };
 
     const mockVersion = { ...expectedVersionData, id: 'version-789' };
@@ -144,7 +144,7 @@ describe('createVersion', () => {
       startedAt: toISO(1000), // First change timestamp
       endedAt: toISO(2000), // Last change timestamp
       endRev: 4,
-      startRev: 0,
+      startRev: 1,
     };
 
     const mockVersion = { ...expectedVersionData, id: 'version-multi' };
@@ -173,7 +173,7 @@ describe('createVersion', () => {
       startedAt: toISO(9000),
       endedAt: toISO(9000),
       endRev: 2,
-      startRev: 1,
+      startRev: 2,
       name: 'Custom Version',
     };
 
@@ -197,7 +197,7 @@ describe('createVersion', () => {
       startedAt: toISO(1000),
       endedAt: toISO(1000),
       endRev: 1,
-      startRev: 0,
+      startRev: 1,
     };
     mockCreateVersionMetadata.mockReturnValue(mockVersion);
 

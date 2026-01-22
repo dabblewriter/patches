@@ -77,7 +77,7 @@ describe('handleOfflineSessionsAndBatches', () => {
     const result = await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
 
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
-      groupId: 'generated-group-id',
+      groupId: undefined,
       reverse: true,
       limit: 1,
     });
@@ -220,13 +220,13 @@ describe('handleOfflineSessionsAndBatches', () => {
     const toUTC = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}/, '');
     expect(createVersion).toHaveBeenCalledWith({
       parentId: undefined,
-      groupId: 'generated-group-id',
+      groupId: undefined,
       origin: 'offline-branch',
       isOffline: true,
       startedAt: toUTC(1000),
       endedAt: toUTC(2000),
       endRev: 7,
-      startRev: 5,
+      startRev: 6,
     });
   });
 

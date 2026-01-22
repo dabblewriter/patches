@@ -21,9 +21,9 @@ export async function createVersion(
 ): Promise<VersionMetadata | undefined> {
   if (changes.length === 0) return;
 
-  const startRev = changes[0].baseRev;
+  const startRev = changes[0].rev;
   if (startRev === undefined) {
-    throw new Error(`Client changes must include baseRev for doc ${docId}.`);
+    throw new Error(`Client changes must include rev for doc ${docId}.`);
   }
 
   const sessionMetadata = createVersionMetadata({

@@ -111,7 +111,7 @@ export interface VersionMetadata {
   endedAt: string;
   /** The ending revision number of this version (the last change's rev). */
   endRev: number;
-  /** The starting revision number of this version (the first change's baseRev). If this is an offline/branch version, this is the revision number of the source document where the branch was created. */
+  /** The starting revision number of this version (the first change's rev). */
   startRev: number;
   /** Optional arbitrary metadata associated with the version. */
   [metadata: string]: any;

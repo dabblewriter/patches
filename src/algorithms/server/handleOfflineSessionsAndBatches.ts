@@ -87,7 +87,7 @@ export async function handleOfflineSessionsAndBatches(
             startedAt: getISO(sessionChanges[0].createdAt),
             endedAt: getISO(sessionChanges[sessionChanges.length - 1].createdAt),
             endRev: sessionChanges[sessionChanges.length - 1].rev,
-            startRev: baseRev,
+            startRev: sessionChanges[0].rev,
           });
           await store.createVersion(docId, sessionMetadata, offlineBaseState, sessionChanges);
           parentId = sessionMetadata.id;

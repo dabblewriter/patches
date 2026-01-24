@@ -1,3 +1,6 @@
+import type { PatchesStoreBackend } from '../../server/types.js';
+import { ErrorCodes, StatusError } from '../error.js';
+
 /**
  * Access level requested for an operation.
  *
@@ -21,6 +24,10 @@ export interface AuthContext {
  * a certain action on a document.  Implementations are entirely application-
  * specific – they may look at a JWT decoded during the WebSocket handshake,
  * consult an ACL service, inspect the actual RPC method, etc.
+ *
+ * **Tombstone checking:** If your store implements tombstones, call
+ * `assertNotDeleted(store, docId)` at the start of canAccess() to automatically
+ * reject access to deleted documents with a 410 error.
  */
 export interface AuthorizationProvider<T extends AuthContext = AuthContext> {
   /**
@@ -68,3 +75,27 @@ export const denyAll: AuthorizationProvider = {
     return false;
   },
 };
+
+/**
+ * Helper for AuthorizationProvider implementations.
+ * Call this in your canAccess() to check for document tombstones.
+ * Throws StatusError(410) if the document has been deleted.
+ *
+ * @example
+ * const myAuthProvider: AuthorizationProvider = {
+ *   async canAccess(ctx, docId, kind, method, params) {
+ *     await assertNotDeleted(store, docId);
+ *     // ... rest of your auth logic
+ *     return true;
+ *   }
+ * };
+ */
+export async function assertNotDeleted(store: PatchesStoreBackend, docId: string): Promise<void> {
+  const tombstone = await store.getTombstone?.(docId);
+  if (tombstone) {
+    throw new StatusError(ErrorCodes.DOC_DELETED, `Document ${docId} was deleted`, {
+      deletedAt: tombstone.deletedAt,
+      lastRev: tombstone.lastRev,
+    });
+  }
+}

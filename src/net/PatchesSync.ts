@@ -50,6 +50,11 @@ export class PatchesSync {
    * Signal emitted when an error occurs.
    */
   readonly onError = signal<(error: Error, context?: { docId?: string }) => void>();
+  /**
+   * Signal emitted when a document is deleted remotely (by another client or discovered via tombstone).
+   * Provides the pending changes that were discarded so the application can handle them.
+   */
+  readonly onRemoteDocDeleted = signal<(docId: string, pendingChanges: Change[]) => void>();
 
   constructor(
     patches: Patches,
@@ -70,6 +75,7 @@ export class PatchesSync {
     onlineState.onOnlineChange(online => this.updateState({ online }));
     this.ws.onStateChange(this._handleConnectionChange.bind(this));
     this.ws.onChangesCommitted(this._receiveCommittedChanges.bind(this));
+    this.ws.onDocDeleted(docId => this._handleRemoteDocDeleted(docId));
 
     // Listen to Patches for tracking changes
     patches.onTrackDocs(this._handleDocsTracked.bind(this));
@@ -241,6 +247,11 @@ export class PatchesSync {
         doc.updateSyncing(null);
       }
     } catch (err) {
+      // Handle DOC_DELETED error (document was deleted while we were offline)
+      if (this._isDocDeletedError(err)) {
+        await this._handleRemoteDocDeleted(docId);
+        return;
+      }
       console.error(`Error syncing doc ${docId}:`, err);
       this.onError.emit(err as Error, { docId });
       if (doc) {
@@ -288,6 +299,11 @@ export class PatchesSync {
         pending = await this.store.getPendingChanges(docId);
       }
     } catch (err) {
+      // Handle DOC_DELETED error (document was deleted while we were offline)
+      if (this._isDocDeletedError(err)) {
+        await this._handleRemoteDocDeleted(docId);
+        return;
+      }
       console.error(`Flush failed for doc ${docId}:`, err);
       this.onError.emit(err as Error, { docId });
       throw err; // Re-throw so caller (like syncAll) knows it failed
@@ -439,5 +455,34 @@ export class PatchesSync {
     if (!this.state.connected) return;
     if (!this.trackedDocs.has(docId)) return;
     await this.flushDoc(docId);
+  }
+
+  /**
+   * Unified handler for remote document deletion (both real-time notifications and offline discovery).
+   * Cleans up local state and notifies the application with any pending changes that were lost.
+   */
+  protected async _handleRemoteDocDeleted(docId: string): Promise<void> {
+    // Get pending changes before cleanup so app can handle them
+    const pendingChanges = await this.store.getPendingChanges(docId);
+
+    // Close doc if open
+    const doc = this.patches.getOpenDoc(docId);
+    if (doc) {
+      await this.patches.closeDoc(docId);
+    }
+
+    // Clean up tracking and local storage
+    this.trackedDocs.delete(docId);
+    await this.store.confirmDeleteDoc(docId);
+
+    // Notify application (with any pending changes that were lost)
+    await this.onRemoteDocDeleted.emit(docId, pendingChanges);
+  }
+
+  /**
+   * Helper to detect DOC_DELETED (410) errors from the server.
+   */
+  protected _isDocDeletedError(err: unknown): boolean {
+    return typeof err === 'object' && err !== null && 'code' in err && (err as { code: number }).code === 410;
   }
 }

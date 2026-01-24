@@ -26,6 +26,9 @@ export class PatchesClient implements PatchesAPI {
   /** Signal emitted when the server pushes document changes. */
   public readonly onChangesCommitted = signal<(docId: string, changes: Change[]) => void>();
 
+  /** Signal emitted when a document is deleted (either by another client or discovered on subscribe). */
+  public readonly onDocDeleted = signal<(docId: string) => void>();
+
   /**
    * Creates a new Patches WebSocket client instance.
    * @param url - The WebSocket server URL to connect to
@@ -40,6 +43,10 @@ export class PatchesClient implements PatchesAPI {
     this.rpc.on('changesCommitted', (params: PatchesNotificationParams) => {
       const { docId, changes } = params;
       this.onChangesCommitted.emit(docId, changes);
+    });
+
+    this.rpc.on('docDeleted', (params: { docId: string }) => {
+      this.onDocDeleted.emit(params.docId);
     });
   }
 

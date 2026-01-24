@@ -45,6 +45,7 @@ export class RPCServer {
     this.rpc.registerMethod('getChangesSince', this.getChangesSince.bind(this));
     this.rpc.registerMethod('commitChanges', this.commitChanges.bind(this));
     this.rpc.registerMethod('deleteDoc', this.deleteDoc.bind(this));
+    this.rpc.registerMethod('undeleteDoc', this.undeleteDoc.bind(this));
 
     // History manager operations (if provided)
     if (this.history) {
@@ -129,6 +130,17 @@ export class RPCServer {
     const { docId } = params;
     await this.assertWrite(ctx, docId, 'deleteDoc', params);
     await this.patches.deleteDoc(docId, ctx?.clientId);
+  }
+
+  /**
+   * Removes the tombstone for a deleted document, allowing it to be recreated.
+   * @param params - The undelete parameters
+   * @param params.docId - The ID of the document to undelete
+   */
+  async undeleteDoc(params: { docId: string }, ctx?: AuthContext) {
+    const { docId } = params;
+    await this.assertWrite(ctx, docId, 'undeleteDoc', params);
+    return this.patches.undeleteDoc(docId);
   }
 
   // ---------------------------------------------------------------------------

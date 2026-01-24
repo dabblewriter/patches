@@ -1,11 +1,22 @@
 export class StatusError extends Error {
   constructor(
     public code: number,
-    message: string
+    message: string,
+    public data?: Record<string, any>
   ) {
     super(message);
   }
 }
+
+/**
+ * Standard error codes for Patches operations.
+ */
+export const ErrorCodes = {
+  /** Document was deleted (tombstone exists). */
+  DOC_DELETED: 410,
+  /** Document not found (never existed). */
+  DOC_NOT_FOUND: 404,
+} as const;
 
 /**
  * Error thrown when the JSON-RPC client receives a message that cannot be parsed as JSON.

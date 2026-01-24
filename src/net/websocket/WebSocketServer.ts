@@ -1,3 +1,4 @@
+import { ErrorCodes, StatusError } from '../error.js';
 import type { ServerTransport } from '../protocol/types.js';
 import { denyAll, type AuthContext, type AuthorizationProvider } from './AuthorizationProvider.js';
 import type { RPCServer } from './RPCServer.js';
@@ -38,6 +39,7 @@ export class WebSocketServer {
 
   /**
    * Subscribes the client to one or more documents to receive real-time updates.
+   * If a document has been deleted (tombstone exists), sends immediate docDeleted notification.
    * @param connectionId - The ID of the connection making the request
    * @param params - The subscription parameters
    * @param params.ids - Document ID or IDs to subscribe to
@@ -54,8 +56,19 @@ export class WebSocketServer {
           if (await this.auth.canAccess(ctx, id, 'read', 'subscribe', params)) {
             allowed.push(id);
           }
-        } catch {
+        } catch (err) {
           // Treat exceptions from the provider as a denial for this doc
+          if (err instanceof StatusError && err.code === ErrorCodes.DOC_DELETED) {
+            // For 410 (document deleted), send docDeleted notification
+            this.transport.send(
+              ctx.clientId!,
+              JSON.stringify({
+                jsonrpc: '2.0',
+                method: 'docDeleted',
+                params: { docId: id },
+              })
+            );
+          }
         }
       })
     );

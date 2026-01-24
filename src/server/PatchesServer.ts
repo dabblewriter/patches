@@ -8,7 +8,8 @@ import { applyChanges } from '../algorithms/shared/applyChanges.js';
 import { createChange } from '../data/change.js';
 import { signal } from '../event-signal.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
-import type { Change, ChangeInput, ChangeMutator, EditableVersionMetadata, PatchesState } from '../types.js';
+import type { Change, ChangeInput, ChangeMutator, DeleteDocOptions, EditableVersionMetadata, PatchesState } from '../types.js';
+import { getISO } from '../utils/dates.js';
 import { CompressedStoreBackend } from './CompressedStoreBackend.js';
 import type { PatchesStoreBackend } from './types.js';
 
@@ -168,10 +169,41 @@ export class PatchesServer {
    * Deletes a document.
    * @param docId The document ID.
    * @param originClientId - The ID of the client that initiated the delete operation.
+   * @param options - Optional deletion settings (e.g., skipTombstone for testing).
    */
-  async deleteDoc(docId: string, originClientId?: string): Promise<void> {
+  async deleteDoc(docId: string, originClientId?: string, options?: DeleteDocOptions): Promise<void> {
+    // Create tombstone if store supports it (unless skipped)
+    if (this.store.createTombstone && !options?.skipTombstone) {
+      const { rev: lastRev } = await this.getDoc(docId);
+      await this.store.createTombstone({
+        docId,
+        deletedAt: getISO(),
+        lastRev,
+        deletedByClientId: originClientId,
+      });
+    }
+
     await this.store.deleteDoc(docId);
     await this.onDocDeleted.emit(docId, originClientId);
+  }
+
+  /**
+   * Removes the tombstone for a deleted document, allowing it to be recreated.
+   * @param docId The document ID.
+   * @returns True if tombstone was found and removed, false if no tombstone existed.
+   */
+  async undeleteDoc(docId: string): Promise<boolean> {
+    if (!this.store.removeTombstone) {
+      return false;
+    }
+
+    const tombstone = await this.store.getTombstone?.(docId);
+    if (!tombstone) {
+      return false;
+    }
+
+    await this.store.removeTombstone(docId);
+    return true;
   }
 
   // === Version Operations ===

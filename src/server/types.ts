@@ -1,6 +1,7 @@
 import type {
   Branch,
   Change,
+  DocumentTombstone,
   EditableVersionMetadata,
   ListChangesOptions,
   ListVersionsOptions,
@@ -58,6 +59,15 @@ export interface PatchesStoreBackend {
 
   /** Deletes a document. */
   deleteDoc(docId: string): Promise<void>;
+
+  /** Creates a tombstone for a deleted document. Called before deleteDoc() to preserve deletion metadata. */
+  createTombstone(tombstone: DocumentTombstone): Promise<void>;
+
+  /** Retrieves a tombstone for a document if it exists. Returns undefined if the document was never deleted or tombstone has expired. */
+  getTombstone(docId: string): Promise<DocumentTombstone | undefined>;
+
+  /** Removes a tombstone (for undelete or TTL cleanup). */
+  removeTombstone(docId: string): Promise<void>;
 }
 
 /**

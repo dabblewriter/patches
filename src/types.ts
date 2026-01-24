@@ -89,6 +89,32 @@ export interface Branch {
 export type EditableBranchMetadata = Disallowed<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'status'>;
 
 /**
+ * Represents a tombstone for a deleted document.
+ * Tombstones persist after deletion to inform late-connecting clients
+ * that a document has been deleted rather than never existing.
+ */
+export interface DocumentTombstone {
+  /** The ID of the deleted document. */
+  docId: string;
+  /** ISO timestamp when the document was deleted (UTC with Z). */
+  deletedAt: string;
+  /** The last revision number before deletion. */
+  lastRev: number;
+  /** Optional client ID that initiated the deletion. */
+  deletedByClientId?: string;
+  /** Optional ISO timestamp for automatic tombstone expiration (UTC with Z). */
+  expiresAt?: string;
+}
+
+/**
+ * Options for deleting a document.
+ */
+export interface DeleteDocOptions {
+  /** Skip creating tombstone (useful for testing/migration scripts). */
+  skipTombstone?: boolean;
+}
+
+/**
  * Metadata, state snapshot, and included changes for a specific version.
  */
 export interface VersionMetadata {

@@ -74,6 +74,7 @@ describe('PatchesSync', () => {
       deleteDoc: vi.fn().mockResolvedValue(undefined),
       onStateChange: vi.fn(),
       onChangesCommitted: vi.fn(),
+      onDocDeleted: vi.fn(),
     };
 
     // Mock constructors - use function expressions for Vitest 4 compatibility

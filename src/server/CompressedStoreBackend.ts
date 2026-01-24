@@ -2,6 +2,7 @@ import type { OpsCompressor } from '../compression/index.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type {
   Change,
+  DocumentTombstone,
   EditableVersionMetadata,
   ListChangesOptions,
   ListVersionsOptions,
@@ -31,7 +32,7 @@ export class CompressedStoreBackend implements PatchesStoreBackend {
   constructor(
     private readonly store: PatchesStoreBackend,
     private readonly compressor: OpsCompressor
-  ) {}
+  ) { }
 
   /**
    * Compresses a single change's ops field.
@@ -124,5 +125,17 @@ export class CompressedStoreBackend implements PatchesStoreBackend {
 
   async deleteDoc(docId: string): Promise<void> {
     return this.store.deleteDoc(docId);
+  }
+
+  async createTombstone(tombstone: DocumentTombstone): Promise<void> {
+    return this.store.createTombstone(tombstone);
+  }
+
+  async getTombstone(docId: string): Promise<DocumentTombstone | undefined> {
+    return this.store.getTombstone(docId);
+  }
+
+  async removeTombstone(docId: string): Promise<void> {
+    return this.store.removeTombstone(docId);
   }
 }

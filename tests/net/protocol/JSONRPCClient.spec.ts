@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { JSONRPCParseError } from '../../../src/net/error';
 import { JSONRPCClient } from '../../../src/net/protocol/JSONRPCClient';
 import type { ClientTransport } from '../../../src/net/protocol/types';
 
@@ -604,6 +605,131 @@ describe('JSONRPCClient', () => {
           timestamp: expect.any(Number),
         })
       );
+    });
+  });
+
+  describe('parse error handling', () => {
+    it('should reject all pending requests when receiving unparseable response', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const promise1 = client.call('method1');
+      const promise2 = client.call('method2');
+
+      // Simulate server returning plain text error
+      onMessageHandler('Internal Server Error');
+
+      // Both promises should be rejected with JSONRPCParseError
+      await expect(promise1).rejects.toBeInstanceOf(JSONRPCParseError);
+      await expect(promise2).rejects.toBeInstanceOf(JSONRPCParseError);
+      consoleSpy.mockRestore();
+    });
+
+    it('should include raw message in JSONRPCParseError', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const responsePromise = client.call('testMethod');
+
+      onMessageHandler('502 Bad Gateway');
+
+      try {
+        await responsePromise;
+        expect.fail('Should have rejected');
+      } catch (error) {
+        expect(error).toBeInstanceOf(JSONRPCParseError);
+        expect((error as JSONRPCParseError).rawMessage).toBe('502 Bad Gateway');
+        expect((error as JSONRPCParseError).message).toContain('502 Bad Gateway');
+      }
+      consoleSpy.mockRestore();
+    });
+
+    it('should truncate long error messages in JSONRPCParseError', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const responsePromise = client.call('testMethod');
+      const longMessage = 'x'.repeat(500);
+
+      onMessageHandler(longMessage);
+
+      try {
+        await responsePromise;
+        expect.fail('Should have rejected');
+      } catch (error) {
+        expect(error).toBeInstanceOf(JSONRPCParseError);
+        expect((error as JSONRPCParseError).rawMessage).toBe(longMessage);
+        expect((error as JSONRPCParseError).message.length).toBeLessThan(300);
+        expect((error as JSONRPCParseError).message).toContain('...');
+      }
+      consoleSpy.mockRestore();
+    });
+
+    it('should preserve the underlying parse error', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const responsePromise = client.call('testMethod');
+
+      onMessageHandler('{ invalid json }');
+
+      try {
+        await responsePromise;
+        expect.fail('Should have rejected');
+      } catch (error) {
+        expect(error).toBeInstanceOf(JSONRPCParseError);
+        expect((error as JSONRPCParseError).parseError).toBeInstanceOf(SyntaxError);
+      }
+      consoleSpy.mockRestore();
+    });
+
+    it('should clear pending map after rejecting all requests', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const promise1 = client.call('method1');
+      const promise2 = client.call('method2');
+
+      onMessageHandler('Server Error');
+
+      // Wait for rejections
+      await Promise.allSettled([promise1, promise2]);
+
+      // Subsequent valid response for old ID should warn (not crash)
+      onMessageHandler(JSON.stringify({ jsonrpc: '2.0', id: 1, result: 'late' }));
+      expect(warnSpy).toHaveBeenCalledWith('Received response for unknown id: 1');
+
+      consoleSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
+    it('should handle parse error with no pending requests gracefully', () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      // No pending requests, just receive bad data
+      onMessageHandler('Unexpected error from server');
+
+      expect(consoleSpy).toHaveBeenCalled();
+      consoleSpy.mockRestore();
+      // Should not throw or crash
+    });
+
+    it('should allow new requests after parse error recovery', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const promise1 = client.call('method1');
+
+      // Trigger parse error
+      onMessageHandler('Server Error');
+      await expect(promise1).rejects.toBeInstanceOf(JSONRPCParseError);
+
+      // New request should work fine
+      const promise2 = client.call('method2');
+      onMessageHandler(JSON.stringify({ jsonrpc: '2.0', id: 2, result: 'success' }));
+      const result = await promise2;
+      expect(result).toBe('success');
+      consoleSpy.mockRestore();
+    });
+
+    it('should handle HTML error pages', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const responsePromise = client.call('testMethod');
+
+      const htmlError = '<html><body><h1>503 Service Unavailable</h1></body></html>';
+      onMessageHandler(htmlError);
+
+      await expect(responsePromise).rejects.toBeInstanceOf(JSONRPCParseError);
+      consoleSpy.mockRestore();
     });
   });
 });

@@ -1,4 +1,5 @@
 import { signal, type Signal, type SignalSubscriber, type Unsubscriber } from '../../event-signal.js';
+import { JSONRPCParseError } from '../error.js';
 import type { ClientTransport, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from './types.js';
 
 /**
@@ -106,7 +107,24 @@ export class JSONRPCClient {
 
       console.warn('Received unexpected message format:', message);
     } catch (error) {
+      const parseError = new JSONRPCParseError(
+        data,
+        error instanceof Error ? error : new Error(String(error))
+      );
       console.error('Failed to parse incoming message:', data, error);
+      this.rejectAllPending(parseError);
+    }
+  }
+
+  /**
+   * Rejects all pending requests with the given error.
+   * Used when we receive an unparseable message, indicating the server is in a bad state.
+   */
+  private rejectAllPending(error: Error): void {
+    const pendingRequests = Array.from(this.pending.entries());
+    this.pending.clear();
+    for (const [, { reject }] of pendingRequests) {
+      reject(error);
     }
   }
 }

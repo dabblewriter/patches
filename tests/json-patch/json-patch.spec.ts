@@ -204,22 +204,22 @@ describe('JSONPatch', () => {
   });
 
   it('handles text delta that overruns document by converting retain to spaces', () => {
-    obj.text = new Delta().insert('Short');
-    patch.text('/text', new Delta().retain(20).insert('Long'));
+    obj.text = new Delta().insert('Short\n');
+    patch.text('/text', new Delta().retain(21).insert('Long'));
     obj = patch.apply(obj, { strict: true });
-    // The retain(20) overruns the 5-char document, creating a retain(15) op after compose.
+    // The retain(21) overruns the 6-char document, creating a retain(15) op after compose.
     // The lenient behavior converts the retain to spaces to preserve cursor positions.
-    // Delta normalizes adjacent string inserts into one op.
-    expect(obj.text.ops).toEqual([{ insert: 'Short' + ''.padStart(15) + 'Long' }]);
+    // Delta normalizes adjacent string inserts into one op. Ensures trailing newline.
+    expect(obj.text.ops).toEqual([{ insert: 'Short\n' + ''.padStart(15) + 'Long\n' }]);
   });
 
   it('handles text delta with trailing retain/delete overrun by dropping them', () => {
-    obj.text = new Delta().insert('Short');
-    patch.text('/text', new Delta().retain(20).delete(5));
+    obj.text = new Delta().insert('Short\n');
+    patch.text('/text', new Delta().retain(21).delete(5));
     obj = patch.apply(obj, { strict: true });
-    // The retain(20) overruns the 5-char document, creating trailing retain/delete ops.
+    // The retain(21) overruns the 6-char document, creating trailing retain/delete ops.
     // Trailing non-insert ops are dropped since there's no subsequent content to preserve.
-    expect(obj.text.ops).toEqual([{ insert: 'Short' }]);
+    expect(obj.text.ops).toEqual([{ insert: 'Short\n' }]);
   });
 
   it('throws an error when adding text that is invalid', () => {

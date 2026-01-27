@@ -63,19 +63,27 @@ export const text: JSONPatchOpHandler = {
 /**
  * Fix non-insert ops (retain/delete that overran the document)
  * Convert retains to space inserts to preserve cursor positions and subsequent edits
+ * Ensure document ends with a newline
  */
 function fixBadDeltaDoc(delta: Delta): Delta {
-  const ops = delta.ops;
   // Find where trailing non-inserts start (these can be dropped)
-  while (ops.length && ops[ops.length - 1].insert === undefined) {
-    ops.pop();
+  while (delta.ops.length && delta.ops[delta.ops.length - 1].insert === undefined) {
+    delta.ops.pop();
   }
-  if (ops.every(op => op.insert !== undefined)) {
+  const endsWithNewline = delta.ops.length > 0 && typeof delta.ops[delta.ops.length - 1].insert === 'string' &&
+    (delta.ops[delta.ops.length - 1].insert as string).endsWith('\n');
+  if (!endsWithNewline) {
+    delta.push({ insert: '\n' });
+  }
+
+  // Check if we need to fix any middle-of-doc retains
+  const hasNonInsertOps = delta.ops.some(op => op.insert === undefined);
+  if (!hasNonInsertOps) {
     return delta;
   }
   const newDelta = new Delta();
 
-  for (const op of ops) {
+  for (const op of delta.ops) {
     if (op.insert !== undefined) {
       newDelta.push(op);
     } else if (op.retain) {

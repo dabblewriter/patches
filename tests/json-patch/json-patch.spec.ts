@@ -203,18 +203,23 @@ describe('JSONPatch', () => {
     expect(obj).toEqual({ test: true, sub: { name: 'Test' } });
   });
 
-  it('throws an error when it cannot apply the patch', () => {
+  it('handles text delta that overruns document by converting retain to spaces', () => {
     obj.text = new Delta().insert('Short');
     patch.text('/text', new Delta().retain(20).insert('Long'));
-    const apply = () => (obj = patch.apply(obj, { strict: true }));
-    expect(apply).toThrow();
+    obj = patch.apply(obj, { strict: true });
+    // The retain(20) overruns the 5-char document, creating a retain(15) op after compose.
+    // The lenient behavior converts the retain to spaces to preserve cursor positions.
+    // Delta normalizes adjacent string inserts into one op.
+    expect(obj.text.ops).toEqual([{ insert: 'Short' + ''.padStart(15) + 'Long' }]);
   });
 
-  it('throws an error when asked and it cannot apply text in the patch', () => {
-    obj.text = new Delta().insert('This is my text.');
-    patch.text('/text', new Delta().retain(110).insert('amazing '));
-    const apply = () => (obj = patch.apply(obj, { strict: true }));
-    expect(apply).toThrow();
+  it('handles text delta with trailing retain/delete overrun by dropping them', () => {
+    obj.text = new Delta().insert('Short');
+    patch.text('/text', new Delta().retain(20).delete(5));
+    obj = patch.apply(obj, { strict: true });
+    // The retain(20) overruns the 5-char document, creating trailing retain/delete ops.
+    // Trailing non-insert ops are dropped since there's no subsequent content to preserve.
+    expect(obj.text.ops).toEqual([{ insert: 'Short' }]);
   });
 
   it('throws an error when adding text that is invalid', () => {

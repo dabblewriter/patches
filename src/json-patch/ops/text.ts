@@ -31,9 +31,7 @@ export const text: JSONPatchOpHandler = {
 
     doc = doc.compose(delta);
 
-    if (hasInvalidOps(doc)) {
-      return 'Invalid text delta provided for this text document';
-    }
+    doc = fixBadDeltaDoc(doc);
 
     return replace.apply(state, path, doc);
   },
@@ -62,6 +60,30 @@ export const text: JSONPatchOpHandler = {
   },
 };
 
-function hasInvalidOps(doc: Delta) {
-  return doc.ops.some(op => typeof op.insert !== 'string' && (typeof op.insert !== 'object' || op.insert === null));
+/**
+ * Fix non-insert ops (retain/delete that overran the document)
+ * Convert retains to space inserts to preserve cursor positions and subsequent edits
+ */
+function fixBadDeltaDoc(delta: Delta): Delta {
+  const ops = delta.ops;
+  // Find where trailing non-inserts start (these can be dropped)
+  while (ops.length && ops[ops.length - 1].insert === undefined) {
+    ops.pop();
+  }
+  if (ops.every(op => op.insert !== undefined)) {
+    return delta;
+  }
+  const newDelta = new Delta();
+
+  for (const op of ops) {
+    if (op.insert !== undefined) {
+      newDelta.push(op);
+    } else if (op.retain) {
+      // Convert retain to spaces to preserve cursor positions
+      const insertOp: Op = { insert: ''.padStart(op.retain) };
+      if (op.attributes) insertOp.attributes = op.attributes;
+      newDelta.push(insertOp);
+    }
+  }
+  return newDelta;
 }

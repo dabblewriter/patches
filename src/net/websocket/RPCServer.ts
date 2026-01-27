@@ -1,7 +1,7 @@
 import type { PatchesBranchManager } from '../../server/PatchesBranchManager.js';
 import type { PatchesHistoryManager } from '../../server/PatchesHistoryManager.js';
 import type { PatchesServer } from '../../server/PatchesServer.js';
-import type { Change, EditableVersionMetadata, ListChangesOptions, ListVersionsOptions } from '../../types.js';
+import type { Change, DeleteDocOptions, EditableVersionMetadata, ListChangesOptions, ListVersionsOptions } from '../../types.js';
 import { StatusError } from '../error.js';
 import { JSONRPCServer } from '../protocol/JSONRPCServer.js';
 import type { CommitChangesOptions } from '../protocol/types.js';
@@ -125,11 +125,12 @@ export class RPCServer {
    * @param connectionId - The ID of the connection making the request
    * @param params - The deletion parameters
    * @param params.docId - The ID of the document to delete
+   * @param params.options - Optional deletion settings (e.g., skipTombstone)
    */
-  async deleteDoc(params: { docId: string }, ctx?: AuthContext) {
-    const { docId } = params;
+  async deleteDoc(params: { docId: string; options?: DeleteDocOptions }, ctx?: AuthContext) {
+    const { docId, options } = params;
     await this.assertWrite(ctx, docId, 'deleteDoc', params);
-    await this.patches.deleteDoc(docId, ctx?.clientId);
+    await this.patches.deleteDoc(docId, ctx?.clientId, options);
   }
 
   /**

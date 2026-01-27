@@ -2,6 +2,7 @@ import { signal } from '../event-signal.js';
 import type {
   Change,
   ChangeInput,
+  DeleteDocOptions,
   EditableVersionMetadata,
   ListVersionsOptions,
   PatchesSnapshot,
@@ -105,10 +106,11 @@ export class PatchesClient implements PatchesAPI {
   /**
    * Deletes a document on the server.
    * @param docId - The ID of the document to delete.
+   * @param options - Optional deletion settings (e.g., skipTombstone).
    * @returns A promise resolving when the deletion is confirmed.
    */
-  async deleteDoc(docId: string): Promise<void> {
-    return this.rpc.call('deleteDoc', { docId });
+  async deleteDoc(docId: string, options?: DeleteDocOptions): Promise<void> {
+    return this.rpc.call('deleteDoc', { docId, options });
   }
 
   // === Version Operations ===

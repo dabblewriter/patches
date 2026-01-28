@@ -106,7 +106,13 @@ describe('makeChange', () => {
     mockBreakChanges.mockReturnValue(brokenChanges);
 
     const mutator = vi.fn();
-    const result = makeChange(snapshot, mutator, {}, 100, vi.fn(() => 50));
+    const result = makeChange(
+      snapshot,
+      mutator,
+      {},
+      100,
+      vi.fn(() => 50)
+    );
 
     expect(mockBreakChanges).toHaveBeenCalledWith([originalChange], 100, expect.any(Function));
     expect(result).toBe(brokenChanges);

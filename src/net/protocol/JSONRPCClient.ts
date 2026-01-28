@@ -107,10 +107,7 @@ export class JSONRPCClient {
 
       console.warn('Received unexpected message format:', message);
     } catch (error) {
-      const parseError = new JSONRPCParseError(
-        data,
-        error instanceof Error ? error : new Error(String(error))
-      );
+      const parseError = new JSONRPCParseError(data, error instanceof Error ? error : new Error(String(error)));
       console.error('Failed to parse incoming message:', data, error);
       this.rejectAllPending(parseError);
     }

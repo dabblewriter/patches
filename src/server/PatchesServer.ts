@@ -7,7 +7,14 @@ import type { OpsCompressor } from '../compression/index.js';
 import { createChange } from '../data/change.js';
 import { signal } from '../event-signal.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
-import type { Change, ChangeInput, ChangeMutator, DeleteDocOptions, EditableVersionMetadata, PatchesState } from '../types.js';
+import type {
+  Change,
+  ChangeInput,
+  ChangeMutator,
+  DeleteDocOptions,
+  EditableVersionMetadata,
+  PatchesState,
+} from '../types.js';
 import { getISO } from '../utils/dates.js';
 import { CompressedStoreBackend } from './CompressedStoreBackend.js';
 import type { PatchesStoreBackend } from './types.js';

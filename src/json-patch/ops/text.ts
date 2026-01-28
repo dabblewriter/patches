@@ -70,7 +70,9 @@ function fixBadDeltaDoc(delta: Delta): Delta {
   while (delta.ops.length && delta.ops[delta.ops.length - 1].insert === undefined) {
     delta.ops.pop();
   }
-  const endsWithNewline = delta.ops.length > 0 && typeof delta.ops[delta.ops.length - 1].insert === 'string' &&
+  const endsWithNewline =
+    delta.ops.length > 0 &&
+    typeof delta.ops[delta.ops.length - 1].insert === 'string' &&
     (delta.ops[delta.ops.length - 1].insert as string).endsWith('\n');
   if (!endsWithNewline) {
     delta.push({ insert: '\n' });

@@ -1,7 +1,13 @@
 import type { PatchesBranchManager } from '../../server/PatchesBranchManager.js';
 import type { PatchesHistoryManager } from '../../server/PatchesHistoryManager.js';
 import type { PatchesServer } from '../../server/PatchesServer.js';
-import type { Change, DeleteDocOptions, EditableVersionMetadata, ListChangesOptions, ListVersionsOptions } from '../../types.js';
+import type {
+  Change,
+  DeleteDocOptions,
+  EditableVersionMetadata,
+  ListChangesOptions,
+  ListVersionsOptions,
+} from '../../types.js';
 import { StatusError } from '../error.js';
 import { JSONRPCServer } from '../protocol/JSONRPCServer.js';
 import type { CommitChangesOptions } from '../protocol/types.js';

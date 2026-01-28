@@ -32,7 +32,7 @@ export class CompressedStoreBackend implements PatchesStoreBackend {
   constructor(
     private readonly store: PatchesStoreBackend,
     private readonly compressor: OpsCompressor
-  ) { }
+  ) {}
 
   /**
    * Compresses a single change's ops field.

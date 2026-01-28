@@ -271,7 +271,7 @@ describe('PatchesServer', () => {
         throw new Error('Apply patch failed');
       });
 
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => { });
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       const result = await server.commitChanges('doc1', [changeWithoutBatch]);
 
@@ -291,7 +291,7 @@ describe('PatchesServer', () => {
 
     it('should handle notification errors gracefully', async () => {
       const emitSpy = vi.spyOn(server.onChangesCommitted, 'emit').mockRejectedValue(new Error('Notification failed'));
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => { });
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       await server.commitChanges('doc1', [mockChange]);
 

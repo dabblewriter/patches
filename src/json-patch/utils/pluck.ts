@@ -16,7 +16,12 @@ export function pluck(state: State, keys: string[]) {
   return object;
 }
 
-export function pluckWithShallowCopy(state: State, keys: string[], createMissingObjects?: boolean, createMissingArrays?: boolean) {
+export function pluckWithShallowCopy(
+  state: State,
+  keys: string[],
+  createMissingObjects?: boolean,
+  createMissingArrays?: boolean
+) {
   let object: any = state.root;
   for (let i = 0, imax = keys.length - 1; i < imax; i++) {
     const key = keys[i];
@@ -32,7 +37,8 @@ export function pluckWithShallowCopy(state: State, keys: string[], createMissing
         object = getValue(state, object[object.length - 1]);
       }
     } else {
-      object = object[key] = createMissingObjects && !object[key] ? getValue(state, container) : getValue(state, object[key]);
+      object = object[key] =
+        createMissingObjects && !object[key] ? getValue(state, container) : getValue(state, object[key]);
     }
   }
   return object;

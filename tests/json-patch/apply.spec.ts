@@ -3,6 +3,57 @@ import { applyPatch } from '../../src/json-patch/applyPatch.js';
 import { bitmask, combineBitmasks } from '../../src/json-patch/ops/bitmask.js';
 
 describe('applyPatch', () => {
+  describe('auto-create missing containers', () => {
+    describe('replace creates objects only', () => {
+      it('creates objects for missing intermediate paths', () => {
+        const result = applyPatch({}, [{ op: 'replace', path: '/obj/sub/foo', value: 'bar' }]);
+        expect(result).toEqual({ obj: { sub: { foo: 'bar' } } });
+      });
+
+      it('creates objects with numeric keys (not arrays) for 0 index', () => {
+        const result = applyPatch({}, [{ op: 'replace', path: '/obj/sub/0/foo', value: 'bar' }]);
+        expect(result).toEqual({ obj: { sub: { 0: { foo: 'bar' } } } });
+      });
+
+      it('creates objects for all numeric keys', () => {
+        const result = applyPatch({}, [{ op: 'replace', path: '/obj/1/foo', value: 'bar' }]);
+        expect(result).toEqual({ obj: { 1: { foo: 'bar' } } });
+      });
+    });
+
+    describe('add creates arrays for 0 index', () => {
+      it('creates objects for missing intermediate paths', () => {
+        const result = applyPatch({}, [{ op: 'add', path: '/obj/sub/foo', value: 'bar' }]);
+        expect(result).toEqual({ obj: { sub: { foo: 'bar' } } });
+      });
+
+      it('creates arrays when path contains 0 index', () => {
+        const result = applyPatch({}, [{ op: 'add', path: '/obj/sub/0/foo', value: 'bar' }]);
+        expect(result).toEqual({ obj: { sub: [{ foo: 'bar' }] } });
+      });
+
+      it('creates nested arrays for consecutive 0 indexes', () => {
+        const result = applyPatch({}, [{ op: 'add', path: '/obj/0/0/foo', value: 'bar' }]);
+        expect(result).toEqual({ obj: [[{ foo: 'bar' }]] });
+      });
+
+      it('creates array at end of path when last key is 0', () => {
+        const result = applyPatch({}, [{ op: 'add', path: '/obj/sub/0', value: 'bar' }]);
+        expect(result).toEqual({ obj: { sub: ['bar'] } });
+      });
+
+      it('creates objects for non-0 numeric keys', () => {
+        const result = applyPatch({}, [{ op: 'add', path: '/obj/1/foo', value: 'bar' }]);
+        expect(result).toEqual({ obj: { 1: { foo: 'bar' } } });
+      });
+
+      it('creates deeply nested structure with mixed arrays and objects', () => {
+        const result = applyPatch({}, [{ op: 'add', path: '/obj/sub/0/foo/bar', value: 'foobar' }]);
+        expect(result).toEqual({ obj: { sub: [{ foo: { bar: 'foobar' } }] } });
+      });
+    });
+  });
+
   describe('move', () => {
     let a: any;
 

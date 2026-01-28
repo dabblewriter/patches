@@ -30,10 +30,10 @@ export const add: JSONPatchOpHandler = {
       if (index < 0 || target.length < index) {
         return `[op:add] invalid array index: ${path}`;
       }
-      pluckWithShallowCopy(state, keys, true).splice(index, 0, value);
+      pluckWithShallowCopy(state, keys, true, true).splice(index, 0, value);
     } else {
       if (!deepEqual(target[lastKey], value)) {
-        pluckWithShallowCopy(state, keys, true)[lastKey] = value;
+        pluckWithShallowCopy(state, keys, true, true)[lastKey] = value;
       }
     }
   },

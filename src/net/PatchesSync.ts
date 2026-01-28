@@ -302,10 +302,6 @@ export class PatchesSync {
         await this._handleRemoteDocDeleted(docId);
         return;
       }
-      if (this._isDocExistsError(err)) {
-        await this._recoverFromDocExists(docId);
-        return;
-      }
       console.error(`Flush failed for doc ${docId}:`, err);
       this.onError.emit(err as Error, { docId });
       throw err;
@@ -490,23 +486,4 @@ export class PatchesSync {
     return typeof err === 'object' && err !== null && 'code' in err && (err as { code: number }).code === 410;
   }
 
-  /**
-   * Helper to detect "document already exists" errors from the server.
-   */
-  private _isDocExistsError(err: unknown): boolean {
-    const message = (err as Error)?.message ?? '';
-    return message.includes('already exists');
-  }
-
-  /**
-   * Recovers from a "document already exists" error by fetching server state and retrying.
-   */
-  private async _recoverFromDocExists(docId: string): Promise<void> {
-    const serverChanges = await this.ws.getChangesSince(docId, 0);
-    const rebasedPending = await this._applyServerChangesToDoc(docId, serverChanges);
-
-    if (rebasedPending.length > 0) {
-      await this.flushDoc(docId, rebasedPending);
-    }
-  }
 }

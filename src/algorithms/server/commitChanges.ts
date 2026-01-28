@@ -70,7 +70,9 @@ export async function commitChanges(
   const laterPartOfAnInitialBatch = batchId && changes[0].rev! > 1;
   if (baseRev === 0 && currentRev > 0 && !laterPartOfAnInitialBatch && changes[0].ops[0]?.path === '') {
     throw new Error(
-      `Document ${docId} already exists at rev ${currentRev}, but client is attempting to create it. Client needs to load the existing document.`
+      `Document ${docId} already exists (rev ${currentRev}). ` +
+        `Cannot apply root-level replace (path: '') with baseRev 0 - this would overwrite the existing document. ` +
+        `Load the existing document first, or use nested paths instead of replacing at root.`
     );
   }
 

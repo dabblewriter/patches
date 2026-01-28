@@ -171,7 +171,7 @@ describe('commitChanges', () => {
     changes[0].ops = [{ op: 'add', path: '', value: {} }]; // Root creation
 
     await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis)).rejects.toThrow(
-      'Document doc1 already exists at rev 1, but client is attempting to create it. Client needs to load the existing document.'
+      /Document doc1 already exists.*Cannot apply root-level replace.*would overwrite the existing document/
     );
   });
 

@@ -7,8 +7,14 @@
  * (c) 2022 Jacob Wright
  *
  *
- * WARNING: using /array/- syntax to indicate the end of the array makes it impossible to transform arrays correctly in
- * all situaions. Please avoid using this syntax when using Operational Transformations.
+ * NOTE ON ARRAY APPEND SYNTAX: The /array/- path syntax (append to end) has limitations with
+ * Operational Transformations. It's safe when:
+ * - The appended value won't be modified by subsequent operations, OR
+ * - The append commits to the server before any operations reference the item by index
+ *
+ * It causes problems when you append with /items/- then reference by index (e.g., /items/3/name)
+ * in uncommitted operations — the index can be transformed but the - cannot, causing them to
+ * target different items after concurrent changes. See docs/json-patch.md for details.
  */
 
 import { getTypes } from './ops/index.js';

@@ -20,8 +20,20 @@ export function pluckWithShallowCopy(state: State, keys: string[], createMissing
   let object: any = state.root;
   for (let i = 0, imax = keys.length - 1; i < imax; i++) {
     const key = keys[i];
-    const container = createMissingArrays && keys[i + 1] === '0' ? EMPTY_ARRAY : EMPTY;
-    object = object[key] = createMissingObjects && !object[key] ? getValue(state, container) : getValue(state, object[key]);
+    const container = createMissingArrays && (keys[i + 1] === '0' || keys[i + 1] === '-') ? EMPTY_ARRAY : EMPTY;
+
+    // Handle array append when key is '-' and object is an array
+    if (key === '-' && Array.isArray(object)) {
+      if (createMissingObjects && object.length === 0) {
+        const newItem = getValue(state, container);
+        object.push(newItem);
+        object = newItem;
+      } else {
+        object = getValue(state, object[object.length - 1]);
+      }
+    } else {
+      object = object[key] = createMissingObjects && !object[key] ? getValue(state, container) : getValue(state, object[key]);
+    }
   }
   return object;
 }

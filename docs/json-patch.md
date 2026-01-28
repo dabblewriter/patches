@@ -5,6 +5,7 @@ Wanna track and apply changes to JSON documents? That's what JSON Patch is all a
 **Table of Contents**
 
 - [What is JSON Patch?](#what-is-json-patch)
+- [Array Append Syntax and OT](#array-append-syntax-and-ot)
 - [The Awesome `JSONPatch` Class](#the-awesome-jsonpatch-class)
 - [The Magical `createJSONPatch()` Helper](#the-magical-createjsonpatch-helper)
 - [The Super Cool Proxy Approach](#the-super-cool-proxy-approach)
@@ -31,6 +32,32 @@ Each patch is an array of operations, and each operation has:
 - A `path` to where the change happens (like "/users/0/name")
 - Usually a `value` (what to add or change to)
 - Sometimes a `from` path (for move and copy operations)
+
+## Array Append Syntax and OT
+
+The `-` character in paths like `/items/-` means "append to the end of the array." This is convenient, but has implications for Operational Transformations.
+
+### When `-` is Safe
+
+- **Appending values that won't be modified** — If you're adding items that are complete and final, `-` works fine
+- **Appending before sync** — If the append commits to the server before any operations reference the item by index, concurrent operations will correctly transform around it
+
+### When `-` Causes Problems
+
+The issue arises when you:
+
+1. Append an object with `/items/-`
+2. Then modify a property with `/items/3/name` (expecting it landed at index 3)
+
+If concurrent operations insert or remove items, the index `3` will be transformed (e.g., to `4`), but the `-` in the first operation cannot be transformed — it still means "end of array." This can cause the operations to target different items.
+
+**The root cause:** `-` is resolved at execution time, not creation time. OT algorithms need concrete indices to compute transformations.
+
+### Recommendation
+
+For OT-heavy workflows, resolve `-` to a concrete index at operation creation time. If the array has 5 items, use `/items/5` instead of `/items/-`. This preserves intent and enables proper transformations.
+
+For simple append-only workflows where appended items aren't subsequently modified, `-` works fine.
 
 ## The Awesome `JSONPatch` Class
 

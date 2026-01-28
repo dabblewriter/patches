@@ -52,6 +52,35 @@ describe('applyPatch', () => {
         expect(result).toEqual({ obj: { sub: [{ foo: { bar: 'foobar' } }] } });
       });
     });
+
+    describe('add creates arrays for - (append) syntax', () => {
+      it('creates array when path ends with -', () => {
+        const result = applyPatch({}, [{ op: 'add', path: '/obj/sub/-', value: 'bar' }]);
+        expect(result).toEqual({ obj: { sub: ['bar'] } });
+      });
+
+      it('creates array with object when path contains - then object key', () => {
+        const result = applyPatch({}, [{ op: 'add', path: '/obj/sub/-/foo', value: 'bar' }]);
+        expect(result).toEqual({ obj: { sub: [{ foo: 'bar' }] } });
+      });
+
+      it('creates nested arrays for consecutive - syntax', () => {
+        const result = applyPatch({}, [{ op: 'add', path: '/obj/-/-/foo', value: 'bar' }]);
+        expect(result).toEqual({ obj: [[{ foo: 'bar' }]] });
+      });
+
+      it('creates mixed 0 and - arrays', () => {
+        const result = applyPatch({}, [{ op: 'add', path: '/obj/0/-/foo', value: 'bar' }]);
+        expect(result).toEqual({ obj: [[{ foo: 'bar' }]] });
+      });
+    });
+
+    describe('replace does not create arrays for - syntax', () => {
+      it('creates objects with - key (not arrays)', () => {
+        const result = applyPatch({}, [{ op: 'replace', path: '/obj/sub/-/foo', value: 'bar' }]);
+        expect(result).toEqual({ obj: { sub: { '-': { foo: 'bar' } } } });
+      });
+    });
   });
 
   describe('move', () => {

@@ -33,7 +33,12 @@ export const add: JSONPatchOpHandler = {
       pluckWithShallowCopy(state, keys, true, true).splice(index, 0, value);
     } else {
       if (!deepEqual(target[lastKey], value)) {
-        pluckWithShallowCopy(state, keys, true, true)[lastKey] = value;
+        const container = pluckWithShallowCopy(state, keys, true, true);
+        if (Array.isArray(container) && lastKey === '-') {
+          container.push(value);
+        } else {
+          container[lastKey] = value;
+        }
       }
     }
   },

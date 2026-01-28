@@ -39,7 +39,22 @@ export async function commitChanges(
   const { state: initialState, rev: initialRev, changes: currentChanges } = await getSnapshotAtRevision(store, docId);
   const currentState = applyChanges(initialState, currentChanges);
   const currentRev = currentChanges.at(-1)?.rev ?? initialRev;
-  const baseRev = changes[0].baseRev ?? currentRev;
+  let baseRev = changes[0].baseRev ?? currentRev;
+
+  // Check if this is a batched continuation (later part of an initial batch upload)
+  const batchedContinuation = batchId && changes[0].rev! > 1;
+
+  // Rebase explicit baseRev: 0 on existing docs to current revision for granular changes.
+  // This avoids expensive transformation through full history when a never-synced client
+  // makes changes to an existing document. Root-level ops are excluded (handled below).
+  if (changes[0].baseRev === 0 && currentRev > 0 && !batchedContinuation) {
+    const hasRootOp = changes.some(c => c.ops.some(op => op.path === ''));
+    if (!hasRootOp) {
+      baseRev = currentRev;
+      // Update all changes to have the rebased baseRev
+      changes.forEach(c => (c.baseRev = baseRev));
+    }
+  }
 
   // Ensure baseRev and rev are set, add committedAt, and clamp createdAt
   const serverNow = getISO();
@@ -67,8 +82,7 @@ export async function commitChanges(
   }
 
   // Prevent stale clients from wiping existing data with a root creation op (unless it's a batched continuation)
-  const laterPartOfAnInitialBatch = batchId && changes[0].rev! > 1;
-  if (baseRev === 0 && currentRev > 0 && !laterPartOfAnInitialBatch && changes[0].ops[0]?.path === '') {
+  if (changes[0].baseRev === 0 && currentRev > 0 && !batchedContinuation && changes[0].ops[0]?.path === '') {
     throw new Error(
       `Document ${docId} already exists (rev ${currentRev}). ` +
         `Cannot apply root-level replace (path: '') with baseRev 0 - this would overwrite the existing document. ` +

@@ -194,6 +194,81 @@ describe('commitChanges', () => {
     expect(result[1]).toHaveLength(1); // Should have transformed changes
   });
 
+  it('should rebase baseRev:0 granular changes to head on existing docs', async () => {
+    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getStateAtRevision } = await import('../../../src/algorithms/server/getStateAtRevision');
+
+    // Document exists with 5 revisions
+    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
+      state: { baseState: true },
+      rev: 0,
+      changes: [
+        createChange('c1', 1, 0),
+        createChange('c2', 2, 1),
+        createChange('c3', 3, 2),
+        createChange('c4', 4, 3),
+        createChange('c5', 5, 4),
+      ],
+    });
+
+    // Granular change with explicit baseRev: 0 (never-synced client)
+    const changes = [createChange('new', 1, 0)];
+    changes[0].ops = [{ op: 'replace', path: '/darkMode', value: true }];
+
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+
+    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+
+    // Should rebase to head (rev 5) - getStateAtRevision called with currentRev, not 0
+    expect(getStateAtRevision).toHaveBeenCalledWith(mockStore, 'doc1', 5);
+
+    // Returned change should have baseRev rebased to 5
+    expect(result[1]).toHaveLength(1);
+    expect(result[1][0].baseRev).toBe(5);
+  });
+
+  it('should still throw error for root replace with baseRev:0 on existing docs', async () => {
+    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
+      state: { baseState: true },
+      rev: 0,
+      changes: [createChange('existing', 5, 0)],
+    });
+
+    // Root replace with explicit baseRev: 0
+    const changes = [createChange('1', 1, 0)];
+    changes[0].ops = [{ op: 'replace', path: '', value: { newDoc: true } }];
+
+    await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis)).rejects.toThrow(
+      /Document doc1 already exists.*Cannot apply root-level replace/
+    );
+  });
+
+  it('should assign correct rev numbers to rebased changes', async () => {
+    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
+      state: { baseState: true },
+      rev: 0,
+      changes: [createChange('existing', 10, 0)], // Server at rev 10
+    });
+
+    // Multiple granular changes with baseRev: 0
+    const changes = [
+      { id: '1', baseRev: 0, ops: [{ op: 'replace', path: '/a', value: 1 }], createdAt: getLocalISO() },
+      { id: '2', baseRev: 0, ops: [{ op: 'replace', path: '/b', value: 2 }], createdAt: getLocalISO() },
+    ] as Change[];
+
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+
+    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+
+    // Revs should be based on rebased baseRev (10), so 11 and 12
+    expect(result[1][0].rev).toBe(11);
+    expect(result[1][1].rev).toBe(12);
+    expect(result[1][0].baseRev).toBe(10);
+    expect(result[1][1].baseRev).toBe(10);
+  });
+
   it('should normalize createdAt timestamps to be in the past', async () => {
     const futureTime = createTimestamp(10000); // 10 seconds in the future
     const changes = [createChange('1', 1, 0, futureTime)];

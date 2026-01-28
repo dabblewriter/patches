@@ -3,7 +3,7 @@ import { deepEqual } from '../utils/deepEqual.js';
 import { getOpData } from '../utils/getOpData.js';
 import {
   isArrayPath,
-  isEmptyObject,
+  isEmptyContainer,
   log,
   updateArrayIndexes,
   updateRemovedOps,
@@ -55,10 +55,10 @@ export const add: JSONPatchOpHandler = {
     if (isArrayPath(thisOp.path, state)) {
       // Adjust any operations on the same array by 1 to account for this new entry
       return updateArrayIndexes(state, thisOp.path, otherOps, 1);
-    } else if (isEmptyObject(thisOp.value)) {
-      // Treat empty objects special. If two empty objects are added to the same location, don't overwrite the existing
-      // one, allowing for the merging of maps together which did not exist before
-      return updateSoftWrites(thisOp.path, otherOps);
+    } else if (isEmptyContainer(thisOp.value)) {
+      // Treat empty objects and arrays special. If two are added to the same location, don't overwrite the existing
+      // one, allowing for the merging of maps/collections together which did not exist before
+      return updateSoftWrites(thisOp.path, otherOps, thisOp.value);
     } else {
       // Remove anything that was done at this path since it is being overwritten by the add
       return updateRemovedOps(state, thisOp.path, otherOps);

@@ -24,6 +24,31 @@ describe('transformPatch', () => {
       ).toEqual([{ op: 'add', path: '/obj/foo/bar', value: 'hi1' }]);
     });
 
+    it('does not overwrite empty arrays used for collections', () => {
+      expect(
+        transformPatch(
+          {},
+          [{ op: 'add', path: '/items', value: [] }],
+          [
+            { op: 'add', path: '/items', value: [] },
+            { op: 'add', path: '/items/0', value: 'first' },
+          ]
+        )
+      ).toEqual([{ op: 'add', path: '/items/0', value: 'first' }]);
+    });
+
+    it('does not conflate empty objects and empty arrays', () => {
+      // Empty object should not filter empty array
+      expect(
+        transformPatch({}, [{ op: 'add', path: '/data', value: {} }], [{ op: 'add', path: '/data', value: [] }])
+      ).toEqual([{ op: 'add', path: '/data', value: [] }]);
+
+      // Empty array should not filter empty object
+      expect(
+        transformPatch({}, [{ op: 'add', path: '/data', value: [] }], [{ op: 'add', path: '/data', value: {} }])
+      ).toEqual([{ op: 'add', path: '/data', value: {} }]);
+    });
+
     it('does not overwrite writes marked as soft, allowing the first one to stand', () => {
       expect(
         transformPatch(

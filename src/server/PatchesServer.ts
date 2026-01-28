@@ -1,10 +1,9 @@
 import { commitChanges, type CommitChangesOptions } from '../algorithms/server/commitChanges.js';
-export type { CommitChangesOptions } from '../algorithms/server/commitChanges.js';
-import type { OpsCompressor } from '../compression/index.js';
 import { createVersion } from '../algorithms/server/createVersion.js';
 import { getSnapshotAtRevision } from '../algorithms/server/getSnapshotAtRevision.js';
 import { getStateAtRevision } from '../algorithms/server/getStateAtRevision.js';
 import { applyChanges } from '../algorithms/shared/applyChanges.js';
+import type { OpsCompressor } from '../compression/index.js';
 import { createChange } from '../data/change.js';
 import { signal } from '../event-signal.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
@@ -12,6 +11,7 @@ import type { Change, ChangeInput, ChangeMutator, DeleteDocOptions, EditableVers
 import { getISO } from '../utils/dates.js';
 import { CompressedStoreBackend } from './CompressedStoreBackend.js';
 import type { PatchesStoreBackend } from './types.js';
+export type { CommitChangesOptions } from '../algorithms/server/commitChanges.js';
 
 /**
  * Configuration options for the PatchesServer.
@@ -54,7 +54,7 @@ export class PatchesServer {
   public readonly onChangesCommitted = signal<(docId: string, changes: Change[], originClientId?: string) => void>();
 
   /** Notifies listeners when a document is deleted. */
-  public readonly onDocDeleted = signal<(docId: string, originClientId?: string) => void>();
+  public readonly onDocDeleted = signal<(docId: string, options?: DeleteDocOptions, originClientId?: string) => void>();
 
   constructor(store: PatchesStoreBackend, options: PatchesServerOptions = {}) {
     this.sessionTimeoutMillis = (options.sessionTimeoutMinutes ?? 30) * 60 * 1000;
@@ -171,7 +171,7 @@ export class PatchesServer {
    * @param originClientId - The ID of the client that initiated the delete operation.
    * @param options - Optional deletion settings (e.g., skipTombstone for testing).
    */
-  async deleteDoc(docId: string, originClientId?: string, options?: DeleteDocOptions): Promise<void> {
+  async deleteDoc(docId: string, options?: DeleteDocOptions, originClientId?: string): Promise<void> {
     // Create tombstone if store supports it (unless skipped)
     if (this.store.createTombstone && !options?.skipTombstone) {
       const { rev: lastRev } = await this.getDoc(docId);
@@ -184,7 +184,7 @@ export class PatchesServer {
     }
 
     await this.store.deleteDoc(docId);
-    await this.onDocDeleted.emit(docId, originClientId);
+    await this.onDocDeleted.emit(docId, options, originClientId);
   }
 
   /**

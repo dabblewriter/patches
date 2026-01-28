@@ -269,6 +269,149 @@ describe('commitChanges', () => {
     expect(result[1][1].baseRev).toBe(10);
   });
 
+  it('should filter soft empty container adds when rebasing baseRev:0 on existing docs', async () => {
+    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { applyChanges } = await import('../../../src/algorithms/shared/applyChanges');
+
+    // Mock state that has data at /settings
+    vi.mocked(applyChanges).mockReturnValue({ settings: { theme: 'dark' } });
+
+    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
+      state: {},
+      rev: 0,
+      changes: [createChange('existing', 5, 0)],
+    });
+
+    // Change with empty object add to existing path (implicit soft write)
+    const changes = [
+      {
+        id: '1',
+        baseRev: 0,
+        ops: [
+          { op: 'add', path: '/settings', value: {} }, // Should be filtered - path exists
+          { op: 'add', path: '/settings/newProp', value: 'test' }, // Should remain
+        ],
+        createdAt: getLocalISO(),
+      },
+    ] as Change[];
+
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+
+    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+
+    // Only the non-soft op should remain
+    expect(result[1]).toHaveLength(1);
+    expect(result[1][0].ops).toHaveLength(1);
+    expect(result[1][0].ops[0].path).toBe('/settings/newProp');
+  });
+
+  it('should filter explicit soft ops when rebasing baseRev:0 on existing docs', async () => {
+    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { applyChanges } = await import('../../../src/algorithms/shared/applyChanges');
+
+    // Mock state that has data at /config
+    vi.mocked(applyChanges).mockReturnValue({ config: 'existing' });
+
+    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
+      state: {},
+      rev: 0,
+      changes: [createChange('existing', 3, 0)],
+    });
+
+    // Change with explicit soft flag
+    const changes = [
+      {
+        id: '1',
+        baseRev: 0,
+        ops: [
+          { op: 'replace', path: '/config', value: 'new', soft: true }, // Should be filtered
+          { op: 'add', path: '/other', value: 'data' }, // Should remain
+        ],
+        createdAt: getLocalISO(),
+      },
+    ] as Change[];
+
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+
+    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+
+    expect(result[1]).toHaveLength(1);
+    expect(result[1][0].ops).toHaveLength(1);
+    expect(result[1][0].ops[0].path).toBe('/other');
+  });
+
+  it('should keep soft writes to non-existent paths when rebasing baseRev:0', async () => {
+    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { applyChanges } = await import('../../../src/algorithms/shared/applyChanges');
+
+    // Mock state without the target paths
+    vi.mocked(applyChanges).mockReturnValue({ existingData: true });
+
+    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
+      state: {},
+      rev: 0,
+      changes: [createChange('existing', 2, 0)],
+    });
+
+    // Soft writes to paths that don't exist
+    const changes = [
+      {
+        id: '1',
+        baseRev: 0,
+        ops: [
+          { op: 'add', path: '/newContainer', value: {} }, // Should remain - path doesn't exist
+          { op: 'add', path: '/anotherNew', value: [], soft: true }, // Should remain - path doesn't exist
+        ],
+        createdAt: getLocalISO(),
+      },
+    ] as Change[];
+
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+
+    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+
+    expect(result[1]).toHaveLength(1);
+    expect(result[1][0].ops).toHaveLength(2);
+  });
+
+  it('should remove changes with no ops after soft write filtering', async () => {
+    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { applyChanges } = await import('../../../src/algorithms/shared/applyChanges');
+
+    // Mock state that has data at the target path
+    vi.mocked(applyChanges).mockReturnValue({ settings: {} });
+
+    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
+      state: {},
+      rev: 0,
+      changes: [createChange('existing', 1, 0)],
+    });
+
+    // Change with only soft ops that will all be filtered
+    const changes = [
+      {
+        id: '1',
+        baseRev: 0,
+        ops: [{ op: 'add', path: '/settings', value: {} }], // Will be filtered
+        createdAt: getLocalISO(),
+      },
+      {
+        id: '2',
+        baseRev: 0,
+        ops: [{ op: 'add', path: '/newPath', value: 'data' }], // Will remain
+        createdAt: getLocalISO(),
+      },
+    ] as Change[];
+
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+
+    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+
+    // Only the second change should remain
+    expect(result[1]).toHaveLength(1);
+    expect(result[1][0].id).toBe('2');
+  });
+
   it('should normalize createdAt timestamps to be in the past', async () => {
     const futureTime = createTimestamp(10000); // 10 seconds in the future
     const changes = [createChange('1', 1, 0, futureTime)];

@@ -1,6 +1,7 @@
 import type { PatchesStoreBackend } from '../../server/types.js';
 import type { Change, ChangeInput, CommitChangesOptions } from '../../types.js';
 import { clampTimestamp, getISO, timestampDiff } from '../../utils/dates.js';
+import { filterSoftWritesAgainstState } from '../../json-patch/utils/softWrites.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { createVersion } from './createVersion.js';
 import { getSnapshotAtRevision } from './getSnapshotAtRevision.js';
@@ -51,8 +52,12 @@ export async function commitChanges(
     const hasRootOp = changes.some(c => c.ops.some(op => op.path === ''));
     if (!hasRootOp) {
       baseRev = currentRev;
-      // Update all changes to have the rebased baseRev
-      changes.forEach(c => (c.baseRev = baseRev));
+      // Update baseRev, filter soft writes, and remove empty changes in one pass
+      changes = changes.filter(c => {
+        c.baseRev = baseRev;
+        c.ops = filterSoftWritesAgainstState(c.ops, currentState);
+        return c.ops.length > 0;
+      });
     }
   }
 

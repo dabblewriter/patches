@@ -224,15 +224,14 @@ export class PatchesSync {
     }
     try {
       const pending = await this.store.getPendingChanges(docId);
+
       if (pending.length > 0) {
-        await this.flushDoc(docId); // flushDoc handles setting flushing state
+        await this.flushDoc(docId, pending);
       } else {
-        // No pending, just check for server changes
         const [committedRev] = await this.store.getLastRevs(docId);
         if (committedRev) {
           const serverChanges = await this.ws.getChangesSince(docId, committedRev);
           if (serverChanges.length > 0) {
-            // Apply server changes with proper rebasing
             await this._applyServerChangesToDoc(docId, serverChanges);
           }
         } else {
@@ -263,8 +262,9 @@ export class PatchesSync {
   /**
    * Flushes a document to the server.
    * @param docId The ID of the document to flush.
+   * @param pending Optional pending changes to flush, to avoid redundant store fetch.
    */
-  protected async flushDoc(docId: string): Promise<void> {
+  protected async flushDoc(docId: string, pending?: Change[]): Promise<void> {
     if (!this.trackedDocs.has(docId)) {
       throw new Error(`Document ${docId} is not tracked`);
     }
@@ -273,8 +273,7 @@ export class PatchesSync {
     }
 
     try {
-      // Get changes from store or memory
-      let pending = await this.store.getPendingChanges(docId);
+      if (!pending) pending = await this.store.getPendingChanges(docId);
       if (!pending.length) {
         return; // Nothing to flush
       }
@@ -299,14 +298,17 @@ export class PatchesSync {
         pending = await this.store.getPendingChanges(docId);
       }
     } catch (err) {
-      // Handle DOC_DELETED error (document was deleted while we were offline)
       if (this._isDocDeletedError(err)) {
         await this._handleRemoteDocDeleted(docId);
         return;
       }
+      if (this._isDocExistsError(err)) {
+        await this._recoverFromDocExists(docId);
+        return;
+      }
       console.error(`Flush failed for doc ${docId}:`, err);
       this.onError.emit(err as Error, { docId });
-      throw err; // Re-throw so caller (like syncAll) knows it failed
+      throw err;
     }
   }
 
@@ -333,12 +335,12 @@ export class PatchesSync {
     docId: string,
     serverChanges: Change[],
     sentPendingRange?: [number, number]
-  ): Promise<void> {
+  ): Promise<Change[]> {
     // 1. Get current document snapshot from store
     const currentSnapshot = await this.store.getDoc(docId);
     if (!currentSnapshot) {
       console.warn(`Cannot apply server changes to non-existent doc: ${docId}`);
-      return;
+      return [];
     }
     const doc = this.patches.getOpenDoc(docId);
     if (doc) {
@@ -368,6 +370,8 @@ export class PatchesSync {
       this.store.saveCommittedChanges(docId, serverChanges, sentPendingRange),
       this.store.replacePendingChanges(docId, rebasedPendingChanges),
     ]);
+
+    return rebasedPendingChanges;
   }
 
   /**
@@ -484,5 +488,25 @@ export class PatchesSync {
    */
   protected _isDocDeletedError(err: unknown): boolean {
     return typeof err === 'object' && err !== null && 'code' in err && (err as { code: number }).code === 410;
+  }
+
+  /**
+   * Helper to detect "document already exists" errors from the server.
+   */
+  private _isDocExistsError(err: unknown): boolean {
+    const message = (err as Error)?.message ?? '';
+    return message.includes('already exists');
+  }
+
+  /**
+   * Recovers from a "document already exists" error by fetching server state and retrying.
+   */
+  private async _recoverFromDocExists(docId: string): Promise<void> {
+    const serverChanges = await this.ws.getChangesSince(docId, 0);
+    const rebasedPending = await this._applyServerChangesToDoc(docId, serverChanges);
+
+    if (rebasedPending.length > 0) {
+      await this.flushDoc(docId, rebasedPending);
+    }
   }
 }

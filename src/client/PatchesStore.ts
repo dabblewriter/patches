@@ -6,6 +6,8 @@ export interface TrackedDoc {
   committedRev: number;
   /** Optional flag indicating the document has been locally deleted. */
   deleted?: true;
+  /** The last revision that was attempted to be submitted to the server. */
+  lastAttemptedSubmissionRev?: number;
 }
 
 /**
@@ -226,4 +228,35 @@ export interface PatchesStore {
    * // Store is no longer usable
    */
   close(): Promise<void>;
+
+  /**
+   * Gets the last revision that was attempted to be submitted to the server.
+   *
+   * This bookmark is used by change collapsing to avoid modifying changes that
+   * may have been partially committed by the server. Returns undefined if no
+   * submission has been attempted yet.
+   *
+   * @param docId Document identifier
+   * @returns The last attempted submission revision, or undefined if none
+   * @example
+   * const lastAttempted = await store.getLastAttemptedSubmissionRev('my-document');
+   * // Use this to protect changes from collapsing
+   */
+  getLastAttemptedSubmissionRev?(docId: string): Promise<number | undefined>;
+
+  /**
+   * Sets the last revision that was attempted to be submitted to the server.
+   *
+   * Called before sending changes to the server to mark them as "in flight".
+   * This prevents change collapsing from modifying these changes in case the
+   * server commits them but the client doesn't receive confirmation.
+   *
+   * @param docId Document identifier
+   * @param rev The revision being submitted
+   * @example
+   * // Before sending batch to server
+   * await store.setLastAttemptedSubmissionRev('my-document', lastChange.rev);
+   * await sendToServer(batch);
+   */
+  setLastAttemptedSubmissionRev?(docId: string, rev: number): Promise<void>;
 }

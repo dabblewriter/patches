@@ -445,6 +445,34 @@ export class IndexedDBStore implements PatchesStore {
     await tx.complete();
     return [lastCommitted?.rev ?? 0, lastPending?.rev ?? lastCommitted?.rev ?? 0];
   }
+
+  // ─── Submission Bookmark ───────────────────────────────────────────────
+
+  /**
+   * Gets the last revision that was attempted to be submitted to the server.
+   * @param docId - The ID of the document.
+   * @returns The last attempted submission revision, or undefined if none.
+   */
+  async getLastAttemptedSubmissionRev(docId: string): Promise<number | undefined> {
+    const [tx, docsStore] = await this.transaction(['docs'], 'readonly');
+    const docMeta = await docsStore.get<TrackedDoc>(docId);
+    await tx.complete();
+    return docMeta?.lastAttemptedSubmissionRev;
+  }
+
+  /**
+   * Sets the last revision that was attempted to be submitted to the server.
+   * @param docId - The ID of the document.
+   * @param rev - The revision being submitted.
+   */
+  async setLastAttemptedSubmissionRev(docId: string, rev: number): Promise<void> {
+    const [tx, docsStore] = await this.transaction(['docs'], 'readwrite');
+    const docMeta = await docsStore.get<TrackedDoc>(docId);
+    if (docMeta) {
+      await docsStore.put({ ...docMeta, lastAttemptedSubmissionRev: rev });
+    }
+    await tx.complete();
+  }
 }
 
 class IDBTransactionWrapper {

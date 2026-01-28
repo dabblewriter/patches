@@ -8,6 +8,7 @@ interface DocBuffers {
   committed: Change[];
   pending: Change[];
   deleted?: true;
+  lastAttemptedSubmissionRev?: number;
 }
 
 /**
@@ -125,5 +126,17 @@ export class InMemoryStore implements PatchesStore {
 
   async close(): Promise<void> {
     this.docs.clear();
+  }
+
+  // ─── Submission Bookmark ───────────────────────────────────────────────
+  async getLastAttemptedSubmissionRev(docId: string): Promise<number | undefined> {
+    return this.docs.get(docId)?.lastAttemptedSubmissionRev;
+  }
+
+  async setLastAttemptedSubmissionRev(docId: string, rev: number): Promise<void> {
+    const buf = this.docs.get(docId);
+    if (buf) {
+      buf.lastAttemptedSubmissionRev = rev;
+    }
   }
 }

@@ -1,5 +1,6 @@
 import { isEqual } from '@dabble/delta';
 import { applyCommittedChanges } from '../algorithms/client/applyCommittedChanges.js';
+import { collapsePendingChanges } from '../algorithms/client/collapsePendingChanges.js';
 import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/shared/changeBatching.js';
 import { Patches } from '../client/Patches.js';
 import type { PatchesStore, TrackedDoc } from '../client/PatchesStore.js';
@@ -278,6 +279,18 @@ export class PatchesSync {
         return; // Nothing to flush
       }
 
+      // Collapse redundant pending changes before sending to reduce network traffic.
+      // Only collapse if the store supports submission bookmarking - without it, we can't
+      // safely protect partially-submitted changes from being collapsed.
+      if (this.store.getLastAttemptedSubmissionRev && this.store.setLastAttemptedSubmissionRev) {
+        const afterRev = await this.store.getLastAttemptedSubmissionRev(docId);
+        pending = collapsePendingChanges(pending, afterRev);
+
+        if (!pending.length) {
+          return; // All changes were collapsed away (unlikely but possible)
+        }
+      }
+
       const batches = breakChangesIntoBatches(pending, {
         maxPayloadBytes: this.maxPayloadBytes,
         maxStorageBytes: this.maxStorageBytes,
@@ -288,6 +301,13 @@ export class PatchesSync {
         if (!this.state.connected) {
           throw new Error('Disconnected during flush');
         }
+
+        // Mark the last rev in this batch as attempted before sending (if store supports it)
+        if (this.store.setLastAttemptedSubmissionRev) {
+          const lastRevInBatch = batch[batch.length - 1].rev;
+          await this.store.setLastAttemptedSubmissionRev(docId, lastRevInBatch);
+        }
+
         const range: [number, number] = [batch[0].rev, batch[batch.length - 1].rev];
         const committed = await this.ws.commitChanges(docId, batch);
 

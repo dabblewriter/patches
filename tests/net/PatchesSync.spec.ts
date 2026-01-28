@@ -45,6 +45,8 @@ describe('PatchesSync', () => {
         rev: 5,
         changes: [],
       }),
+      getLastAttemptedSubmissionRev: vi.fn().mockResolvedValue(undefined),
+      setLastAttemptedSubmissionRev: vi.fn().mockResolvedValue(undefined),
     };
 
     // Mock Patches
@@ -290,7 +292,7 @@ describe('PatchesSync', () => {
 
       await sync['syncDoc']('doc1');
 
-      expect(flushDocSpy).toHaveBeenCalledWith('doc1');
+      expect(flushDocSpy).toHaveBeenCalledWith('doc1', pendingChanges);
     });
 
     it('should sync document without pending changes', async () => {

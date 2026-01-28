@@ -31,9 +31,9 @@ interface StoredChange extends Change {
  * A snapshot will not be created if there are pending changes based on revisions older than the 200th committed change until those pending changes are committed.
  */
 export class IndexedDBStore implements PatchesStore {
-  private db: IDBDatabase | null = null;
-  private dbName?: string;
-  private dbPromise: Deferred<IDBDatabase>;
+  protected db: IDBDatabase | null = null;
+  protected dbName?: string;
+  protected dbPromise: Deferred<IDBDatabase>;
 
   constructor(dbName?: string) {
     this.dbName = dbName;
@@ -43,7 +43,7 @@ export class IndexedDBStore implements PatchesStore {
     }
   }
 
-  private async initDB() {
+  protected async initDB() {
     if (!this.dbName) return;
     const request = indexedDB.open(this.dbName, DB_VERSION);
 
@@ -72,7 +72,7 @@ export class IndexedDBStore implements PatchesStore {
     };
   }
 
-  private getDB(): Promise<IDBDatabase> {
+  protected getDB(): Promise<IDBDatabase> {
     return this.dbPromise.promise;
   }
 
@@ -116,7 +116,7 @@ export class IndexedDBStore implements PatchesStore {
     });
   }
 
-  private async transaction(
+  protected async transaction(
     storeNames: string[],
     mode: IDBTransactionMode
   ): Promise<[IDBTransactionWrapper, ...IDBStoreWrapper[]]> {
@@ -448,8 +448,8 @@ export class IndexedDBStore implements PatchesStore {
 }
 
 class IDBTransactionWrapper {
-  private tx: IDBTransaction;
-  private promise: Promise<void>;
+  protected tx: IDBTransaction;
+  protected promise: Promise<void>;
 
   constructor(tx: IDBTransaction) {
     this.tx = tx;
@@ -469,13 +469,13 @@ class IDBTransactionWrapper {
 }
 
 class IDBStoreWrapper {
-  private store: IDBObjectStore;
+  protected store: IDBObjectStore;
 
   constructor(store: IDBObjectStore) {
     this.store = store;
   }
 
-  private createRange(lower?: any, upper?: any): IDBKeyRange | undefined {
+  protected createRange(lower?: any, upper?: any): IDBKeyRange | undefined {
     if (lower === undefined && upper === undefined) return undefined;
     return IDBKeyRange.bound(lower, upper);
   }

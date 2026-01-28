@@ -63,7 +63,7 @@ describe('SignalingService', () => {
       const client2Id = await service.onClientConnected();
 
       const messages = service.getMessages(client2Id);
-      expect(messages[0].params.peers).toEqual([client1Id]);
+      expect((messages[0] as JsonRpcRequest).params.peers).toEqual([client1Id]);
     });
 
     it('should use provided client ID if given', async () => {
@@ -72,7 +72,7 @@ describe('SignalingService', () => {
 
       expect(clientId).toBe(customId);
       const messages = service.getMessages(customId);
-      expect(messages[0].params.id).toBe(customId);
+      expect((messages[0] as JsonRpcRequest).params.id).toBe(customId);
     });
 
     it('should handle multiple clients correctly', async () => {
@@ -87,7 +87,7 @@ describe('SignalingService', () => {
 
       // Third client should see first two clients in peers list
       const client3Welcome = service.getMessages(client3Id)[0];
-      expect(client3Welcome.params.peers).toEqual(expect.arrayContaining([client1Id, client2Id]));
+      expect((client3Welcome as JsonRpcRequest).params.peers).toEqual(expect.arrayContaining([client1Id, client2Id]));
     });
   });
 
@@ -370,7 +370,7 @@ describe('SignalingService', () => {
       const newClientId = await service.onClientConnected();
 
       const welcomeMessage = service.getMessages(newClientId)[0];
-      expect(welcomeMessage.params.peers).toHaveLength(5); // Remaining 5 clients
+      expect((welcomeMessage as JsonRpcRequest).params.peers).toHaveLength(5); // Remaining 5 clients
     });
 
     it('should handle empty signaling data', async () => {

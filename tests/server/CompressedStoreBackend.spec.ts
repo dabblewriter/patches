@@ -40,6 +40,9 @@ describe('CompressedStoreBackend', () => {
       listVersions: vi.fn().mockResolvedValue([]),
       loadVersionState: vi.fn().mockResolvedValue(undefined),
       deleteDoc: vi.fn(),
+      createTombstone: vi.fn(),
+      getTombstone: vi.fn(),
+      removeTombstone: vi.fn(),
     };
   });
 
@@ -165,7 +168,9 @@ describe('CompressedStoreBackend', () => {
       const changes = [createChange('c1', 1, [{ op: 'add', path: '/test', value: 'data' }])];
       const metadata: VersionMetadata = {
         id: 'v1',
-        rev: 1,
+        endRev: 1,
+        startRev: 1,
+        origin: 'main' as const,
         startedAt: '2024-01-01T00:00:00.000Z',
         endedAt: '2024-01-01T01:00:00.000Z',
       };
@@ -182,7 +187,9 @@ describe('CompressedStoreBackend', () => {
       const state = { text: 'hello', count: 42 };
       const metadata: VersionMetadata = {
         id: 'v1',
-        rev: 1,
+        endRev: 1,
+        startRev: 1,
+        origin: 'main' as const,
         startedAt: '2024-01-01T00:00:00.000Z',
         endedAt: '2024-01-01T01:00:00.000Z',
       };

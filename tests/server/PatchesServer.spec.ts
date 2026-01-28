@@ -271,7 +271,7 @@ describe('PatchesServer', () => {
         throw new Error('Apply patch failed');
       });
 
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => { });
 
       const result = await server.commitChanges('doc1', [changeWithoutBatch]);
 
@@ -291,7 +291,7 @@ describe('PatchesServer', () => {
 
     it('should handle notification errors gracefully', async () => {
       const emitSpy = vi.spyOn(server.onChangesCommitted, 'emit').mockRejectedValue(new Error('Notification failed'));
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => { });
 
       await server.commitChanges('doc1', [mockChange]);
 
@@ -357,10 +357,10 @@ describe('PatchesServer', () => {
     it('should delete document and emit signal', async () => {
       const emitSpy = vi.spyOn(server.onDocDeleted, 'emit').mockResolvedValue();
 
-      await server.deleteDoc('doc1', 'client1');
+      await server.deleteDoc('doc1', undefined, 'client1');
 
       expect(mockStore.deleteDoc).toHaveBeenCalledWith('doc1');
-      expect(emitSpy).toHaveBeenCalledWith('doc1', 'client1');
+      expect(emitSpy).toHaveBeenCalledWith('doc1', undefined, 'client1');
     });
   });
 
@@ -371,8 +371,8 @@ describe('PatchesServer', () => {
         origin: 'main' as const,
         startedAt: getISO(),
         endedAt: getISO(),
-        rev: 5,
-        baseRev: 1,
+        startRev: 1,
+        endRev: 5,
       };
 
       vi.mocked(getSnapshotAtRevision).mockResolvedValue({

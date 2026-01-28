@@ -130,7 +130,7 @@ describe('Patches', () => {
     });
 
     it('should accept custom docOptions', () => {
-      const customOptions = { maxPayloadBytes: 100 };
+      const customOptions = { maxStorageBytes: 100 };
       const patchesInstance = new Patches({
         store: mockStore,
         docOptions: customOptions,

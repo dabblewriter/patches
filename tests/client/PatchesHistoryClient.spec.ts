@@ -39,8 +39,8 @@ describe('PatchesHistoryClient', () => {
 
   const createVersion = (id: string, rev: number, parentId?: string): VersionMetadata => ({
     id,
-    rev,
-    baseRev: rev - 1,
+    endRev: rev,
+    startRev: rev,
     origin: 'main' as const,
     startedAt: getISO(new Date(Date.now() - 1000)),
     endedAt: getISO(),

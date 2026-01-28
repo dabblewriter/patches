@@ -73,7 +73,7 @@ export class RPCServer {
       this.rpc.notify('changesCommitted', { docId, changes }, originClientId);
     });
 
-    this.patches.onDocDeleted((docId, originClientId) => {
+    this.patches.onDocDeleted((docId, options, originClientId) => {
       this.rpc.notify('docDeleted', { docId }, originClientId);
     });
   }
@@ -130,7 +130,7 @@ export class RPCServer {
   async deleteDoc(params: { docId: string; options?: DeleteDocOptions }, ctx?: AuthContext) {
     const { docId, options } = params;
     await this.assertWrite(ctx, docId, 'deleteDoc', params);
-    await this.patches.deleteDoc(docId, ctx?.clientId, options);
+    await this.patches.deleteDoc(docId, options, ctx?.clientId);
   }
 
   /**

@@ -111,8 +111,8 @@ describe('handleOfflineSessionsAndBatches', () => {
       endedAt: toISO(1000),
       origin: 'offline-branch' as const,
       startedAt: toISO(900),
-      rev: 1,
-      baseRev: 0,
+      endRev: 1,
+      startRev: 1,
     };
     const changes = [
       createChange('1', 6, 1200), // Within timeout
@@ -143,8 +143,8 @@ describe('handleOfflineSessionsAndBatches', () => {
       endedAt: toISO(1000),
       origin: 'offline-branch' as const,
       startedAt: toISO(900),
-      rev: 1,
-      baseRev: 0,
+      endRev: 1,
+      startRev: 1,
     };
     const changes = [
       createChange('1', 6, 400000), // Exceeds timeout (300000ms)

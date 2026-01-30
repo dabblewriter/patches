@@ -221,14 +221,14 @@ export class PatchesServer {
    * @param metadata Optional metadata for the version.
    * @returns The ID of the created version.
    */
-  async captureCurrentVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string> {
+  async captureCurrentVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string | null> {
     assertVersionMetadata(metadata);
     const { state: initialState, changes } = await getSnapshotAtRevision(this.store, docId);
     let state = initialState;
     state = applyChanges(state, changes);
     const version = await createVersion(this.store, docId, state, changes, metadata);
     if (!version) {
-      throw new Error(`No changes to create a version for doc ${docId}.`);
+      return null;
     }
     return version.id;
   }

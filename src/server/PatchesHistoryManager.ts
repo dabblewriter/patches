@@ -36,9 +36,9 @@ export class PatchesHistoryManager {
    * Create a new named version snapshot of a document's current state.
    * @param docId The document ID.
    * @param name The name of the version.
-   * @returns The ID of the created version.
+   * @returns The ID of the created version, or null if no changes to capture.
    */
-  async createVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string> {
+  async createVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string | null> {
     assertVersionMetadata(metadata);
     return await this.patches.captureCurrentVersion(docId, metadata);
   }

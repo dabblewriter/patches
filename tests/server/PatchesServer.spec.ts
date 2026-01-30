@@ -403,7 +403,7 @@ describe('PatchesServer', () => {
       expect(result).toBe('version1');
     });
 
-    it('should throw error when no changes to create version', async () => {
+    it('should return null when no changes to create version', async () => {
       vi.mocked(getSnapshotAtRevision).mockResolvedValue({
         state: { content: 'test' },
         rev: 5,
@@ -412,7 +412,8 @@ describe('PatchesServer', () => {
       vi.mocked(applyChanges).mockReturnValue({ content: 'test' });
       vi.mocked(createVersionAlgorithm).mockResolvedValue(undefined);
 
-      await expect(server.captureCurrentVersion('doc1')).rejects.toThrow('No changes to create a version');
+      const result = await server.captureCurrentVersion('doc1');
+      expect(result).toBeNull();
     });
   });
 });

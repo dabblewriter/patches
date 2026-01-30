@@ -15,7 +15,6 @@ import type {
   EditableVersionMetadata,
   PatchesState,
 } from '../types.js';
-import { getISO } from '../utils/dates.js';
 import { CompressedStoreBackend } from './CompressedStoreBackend.js';
 import type { PatchesStoreBackend } from './types.js';
 export type { CommitChangesOptions } from '../algorithms/server/commitChanges.js';
@@ -184,7 +183,7 @@ export class PatchesServer {
       const { rev: lastRev } = await this.getDoc(docId);
       await this.store.createTombstone({
         docId,
-        deletedAt: getISO(),
+        deletedAt: Date.now(),
         lastRev,
         deletedByClientId: originClientId,
       });

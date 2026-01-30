@@ -1,7 +1,6 @@
 import { createVersionMetadata } from '../../data/version.js';
 import type { PatchesStoreBackend } from '../../server/types.js';
 import type { Change } from '../../types.js';
-import { getISO, timestampDiff } from '../../utils/dates.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { breakChanges } from '../shared/changeBatching.js';
 import { getStateAtRevision } from './getStateAtRevision.js';
@@ -54,7 +53,7 @@ export async function handleOfflineSessionsAndBatches(
 
   for (let i = 1; i <= changes.length; i++) {
     const isLastChange = i === changes.length;
-    const timeDiff = isLastChange ? Infinity : timestampDiff(changes[i].createdAt, changes[i - 1].createdAt);
+    const timeDiff = isLastChange ? Infinity : changes[i].createdAt - changes[i - 1].createdAt;
 
     // TODO check the logic of this
     // Session ends if timeout exceeded OR it's the last change in the batch
@@ -64,12 +63,12 @@ export async function handleOfflineSessionsAndBatches(
         // TODO check the logic of this
         // Check if this is a continuation of the previous session (merge/extend)
         const isContinuation =
-          !!lastVersion && timestampDiff(sessionChanges[0].createdAt, lastVersion.endedAt) <= sessionTimeoutMillis;
+          !!lastVersion && sessionChanges[0].createdAt - lastVersion.endedAt <= sessionTimeoutMillis;
 
         if (isContinuation) {
           // Append to the existing version
           const mergedState = applyChanges(offlineBaseState, sessionChanges);
-          const newEndedAt = getISO(sessionChanges[sessionChanges.length - 1].createdAt);
+          const newEndedAt = sessionChanges[sessionChanges.length - 1].createdAt;
           const newRev = sessionChanges[sessionChanges.length - 1].rev;
           await store.appendVersionChanges(docId, lastVersion.id, sessionChanges, newEndedAt, newRev, mergedState);
           offlineBaseState = mergedState;
@@ -83,9 +82,8 @@ export async function handleOfflineSessionsAndBatches(
             groupId: batchId,
             origin,
             isOffline,
-            // Convert client timestamps to UTC for version metadata (enables lexicographic sorting)
-            startedAt: getISO(sessionChanges[0].createdAt),
-            endedAt: getISO(sessionChanges[sessionChanges.length - 1].createdAt),
+            startedAt: sessionChanges[0].createdAt,
+            endedAt: sessionChanges[sessionChanges.length - 1].createdAt,
             endRev: sessionChanges[sessionChanges.length - 1].rev,
             startRev: sessionChanges[0].rev,
           });

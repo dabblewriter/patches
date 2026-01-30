@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { handleOfflineSessionsAndBatches } from '../../../src/algorithms/server/handleOfflineSessionsAndBatches';
 import type { PatchesStoreBackend } from '../../../src/server/types';
 import type { Change } from '../../../src/types';
-import { getISO } from '../../../src/utils/dates';
 
 // Mock the dependencies
 vi.mock('crypto-id');
@@ -14,16 +13,13 @@ describe('handleOfflineSessionsAndBatches', () => {
   let mockStore: PatchesStoreBackend;
   const sessionTimeoutMillis = 300000; // 5 minutes
 
-  /** Creates an ISO timestamp from milliseconds since epoch */
-  const toISO = (ms: number): string => new Date(ms).toISOString().replace('Z', '+00:00');
-
   const createChange = (id: string, rev: number, createdAtMs: number): Change => ({
     id,
     rev,
     baseRev: rev - 1,
     ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
-    createdAt: toISO(createdAtMs),
-    committedAt: getISO(),
+    createdAt: createdAtMs,
+    committedAt: Date.now(),
   });
 
   beforeEach(async () => {
@@ -38,8 +34,8 @@ describe('handleOfflineSessionsAndBatches', () => {
     vi.mocked(createVersion).mockImplementation((data: any) => ({
       id: 'version-id',
       origin: 'offline-branch' as const,
-      startedAt: new Date().toISOString(),
-      endedAt: new Date().toISOString(),
+      startedAt: Date.now(),
+      endedAt: Date.now(),
       rev: 1,
       baseRev: 0,
       ...(data || {}),
@@ -108,9 +104,9 @@ describe('handleOfflineSessionsAndBatches', () => {
     const existingVersion = {
       id: 'existing-version',
       parentId: 'parent-version',
-      endedAt: toISO(1000),
+      endedAt: 1000,
       origin: 'offline-branch' as const,
-      startedAt: toISO(900),
+      startedAt: 900,
       endRev: 1,
       startRev: 1,
     };
@@ -128,7 +124,7 @@ describe('handleOfflineSessionsAndBatches', () => {
       'doc1',
       'existing-version',
       changes,
-      expect.any(String), // newEndedAt
+      expect.any(Number), // newEndedAt
       6, // newRev from the change
       expect.any(Object) // mergedState
     );
@@ -140,9 +136,9 @@ describe('handleOfflineSessionsAndBatches', () => {
     const existingVersion = {
       id: 'existing-version',
       parentId: 'parent-version',
-      endedAt: toISO(1000),
+      endedAt: 1000,
       origin: 'offline-branch' as const,
-      startedAt: toISO(900),
+      startedAt: 900,
       endRev: 1,
       startRev: 1,
     };
@@ -216,15 +212,13 @@ describe('handleOfflineSessionsAndBatches', () => {
     await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
 
     const { createVersionMetadata: createVersion } = await import('../../../src/data/version');
-    // toISO strips milliseconds
-    const toUTC = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}/, '');
     expect(createVersion).toHaveBeenCalledWith({
       parentId: undefined,
       groupId: undefined,
       origin: 'offline-branch',
       isOffline: true,
-      startedAt: toUTC(1000),
-      endedAt: toUTC(2000),
+      startedAt: 1000,
+      endedAt: 2000,
       endRev: 7,
       startRev: 6,
     });
@@ -237,8 +231,8 @@ describe('handleOfflineSessionsAndBatches', () => {
       rev,
       baseRev: rev - 1,
       ops: [{ op: 'add', path: `/change-${id}`, value: 'x'.repeat(200) }],
-      createdAt: toISO(createdAtMs),
-      committedAt: getISO(),
+      createdAt: createdAtMs,
+      committedAt: Date.now(),
     });
 
     const changes = [createLargeChange('1', 6, 1000), createLargeChange('2', 7, 1100), createLargeChange('3', 8, 1200)];
@@ -273,8 +267,8 @@ describe('handleOfflineSessionsAndBatches', () => {
       rev,
       baseRev: rev - 1,
       ops: [{ op: 'add', path: `/change-${id}`, value: 'x'.repeat(200) }],
-      createdAt: toISO(createdAtMs),
-      committedAt: getISO(),
+      createdAt: createdAtMs,
+      committedAt: Date.now(),
     });
 
     const changes = [createLargeChange('1', 6, 1000), createLargeChange('2', 7, 1100), createLargeChange('3', 8, 1200)];

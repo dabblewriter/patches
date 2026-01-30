@@ -81,7 +81,7 @@ export class CompressedStoreBackend implements PatchesStoreBackend {
     docId: string,
     versionId: string,
     changes: Change[],
-    newEndedAt: string,
+    newEndedAt: number,
     newRev: number,
     newState: any
   ): Promise<void> {

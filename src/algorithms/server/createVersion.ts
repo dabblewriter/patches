@@ -1,7 +1,6 @@
 import { createVersionMetadata } from '../../data/version.js';
 import type { PatchesStoreBackend } from '../../server/types.js';
 import type { Change, EditableVersionMetadata, VersionMetadata } from '../../types.js';
-import { getISO } from '../../utils/dates.js';
 
 /**
  * Creates a new version snapshot of a document's state from changes.
@@ -28,9 +27,8 @@ export async function createVersion(
 
   const sessionMetadata = createVersionMetadata({
     origin: 'main',
-    // Convert client timestamps to UTC for version metadata (enables lexicographic sorting)
-    startedAt: getISO(changes[0].createdAt),
-    endedAt: getISO(changes[changes.length - 1].createdAt),
+    startedAt: changes[0].createdAt,
+    endedAt: changes[changes.length - 1].createdAt,
     endRev: changes[changes.length - 1].rev,
     startRev,
     ...metadata,

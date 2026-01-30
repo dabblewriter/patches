@@ -4,7 +4,6 @@ import { JSONPatch } from '../../src/json-patch/JSONPatch';
 import { PatchesServer, assertVersionMetadata } from '../../src/server/PatchesServer';
 import type { PatchesStoreBackend } from '../../src/server/types';
 import type { Change, EditableVersionMetadata } from '../../src/types';
-import { getISO, getLocalISO } from '../../src/utils/dates';
 
 // Mock the algorithm modules
 vi.mock('../../src/algorithms/server/getSnapshotAtRevision');
@@ -109,8 +108,8 @@ describe('PatchesServer', () => {
       rev: 2,
       batchId: 'batch1',
       ops: [{ op: 'replace', path: '/content', value: 'new content' }],
-      createdAt: getLocalISO(),
-      committedAt: getISO(),
+      createdAt: Date.now(),
+      committedAt: Date.now(),
     } as Change;
 
     beforeEach(() => {
@@ -141,7 +140,7 @@ describe('PatchesServer', () => {
         id: 'change1',
         rev: 2,
         ops: [{ op: 'replace', path: '/content', value: 'new content' }],
-        createdAt: getLocalISO(),
+        createdAt: Date.now(),
         // No baseRev - should be filled in
         // No batchId - skip offline handling
       } as any;
@@ -314,8 +313,8 @@ describe('PatchesServer', () => {
         baseRev: 1,
         rev: 2,
         ops: mockPatch.ops,
-        createdAt: getLocalISO(),
-        committedAt: getISO(),
+        createdAt: Date.now(),
+        committedAt: Date.now(),
       } as Change);
 
       const commitSpy = vi.spyOn(server, 'commitChanges').mockResolvedValue([[], []]);
@@ -369,8 +368,8 @@ describe('PatchesServer', () => {
       const mockVersion = {
         id: 'version1',
         origin: 'main' as const,
-        startedAt: getISO(),
-        endedAt: getISO(),
+        startedAt: Date.now(),
+        endedAt: Date.now(),
         startRev: 1,
         endRev: 5,
       };
@@ -383,8 +382,8 @@ describe('PatchesServer', () => {
             id: 'change1',
             rev: 5,
             baseRev: 1,
-            createdAt: getLocalISO(),
-            committedAt: getISO(),
+            createdAt: Date.now(),
+            committedAt: Date.now(),
           } as Change,
         ],
       });

@@ -43,7 +43,7 @@ export interface PatchesStoreBackend {
     docId: string,
     versionId: string,
     changes: Change[],
-    newEndedAt: string,
+    newEndedAt: number,
     newEndRev: number,
     newState: any
   ): Promise<void>;

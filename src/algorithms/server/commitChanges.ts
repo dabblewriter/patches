@@ -1,6 +1,5 @@
 import type { PatchesStoreBackend } from '../../server/types.js';
 import type { Change, ChangeInput, CommitChangesOptions } from '../../types.js';
-import { clampTimestamp, getISO, timestampDiff } from '../../utils/dates.js';
 import { filterSoftWritesAgainstState } from '../../json-patch/utils/softWrites.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { createVersion } from './createVersion.js';
@@ -62,7 +61,7 @@ export async function commitChanges(
   }
 
   // Ensure baseRev and rev are set, add committedAt, and clamp createdAt
-  const serverNow = getISO();
+  const serverNow = Date.now();
   let rev = baseRev + 1;
   changes.forEach(c => {
     if (c.baseRev == null) c.baseRev = baseRev;
@@ -75,8 +74,8 @@ export async function commitChanges(
     if (!options?.historicalImport || !(c as Change).committedAt) {
       (c as Change).committedAt = serverNow;
     }
-    // Clamp createdAt to not be after committedAt (preserves timezone offset)
-    c.createdAt = c.createdAt ? clampTimestamp(c.createdAt, serverNow) : serverNow;
+    // Clamp createdAt to not be after committedAt
+    c.createdAt = c.createdAt ? Math.min(c.createdAt, serverNow) : serverNow;
   });
 
   // Basic validation
@@ -99,7 +98,7 @@ export async function commitChanges(
   // In historicalImport mode, use incoming change timestamp instead of serverNow for accurate gap detection
   const lastChange = currentChanges[currentChanges.length - 1];
   const compareTime = options?.historicalImport ? changes[0].createdAt : serverNow;
-  if (lastChange && timestampDiff(compareTime, lastChange.createdAt) > sessionTimeoutMillis) {
+  if (lastChange && compareTime - lastChange.createdAt > sessionTimeoutMillis) {
     await createVersion(store, docId, currentState, currentChanges);
   }
 
@@ -120,7 +119,7 @@ export async function commitChanges(
   // 4. Handle offline-session versioning:
   // - batchId present (multi-batch uploads)
   // - or the first change is older than the session timeout (single-batch offline)
-  const isOfflineTimestamp = timestampDiff(serverNow, incomingChanges[0].createdAt) > sessionTimeoutMillis;
+  const isOfflineTimestamp = serverNow - incomingChanges[0].createdAt > sessionTimeoutMillis;
   if (isOfflineTimestamp || batchId) {
     // Determine if we can fast-forward (no concurrent changes to transform over)
     const canFastForward = committedChanges.length === 0;

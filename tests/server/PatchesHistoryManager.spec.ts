@@ -9,7 +9,6 @@ import type {
   ListVersionsOptions,
   VersionMetadata,
 } from '../../src/types';
-import { getISO, getLocalISO } from '../../src/utils/dates';
 
 // Mock the PatchesServer module
 vi.mock('../../src/server/PatchesServer', async () => {
@@ -63,8 +62,8 @@ describe('PatchesHistoryManager', () => {
         groupId: 'group1',
         origin: 'main',
         branchName: undefined,
-        startedAt: getISO(),
-        endedAt: getISO(),
+        startedAt: Date.now(),
+        endedAt: Date.now(),
         endRev: 5,
         startRev: 1,
         name: 'Version 1',
@@ -76,8 +75,8 @@ describe('PatchesHistoryManager', () => {
         groupId: 'group1',
         origin: 'main',
         branchName: undefined,
-        startedAt: getISO(),
-        endedAt: getISO(),
+        startedAt: Date.now(),
+        endedAt: Date.now(),
         endRev: 10,
         startRev: 5,
         name: 'Version 2',
@@ -247,8 +246,8 @@ describe('PatchesHistoryManager', () => {
         rev: 2,
         baseRev: 1,
         ops: [{ op: 'add', path: '/title', value: 'Test' }],
-        createdAt: getLocalISO(),
-        committedAt: getISO(),
+        createdAt: Date.now(),
+        committedAt: Date.now(),
         metadata: {},
       },
       {
@@ -256,8 +255,8 @@ describe('PatchesHistoryManager', () => {
         rev: 3,
         baseRev: 2,
         ops: [{ op: 'replace', path: '/content', value: 'Updated content' }],
-        createdAt: getLocalISO(),
-        committedAt: getISO(),
+        createdAt: Date.now(),
+        committedAt: Date.now(),
         metadata: {},
       },
     ];
@@ -306,8 +305,8 @@ describe('PatchesHistoryManager', () => {
         rev: 1,
         baseRev: 0,
         ops: [{ op: 'add', path: '', value: { title: 'New Doc' } }],
-        createdAt: getLocalISO(),
-        committedAt: getISO(),
+        createdAt: Date.now(),
+        committedAt: Date.now(),
         metadata: {},
       },
       {
@@ -315,8 +314,8 @@ describe('PatchesHistoryManager', () => {
         rev: 2,
         baseRev: 1,
         ops: [{ op: 'replace', path: '/title', value: 'Updated Doc' }],
-        createdAt: getLocalISO(),
-        committedAt: getISO(),
+        createdAt: Date.now(),
+        committedAt: Date.now(),
         metadata: {},
       },
     ];
@@ -380,8 +379,8 @@ describe('PatchesHistoryManager', () => {
           groupId: 'group1',
           origin: 'main' as const,
           branchName: undefined,
-          startedAt: getISO(),
-          endedAt: getISO(),
+          startedAt: Date.now(),
+          endedAt: Date.now(),
           endRev: 5,
           startRev: 1,
           name: 'Feature Complete',
@@ -408,8 +407,8 @@ describe('PatchesHistoryManager', () => {
           rev: 1,
           baseRev: 0,
           ops: [{ op: 'add', path: '', value: mockState }],
-          createdAt: getLocalISO(),
-          committedAt: getISO(),
+          createdAt: Date.now(),
+          committedAt: Date.now(),
           metadata: {},
         },
       ];

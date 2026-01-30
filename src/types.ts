@@ -16,8 +16,8 @@ export interface ChangeInput {
   baseRev?: number;
   /** Optional revision number. If omitted, server assigns based on current state. */
   rev?: number;
-  /** Client-side ISO timestamp when the change was created (with timezone offset). */
-  createdAt: string;
+  /** Unix timestamp in milliseconds when the change was created. */
+  createdAt: number;
   /** Optional batch identifier for grouping changes that belong to the same client batch (for multi-batch offline/large edits). */
   batchId?: string;
   /** Optional arbitrary metadata associated with the change. */
@@ -33,8 +33,8 @@ export interface Change extends ChangeInput {
   baseRev: number;
   /** The revision number assigned by the server after commit. */
   rev: number;
-  /** Server-side ISO timestamp when the change was committed (UTC with Z). */
-  committedAt: string;
+  /** Unix timestamp in milliseconds when the change was committed. */
+  committedAt: number;
 }
 
 /**
@@ -76,8 +76,8 @@ export interface Branch {
   docId: string;
   /** The revision number on the source document where the branch occurred. */
   branchedAtRev: number;
-  /** Server-side ISO timestamp when the branch was created (UTC with Z). */
-  createdAt: string;
+  /** Unix timestamp in milliseconds when the branch was created. */
+  createdAt: number;
   /** Optional user-friendly name for the branch. */
   name?: string;
   /** Current status of the branch. */
@@ -96,14 +96,14 @@ export type EditableBranchMetadata = Disallowed<Branch, 'id' | 'docId' | 'branch
 export interface DocumentTombstone {
   /** The ID of the deleted document. */
   docId: string;
-  /** ISO timestamp when the document was deleted (UTC with Z). */
-  deletedAt: string;
+  /** Unix timestamp in milliseconds when the document was deleted. */
+  deletedAt: number;
   /** The last revision number before deletion. */
   lastRev: number;
   /** Optional client ID that initiated the deletion. */
   deletedByClientId?: string;
-  /** Optional ISO timestamp for automatic tombstone expiration (UTC with Z). */
-  expiresAt?: string;
+  /** Optional Unix timestamp in milliseconds for automatic tombstone expiration. */
+  expiresAt?: number;
 }
 
 /**
@@ -131,10 +131,10 @@ export interface VersionMetadata {
   isOffline?: boolean;
   /** User-defined name if origin is 'branch'. */
   branchName?: string;
-  /** Server-side ISO timestamp of version start (UTC with Z). */
-  startedAt: string;
-  /** Server-side ISO timestamp of version end (UTC with Z). */
-  endedAt: string;
+  /** Unix timestamp in milliseconds of version start. */
+  startedAt: number;
+  /** Unix timestamp in milliseconds of version end. */
+  endedAt: number;
   /** The ending revision number of this version (the last change's rev). */
   endRev: number;
   /** The starting revision number of this version (the first change's rev). */

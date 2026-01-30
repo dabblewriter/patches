@@ -2,7 +2,6 @@ import { inc } from 'alphacounter';
 import { createId } from 'crypto-id';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change, ChangeInput } from '../types.js';
-import { getLocalISO } from '../utils/dates.js';
 
 /**
  * Create a change id for a given revision. Uses a random 4 character id, prefixed with a revision number string.
@@ -25,7 +24,7 @@ export function createChange(
     return {
       id: createId(8),
       ops: baseRev,
-      createdAt: getLocalISO(),
+      createdAt: Date.now(),
       ...rev,
     };
   } else {
@@ -34,7 +33,7 @@ export function createChange(
       baseRev,
       rev,
       ops,
-      createdAt: getLocalISO(),
+      createdAt: Date.now(),
       ...metadata,
     };
   }

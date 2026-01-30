@@ -3,7 +3,6 @@ import { breakChanges } from '../algorithms/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import { createVersionMetadata } from '../data/version.js';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata } from '../types.js';
-import { getISO } from '../utils/dates.js';
 import type { PatchesServer } from './PatchesServer.js';
 import type { BranchingStoreBackend } from './types.js';
 
@@ -47,7 +46,7 @@ export class PatchesBranchManager {
     const branchDocId = this.store.createBranchId
       ? await Promise.resolve(this.store.createBranchId(docId))
       : createId(22);
-    const now = getISO();
+    const now = Date.now();
     // Create an initial version at the branch point rev (for snapshotting/large docs)
     const initialVersionMetadata = createVersionMetadata({
       origin: 'main', // Branch doc versions are 'main' until merged

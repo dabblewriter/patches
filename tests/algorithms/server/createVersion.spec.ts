@@ -12,9 +12,6 @@ describe('createVersion', () => {
   const mockCreateVersionMetadata = vi.mocked(versionModule.createVersionMetadata);
   let mockStore: PatchesStoreBackend;
 
-  // Helper to create ISO timestamp without milliseconds
-  const toISO = (timestamp: number) => new Date(timestamp).toISOString().replace(/\.\d{3}/, '');
-
   beforeEach(() => {
     vi.clearAllMocks();
     mockStore = {
@@ -28,14 +25,14 @@ describe('createVersion', () => {
       createChange(1, 2, [{ op: 'replace', path: '/text', value: 'world' }]),
     ];
 
-    // Set specific timestamps for predictable testing (ISO strings with timezone offset)
-    changes[0].createdAt = '1970-01-01T00:00:01.000+00:00';
-    changes[1].createdAt = '1970-01-01T00:00:02.000+00:00';
+    // Set specific timestamps for predictable testing (Unix ms)
+    changes[0].createdAt = 1000;
+    changes[1].createdAt = 2000;
 
     const expectedVersionData = {
       origin: main,
-      startedAt: toISO(1000), // Converted to UTC
-      endedAt: toISO(2000),
+      startedAt: 1000,
+      endedAt: 2000,
       endRev: 2,
       startRev: 1,
     };
@@ -53,7 +50,7 @@ describe('createVersion', () => {
   it('should merge additional metadata into version', async () => {
     const changes = [createChange(5, 6, [{ op: 'add', path: '/title', value: 'Document' }])];
 
-    changes[0].createdAt = '1970-01-01T00:00:05.000+00:00';
+    changes[0].createdAt = 5000;
 
     const additionalMetadata = {
       name: 'My Version',
@@ -63,8 +60,8 @@ describe('createVersion', () => {
 
     const expectedVersionData = {
       origin: main,
-      startedAt: toISO(5000),
-      endedAt: toISO(5000),
+      startedAt: 5000,
+      endedAt: 5000,
       endRev: 6,
       startRev: 6,
       name: 'My Version',
@@ -105,12 +102,12 @@ describe('createVersion', () => {
   it('should handle single change correctly', async () => {
     const changes = [createChange(10, 11, [{ op: 'replace', path: '/status', value: 'complete' }])];
 
-    changes[0].createdAt = '1970-01-01T00:00:07.500+00:00';
+    changes[0].createdAt = 7500;
 
     const expectedVersionData = {
       origin: main,
-      startedAt: toISO(7500),
-      endedAt: toISO(7500),
+      startedAt: 7500,
+      endedAt: 7500,
       endRev: 11,
       startRev: 11,
     };
@@ -134,15 +131,15 @@ describe('createVersion', () => {
     ];
 
     // Set timestamps out of order to ensure we use array position, not timestamp order
-    changes[0].createdAt = '1970-01-01T00:00:01.000+00:00'; // First change
-    changes[1].createdAt = '1970-01-01T00:00:00.500+00:00'; // Earlier timestamp but not first
-    changes[2].createdAt = '1970-01-01T00:00:03.000+00:00'; // Latest timestamp but not last
-    changes[3].createdAt = '1970-01-01T00:00:02.000+00:00'; // Last change
+    changes[0].createdAt = 1000; // First change
+    changes[1].createdAt = 500; // Earlier timestamp but not first
+    changes[2].createdAt = 3000; // Latest timestamp but not last
+    changes[3].createdAt = 2000; // Last change
 
     const expectedVersionData = {
       origin: main,
-      startedAt: toISO(1000), // First change timestamp
-      endedAt: toISO(2000), // Last change timestamp
+      startedAt: 1000, // First change timestamp
+      endedAt: 2000, // Last change timestamp
       endRev: 4,
       startRev: 1,
     };
@@ -161,7 +158,7 @@ describe('createVersion', () => {
   it('should override metadata properties correctly', async () => {
     const changes = [createChange(1, 2, [{ op: 'add', path: '/test', value: 'value' }])];
 
-    changes[0].createdAt = '1970-01-01T00:00:09.000+00:00';
+    changes[0].createdAt = 9000;
 
     // Metadata that overrides some default properties
     const metadata = {
@@ -170,8 +167,8 @@ describe('createVersion', () => {
 
     const expectedVersionData = {
       origin: main,
-      startedAt: toISO(9000),
-      endedAt: toISO(9000),
+      startedAt: 9000,
+      endedAt: 9000,
       endRev: 2,
       startRev: 2,
       name: 'Custom Version',
@@ -189,13 +186,13 @@ describe('createVersion', () => {
 
   it('should handle store errors gracefully', async () => {
     const changes = [createChange(0, 1, [{ op: 'add', path: '/text', value: 'hello' }])];
-    changes[0].createdAt = '1970-01-01T00:00:01.000+00:00';
+    changes[0].createdAt = 1000;
 
     const mockVersion = {
       id: 'version-123',
       origin: main,
-      startedAt: toISO(1000),
-      endedAt: toISO(1000),
+      startedAt: 1000,
+      endedAt: 1000,
       endRev: 1,
       startRev: 1,
     };

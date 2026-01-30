@@ -6,4 +6,3 @@ export * from './event-signal.js';
 export * from './json-patch/index.js';
 export type { ApplyJSONPatchOptions } from './json-patch/types.js';
 export type * from './types.js';
-export * from './utils/dates.js';

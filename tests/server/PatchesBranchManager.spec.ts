@@ -3,7 +3,6 @@ import { PatchesBranchManager, assertBranchMetadata } from '../../src/server/Pat
 import { PatchesServer } from '../../src/server/PatchesServer';
 import type { BranchingStoreBackend } from '../../src/server/types';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata, VersionMetadata } from '../../src/types';
-import { getISO, getLocalISO } from '../../src/utils/dates';
 
 // Mock the dependencies
 vi.mock('crypto-id', () => ({
@@ -64,7 +63,7 @@ describe('PatchesBranchManager', () => {
           id: 'branch1',
           docId: 'doc1',
           branchedAtRev: 5,
-          createdAt: getISO(),
+          createdAt: Date.now(),
           status: 'open',
           name: 'Feature Branch',
         },
@@ -72,7 +71,7 @@ describe('PatchesBranchManager', () => {
           id: 'branch2',
           docId: 'doc1',
           branchedAtRev: 3,
-          createdAt: getISO(),
+          createdAt: Date.now(),
           status: 'merged',
           name: 'Bug Fix Branch',
         },
@@ -100,8 +99,8 @@ describe('PatchesBranchManager', () => {
     const mockVersion: VersionMetadata = {
       id: 'version1',
       origin: 'main' as const,
-      startedAt: getISO(),
-      endedAt: getISO(),
+      startedAt: Date.now(),
+      endedAt: Date.now(),
       endRev: 5,
       startRev: 5,
       groupId: 'generated-id',
@@ -129,8 +128,8 @@ describe('PatchesBranchManager', () => {
       expect(mockServer.getStateAtRevision).toHaveBeenCalledWith('doc1', 5);
       expect(createVersionMetadata).toHaveBeenCalledWith({
         origin: 'main',
-        startedAt: expect.any(String),
-        endedAt: expect.any(String),
+        startedAt: expect.any(Number),
+        endedAt: expect.any(Number),
         endRev: 5,
         startRev: 5,
         name: 'Test Branch',
@@ -144,7 +143,7 @@ describe('PatchesBranchManager', () => {
         id: 'generated-id',
         docId: 'doc1',
         branchedAtRev: 5,
-        createdAt: expect.any(String),
+        createdAt: expect.any(Number),
         status: 'open',
       });
       expect(result).toBe('generated-id');
@@ -158,7 +157,7 @@ describe('PatchesBranchManager', () => {
         id: 'generated-id',
         docId: 'doc1',
         branchedAtRev: 3,
-        createdAt: expect.any(String),
+        createdAt: expect.any(Number),
         status: 'open',
       });
     });
@@ -168,7 +167,7 @@ describe('PatchesBranchManager', () => {
         id: 'branch1',
         docId: 'original-doc',
         branchedAtRev: 1,
-        createdAt: getISO(),
+        createdAt: Date.now(),
         status: 'open',
       };
 
@@ -266,7 +265,7 @@ describe('PatchesBranchManager', () => {
       id: 'branch1',
       docId: 'doc1',
       branchedAtRev: 5,
-      createdAt: getISO(),
+      createdAt: Date.now(),
       status: 'open',
       name: 'Feature Branch',
     };
@@ -277,8 +276,8 @@ describe('PatchesBranchManager', () => {
         rev: 1,
         baseRev: 0,
         ops: [{ op: 'replace', path: '/title', value: 'New Title' }],
-        createdAt: getLocalISO(),
-        committedAt: getISO(),
+        createdAt: Date.now(),
+        committedAt: Date.now(),
         metadata: {},
       },
       {
@@ -286,8 +285,8 @@ describe('PatchesBranchManager', () => {
         rev: 2,
         baseRev: 1,
         ops: [{ op: 'add', path: '/section', value: 'New Section' }],
-        createdAt: getLocalISO(),
-        committedAt: getISO(),
+        createdAt: Date.now(),
+        committedAt: Date.now(),
         metadata: {},
       },
     ];
@@ -299,8 +298,8 @@ describe('PatchesBranchManager', () => {
         groupId: 'branch1',
         origin: 'main',
         branchName: 'Feature Branch',
-        startedAt: getISO(),
-        endedAt: getISO(),
+        startedAt: Date.now(),
+        endedAt: Date.now(),
         endRev: 2,
         startRev: 0,
       },
@@ -325,8 +324,8 @@ describe('PatchesBranchManager', () => {
           { op: 'replace', path: '/title', value: 'New Title' },
           { op: 'add', path: '/section', value: 'New Section' },
         ],
-        createdAt: getLocalISO(),
-        committedAt: getISO(),
+        createdAt: Date.now(),
+        committedAt: Date.now(),
         metadata: {},
       };
 
@@ -385,8 +384,8 @@ describe('PatchesBranchManager', () => {
         baseRev: 5,
         rev: 7,
         ops: [],
-        createdAt: getLocalISO(),
-        committedAt: getISO(),
+        createdAt: Date.now(),
+        committedAt: Date.now(),
         metadata: {},
       });
       vi.mocked(mockServer.commitChanges).mockRejectedValue(commitError);
@@ -408,8 +407,8 @@ describe('PatchesBranchManager', () => {
           groupId: 'branch1',
           origin: 'main',
           branchName: 'Feature Branch',
-          startedAt: getISO(),
-          endedAt: getISO(),
+          startedAt: Date.now(),
+          endedAt: Date.now(),
           endRev: 1,
           startRev: 0,
         },
@@ -419,8 +418,8 @@ describe('PatchesBranchManager', () => {
           groupId: 'branch1',
           origin: 'main',
           branchName: 'Feature Branch',
-          startedAt: getISO(),
-          endedAt: getISO(),
+          startedAt: Date.now(),
+          endedAt: Date.now(),
           endRev: 2,
           startRev: 1,
         },
@@ -432,8 +431,8 @@ describe('PatchesBranchManager', () => {
           id: 'new-version1',
           origin: 'branch',
           parentId: undefined,
-          startedAt: getISO(),
-          endedAt: getISO(),
+          startedAt: Date.now(),
+          endedAt: Date.now(),
           endRev: 1,
           startRev: 5,
         })
@@ -441,8 +440,8 @@ describe('PatchesBranchManager', () => {
           id: 'new-version2',
           origin: 'branch',
           parentId: 'new-version1',
-          startedAt: getISO(),
-          endedAt: getISO(),
+          startedAt: Date.now(),
+          endedAt: Date.now(),
           endRev: 2,
           startRev: 5,
         });
@@ -451,8 +450,8 @@ describe('PatchesBranchManager', () => {
         baseRev: 5,
         rev: 7,
         ops: [],
-        createdAt: getLocalISO(),
-        committedAt: getISO(),
+        createdAt: Date.now(),
+        committedAt: Date.now(),
         metadata: {},
       });
       vi.mocked(mockServer.commitChanges).mockResolvedValue([[], []]);

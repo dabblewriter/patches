@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { commitChanges } from '../../../src/algorithms/server/commitChanges';
 import type { PatchesStoreBackend } from '../../../src/server/types';
 import type { Change } from '../../../src/types';
-import { getISO, getLocalISO } from '../../../src/utils/dates';
 
 // Mock the dependencies
 vi.mock('../../../src/algorithms/shared/applyChanges');
@@ -16,18 +15,18 @@ describe('commitChanges', () => {
   let mockStore: PatchesStoreBackend;
   const sessionTimeoutMillis = 300000; // 5 minutes
 
-  /** Creates an ISO timestamp offset by the given milliseconds from now */
-  const createTimestamp = (offsetMs: number = 0): string => {
-    return new Date(Date.now() + offsetMs).toISOString().replace('Z', '+00:00');
+  /** Creates a timestamp offset by the given milliseconds from now */
+  const createTimestamp = (offsetMs: number = 0): number => {
+    return Date.now() + offsetMs;
   };
 
-  const createChange = (id: string, rev: number, baseRev: number, createdAt: string = getLocalISO()): Change => ({
+  const createChange = (id: string, rev: number, baseRev: number, createdAt: number = Date.now()): Change => ({
     id,
     rev,
     baseRev,
     ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
     createdAt,
-    committedAt: getISO(),
+    committedAt: Date.now(),
   });
 
   beforeEach(async () => {
@@ -97,7 +96,7 @@ describe('commitChanges', () => {
 
     // Change without baseRev
     const changes = [
-      { id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: getLocalISO() },
+      { id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: Date.now() },
     ] as Change[];
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
@@ -119,8 +118,8 @@ describe('commitChanges', () => {
 
     // Multiple changes without baseRev
     const changes = [
-      { id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: getLocalISO() },
-      { id: '2', ops: [{ op: 'add', path: '/baz', value: 'qux' }], createdAt: getLocalISO() },
+      { id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: Date.now() },
+      { id: '2', ops: [{ op: 'add', path: '/baz', value: 'qux' }], createdAt: Date.now() },
     ] as Change[];
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
@@ -254,8 +253,8 @@ describe('commitChanges', () => {
 
     // Multiple granular changes with baseRev: 0
     const changes = [
-      { id: '1', baseRev: 0, ops: [{ op: 'replace', path: '/a', value: 1 }], createdAt: getLocalISO() },
-      { id: '2', baseRev: 0, ops: [{ op: 'replace', path: '/b', value: 2 }], createdAt: getLocalISO() },
+      { id: '1', baseRev: 0, ops: [{ op: 'replace', path: '/a', value: 1 }], createdAt: Date.now() },
+      { id: '2', baseRev: 0, ops: [{ op: 'replace', path: '/b', value: 2 }], createdAt: Date.now() },
     ] as Change[];
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
@@ -291,7 +290,7 @@ describe('commitChanges', () => {
           { op: 'add', path: '/settings', value: {} }, // Should be filtered - path exists
           { op: 'add', path: '/settings/newProp', value: 'test' }, // Should remain
         ],
-        createdAt: getLocalISO(),
+        createdAt: Date.now(),
       },
     ] as Change[];
 
@@ -327,7 +326,7 @@ describe('commitChanges', () => {
           { op: 'replace', path: '/config', value: 'new', soft: true }, // Should be filtered
           { op: 'add', path: '/other', value: 'data' }, // Should remain
         ],
-        createdAt: getLocalISO(),
+        createdAt: Date.now(),
       },
     ] as Change[];
 
@@ -362,7 +361,7 @@ describe('commitChanges', () => {
           { op: 'add', path: '/newContainer', value: {} }, // Should remain - path doesn't exist
           { op: 'add', path: '/anotherNew', value: [], soft: true }, // Should remain - path doesn't exist
         ],
-        createdAt: getLocalISO(),
+        createdAt: Date.now(),
       },
     ] as Change[];
 
@@ -393,13 +392,13 @@ describe('commitChanges', () => {
         id: '1',
         baseRev: 0,
         ops: [{ op: 'add', path: '/settings', value: {} }], // Will be filtered
-        createdAt: getLocalISO(),
+        createdAt: Date.now(),
       },
       {
         id: '2',
         baseRev: 0,
         ops: [{ op: 'add', path: '/newPath', value: 'data' }], // Will remain
-        createdAt: getLocalISO(),
+        createdAt: Date.now(),
       },
     ] as Change[];
 
@@ -421,8 +420,7 @@ describe('commitChanges', () => {
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
     // Returned transformed changes should have normalized timestamps (clamped to server time)
-    const resultTime = new Date(result[1][0].createdAt).getTime();
-    expect(resultTime).toBeLessThanOrEqual(Date.now());
+    expect(result[1][0].createdAt).toBeLessThanOrEqual(Date.now());
   });
 
   it('should create version when last change is older than session timeout', async () => {

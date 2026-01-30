@@ -715,6 +715,70 @@ describe('transformPatch', () => {
         ).toEqual([{ op: '@inc', path: '/x', value: 2 }]);
       });
     });
+
+    describe('max vs', () => {
+      it('max vs add - object', () => {
+        expect(
+          transformPatch(obj, [{ op: '@max', path: '/x', value: 10 }], [{ op: 'add', path: '/x', value: 'x' }])
+        ).toEqual([{ op: 'add', path: '/x', value: 'x' }]);
+      });
+
+      it('max vs remove - object', () => {
+        expect(transformPatch(obj, [{ op: '@max', path: '/x', value: 10 }], [{ op: 'remove', path: '/x' }])).toEqual([
+          { op: 'remove', path: '/x' },
+        ]);
+      });
+
+      it('max vs replace - object', () => {
+        expect(
+          transformPatch(obj, [{ op: '@max', path: '/x', value: 10 }], [{ op: 'replace', path: '/x', value: 'x' }])
+        ).toEqual([{ op: 'replace', path: '/x', value: 'x' }]);
+      });
+
+      it('max vs max - object', () => {
+        expect(
+          transformPatch(obj, [{ op: '@max', path: '/x', value: 10 }], [{ op: '@max', path: '/x', value: 20 }])
+        ).toEqual([{ op: '@max', path: '/x', value: 20 }]);
+      });
+
+      it('max vs min - object', () => {
+        expect(
+          transformPatch(obj, [{ op: '@max', path: '/x', value: 10 }], [{ op: '@min', path: '/x', value: 5 }])
+        ).toEqual([{ op: '@min', path: '/x', value: 5 }]);
+      });
+    });
+
+    describe('min vs', () => {
+      it('min vs add - object', () => {
+        expect(
+          transformPatch(obj, [{ op: '@min', path: '/x', value: 5 }], [{ op: 'add', path: '/x', value: 'x' }])
+        ).toEqual([{ op: 'add', path: '/x', value: 'x' }]);
+      });
+
+      it('min vs remove - object', () => {
+        expect(transformPatch(obj, [{ op: '@min', path: '/x', value: 5 }], [{ op: 'remove', path: '/x' }])).toEqual([
+          { op: 'remove', path: '/x' },
+        ]);
+      });
+
+      it('min vs replace - object', () => {
+        expect(
+          transformPatch(obj, [{ op: '@min', path: '/x', value: 5 }], [{ op: 'replace', path: '/x', value: 'x' }])
+        ).toEqual([{ op: 'replace', path: '/x', value: 'x' }]);
+      });
+
+      it('min vs min - object', () => {
+        expect(
+          transformPatch(obj, [{ op: '@min', path: '/x', value: 5 }], [{ op: '@min', path: '/x', value: 3 }])
+        ).toEqual([{ op: '@min', path: '/x', value: 3 }]);
+      });
+
+      it('min vs max - object', () => {
+        expect(
+          transformPatch(obj, [{ op: '@min', path: '/x', value: 5 }], [{ op: '@max', path: '/x', value: 10 }])
+        ).toEqual([{ op: '@max', path: '/x', value: 10 }]);
+      });
+    });
   });
 
   describe('array', () => {

@@ -23,10 +23,10 @@ interface StoredChange extends Change {
  * - snapshots<{ docId: string; rev: number; state: any }> (primary key: docId)
  * - committedChanges<Change & { docId: string; }> (primary key: [docId, rev])
  * - pendingChanges<Change & { docId: string; }> (primary key: [docId, rev])
- * - docs<{ docId: string; committedRev: number; deleted?: boolean }> (primary key: docId)
+ * - docs<{ docId: string; committedRev: number; lastAttemptedSubmissionRev?: number; deleted?: boolean }> (primary key: docId)
  *
  * Under the hood, this class will store snapshots of the document only for committed state. It will not update the
- * committed state on *every* received committed change as this can cause issues with IndexedDB with many large updates.
+ * committed state on *every* received committed change as this can cause issues with IndexedDB with many small updates.
  * After every 200 committed changes, the class will save the current state to the snapshot store and delete the committed changes that went into it.
  * A snapshot will not be created if there are pending changes based on revisions older than the 200th committed change until those pending changes are committed.
  */

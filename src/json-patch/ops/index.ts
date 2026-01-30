@@ -3,6 +3,7 @@ import { add } from './add.js';
 import { bit } from './bitmask.js';
 import { copy } from './copy.js';
 import { increment } from './increment.js';
+import { max, min } from './minmax.js';
 import { move } from './move.js';
 import { remove } from './remove.js';
 import { replace } from './replace.js';
@@ -10,7 +11,7 @@ import { test } from './test.js';
 import { text } from './text.js';
 
 // Export all patch operations
-export { add, bit, copy, increment, move, remove, replace, test };
+export { add, bit, copy, increment, max, min, move, remove, replace, test };
 
 export function getTypes(custom?: JSONPatchOpHandlerMap) {
   return {
@@ -23,6 +24,8 @@ export function getTypes(custom?: JSONPatchOpHandlerMap) {
     '@inc': increment,
     '@bit': bit,
     '@txt': text,
+    '@max': max,
+    '@min': min,
     ...custom,
   };
 }

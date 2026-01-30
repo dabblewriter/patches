@@ -37,6 +37,48 @@ describe('composePatch', () => {
     ).toEqual([{ op: '@txt', path: '/x', value: { ops: [{ insert: 'Who is that!' }] } }]);
   });
 
+  it('max compose', () => {
+    expect(
+      composePatch([
+        { op: '@max', path: '/x', value: 5 },
+        { op: '@max', path: '/x', value: 10 },
+        { op: '@max', path: '/x', value: 3 },
+        { op: '@max', path: '/x', value: 8 },
+      ])
+    ).toEqual([{ op: '@max', path: '/x', value: 10 }]);
+  });
+
+  it('min compose', () => {
+    expect(
+      composePatch([
+        { op: '@min', path: '/x', value: 10 },
+        { op: '@min', path: '/x', value: 5 },
+        { op: '@min', path: '/x', value: 15 },
+        { op: '@min', path: '/x', value: 3 },
+      ])
+    ).toEqual([{ op: '@min', path: '/x', value: 3 }]);
+  });
+
+  it('max compose with ISO dates', () => {
+    expect(
+      composePatch([
+        { op: '@max', path: '/lastModified', value: '2024-01-15T10:00:00Z' },
+        { op: '@max', path: '/lastModified', value: '2024-01-20T10:00:00Z' },
+        { op: '@max', path: '/lastModified', value: '2024-01-10T10:00:00Z' },
+      ])
+    ).toEqual([{ op: '@max', path: '/lastModified', value: '2024-01-20T10:00:00Z' }]);
+  });
+
+  it('min compose with ISO dates', () => {
+    expect(
+      composePatch([
+        { op: '@min', path: '/createdAt', value: '2024-01-15T10:00:00Z' },
+        { op: '@min', path: '/createdAt', value: '2024-01-10T10:00:00Z' },
+        { op: '@min', path: '/createdAt', value: '2024-01-20T10:00:00Z' },
+      ])
+    ).toEqual([{ op: '@min', path: '/createdAt', value: '2024-01-10T10:00:00Z' }]);
+  });
+
   it('composes contiguous op', () => {
     expect(
       composePatch([

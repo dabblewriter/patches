@@ -119,6 +119,24 @@ export class JSONPatch {
   }
 
   /**
+   * Sets a value only if it's greater than the current value.
+   * Works with numbers or strings (ISO dates compare correctly).
+   */
+  max(path: PathLike, value: number | string) {
+    if (value && (value as any).toJSON) value = (value as any).toJSON();
+    return this.op('@max', path, value);
+  }
+
+  /**
+   * Sets a value only if it's less than the current value.
+   * Works with numbers or strings (ISO dates compare correctly).
+   */
+  min(path: PathLike, value: number | string) {
+    if (value && (value as any).toJSON) value = (value as any).toJSON();
+    return this.op('@min', path, value);
+  }
+
+  /**
    * Flips a bit at the given index in a bitmask to the given value.
    */
   bit(path: PathLike, index: number, on: boolean) {

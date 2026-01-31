@@ -34,10 +34,9 @@ describe('max and min operations', () => {
 
     it('updates when new value is greater (ISO dates)', () => {
       expect(
-        applyPatch(
-          { lastModified: '2024-01-15T10:00:00Z' },
-          [{ op: '@max', path: '/lastModified', value: '2024-01-20T10:00:00Z' }]
-        )
+        applyPatch({ lastModified: '2024-01-15T10:00:00Z' }, [
+          { op: '@max', path: '/lastModified', value: '2024-01-20T10:00:00Z' },
+        ])
       ).toEqual({ lastModified: '2024-01-20T10:00:00Z' });
     });
 
@@ -55,9 +54,9 @@ describe('max and min operations', () => {
     });
 
     it('works with nested paths', () => {
-      expect(
-        applyPatch({ a: { b: { c: 5 } } }, [{ op: '@max', path: '/a/b/c', value: 10 }])
-      ).toEqual({ a: { b: { c: 10 } } });
+      expect(applyPatch({ a: { b: { c: 5 } } }, [{ op: '@max', path: '/a/b/c', value: 10 }])).toEqual({
+        a: { b: { c: 10 } },
+      });
     });
 
     it('handles zero correctly (0 is a valid value)', () => {
@@ -95,10 +94,9 @@ describe('max and min operations', () => {
 
     it('updates when new value is smaller (ISO dates)', () => {
       expect(
-        applyPatch(
-          { createdAt: '2024-01-20T10:00:00Z' },
-          [{ op: '@min', path: '/createdAt', value: '2024-01-15T10:00:00Z' }]
-        )
+        applyPatch({ createdAt: '2024-01-20T10:00:00Z' }, [
+          { op: '@min', path: '/createdAt', value: '2024-01-15T10:00:00Z' },
+        ])
       ).toEqual({ createdAt: '2024-01-15T10:00:00Z' });
     });
 
@@ -116,9 +114,9 @@ describe('max and min operations', () => {
     });
 
     it('works with nested paths', () => {
-      expect(
-        applyPatch({ a: { b: { c: 10 } } }, [{ op: '@min', path: '/a/b/c', value: 5 }])
-      ).toEqual({ a: { b: { c: 5 } } });
+      expect(applyPatch({ a: { b: { c: 10 } } }, [{ op: '@min', path: '/a/b/c', value: 5 }])).toEqual({
+        a: { b: { c: 5 } },
+      });
     });
 
     it('handles zero correctly (0 is a valid value)', () => {

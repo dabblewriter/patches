@@ -247,29 +247,26 @@ describe('IndexedDBStore', () => {
     });
   });
 
-  describe('replacePendingChanges', () => {
-    it('should replace all pending changes', async () => {
-      const changes = [createChange('p3', 3)];
-      await store.replacePendingChanges('doc1', changes);
-
-      const pendingStore = mockStores.get('pendingChanges');
-      expect(pendingStore?.delete).toHaveBeenCalled();
-      expect(pendingStore?.put).toHaveBeenCalledWith({ ...changes[0], docId: 'doc1' });
-    });
-  });
-
-  describe('saveCommittedChanges', () => {
-    it('should save committed changes', async () => {
-      const changes = [createChange('c1', 1), createChange('c2', 2)];
-      await store.saveCommittedChanges('doc1', changes);
+  describe('applyServerChanges', () => {
+    it('should save committed changes and replace pending', async () => {
+      const serverChanges = [createChange('c1', 1), createChange('c2', 2)];
+      const rebasedPending = [createChange('p1', 3)];
+      await store.applyServerChanges('doc1', serverChanges, rebasedPending);
 
       const committedStore = mockStores.get('committedChanges');
       expect(committedStore?.put).toHaveBeenCalledTimes(2);
+
+      const pendingStore = mockStores.get('pendingChanges');
+      expect(pendingStore?.delete).toHaveBeenCalled();
+      expect(pendingStore?.put).toHaveBeenCalledWith({ ...rebasedPending[0], docId: 'doc1' });
     });
 
-    it('should remove sent pending changes when range provided', async () => {
-      const changes = [createChange('c1', 4)];
-      await store.saveCommittedChanges('doc1', changes, [1, 2]);
+    it('should handle empty rebased pending changes', async () => {
+      const serverChanges = [createChange('c1', 1)];
+      await store.applyServerChanges('doc1', serverChanges, []);
+
+      const committedStore = mockStores.get('committedChanges');
+      expect(committedStore?.put).toHaveBeenCalledTimes(1);
 
       const pendingStore = mockStores.get('pendingChanges');
       expect(pendingStore?.delete).toHaveBeenCalled();
@@ -348,35 +345,25 @@ describe('IndexedDBStore', () => {
     });
   });
 
-  describe('getLastRevs', () => {
-    it('should return last committed and pending revisions', async () => {
-      const committedStore = createMockIDBStore();
-      const pendingStore = createMockIDBStore();
+  describe('getCommittedRev', () => {
+    it('should return committed revision from docs store', async () => {
+      const docsStore = createMockIDBStore();
+      docsStore.get.mockResolvedValue({ docId: 'doc1', committedRev: 4 });
+      mockStores.set('docs', docsStore);
 
-      committedStore.getLastFromCursor.mockResolvedValue({ rev: 4 });
-      pendingStore.getLastFromCursor.mockResolvedValue({ rev: 6 });
+      const result = await store.getCommittedRev('doc1');
 
-      mockStores.set('committedChanges', committedStore);
-      mockStores.set('pendingChanges', pendingStore);
-
-      const result = await store.getLastRevs('doc1');
-
-      expect(result).toEqual([4, 6]);
+      expect(result).toBe(4);
     });
 
-    it('should return [0, 0] for empty document', async () => {
-      const committedStore = createMockIDBStore();
-      const pendingStore = createMockIDBStore();
+    it('should return 0 for non-existent document', async () => {
+      const docsStore = createMockIDBStore();
+      docsStore.get.mockResolvedValue(undefined);
+      mockStores.set('docs', docsStore);
 
-      committedStore.getLastFromCursor.mockResolvedValue(undefined);
-      pendingStore.getLastFromCursor.mockResolvedValue(undefined);
+      const result = await store.getCommittedRev('doc1');
 
-      mockStores.set('committedChanges', committedStore);
-      mockStores.set('pendingChanges', pendingStore);
-
-      const result = await store.getLastRevs('doc1');
-
-      expect(result).toEqual([0, 0]);
+      expect(result).toBe(0);
     });
   });
 });

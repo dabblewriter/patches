@@ -229,7 +229,7 @@ export class PatchesSync {
       if (pending.length > 0) {
         await this.flushDoc(docId, pending);
       } else {
-        const [committedRev] = await this.store.getLastRevs(docId);
+        const committedRev = await this.store.getCommittedRev(docId);
         if (committedRev) {
           const serverChanges = await this.ws.getChangesSince(docId, committedRev);
           if (serverChanges.length > 0) {
@@ -308,11 +308,10 @@ export class PatchesSync {
           await this.store.setLastAttemptedSubmissionRev(docId, lastRevInBatch);
         }
 
-        const range: [number, number] = [batch[0].rev, batch[batch.length - 1].rev];
         const committed = await this.ws.commitChanges(docId, batch);
 
-        // Apply the committed changes using the sync algorithm (already saved to store)
-        await this._applyServerChangesToDoc(docId, committed, range);
+        // Apply the committed changes using the sync algorithm
+        await this._applyServerChangesToDoc(docId, committed);
 
         // Fetch remaining pending for next batch or check completion
         pending = await this.store.getPendingChanges(docId);
@@ -347,11 +346,7 @@ export class PatchesSync {
    * Applies server changes to a document using the centralized sync algorithm.
    * This ensures consistent OT behavior regardless of whether the doc is open in memory.
    */
-  protected async _applyServerChangesToDoc(
-    docId: string,
-    serverChanges: Change[],
-    sentPendingRange?: [number, number]
-  ): Promise<Change[]> {
+  protected async _applyServerChangesToDoc(docId: string, serverChanges: Change[]): Promise<Change[]> {
     // 1. Get current document snapshot from store
     const currentSnapshot = await this.store.getDoc(docId);
     if (!currentSnapshot) {
@@ -381,11 +376,8 @@ export class PatchesSync {
       }
     }
 
-    // 4. Save changes to store (if not already saved)
-    await Promise.all([
-      this.store.saveCommittedChanges(docId, serverChanges, sentPendingRange),
-      this.store.replacePendingChanges(docId, rebasedPendingChanges),
-    ]);
+    // 4. Save changes to store atomically
+    await this.store.applyServerChanges(docId, serverChanges, rebasedPendingChanges);
 
     return rebasedPendingChanges;
   }

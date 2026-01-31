@@ -58,9 +58,9 @@ describe('PatchesStore interface', () => {
         expect(typeof docId).toBe('string');
         return [];
       },
-      getLastRevs: async (docId: string): Promise<[number, number]> => {
+      getCommittedRev: async (docId: string): Promise<number> => {
         expect(typeof docId).toBe('string');
-        return [0, 0];
+        return 0;
       },
       saveDoc: async (docId: string, docState: PatchesState) => {
         expect(typeof docId).toBe('string');
@@ -70,17 +70,10 @@ describe('PatchesStore interface', () => {
         expect(typeof docId).toBe('string');
         expect(Array.isArray(changes)).toBe(true);
       },
-      saveCommittedChanges: async (docId: string, changes: Change[], sentPendingRange?: [number, number]) => {
+      applyServerChanges: async (docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]) => {
         expect(typeof docId).toBe('string');
-        expect(Array.isArray(changes)).toBe(true);
-        if (sentPendingRange) {
-          expect(Array.isArray(sentPendingRange)).toBe(true);
-          expect(sentPendingRange).toHaveLength(2);
-        }
-      },
-      replacePendingChanges: async (docId: string, changes: Change[]) => {
-        expect(typeof docId).toBe('string');
-        expect(Array.isArray(changes)).toBe(true);
+        expect(Array.isArray(serverChanges)).toBe(true);
+        expect(Array.isArray(rebasedPendingChanges)).toBe(true);
       },
       deleteDoc: async (docId: string) => {
         expect(typeof docId).toBe('string');
@@ -102,11 +95,10 @@ describe('PatchesStore interface', () => {
       expect(typeof store.listDocs).toBe('function');
       expect(typeof store.getDoc).toBe('function');
       expect(typeof store.getPendingChanges).toBe('function');
-      expect(typeof store.getLastRevs).toBe('function');
+      expect(typeof store.getCommittedRev).toBe('function');
       expect(typeof store.saveDoc).toBe('function');
       expect(typeof store.savePendingChanges).toBe('function');
-      expect(typeof store.saveCommittedChanges).toBe('function');
-      expect(typeof store.replacePendingChanges).toBe('function');
+      expect(typeof store.applyServerChanges).toBe('function');
       expect(typeof store.deleteDoc).toBe('function');
       expect(typeof store.confirmDeleteDoc).toBe('function');
       expect(typeof store.close).toBe('function');
@@ -147,14 +139,11 @@ describe('PatchesStore interface', () => {
       expect(Array.isArray(result)).toBe(true);
     });
 
-    it('should define getLastRevs method signature', async () => {
+    it('should define getCommittedRev method signature', async () => {
       const store = createMockStore();
-      const result = await store.getLastRevs('doc1');
+      const result = await store.getCommittedRev('doc1');
 
-      expect(Array.isArray(result)).toBe(true);
-      expect(result).toHaveLength(2);
-      expect(typeof result[0]).toBe('number');
-      expect(typeof result[1]).toBe('number');
+      expect(typeof result).toBe('number');
     });
 
     it('should define saveDoc method signature', async () => {
@@ -180,9 +169,9 @@ describe('PatchesStore interface', () => {
       await store.savePendingChanges('doc1', changes);
     });
 
-    it('should define saveCommittedChanges method signature', async () => {
+    it('should define applyServerChanges method signature', async () => {
       const store = createMockStore();
-      const changes: Change[] = [
+      const serverChanges: Change[] = [
         {
           id: 'c1',
           rev: 1,
@@ -192,28 +181,9 @@ describe('PatchesStore interface', () => {
           committedAt: '2024-01-01T00:00:00.000Z',
         },
       ];
+      const rebasedPending: Change[] = [];
 
-      // Without sentPendingRange
-      await store.saveCommittedChanges('doc1', changes);
-
-      // With sentPendingRange
-      await store.saveCommittedChanges('doc1', changes, [1, 5]);
-    });
-
-    it('should define replacePendingChanges method signature', async () => {
-      const store = createMockStore();
-      const changes: Change[] = [
-        {
-          id: 'c1',
-          rev: 1,
-          baseRev: 0,
-          ops: [{ op: 'add', path: '/test', value: 'data' }],
-          createdAt: '2024-01-01T00:00:00.000Z',
-          committedAt: '2024-01-01T00:00:00.000Z',
-        },
-      ];
-
-      await store.replacePendingChanges('doc1', changes);
+      await store.applyServerChanges('doc1', serverChanges, rebasedPending);
     });
 
     it('should define deleteDoc method signature', async () => {
@@ -239,11 +209,10 @@ describe('PatchesStore interface', () => {
         listDocs: async (includeDeleted?: boolean) => [],
         getDoc: async (docId: string) => undefined,
         getPendingChanges: async (docId: string) => [],
-        getLastRevs: async (docId: string) => [0, 0],
+        getCommittedRev: async (docId: string) => 0,
         saveDoc: async (docId: string, docState: PatchesState) => {},
         savePendingChanges: async (docId: string, changes: Change[]) => {},
-        saveCommittedChanges: async (docId: string, changes: Change[], sentPendingRange?: [number, number]) => {},
-        replacePendingChanges: async (docId: string, changes: Change[]) => {},
+        applyServerChanges: async (docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]) => {},
         deleteDoc: async (docId: string) => {},
         confirmDeleteDoc: async (docId: string) => {},
         close: async () => {},
@@ -270,13 +239,12 @@ describe('PatchesStore interface', () => {
       const docs: TrackedDoc[] = await store.listDocs();
       const snapshot: PatchesSnapshot | undefined = await store.getDoc('test');
       const pending: Change[] = await store.getPendingChanges('test');
-      const revs: [number, number] = await store.getLastRevs('test');
+      const committedRev: number = await store.getCommittedRev('test');
 
       expect(Array.isArray(docs)).toBe(true);
       expect(snapshot === undefined || typeof snapshot === 'object').toBe(true);
       expect(Array.isArray(pending)).toBe(true);
-      expect(Array.isArray(revs)).toBe(true);
-      expect(revs).toHaveLength(2);
+      expect(typeof committedRev).toBe('number');
     });
   });
 
@@ -328,7 +296,7 @@ describe('PatchesStore interface', () => {
 
       await store.savePendingChanges('doc1', changes);
       await store.getPendingChanges('doc1');
-      await store.replacePendingChanges('doc1', []);
+      await store.applyServerChanges('doc1', changes, []);
     });
 
     it('should support document deletion lifecycle', async () => {
@@ -348,11 +316,10 @@ describe('PatchesStore interface', () => {
     listDocs: async () => [],
     getDoc: async () => undefined,
     getPendingChanges: async () => [],
-    getLastRevs: async () => [0, 0],
+    getCommittedRev: async () => 0,
     saveDoc: async () => {},
     savePendingChanges: async () => {},
-    saveCommittedChanges: async () => {},
-    replacePendingChanges: async () => {},
+    applyServerChanges: async () => {},
     deleteDoc: async () => {},
     confirmDeleteDoc: async () => {},
     close: async () => {},

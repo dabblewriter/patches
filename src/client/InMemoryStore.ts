@@ -1,5 +1,4 @@
 import { applyChanges } from '../algorithms/shared/applyChanges.js';
-import { transformPatch } from '../json-patch/transformPatch.js';
 import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
@@ -27,16 +26,6 @@ export class InMemoryStore implements PatchesStore {
     const state = applyChanges(buf.snapshot?.state ?? null, buf.committed);
     const committedRev = buf.committed.at(-1)?.rev ?? buf.snapshot?.rev ?? 0;
 
-    // Rebase pending if they are stale w.r.t committed
-    if (buf.pending.length && buf.pending[0].baseRev! < committedRev) {
-      const patch = buf.committed.filter(c => c.rev > buf.pending[0].baseRev!).flatMap(c => c.ops);
-      const offset = committedRev - buf.pending[0].baseRev!;
-      buf.pending.forEach(ch => {
-        ch.rev += offset;
-        ch.ops = transformPatch(state, patch, ch.ops);
-      });
-    }
-
     return {
       state,
       rev: committedRev,
@@ -48,12 +37,10 @@ export class InMemoryStore implements PatchesStore {
     return this.docs.get(docId)?.pending.slice() ?? [];
   }
 
-  async getLastRevs(docId: string): Promise<[number, number]> {
+  async getCommittedRev(docId: string): Promise<number> {
     const buf = this.docs.get(docId);
-    if (!buf) return [0, 0];
-    const committedRev = buf.committed.at(-1)?.rev ?? buf.snapshot?.rev ?? 0;
-    const pendingRev = buf.pending.at(-1)?.rev ?? committedRev;
-    return [committedRev, pendingRev];
+    if (!buf) return 0;
+    return buf.committed.at(-1)?.rev ?? buf.snapshot?.rev ?? 0;
   }
 
   async listDocs(includeDeleted = false): Promise<TrackedDoc[]> {
@@ -77,22 +64,12 @@ export class InMemoryStore implements PatchesStore {
     buf.pending.push(...changes);
   }
 
-  async saveCommittedChanges(docId: string, changes: Change[], sentPendingRange?: [number, number]): Promise<void> {
+  async applyServerChanges(docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]): Promise<void> {
     const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
     if (!this.docs.has(docId)) this.docs.set(docId, buf);
 
-    buf.committed.push(...changes);
-
-    if (sentPendingRange) {
-      const [min, max] = sentPendingRange;
-      buf.pending = buf.pending.filter(p => p.rev < min || p.rev > max);
-    }
-  }
-
-  async replacePendingChanges(docId: string, changes: Change[]): Promise<void> {
-    const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
-    if (!this.docs.has(docId)) this.docs.set(docId, buf);
-    buf.pending = [...changes];
+    buf.committed.push(...serverChanges);
+    buf.pending = [...rebasedPendingChanges];
   }
 
   // ─── Metadata / Tracking ───────────────────────────────────────────

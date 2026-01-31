@@ -4,7 +4,6 @@ import type { Change, PatchesState } from '../../src/types';
 
 // Mock the dependencies
 vi.mock('../../src/algorithms/shared/applyChanges');
-vi.mock('../../src/json-patch/transformPatch');
 
 describe('InMemoryStore', () => {
   let store: InMemoryStore;
@@ -33,10 +32,6 @@ describe('InMemoryStore', () => {
       ...(state || {}),
       appliedChanges: changes.length,
     }));
-
-    // Mock transformPatch
-    const { transformPatch } = await import('../../src/json-patch/transformPatch');
-    vi.mocked(transformPatch).mockImplementation((state, patch, ops) => ops);
   });
 
   describe('getDoc', () => {
@@ -66,10 +61,10 @@ describe('InMemoryStore', () => {
 
     it('should return document with committed changes applied', async () => {
       const snapshot = createState({ text: 'hello' }, 5);
-      const changes = [createChange('c1', 6), createChange('c2', 7)];
+      const serverChanges = [createChange('c1', 6), createChange('c2', 7)];
 
       await store.saveDoc('doc1', snapshot);
-      await store.saveCommittedChanges('doc1', changes);
+      await store.applyServerChanges('doc1', serverChanges, []);
 
       const result = await store.getDoc('doc1');
 
@@ -92,24 +87,9 @@ describe('InMemoryStore', () => {
       expect(result?.changes).toEqual(pending);
     });
 
-    it('should rebase stale pending changes', async () => {
-      const snapshot = createState({ text: 'hello' }, 5);
-      const committed = [createChange('c1', 6), createChange('c2', 7)];
-      const pending = [createChange('p1', 6, 5)]; // Based on old revision
-
-      await store.saveDoc('doc1', snapshot);
-      await store.saveCommittedChanges('doc1', committed);
-      await store.savePendingChanges('doc1', pending);
-
-      const result = await store.getDoc('doc1');
-
-      expect(result?.changes[0].rev).toBe(8); // Should be rebased
-      expect(result?.changes[0].baseRev).toBe(5);
-    });
-
     it('should handle document with no snapshot', async () => {
-      const committed = [createChange('c1', 1), createChange('c2', 2)];
-      await store.saveCommittedChanges('doc1', committed);
+      const serverChanges = [createChange('c1', 1), createChange('c2', 2)];
+      await store.applyServerChanges('doc1', serverChanges, []);
 
       const result = await store.getDoc('doc1');
 
@@ -148,36 +128,33 @@ describe('InMemoryStore', () => {
     });
   });
 
-  describe('getLastRevs', () => {
-    it('should return [0, 0] for non-existent document', async () => {
-      const result = await store.getLastRevs('non-existent');
-      expect(result).toEqual([0, 0]);
+  describe('getCommittedRev', () => {
+    it('should return 0 for non-existent document', async () => {
+      const result = await store.getCommittedRev('non-existent');
+      expect(result).toBe(0);
     });
 
-    it('should return revision from snapshot only', async () => {
+    it('should return revision from snapshot', async () => {
       const snapshot = createState({ text: 'hello' }, 5);
       await store.saveDoc('doc1', snapshot);
 
-      const result = await store.getLastRevs('doc1');
-      expect(result).toEqual([5, 5]);
+      const result = await store.getCommittedRev('doc1');
+      expect(result).toBe(5);
     });
 
-    it('should return committed and pending revisions', async () => {
-      const committed = [createChange('c1', 3), createChange('c2', 4)];
-      const pending = [createChange('p1', 5), createChange('p2', 6)];
+    it('should return committed revision', async () => {
+      const serverChanges = [createChange('c1', 3), createChange('c2', 4)];
+      await store.applyServerChanges('doc1', serverChanges, []);
 
-      await store.saveCommittedChanges('doc1', committed);
-      await store.savePendingChanges('doc1', pending);
-
-      const result = await store.getLastRevs('doc1');
-      expect(result).toEqual([4, 6]);
+      const result = await store.getCommittedRev('doc1');
+      expect(result).toBe(4);
     });
 
     it('should handle empty buffers', async () => {
       await store.trackDocs(['doc1']);
 
-      const result = await store.getLastRevs('doc1');
-      expect(result).toEqual([0, 0]);
+      const result = await store.getCommittedRev('doc1');
+      expect(result).toBe(0);
     });
   });
 
@@ -228,7 +205,7 @@ describe('InMemoryStore', () => {
 
     it('should reset committed and pending changes', async () => {
       await store.savePendingChanges('doc1', [createChange('p1', 1)]);
-      await store.saveCommittedChanges('doc1', [createChange('c1', 2)]);
+      await store.applyServerChanges('doc1', [createChange('c1', 2)], []);
 
       const snapshot = createState({ text: 'hello' }, 5);
       await store.saveDoc('doc1', snapshot);
@@ -259,38 +236,40 @@ describe('InMemoryStore', () => {
     });
   });
 
-  describe('saveCommittedChanges', () => {
-    it('should save committed changes', async () => {
-      const changes = [createChange('c1', 1), createChange('c2', 2)];
-      await store.saveCommittedChanges('doc1', changes);
+  describe('applyServerChanges', () => {
+    it('should save committed changes and update pending', async () => {
+      const serverChanges = [createChange('c1', 1), createChange('c2', 2)];
+      const rebasedPending = [createChange('p1', 3)];
+      await store.applyServerChanges('doc1', serverChanges, rebasedPending);
 
-      const [committedRev] = await store.getLastRevs('doc1');
+      const committedRev = await store.getCommittedRev('doc1');
       expect(committedRev).toBe(2);
+
+      const pending = await store.getPendingChanges('doc1');
+      expect(pending).toEqual(rebasedPending);
     });
 
-    it('should remove sent pending changes when range provided', async () => {
-      const pending = [createChange('p1', 1), createChange('p2', 2), createChange('p3', 3)];
-      const committed = [createChange('c1', 4)];
-
-      await store.savePendingChanges('doc1', pending);
-      await store.saveCommittedChanges('doc1', committed, [1, 2]); // Remove p1 and p2
-
-      const remainingPending = await store.getPendingChanges('doc1');
-      expect(remainingPending).toHaveLength(1);
-      expect(remainingPending[0].id).toBe('p3');
-    });
-  });
-
-  describe('replacePendingChanges', () => {
-    it('should replace all pending changes', async () => {
+    it('should replace all pending changes with rebased versions', async () => {
       const initial = [createChange('p1', 1), createChange('p2', 2)];
-      const replacement = [createChange('p3', 3)];
-
       await store.savePendingChanges('doc1', initial);
-      await store.replacePendingChanges('doc1', replacement);
+
+      const serverChanges = [createChange('c1', 3)];
+      const rebasedPending = [createChange('p3', 4)];
+      await store.applyServerChanges('doc1', serverChanges, rebasedPending);
 
       const result = await store.getPendingChanges('doc1');
-      expect(result).toEqual(replacement);
+      expect(result).toEqual(rebasedPending);
+    });
+
+    it('should handle empty rebased pending changes', async () => {
+      const initial = [createChange('p1', 1)];
+      await store.savePendingChanges('doc1', initial);
+
+      const serverChanges = [createChange('c1', 2)];
+      await store.applyServerChanges('doc1', serverChanges, []);
+
+      const result = await store.getPendingChanges('doc1');
+      expect(result).toEqual([]);
     });
   });
 
@@ -338,7 +317,7 @@ describe('InMemoryStore', () => {
       const snapshot = createState({ text: 'hello' }, 5);
       await store.saveDoc('doc1', snapshot);
       await store.savePendingChanges('doc1', [createChange('p1', 6)]);
-      await store.saveCommittedChanges('doc1', [createChange('c1', 7)]);
+      await store.applyServerChanges('doc1', [createChange('c1', 7)], []);
 
       await store.deleteDoc('doc1');
 

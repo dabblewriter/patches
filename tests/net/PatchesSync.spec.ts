@@ -35,10 +35,9 @@ describe('PatchesSync', () => {
     mockStore = {
       listDocs: vi.fn().mockResolvedValue([]),
       getPendingChanges: vi.fn().mockResolvedValue([]),
-      getLastRevs: vi.fn().mockResolvedValue([0, 0]),
+      getCommittedRev: vi.fn().mockResolvedValue(0),
       saveDoc: vi.fn().mockResolvedValue(undefined),
-      saveCommittedChanges: vi.fn().mockResolvedValue(undefined),
-      replacePendingChanges: vi.fn().mockResolvedValue(undefined),
+      applyServerChanges: vi.fn().mockResolvedValue(undefined),
       confirmDeleteDoc: vi.fn().mockResolvedValue(undefined),
       getDoc: vi.fn().mockResolvedValue({
         state: { content: 'test' },
@@ -297,7 +296,7 @@ describe('PatchesSync', () => {
 
     it('should sync document without pending changes', async () => {
       mockStore.getPendingChanges.mockResolvedValue([]);
-      mockStore.getLastRevs.mockResolvedValue([5, 3]);
+      mockStore.getCommittedRev.mockResolvedValue(5);
 
       const serverChanges: Change[] = [
         {
@@ -322,7 +321,7 @@ describe('PatchesSync', () => {
 
     it('should get full document snapshot if no committed rev', async () => {
       mockStore.getPendingChanges.mockResolvedValue([]);
-      mockStore.getLastRevs.mockResolvedValue([0, 0]); // No committed rev
+      mockStore.getCommittedRev.mockResolvedValue(0); // No committed rev
 
       const snapshot = { state: { content: 'new' }, rev: 1 };
       mockWebSocket.getDoc.mockResolvedValue(snapshot);
@@ -344,7 +343,7 @@ describe('PatchesSync', () => {
 
       mockPatches.getOpenDoc.mockReturnValue(mockDoc);
       mockStore.getPendingChanges.mockResolvedValue([]);
-      mockStore.getLastRevs.mockResolvedValue([0, 0]);
+      mockStore.getCommittedRev.mockResolvedValue(0);
 
       await sync['syncDoc']('doc1');
 
@@ -363,7 +362,7 @@ describe('PatchesSync', () => {
 
       mockPatches.getOpenDoc.mockReturnValue(mockDoc);
       mockStore.getPendingChanges.mockResolvedValue([]);
-      mockStore.getLastRevs.mockResolvedValue([0, 0]);
+      mockStore.getCommittedRev.mockResolvedValue(0);
 
       await sync['syncDoc']('doc1');
 
@@ -435,7 +434,7 @@ describe('PatchesSync', () => {
       await sync['flushDoc']('doc1');
 
       expect(mockWebSocket.commitChanges).toHaveBeenCalledWith('doc1', pendingChanges);
-      expect(applySpy).toHaveBeenCalledWith('doc1', committed, [1, 2]);
+      expect(applySpy).toHaveBeenCalledWith('doc1', committed);
     });
   });
 
@@ -462,8 +461,7 @@ describe('PatchesSync', () => {
 
       await sync['_applyServerChangesToDoc']('doc1', serverChanges);
 
-      expect(mockStore.saveCommittedChanges).toHaveBeenCalledWith('doc1', serverChanges, undefined);
-      expect(mockStore.replacePendingChanges).toHaveBeenCalledWith('doc1', []);
+      expect(mockStore.applyServerChanges).toHaveBeenCalledWith('doc1', serverChanges, []);
     });
 
     it('should handle non-existent documents', async () => {

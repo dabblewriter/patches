@@ -97,22 +97,18 @@ export interface PatchesStore {
   getPendingChanges(docId: string): Promise<Change[]>;
 
   /**
-   * Returns revision counters for tracking document sync state.
+   * Returns the last committed revision for a document.
    *
-   * committedRev: Last revision confirmed by the server
-   * pendingRev: Next revision number for new local changes
-   * The gap between these indicates how many changes are pending server confirmation.
+   * The committed revision is the last revision confirmed by the server.
+   * Used during sync to fetch changes since this revision.
    *
    * @param docId Document identifier
-   * @returns Tuple of [committedRev, pendingRev]
+   * @returns The last committed revision, or 0 if not found
    * @example
-   * const [committed, pending] = await store.getLastRevs('my-document');
-   * console.log(`Server confirmed through rev ${committed}, local changes at rev ${pending}`);
-   * if (pending > committed) {
-   *   console.log(`${pending - committed} changes pending server confirmation`);
-   * }
+   * const committedRev = await store.getCommittedRev('my-document');
+   * const serverChanges = await api.getChangesSince(docId, committedRev);
    */
-  getLastRevs(docId: string): Promise<[committedRev: number, pendingRev: number]>;
+  getCommittedRev(docId: string): Promise<number>;
 
   /**
    * Saves the current document state to persistent storage.
@@ -150,39 +146,22 @@ export interface PatchesStore {
   savePendingChanges(docId: string, changes: Change[]): Promise<void>;
 
   /**
-   * Records changes confirmed by the server and optionally removes sent pending changes.
+   * Atomically applies server-confirmed changes and updates pending changes.
    *
-   * Adds server-confirmed changes to the document's history and updates the committed revision.
-   * If sentPendingRange is provided, removes the specified range of pending changes that
-   * were confirmed by the server (they're no longer pending).
-   *
-   * @param docId Document identifier
-   * @param changes Server-confirmed changes to record
-   * @param sentPendingRange Optional range [startRev, endRev] of pending changes to remove
-   * @example
-   * // Server confirmed our changes
-   * await store.saveCommittedChanges('my-document', serverChanges, [10, 12]);
-   *
-   * // Server sent changes from other clients
-   * await store.saveCommittedChanges('my-document', serverChanges);
-   */
-  saveCommittedChanges(docId: string, changes: Change[], sentPendingRange?: [number, number]): Promise<void>;
-
-  /**
-   * Completely replaces the document's pending changes with a new set.
-   *
-   * Discards all existing pending changes and replaces them with the provided array.
-   * Used when operational transformation rebases pending changes after receiving server updates.
-   * The new changes should have sequential revision numbers.
+   * This is the core sync operation that must be atomic: server changes become
+   * committed history, and pending changes are replaced with their rebased versions.
+   * Implementations must ensure both operations complete together (single transaction
+   * for databases) to prevent inconsistent state if the app crashes mid-operation.
    *
    * @param docId Document identifier
-   * @param changes New complete set of pending changes
+   * @param serverChanges Changes confirmed by the server to add to committed history
+   * @param rebasedPendingChanges Pending changes after OT rebasing (replaces all existing pending)
    * @example
-   * // After rebasing pending changes due to server conflicts
-   * const rebasedChanges = transformPendingChanges(serverChanges, currentPending);
-   * await store.replacePendingChanges('my-document', rebasedChanges);
+   * // After receiving server changes and rebasing pending
+   * const rebased = rebaseChanges(serverChanges, pending);
+   * await store.applyServerChanges('my-document', serverChanges, rebased);
    */
-  replacePendingChanges(docId: string, changes: Change[]): Promise<void>;
+  applyServerChanges(docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]): Promise<void>;
 
   /**
    * Marks a document for collaborative deletion.

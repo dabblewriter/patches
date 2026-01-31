@@ -1,5 +1,4 @@
 import { applyChanges } from '../algorithms/shared/applyChanges.js';
-import { transformPatch } from '../json-patch/transformPatch.js';
 import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
 import { deferred, type Deferred } from '../utils/deferred.js';
@@ -158,21 +157,6 @@ export class IndexedDBStore implements PatchesStore {
     // Apply any committed changes to the snapshot state
     const state = applyChanges(snapshot?.state, committed);
 
-    // Rebase pending changes if there are any committed changes received since their baseRev
-    const lastCommitted = committed[committed.length - 1];
-    const baseRev = pending[0]?.baseRev;
-    if (lastCommitted && baseRev && baseRev < lastCommitted.rev) {
-      const patch = committed
-        .filter(change => change.rev > baseRev)
-        .map(change => change.ops)
-        .flat();
-      const offset = lastCommitted.rev - baseRev;
-      pending.forEach(change => {
-        change.rev += offset;
-        change.ops = transformPatch(state, patch, change.ops);
-      });
-    }
-
     await tx.complete();
     return {
       state,
@@ -273,89 +257,57 @@ export class IndexedDBStore implements PatchesStore {
     return result;
   }
 
-  /**
-   * Replace all pending changes for a document (used after rebasing).
-   * @param docId - The ID of the document to replace the pending changes for.
-   * @param changes - The changes to replace the pending changes with.
-   */
-  @blockable
-  async replacePendingChanges(docId: string, changes: Change[]): Promise<void> {
-    const [tx, pendingChanges, docsStore] = await this.transaction(['pendingChanges', 'docs'], 'readwrite');
-
-    // Ensure the document is tracked
-    let docMeta = await docsStore.get<TrackedDoc>(docId);
-    if (!docMeta) {
-      docMeta = { docId, committedRev: 0 };
-      await docsStore.put(docMeta);
-    } else if (docMeta.deleted) {
-      delete docMeta.deleted;
-      await docsStore.put(docMeta);
-      console.warn(`Revived document ${docId} by replacing pending changes.`);
-    }
-
-    // Remove all existing pending changes and add the new ones
-    await pendingChanges.delete([docId, 0], [docId, Infinity]);
-    await Promise.all(changes.map(change => pendingChanges.put<StoredChange>({ ...change, docId })));
-
-    await tx.complete();
-  }
-
-  // ─── Committed Changes ─────────────────────────────────────────────────────
+  // ─── Server Changes ─────────────────────────────────────────────────────
 
   /**
-   * Store server‐confirmed changes.  Will:
-   * - persist them in the committedChanges store
-   * - remove any pending changes whose rev falls within `sentPendingRange`
+   * Atomically applies server-confirmed changes and updates pending changes.
+   * This is the core sync operation that must be atomic.
+   *
+   * Will:
+   * - persist server changes in the committedChanges store
+   * - replace all pending changes with the rebased versions
    * - optionally compact a new snapshot after N changes (hidden internally)
-   * @param docId - The ID of the document to save the changes for
-   * @param changes - The changes to save
-   * @param sentPendingRange - The range of pending changes to remove, *must* be provided after receiving the changes
-   * from the server in response to a patchesDoc request.
+   *
+   * @param docId - The ID of the document
+   * @param serverChanges - Changes confirmed by the server
+   * @param rebasedPendingChanges - Pending changes after OT rebasing
    */
   @blockable
-  async saveCommittedChanges(docId: string, changes: Change[], sentPendingRange?: [number, number]): Promise<void> {
-    const [tx, committedChanges, pendingChanges, snapshots, docsStore] = await this.transaction(
+  async applyServerChanges(docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]): Promise<void> {
+    const [tx, committedChangesStore, pendingChangesStore, snapshots, docsStore] = await this.transaction(
       ['committedChanges', 'pendingChanges', 'snapshots', 'docs'],
       'readwrite'
     );
 
     // Save committed changes
-    await Promise.all(changes.map(change => committedChanges.put<StoredChange>({ ...change, docId })));
+    await Promise.all(serverChanges.map(change => committedChangesStore.put<StoredChange>({ ...change, docId })));
 
-    // Remove pending changes if range provided
-    if (sentPendingRange) {
-      await pendingChanges.delete([docId, sentPendingRange[0]], [docId, sentPendingRange[1]]);
-    }
+    // Replace all pending changes with rebased versions
+    await pendingChangesStore.delete([docId, 0], [docId, Infinity]);
+    await Promise.all(rebasedPendingChanges.map(change => pendingChangesStore.put<StoredChange>({ ...change, docId })));
 
     // Check if we should create a snapshot
-    const count = await committedChanges.count([docId, 0], [docId, Infinity]);
+    const count = await committedChangesStore.count([docId, 0], [docId, Infinity]);
 
     if (count >= SNAPSHOT_INTERVAL) {
-      // Update the snapshot. A snapshot will not be updated if there are pending changes based on revisions older than
-      // the latest committed change until those pending changes are committed.
-      const [snapshot, committed, firstPending] = await Promise.all([
+      // With atomic updates, pending changes are always rebased, so we can safely snapshot
+      const [snapshot, committed] = await Promise.all([
         snapshots.get<Snapshot>(docId),
-        committedChanges.getAll<StoredChange>([docId, 0], [docId, Infinity], SNAPSHOT_INTERVAL),
-        pendingChanges.getFirstFromCursor<StoredChange>([docId, 0], [docId, Infinity]),
+        committedChangesStore.getAll<StoredChange>([docId, 0], [docId, Infinity], SNAPSHOT_INTERVAL),
       ]);
 
-      // Update the snapshot
       const lastRev = committed[committed.length - 1]?.rev;
-      if (!firstPending?.baseRev || firstPending?.baseRev >= lastRev) {
+      if (lastRev) {
         const state = applyChanges(snapshot?.state, committed);
         await Promise.all([
-          snapshots.put({
-            docId,
-            rev: lastRev,
-            state,
-          }),
-          committedChanges.delete([docId, 0], [docId, lastRev]),
+          snapshots.put({ docId, rev: lastRev, state }),
+          committedChangesStore.delete([docId, 0], [docId, lastRev]),
         ]);
       }
     }
 
-    // Update committedRev in the docs store if changes were saved
-    const lastCommittedRev = changes.at(-1)?.rev;
+    // Update committedRev in the docs store
+    const lastCommittedRev = serverChanges.at(-1)?.rev;
     if (lastCommittedRev !== undefined) {
       const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
       if (lastCommittedRev > docMeta.committedRev) {
@@ -425,25 +377,15 @@ export class IndexedDBStore implements PatchesStore {
   }
 
   /**
-   * Tell me the last committed revision you have *and* the highest
-   * rev of any change.  Use these to drive:
-   *   - fetch changes:   api.getChangesSince(docId, committedRev)
-   *   - build new patch: newChange.rev = pendingRev; baseRev = committedRev
+   * Returns the last committed revision for a document.
+   * @param docId - The ID of the document.
+   * @returns The last committed revision, or 0 if not found.
    */
-  @blockable
-  async getLastRevs(docId: string): Promise<[number, number]> {
-    const [tx, committedChanges, pendingChanges] = await this.transaction(
-      ['committedChanges', 'pendingChanges'],
-      'readonly'
-    );
-
-    const [lastCommitted, lastPending] = await Promise.all([
-      committedChanges.getLastFromCursor<StoredChange>([docId, 0], [docId, Infinity]),
-      pendingChanges.getLastFromCursor<StoredChange>([docId, 0], [docId, Infinity]),
-    ]);
-
+  async getCommittedRev(docId: string): Promise<number> {
+    const [tx, docsStore] = await this.transaction(['docs'], 'readonly');
+    const docMeta = await docsStore.get<TrackedDoc>(docId);
     await tx.complete();
-    return [lastCommitted?.rev ?? 0, lastPending?.rev ?? lastCommitted?.rev ?? 0];
+    return docMeta?.committedRev ?? 0;
   }
 
   // ─── Submission Bookmark ───────────────────────────────────────────────

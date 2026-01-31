@@ -95,9 +95,7 @@ describe('commitChanges', () => {
     });
 
     // Change without baseRev
-    const changes = [
-      { id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: Date.now() },
-    ] as Change[];
+    const changes = [{ id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: Date.now() }] as Change[];
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 

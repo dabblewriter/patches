@@ -332,7 +332,7 @@ describe('PatchesBranchManager', () => {
       const committedChanges: Change[] = [flattenedChange];
 
       vi.mocked(createChange).mockReturnValue(flattenedChange);
-      vi.mocked(mockServer.commitChanges).mockResolvedValue([[], committedChanges]);
+      vi.mocked(mockServer.commitChanges).mockResolvedValue(committedChanges);
 
       const result = await branchManager.mergeBranch('branch1');
 
@@ -454,7 +454,7 @@ describe('PatchesBranchManager', () => {
         committedAt: Date.now(),
         metadata: {},
       });
-      vi.mocked(mockServer.commitChanges).mockResolvedValue([[], []]);
+      vi.mocked(mockServer.commitChanges).mockResolvedValue([]);
 
       await branchManager.mergeBranch('branch1');
 

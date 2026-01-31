@@ -121,19 +121,22 @@ export class PatchesServer implements DocumentServer {
 
   /**
    * Commits a set of changes to a document, applying operational transformation as needed.
+   *
+   * Returns all changes the client needs to apply: both catchup changes (from other
+   * clients) and the client's own transformed changes. Only the new changes are
+   * broadcast to other clients.
+   *
    * @param docId - The ID of the document.
    * @param changes - The changes to commit.
    * @param options - Optional commit settings (e.g., forceCommit for migrations).
-   * @returns A tuple of [committedChanges, transformedChanges] where:
-   *   - committedChanges: Changes that were already committed to the server after the client's base revision
-   *   - transformedChanges: The client's changes after being transformed against concurrent changes
+   * @returns Combined array of catchup changes followed by the client's committed changes.
    */
   async commitChanges(
     docId: string,
     changes: ChangeInput[],
     options?: CommitChangesOptions
-  ): Promise<[Change[], Change[]]> {
-    const [committedChanges, transformedChanges] = await commitChanges(
+  ): Promise<Change[]> {
+    const { catchupChanges, newChanges } = await commitChanges(
       this.store,
       docId,
       changes,
@@ -142,22 +145,21 @@ export class PatchesServer implements DocumentServer {
       this.maxStorageBytes
     );
 
-    // Persist and notify about newly transformed changes atomically
-    if (transformedChanges.length > 0) {
+    // Notify about newly committed changes (broadcast to other clients)
+    if (newChanges.length > 0) {
       try {
         // Fire event for realtime transports (WebSocket, etc.)
         // Use clientId from request context for broadcast filtering
-        await this.onChangesCommitted.emit(docId, transformedChanges, getClientId());
+        await this.onChangesCommitted.emit(docId, newChanges, getClientId());
       } catch (error) {
         // If notification fails after saving, log error but don't fail the operation
         // The changes are already committed to storage, so we can't roll back
         console.error(`Failed to notify clients about committed changes for doc ${docId}:`, error);
-        // Consider implementing a retry mechanism or dead letter queue here
       }
     }
 
-    // Return committed changes and newly transformed changes separately
-    return [committedChanges, transformedChanges];
+    // Return combined changes: catchup first, then new changes
+    return [...catchupChanges, ...newChanges];
   }
 
   /**

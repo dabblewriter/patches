@@ -130,9 +130,9 @@ describe('PatchesServer', () => {
       vi.mocked(mockStore.saveChanges).mockResolvedValue();
     });
 
-    it('should return empty arrays for empty changes', async () => {
+    it('should return empty array for empty changes', async () => {
       const result = await server.commitChanges('doc1', []);
-      expect(result).toEqual([[], []]);
+      expect(result).toEqual([]);
     });
 
     it('should fill in baseRev when missing (apply to latest)', async () => {
@@ -147,8 +147,8 @@ describe('PatchesServer', () => {
       } as any;
       const result = await server.commitChanges('doc1', [changeWithoutBaseRev]);
       // Should succeed, not throw - baseRev gets filled in with current revision
-      expect(result[1]).toHaveLength(1);
-      expect(result[1][0].baseRev).toBe(1); // Current rev from mock
+      expect(result).toHaveLength(1);
+      expect(result[0].baseRev).toBe(1); // Current rev from mock
     });
 
     it('should throw error for inconsistent baseRev in batch', async () => {
@@ -189,8 +189,8 @@ describe('PatchesServer', () => {
           }),
         ])
       );
-      expect(result[0]).toEqual([]); // No committed changes
-      expect(result[1]).toHaveLength(1); // One transformed change
+      // Result is combined: catchup + new changes
+      expect(result).toHaveLength(1); // One transformed change, no catchup
     });
 
     it('should filter out already committed changes', async () => {
@@ -199,8 +199,8 @@ describe('PatchesServer', () => {
 
       const result = await server.commitChanges('doc1', [existingChange]);
 
-      expect(result[0]).toEqual([existingChange]); // Existing committed changes
-      expect(result[1]).toEqual([]); // No new changes
+      // Result contains catchup changes only (no new changes)
+      expect(result).toEqual([existingChange]);
       expect(mockStore.saveChanges).not.toHaveBeenCalled();
     });
 
@@ -257,7 +257,8 @@ describe('PatchesServer', () => {
 
       const result = await server.commitChanges('doc1', [changeWithoutBatch]);
 
-      expect(result[1]).toEqual([]); // No transformed changes
+      // Result contains only catchup changes (no new transformed changes)
+      expect(result).toEqual([committedChange]);
       expect(mockStore.saveChanges).not.toHaveBeenCalled();
     });
 
@@ -276,7 +277,8 @@ describe('PatchesServer', () => {
       const result = await server.commitChanges('doc1', [changeWithoutBatch]);
 
       expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Error applying change'), expect.any(Error));
-      expect(result[1]).toEqual([]);
+      // Result contains only catchup changes (no new changes due to error)
+      expect(result).toEqual([committedChange]);
 
       consoleSpy.mockRestore();
     });
@@ -323,7 +325,7 @@ describe('PatchesServer', () => {
         committedAt: Date.now(),
       } as Change);
 
-      const commitSpy = vi.spyOn(server, 'commitChanges').mockResolvedValue([[], []]);
+      const commitSpy = vi.spyOn(server, 'commitChanges').mockResolvedValue([]);
 
       const result = await server.change(
         'doc1',

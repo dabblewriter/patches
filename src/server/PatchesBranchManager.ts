@@ -164,7 +164,7 @@ export class PatchesBranchManager {
           baseRev: branchStartRevOnSource,
           rev: undefined, // Let commitChanges assign sequential revs
         }));
-        [, committedMergeChanges] = await this.patchesServer.commitChanges(sourceDocId, adjustedChanges);
+        committedMergeChanges = await this.patchesServer.commitChanges(sourceDocId, adjustedChanges);
       } else {
         // Divergent: flatten and transform (current behavior)
         const rev = branchStartRevOnSource + branchChanges.length;
@@ -180,7 +180,7 @@ export class PatchesBranchManager {
           changesToCommit = breakChanges(changesToCommit, this.maxPayloadBytes);
         }
 
-        [, committedMergeChanges] = await this.patchesServer.commitChanges(sourceDocId, changesToCommit);
+        committedMergeChanges = await this.patchesServer.commitChanges(sourceDocId, changesToCommit);
       }
     } catch (error) {
       console.error(`Failed to merge branch ${branchId} into ${sourceDocId}:`, error);

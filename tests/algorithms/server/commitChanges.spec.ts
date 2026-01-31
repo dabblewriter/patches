@@ -81,7 +81,7 @@ describe('commitChanges', () => {
   it('should return empty arrays for empty changes array', async () => {
     const result = await commitChanges(mockStore, 'doc1', [], sessionTimeoutMillis);
 
-    expect(result).toEqual([[], []]);
+    expect(result).toEqual({ catchupChanges: [], newChanges: [] });
     expect(mockStore.listChanges).not.toHaveBeenCalled();
     expect(mockStore.saveChanges).not.toHaveBeenCalled();
   });
@@ -102,8 +102,8 @@ describe('commitChanges', () => {
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
     // Returned transformed changes should have baseRev filled in
-    expect(result[1]).toHaveLength(1);
-    expect(result[1][0].baseRev).toBe(5);
+    expect(result.newChanges).toHaveLength(1);
+    expect(result.newChanges[0].baseRev).toBe(5);
   });
 
   it('should fill in baseRev for multiple changes when all omit it', async () => {
@@ -125,9 +125,9 @@ describe('commitChanges', () => {
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
     // Returned transformed changes should have baseRev filled in
-    expect(result[1]).toHaveLength(2);
-    expect(result[1][0].baseRev).toBe(3);
-    expect(result[1][1].baseRev).toBe(3);
+    expect(result.newChanges).toHaveLength(2);
+    expect(result.newChanges[0].baseRev).toBe(3);
+    expect(result.newChanges[1].baseRev).toBe(3);
   });
 
   it('should throw error when changes have inconsistent baseRev', async () => {
@@ -188,7 +188,7 @@ describe('commitChanges', () => {
 
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    expect(result[1]).toHaveLength(1); // Should have transformed changes
+    expect(result.newChanges).toHaveLength(1); // Should have transformed changes
   });
 
   it('should rebase baseRev:0 granular changes to head on existing docs', async () => {
@@ -220,8 +220,8 @@ describe('commitChanges', () => {
     expect(getStateAtRevision).toHaveBeenCalledWith(mockStore, 'doc1', 5);
 
     // Returned change should have baseRev rebased to 5
-    expect(result[1]).toHaveLength(1);
-    expect(result[1][0].baseRev).toBe(5);
+    expect(result.newChanges).toHaveLength(1);
+    expect(result.newChanges[0].baseRev).toBe(5);
   });
 
   it('should still throw error for root replace with baseRev:0 on existing docs', async () => {
@@ -260,10 +260,10 @@ describe('commitChanges', () => {
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
     // Revs should be based on rebased baseRev (10), so 11 and 12
-    expect(result[1][0].rev).toBe(11);
-    expect(result[1][1].rev).toBe(12);
-    expect(result[1][0].baseRev).toBe(10);
-    expect(result[1][1].baseRev).toBe(10);
+    expect(result.newChanges[0].rev).toBe(11);
+    expect(result.newChanges[1].rev).toBe(12);
+    expect(result.newChanges[0].baseRev).toBe(10);
+    expect(result.newChanges[1].baseRev).toBe(10);
   });
 
   it('should filter soft empty container adds when rebasing baseRev:0 on existing docs', async () => {
@@ -297,9 +297,9 @@ describe('commitChanges', () => {
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
     // Only the non-soft op should remain
-    expect(result[1]).toHaveLength(1);
-    expect(result[1][0].ops).toHaveLength(1);
-    expect(result[1][0].ops[0].path).toBe('/settings/newProp');
+    expect(result.newChanges).toHaveLength(1);
+    expect(result.newChanges[0].ops).toHaveLength(1);
+    expect(result.newChanges[0].ops[0].path).toBe('/settings/newProp');
   });
 
   it('should filter explicit soft ops when rebasing baseRev:0 on existing docs', async () => {
@@ -332,9 +332,9 @@ describe('commitChanges', () => {
 
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    expect(result[1]).toHaveLength(1);
-    expect(result[1][0].ops).toHaveLength(1);
-    expect(result[1][0].ops[0].path).toBe('/other');
+    expect(result.newChanges).toHaveLength(1);
+    expect(result.newChanges[0].ops).toHaveLength(1);
+    expect(result.newChanges[0].ops[0].path).toBe('/other');
   });
 
   it('should keep soft writes to non-existent paths when rebasing baseRev:0', async () => {
@@ -367,8 +367,8 @@ describe('commitChanges', () => {
 
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    expect(result[1]).toHaveLength(1);
-    expect(result[1][0].ops).toHaveLength(2);
+    expect(result.newChanges).toHaveLength(1);
+    expect(result.newChanges[0].ops).toHaveLength(2);
   });
 
   it('should remove changes with no ops after soft write filtering', async () => {
@@ -405,8 +405,8 @@ describe('commitChanges', () => {
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
     // Only the second change should remain
-    expect(result[1]).toHaveLength(1);
-    expect(result[1][0].id).toBe('2');
+    expect(result.newChanges).toHaveLength(1);
+    expect(result.newChanges[0].id).toBe('2');
   });
 
   it('should normalize createdAt timestamps to be in the past', async () => {
@@ -418,7 +418,7 @@ describe('commitChanges', () => {
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
     // Returned transformed changes should have normalized timestamps (clamped to server time)
-    expect(result[1][0].createdAt).toBeLessThanOrEqual(Date.now());
+    expect(result.newChanges[0].createdAt).toBeLessThanOrEqual(Date.now());
   });
 
   it('should create version when last change is older than session timeout', async () => {
@@ -461,9 +461,9 @@ describe('commitChanges', () => {
 
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    expect(result[0]).toEqual([existingChange]); // Committed changes
-    expect(result[1]).toHaveLength(1); // Only new change should be transformed
-    expect(result[1][0].id).toBe('new');
+    expect(result.catchupChanges).toEqual([existingChange]); // Committed changes
+    expect(result.newChanges).toHaveLength(1); // Only new change should be transformed
+    expect(result.newChanges[0].id).toBe('new');
   });
 
   it('should return committed changes when all incoming changes already exist', async () => {
@@ -482,8 +482,8 @@ describe('commitChanges', () => {
 
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    expect(result[0]).toEqual([existingChange]);
-    expect(result[1]).toEqual([]);
+    expect(result.catchupChanges).toEqual([existingChange]);
+    expect(result.newChanges).toEqual([]);
     expect(mockStore.saveChanges).not.toHaveBeenCalled();
   });
 
@@ -659,8 +659,8 @@ describe('commitChanges', () => {
 
     const result = await commitChanges(mockStore, 'doc1', [incomingChange], sessionTimeoutMillis);
 
-    expect(result[0]).toEqual([committedChange]);
-    expect(result[1]).toEqual([transformedChange]);
+    expect(result.catchupChanges).toEqual([committedChange]);
+    expect(result.newChanges).toEqual([transformedChange]);
   });
 
   it('should exclude changes with matching batchId from committed changes', async () => {
@@ -714,7 +714,7 @@ describe('commitChanges', () => {
       undefined
     );
     expect(mockStore.saveChanges).toHaveBeenCalledWith('doc1', transformedChanges);
-    expect(result[0]).toEqual([committedChange]);
-    expect(result[1]).toEqual(transformedChanges);
+    expect(result.catchupChanges).toEqual([committedChange]);
+    expect(result.newChanges).toEqual(transformedChanges);
   });
 });

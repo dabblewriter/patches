@@ -1,26 +1,31 @@
-import type { Change, ChangeInput, PatchesState } from '../types.js';
+import type { Change, ChangeInput, CommitChangesOptions, DeleteDocOptions, PatchesState } from '../types.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 
 /**
  * Result of committing changes to a document.
+ * Used internally by the algorithm layer to provide structured information
+ * about what was committed.
  */
 export interface CommitResult {
-  /** The changes that were committed (potentially transformed). */
-  changes: Change[];
-  /** Server timestamp in milliseconds (useful for client time calibration). */
-  serverTime?: number;
+  /** Changes the client missed from other clients (for catchup sync). */
+  catchupChanges: Change[];
+  /** The client's changes after transformation (will be broadcast to others). */
+  newChanges: Change[];
 }
 
 /**
  * Interface that document servers must implement to work with the RPC layer.
  * Both PatchesServer (OT) and MergeServer (LWW) implement this interface.
+ *
+ * Methods are called via JSON-RPC from clients. Each method is stateless
+ * and receives the document ID as the first parameter.
  */
 export interface DocumentServer {
   /**
    * Get the current state of a document.
    * @param docId - The document ID.
    * @param atRev - Optional revision to get state at (for OT servers).
-   * @returns The document state and revision, or a state with rev 0 if not found.
+   * @returns The document state and revision, or `{ state: {}, rev: 0 }` if not found.
    */
   getDoc(docId: string, atRev?: number): Promise<PatchesState>;
 
@@ -28,25 +33,30 @@ export interface DocumentServer {
    * Get changes that occurred after a specific revision.
    * @param docId - The document ID.
    * @param rev - The revision number to get changes after.
-   * @returns Array of changes after the specified revision.
+   * @returns Array of changes after the specified revision, in revision order.
    */
   getChangesSince(docId: string, rev: number): Promise<Change[]>;
 
   /**
    * Commit changes to a document.
+   *
+   * Applies operational transformation as needed, assigns revision numbers,
+   * and persists the changes. Returns all changes the client needs to apply:
+   * both catchup changes (from other clients) and the client's own transformed changes.
+   *
    * @param docId - The document ID.
    * @param changes - The changes to commit.
    * @param options - Optional commit options.
-   * @returns Tuple of [priorChanges, newChanges] for OT conflict resolution.
+   * @returns Combined array of catchup changes followed by the client's committed changes.
    */
-  commitChanges(docId: string, changes: ChangeInput[], options?: any): Promise<[Change[], Change[]]>;
+  commitChanges(docId: string, changes: ChangeInput[], options?: CommitChangesOptions): Promise<Change[]>;
 
   /**
    * Delete a document.
    * @param docId - The document ID.
    * @param options - Optional deletion options.
    */
-  deleteDoc(docId: string, options?: any): Promise<void>;
+  deleteDoc(docId: string, options?: DeleteDocOptions): Promise<void>;
 
   /**
    * Removes the tombstone for a deleted document, allowing it to be recreated.

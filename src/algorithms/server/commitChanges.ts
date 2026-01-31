@@ -1,3 +1,4 @@
+import type { CommitResult } from '../../server/DocumentServer.js';
 import type { PatchesStoreBackend } from '../../server/types.js';
 import type { Change, ChangeInput, CommitChangesOptions } from '../../types.js';
 import { filterSoftWritesAgainstState } from '../../json-patch/utils/softWrites.js';
@@ -10,16 +11,19 @@ import { transformIncomingChanges } from './transformIncomingChanges.js';
 
 // Re-export for backwards compatibility
 export type { CommitChangesOptions } from '../../types.js';
+export type { CommitResult } from '../../server/DocumentServer.js';
 
 /**
  * Commits a set of changes to a document, applying operational transformation as needed.
+ * @param store - The backend store for persistence.
  * @param docId - The ID of the document.
  * @param changes - The changes to commit.
- * @param originClientId - The ID of the client that initiated the commit.
+ * @param sessionTimeoutMillis - Timeout for session-based versioning.
  * @param options - Optional commit settings.
- * @returns A tuple of [committedChanges, transformedChanges] where:
- *   - committedChanges: Changes that were already committed to the server after the client's base revision
- *   - transformedChanges: The client's changes after being transformed against concurrent changes
+ * @param maxStorageBytes - Optional max bytes per change for storage limits.
+ * @returns A CommitResult containing:
+ *   - catchupChanges: Changes the client missed from other clients
+ *   - newChanges: The client's changes after transformation
  */
 export async function commitChanges(
   store: PatchesStoreBackend,
@@ -28,9 +32,9 @@ export async function commitChanges(
   sessionTimeoutMillis: number,
   options?: CommitChangesOptions,
   maxStorageBytes?: number
-): Promise<[Change[], Change[]]> {
+): Promise<CommitResult> {
   if (changes.length === 0) {
-    return [[], []];
+    return { catchupChanges: [], newChanges: [] };
   }
 
   const batchId = changes[0].batchId;
@@ -113,7 +117,7 @@ export async function commitChanges(
 
   // If all incoming changes were already committed, return the committed changes found
   if (incomingChanges.length === 0) {
-    return [committedChanges, []];
+    return { catchupChanges: committedChanges, newChanges: [] };
   }
 
   // 4. Handle offline-session versioning:
@@ -142,7 +146,7 @@ export async function commitChanges(
     // Fast-forward: no transformation needed, save changes directly
     if (canFastForward) {
       await store.saveChanges(docId, incomingChanges);
-      return [[], incomingChanges];
+      return { catchupChanges: [], newChanges: incomingChanges };
     }
   }
 
@@ -162,6 +166,6 @@ export async function commitChanges(
     await store.saveChanges(docId, transformedChanges);
   }
 
-  // Return committed changes and newly transformed changes separately
-  return [committedChanges, transformedChanges];
+  // Return catchup changes and newly transformed changes separately
+  return { catchupChanges: committedChanges, newChanges: transformedChanges };
 }

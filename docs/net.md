@@ -194,7 +194,7 @@ The network layer is a key piece of the collaborative puzzle:
 2.  **`Patches`**: The main client-side orchestrator. It manages multiple `PatchesDoc` instances and interfaces with `PatchesStore` and `PatchesSync`.
 3.  **`PatchesStore`**: Handles local persistence of document state and changes, crucial for resilience and quick load times.
 4.  **`PatchesSync`**: Connects to the server, sends local changes queued by `Patches` (via the store), and receives remote changes to be applied.
-5.  **Server-Side (`PatchesServer`, etc.)**: Your backend receives changes, applies Operational Transformation for conflict resolution, and broadcasts changes to other connected clients.
+5.  **Server-Side (`OTServer`, etc.)**: Your backend receives changes, applies Operational Transformation for conflict resolution, and broadcasts changes to other connected clients.
 
 Together, these components aim to provide a robust and relatively seamless collaborative experience.
 

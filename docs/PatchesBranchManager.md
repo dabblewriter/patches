@@ -26,13 +26,13 @@ Basically, anytime you want a "copy" of a document that can diverge and then pot
 Setting up branching is super simple:
 
 ```typescript
-import { PatchesServer } from '@dabble/patches/server';
+import { OTServer } from '@dabble/patches/server';
 import { PatchesBranchManager, BranchingStoreBackend } from '@dabble/patches/server';
 import { MyDatabaseStore } from './my-store'; // Your backend implementation
 
 // First, you need your store and server
 const store = new MyDatabaseStore(/* your connection details */);
-const server = new PatchesServer(store);
+const server = new OTServer(store);
 
 // Then create the branch manager
 const branchManager = new PatchesBranchManager(store, server);
@@ -157,17 +157,17 @@ The key relationship is:
 Here's how you might implement a feature branching workflow in your app:
 
 ```typescript
-import { PatchesServer } from '@dabble/patches/server';
+import { OTServer } from '@dabble/patches/server';
 import { PatchesBranchManager } from '@dabble/patches/server';
 import { MyDatabaseStore } from './database-store';
 
 class DocumentWorkflow {
-  private server: PatchesServer;
+  private server: OTServer;
   private branchManager: PatchesBranchManager;
 
   constructor() {
     const store = new MyDatabaseStore();
-    this.server = new PatchesServer(store);
+    this.server = new OTServer(store);
     this.branchManager = new PatchesBranchManager(store, this.server);
   }
 

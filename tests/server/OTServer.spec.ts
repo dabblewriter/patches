@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createChange } from '../../src/data/change';
 import { JSONPatch } from '../../src/json-patch/JSONPatch';
 import { clearAuthContext, setAuthContext } from '../../src/net/serverContext';
-import { PatchesServer, assertVersionMetadata } from '../../src/server/PatchesServer';
+import { OTServer } from '../../src/server/OTServer';
+import { assertVersionMetadata } from '../../src/server/utils';
 import type { PatchesStoreBackend } from '../../src/server/types';
 import type { Change, EditableVersionMetadata } from '../../src/types';
 
@@ -26,8 +27,8 @@ import { applyPatch } from '../../src/json-patch/applyPatch';
 import { createJSONPatch } from '../../src/json-patch/createJSONPatch';
 import { transformPatch } from '../../src/json-patch/transformPatch';
 
-describe('PatchesServer', () => {
-  let server: PatchesServer;
+describe('OTServer', () => {
+  let server: OTServer;
   let mockStore: PatchesStoreBackend;
 
   beforeEach(() => {
@@ -38,7 +39,7 @@ describe('PatchesServer', () => {
       createVersion: vi.fn(),
     } as any;
 
-    server = new PatchesServer(mockStore);
+    server = new OTServer(mockStore);
 
     // Reset all mocks
     vi.clearAllMocks();
@@ -46,13 +47,13 @@ describe('PatchesServer', () => {
 
   describe('constructor', () => {
     it('should create server with default options', () => {
-      const server = new PatchesServer(mockStore);
+      const server = new OTServer(mockStore);
       expect(server).toBeDefined();
       expect(server.store).toBe(mockStore);
     });
 
     it('should create server with custom session timeout', () => {
-      const server = new PatchesServer(mockStore, { sessionTimeoutMinutes: 60 });
+      const server = new OTServer(mockStore, { sessionTimeoutMinutes: 60 });
       expect(server).toBeDefined();
     });
 

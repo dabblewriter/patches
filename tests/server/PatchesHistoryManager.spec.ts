@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PatchesHistoryManager } from '../../src/server/PatchesHistoryManager';
-import { PatchesServer } from '../../src/server/PatchesServer';
+import type { PatchesServer } from '../../src/server/PatchesServer';
 import type { PatchesStoreBackend } from '../../src/server/types';
 import type {
   Change,
@@ -10,16 +10,16 @@ import type {
   VersionMetadata,
 } from '../../src/types';
 
-// Mock the PatchesServer module
-vi.mock('../../src/server/PatchesServer', async () => {
-  const actual = await vi.importActual('../../src/server/PatchesServer');
+// Mock the utils module
+vi.mock('../../src/server/utils', async () => {
+  const actual = await vi.importActual('../../src/server/utils');
   return {
     ...actual,
     assertVersionMetadata: vi.fn(),
   };
 });
 
-import { assertVersionMetadata } from '../../src/server/PatchesServer';
+import { assertVersionMetadata } from '../../src/server/utils';
 
 describe('PatchesHistoryManager', () => {
   let historyManager: PatchesHistoryManager;

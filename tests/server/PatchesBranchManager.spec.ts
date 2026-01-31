@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PatchesBranchManager, assertBranchMetadata } from '../../src/server/PatchesBranchManager';
-import { PatchesServer } from '../../src/server/PatchesServer';
+import type { PatchesServer } from '../../src/server/PatchesServer';
 import type { BranchingStoreBackend } from '../../src/server/types';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata, VersionMetadata } from '../../src/types';
 
@@ -40,7 +40,7 @@ describe('PatchesBranchManager', () => {
     } as any;
 
     mockServer = {
-      getStateAtRevision: vi.fn(),
+      getDoc: vi.fn(),
       commitChanges: vi.fn(),
     } as any;
 
@@ -109,7 +109,7 @@ describe('PatchesBranchManager', () => {
 
     beforeEach(() => {
       vi.mocked(mockStore.loadBranch).mockResolvedValue(null);
-      vi.mocked(mockServer.getStateAtRevision).mockResolvedValue({ state: mockState, rev: 5 });
+      vi.mocked(mockServer.getDoc).mockResolvedValue({ state: mockState, rev: 5 });
       vi.mocked(createId).mockReturnValue('generated-id');
       vi.mocked(createVersionMetadata).mockReturnValue(mockVersion);
       vi.mocked(mockStore.createVersion).mockResolvedValue();
@@ -125,7 +125,7 @@ describe('PatchesBranchManager', () => {
       const result = await branchManager.createBranch('doc1', 5, metadata);
 
       expect(mockStore.loadBranch).toHaveBeenCalledWith('doc1');
-      expect(mockServer.getStateAtRevision).toHaveBeenCalledWith('doc1', 5);
+      expect(mockServer.getDoc).toHaveBeenCalledWith('doc1', 5);
       expect(createVersionMetadata).toHaveBeenCalledWith({
         origin: 'main',
         startedAt: expect.any(Number),
@@ -179,7 +179,7 @@ describe('PatchesBranchManager', () => {
     });
 
     it('should handle state retrieval errors', async () => {
-      vi.mocked(mockServer.getStateAtRevision).mockRejectedValue(new Error('State not found'));
+      vi.mocked(mockServer.getDoc).mockRejectedValue(new Error('State not found'));
 
       await expect(branchManager.createBranch('doc1', 5)).rejects.toThrow('State not found');
     });

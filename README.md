@@ -131,15 +131,15 @@ doc.change(draft => {
 
 ### Server Example
 
-Here's a basic Express server using `PatchesServer`:
+Here's a basic Express server using `OTServer`:
 
 ```typescript
 import express from 'express';
-import { PatchesServer, PatchesStoreBackend, Change } from '@dabble/patches/server';
+import { OTServer, PatchesStoreBackend, Change } from '@dabble/patches/server';
 
 // Server Setup
 const store = new InMemoryStore(); // Use a real database in production!
-const server = new PatchesServer(store);
+const server = new OTServer(store);
 const app = express();
 app.use(express.json());
 
@@ -213,9 +213,9 @@ This represents a single collaborative document. You don't create this directly;
   - Applies external updates, rebasing local changes as needed
 - **Event Emitters:** Hooks like `onUpdate` and `onChange` to react to state changes
 
-### PatchesServer
+### OTServer
 
-([`docs/PatchesServer.md`](./docs/PatchesServer.md))
+([`docs/OTServer.md`](./docs/OTServer.md))
 
 The heart of server-side logic!
 
@@ -284,7 +284,7 @@ Check the [Awareness documentation](./docs/awareness.md) for how to build collab
 
 ### Server-Side
 
-1. **Initialize `PatchesServer`** with your backend store
+1. **Initialize `OTServer`** with your backend store
 2. **Receive Client Changes** with `server.receiveChanges()`
 3. **Handle History/Branching** with `PatchesHistoryManager` and `PatchesBranchManager`
 
@@ -322,7 +322,7 @@ doc.change(draft => {
 ```typescript
 import express from 'express';
 import {
-  PatchesServer,
+  OTServer,
   PatchesStoreBackend,
   Change,
   VersionMetadata, //... other types
@@ -337,7 +337,7 @@ class InMemoryStore implements PatchesStoreBackend {
 
 // --- Server Setup ---
 const store = new InMemoryStore();
-const server = new PatchesServer(store);
+const server = new OTServer(store);
 const app = express();
 app.use(express.json());
 
@@ -354,7 +354,7 @@ app.listen(PORT, () => {
 
 ### Offline Support & Versioning
 
-See [`PatchesServer Versioning`](./docs/PatchesServer.md#versioning) and [`PatchesHistoryManager`](./docs/PatchesHistoryManager.md).
+See [`OTServer Versioning`](./docs/OTServer.md#versioning) and [`PatchesHistoryManager`](./docs/PatchesHistoryManager.md).
 
 ### Branching and Merging
 

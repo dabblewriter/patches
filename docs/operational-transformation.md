@@ -59,7 +59,7 @@ With the refactor, we've separated concerns beautifully:
 - **Patches:** Main coordinator and public API
 - **PatchesSync:** Sync coordinator between client and server
 - **PatchesDoc:** Document interface and local state manager
-- **PatchesServer:** Server-side request handler
+- **OTServer:** Server-side request handler
 
 ### Algorithm Layer
 
@@ -212,7 +212,7 @@ interface Change {
 }
 ```
 
-### `PatchesServer` 🏢
+### `OTServer` 🏢
 
 The server-side authority that:
 

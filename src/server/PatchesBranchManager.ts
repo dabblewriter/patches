@@ -51,7 +51,7 @@ export class PatchesBranchManager {
       throw new Error('Cannot create a branch from another branch.');
     }
     // 1. Get the state at the branch point
-    const stateAtRev = (await this.patchesServer.getStateAtRevision(docId, rev)).state;
+    const stateAtRev = (await this.patchesServer.getDoc(docId, rev)).state;
     const branchDocId = this.store.createBranchId
       ? await Promise.resolve(this.store.createBranchId(docId))
       : createId(22);

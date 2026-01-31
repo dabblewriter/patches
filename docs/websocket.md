@@ -316,11 +316,11 @@ Patches gives you a ready-made **WebSocketServer** class that mirrors the client
 
 ```ts
 import { WebSocketServer } from '@dabble/patches/net';
-import { PatchesServer } from '@dabble/patches/server';
+import { OTServer } from '@dabble/patches/server';
 import { MyWebSocketAdaptor } from './your-ws-lib';
 
 const transport = new MyWebSocketAdaptor(/* underlying ws library */);
-const core = new PatchesServer(myStoreBackend);
+const core = new OTServer(myStoreBackend);
 const webSocketApi = new WebSocketServer({ transport, patches: core });
 
 // Need history or branching?  Just pass the managers as well:

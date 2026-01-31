@@ -4,11 +4,11 @@ Alright, let's peek behind the curtain at the brains of the Patches operation. T
 
 ## The Big Idea: Keep It Clean, Keep It Clear
 
-Think of it like a well-organized kitchen. You've got your chefs (the main classes like `PatchesSync`, `PatchesDoc`, `PatchesServer`) who decide what needs to be done. Then you've got your specialized tools and recipe cards (that's our algorithms module!).
+Think of it like a well-organized kitchen. You've got your chefs (the main classes like `PatchesSync`, `PatchesDoc`, `OTServer`) who decide what needs to be done. Then you've got your specialized tools and recipe cards (that's our algorithms module!).
 
 Here's the breakdown:
 
-- **Chef's Orders (Orchestration)**: `PatchesSync`, `PatchesDoc`, `PatchesServer` call the shots.
+- **Chef's Orders (Orchestration)**: `PatchesSync`, `PatchesDoc`, `OTServer` call the shots.
 - **Recipe Cards (Algorithm Logic)**: Pure functions in `src/algorithms/` that do the heavy lifting of OT and syncing without messing with anything else.
 - **Pantry (Storage)**: Your chosen store (like `IndexedDBStore`) just holds the ingredients.
 - **Waiter Service (Networking)**: The WebSocket and protocol layers just shuttle messages back and forth.
@@ -80,11 +80,11 @@ src/algorithms/
 
 ### `commitChanges.ts`
 
-- **`commitChanges(store, docId, changes, sessionTimeoutMillis, options?)`**: The complete workflow for committing client changes to the server. This algorithm handles the entire change commit process: validation, idempotency checks, offline session management, version creation, operational transformation against concurrent changes, and persistence. Returns both committed changes found on the server and the newly transformed changes. Pass `options.forceCommit: true` to preserve changes even if they result in no state modification (useful for migrations). This is the brain behind `PatchesServer.commitChanges()`.
+- **`commitChanges(store, docId, changes, sessionTimeoutMillis, options?)`**: The complete workflow for committing client changes to the server. This algorithm handles the entire change commit process: validation, idempotency checks, offline session management, version creation, operational transformation against concurrent changes, and persistence. Returns both committed changes found on the server and the newly transformed changes. Pass `options.forceCommit: true` to preserve changes even if they result in no state modification (useful for migrations). This is the brain behind `OTServer.commitChanges()`.
 
 ### `createVersion.ts`
 
-- **`createVersion(store, docId, state, changes, metadata?)`**: Creates and persists a new version snapshot. Takes the document state, changes since the last version, and optional metadata, then handles all the version creation logic including ID generation, metadata setup, and storage persistence. This is what `PatchesServer.captureCurrentVersion()` uses internally.
+- **`createVersion(store, docId, state, changes, metadata?)`**: Creates and persists a new version snapshot. Takes the document state, changes since the last version, and optional metadata, then handles all the version creation logic including ID generation, metadata setup, and storage persistence. This is what `OTServer.captureCurrentVersion()` uses internally.
 
 ### `transformIncomingChanges.ts`
 

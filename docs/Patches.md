@@ -293,7 +293,7 @@ The `Patches` class is just one piece of the puzzle. Check out these related com
 - [`PatchesDoc`](./PatchesDoc.md) - Individual document instances that `Patches` creates for you
 - [`PatchesSync`](./PatchesSync.md) - Real-time synchronization coordinator with a server
 - [`PatchesStore`](./persist.md) - The interface for document persistence
-- [`PatchesServer`](./PatchesServer.md) - The server-side component that handles collaboration
+- [`OTServer`](./OTServer.md) - The server-side component that handles collaboration
 - [`Algorithms`](./algorithms.md) - The pure functions that handle OT and change processing
 
 Remember, `Patches` is your friendly neighborhood document orchestrator. It coordinates everything so you can focus on building an awesome collaborative experience! 🚀

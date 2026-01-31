@@ -18,7 +18,7 @@ Patches is an unrelease project, in stealth mode, being iterated on until it is 
 - **Centralized OT:** Server is the single source of truth for document history and conflict resolution.
 - **Patches:** The main client-side interface, loading docs, syncing with the server, and storing data. Supported by PatchesSync and PatchesStore for implementation.
 - **PatchesDoc:** Client-side document, manages local state, optimistic updates, and syncs with server.
-- **PatchesServer:** Server-side authority, applies/commits changes, manages versions and persistence.
+- **OTServer:** Server-side OT authority (implements PatchesServer interface), applies/commits changes, manages versions and persistence.
 - **PatchesHistoryManager:** Query document versions and change history.
 - **PatchesBranchManager:** Supports branching/merging workflows.
 - **Backend Store:** You must implement a storage backend (see `PatchesStoreBackend`/`BranchingStoreBackend` interfaces).
@@ -27,7 +27,7 @@ Patches is an unrelease project, in stealth mode, being iterated on until it is 
 
 - `src/` — Main source code
   - `client/` — Client-side OT implementation (PatchesDoc)
-  - `server/` — Server-side OT implementation (PatchesServer, PatchesHistoryManager, PatchesBranchManager)
+  - `server/` — Server-side OT implementation (OTServer, PatchesHistoryManager, PatchesBranchManager)
   - `net/` — Network layer (WebSocket, protocol, providers)
   - `json-patch/`, `utils/` — Supporting modules
 - `docs/` — In-depth documentation for each core component

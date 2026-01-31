@@ -6,7 +6,8 @@ import type {
   ListVersionsOptions,
   VersionMetadata,
 } from '../types.js';
-import { assertVersionMetadata, type PatchesServer } from './PatchesServer.js';
+import type { PatchesServer } from './PatchesServer.js';
+import { assertVersionMetadata } from './utils.js';
 import type { PatchesStoreBackend } from './types.js';
 
 /**

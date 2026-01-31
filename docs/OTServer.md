@@ -1,8 +1,8 @@
-# `PatchesServer`
+# `OTServer`
 
-Meet the boss of your OT system! 🏢
+The central authority for your OT system.
 
-`PatchesServer` is the central authority that keeps everything running smoothly. It's like the air traffic controller for your collaborative documents – directing traffic, preventing collisions, and making sure everyone sees the same thing.
+`OTServer` is the server-side implementation of the Operational Transformation algorithm. It keeps everything running smoothly. It's like the air traffic controller for your collaborative documents – directing traffic, preventing collisions, and making sure everyone sees the same thing.
 
 **Table of Contents**
 
@@ -17,7 +17,7 @@ Meet the boss of your OT system! 🏢
 
 ## Overview
 
-`PatchesServer` does **all the important stuff**:
+`OTServer` does **all the important stuff**:
 
 1. **Central Authority:** It's the one source of truth that decides the correct order of operations
 2. **Transformation:** Takes client changes and transforms them against other clients' changes so everything works perfectly
@@ -28,22 +28,22 @@ Meet the boss of your OT system! 🏢
 
 ## Initialization
 
-Getting started is super easy. Just give `PatchesServer` a store that implements [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) and some optional config options:
+Getting started is super easy. Just give `OTServer` a store that implements [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) and some optional config options:
 
 ```typescript
-import { PatchesServer, PatchesServerOptions } from '@dabble/patches/server';
+import { OTServer, OTServerOptions } from '@dabble/patches/server';
 import { MyDatabaseStore } from './my-store'; // Your backend implementation
 
 // Instantiate your backend store
 const store = new MyDatabaseStore(/* connection details, etc. */);
 
 // Configure options (optional)
-const options: PatchesServerOptions = {
+const options: OTServerOptions = {
   // Create version snapshots if gap between ops in a batch > 15 mins
   sessionTimeoutMinutes: 15,
 };
 
-const server = new PatchesServer(store, options);
+const server = new OTServer(store, options);
 ```
 
 ## Core Method: `commitChanges()`
@@ -126,7 +126,7 @@ Got a client submitting a ton of changes (maybe after being offline)? They can s
 
 ## Versioning
 
-`PatchesServer` automatically creates version snapshots to make history tracking and offline work a breeze.
+`OTServer` automatically creates version snapshots to make history tracking and offline work a breeze.
 
 ### Offline Snapshots
 
@@ -145,7 +145,7 @@ Defaults to 30 minutes. This setting controls when new version snapshots are cre
 
 ## State and History Retrieval
 
-Need to get document state or history? `PatchesServer` has you covered!
+Need to get document state or history? `OTServer` has you covered!
 
 ### `getDoc()`
 
@@ -207,7 +207,7 @@ const unsubscribedIds = await server.unsubscribe(clientId, [docId1, docId2]);
 
 ## Backend Store Dependency
 
-`PatchesServer` relies 100% on your implementation of the [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) interface. It doesn't do its own storage – it delegates all that to your backend.
+`OTServer` relies 100% on your implementation of the [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) interface. It doesn't do its own storage – it delegates all that to your backend.
 
 Check out the [Backend Store Interface](./operational-transformation.md#backend-store-interface) for all the methods you need to implement.
 

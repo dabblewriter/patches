@@ -55,7 +55,7 @@ The codebase is divided into client-side and server-side components:
 
 ### Server-Side Components
 
-1. **PatchesServer**: Core server-side authority
+1. **OTServer**: Core server-side OT authority (implements PatchesServer interface)
    - Processes incoming changes, assigns revisions
    - Uses server algorithm functions for state management
    - Maintains document history
@@ -139,9 +139,9 @@ The system uses JSON Patch operations (RFC 6902) with custom OT transformations 
    const sync = new PatchesSync(patches, 'wss://server.com');
 
    // Server-side
-   import { PatchesServer } from '@dabble/patches/server';
+   import { OTServer } from '@dabble/patches/server';
 
-   const server = new PatchesServer(store);
+   const server = new OTServer(store);
    ```
 
 ## Testing Approach

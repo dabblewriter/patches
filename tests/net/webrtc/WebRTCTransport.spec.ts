@@ -365,10 +365,7 @@ describe('WebRTCTransport', () => {
 
       signalHandler(signalData);
 
-      expect(mockJSONRPCClient.call).toHaveBeenCalledWith('peer-signal', {
-        to: 'peer1',
-        data: signalData,
-      });
+      expect(mockJSONRPCClient.call).toHaveBeenCalledWith('peer-signal', 'peer1', signalData);
     });
 
     it('should handle peer connect event', () => {

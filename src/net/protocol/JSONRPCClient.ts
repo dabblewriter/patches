@@ -25,12 +25,13 @@ export class JSONRPCClient {
    * Sends a JSON-RPC request to the server and returns a promise for the response.
    *
    * @param method - The name of the remote procedure to call
-   * @param params - The parameters to pass to the remote procedure (optional)
+   * @param args - The arguments to pass to the remote procedure (sent as array)
    * @returns A promise that resolves with the result of the procedure call or rejects with an error
    * @template T - The expected return type of the remote procedure
    */
-  async call<T = any>(method: string, params?: any): Promise<T> {
+  async call<T = any>(method: string, ...args: any[]): Promise<T> {
     const id = this.nextId++;
+    const params = args.length > 0 ? args : undefined;
     const message: JsonRpcRequest = { jsonrpc: '2.0', id, method, params };
 
     return new Promise((resolve, reject) => {
@@ -43,9 +44,10 @@ export class JSONRPCClient {
    * Sends a JSON-RPC notification to the server (no response expected).
    *
    * @param method - The name of the remote procedure to call
-   * @param params - The parameters to pass to the remote procedure (optional)
+   * @param args - The arguments to pass to the remote procedure (sent as array)
    */
-  notify(method: string, params?: any): void {
+  notify(method: string, ...args: any[]): void {
+    const params = args.length > 0 ? args : undefined;
     const message: JsonRpcNotification = { jsonrpc: '2.0', method, params };
     this.transport.send(JSON.stringify(message));
   }

@@ -7,6 +7,8 @@ import type { OpsCompressor } from '../compression/index.js';
 import { createChange } from '../data/change.js';
 import { signal } from '../event-signal.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
+import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
+import { getClientId } from '../net/serverContext.js';
 import type {
   Change,
   ChangeInput,
@@ -16,6 +18,7 @@ import type {
   PatchesState,
 } from '../types.js';
 import { CompressedStoreBackend } from './CompressedStoreBackend.js';
+import type { DocumentServer } from './DocumentServer.js';
 import type { PatchesStoreBackend } from './types.js';
 export type { CommitChangesOptions } from '../algorithms/server/commitChanges.js';
 
@@ -51,7 +54,19 @@ export interface PatchesServerOptions {
  * coordinating batches of changes, managing versioning based on sessions (including offline),
  * and persisting data using a backend store.
  */
-export class PatchesServer {
+export class PatchesServer implements DocumentServer {
+  /**
+   * Static API definition for use with JSONRPCServer.register().
+   * Maps method names to required access levels.
+   */
+  static api: ApiDefinition = {
+    getDoc: 'read',
+    getChangesSince: 'read',
+    commitChanges: 'write',
+    deleteDoc: 'write',
+    undeleteDoc: 'write',
+  } as const;
+
   private readonly sessionTimeoutMillis: number;
   private readonly maxStorageBytes?: number;
   readonly store: PatchesStoreBackend;
@@ -109,7 +124,6 @@ export class PatchesServer {
    * @param docId - The ID of the document.
    * @param changes - The changes to commit.
    * @param options - Optional commit settings (e.g., forceCommit for migrations).
-   * @param originClientId - The ID of the client that initiated the commit (used by transport layer for broadcast filtering).
    * @returns A tuple of [committedChanges, transformedChanges] where:
    *   - committedChanges: Changes that were already committed to the server after the client's base revision
    *   - transformedChanges: The client's changes after being transformed against concurrent changes
@@ -117,8 +131,7 @@ export class PatchesServer {
   async commitChanges(
     docId: string,
     changes: ChangeInput[],
-    options?: CommitChangesOptions,
-    originClientId?: string
+    options?: CommitChangesOptions
   ): Promise<[Change[], Change[]]> {
     const [committedChanges, transformedChanges] = await commitChanges(
       this.store,
@@ -133,7 +146,8 @@ export class PatchesServer {
     if (transformedChanges.length > 0) {
       try {
         // Fire event for realtime transports (WebSocket, etc.)
-        await this.onChangesCommitted.emit(docId, transformedChanges, originClientId);
+        // Use clientId from request context for broadcast filtering
+        await this.onChangesCommitted.emit(docId, transformedChanges, getClientId());
       } catch (error) {
         // If notification fails after saving, log error but don't fail the operation
         // The changes are already committed to storage, so we can't roll back
@@ -174,10 +188,11 @@ export class PatchesServer {
   /**
    * Deletes a document.
    * @param docId The document ID.
-   * @param originClientId - The ID of the client that initiated the delete operation.
    * @param options - Optional deletion settings (e.g., skipTombstone for testing).
    */
-  async deleteDoc(docId: string, options?: DeleteDocOptions, originClientId?: string): Promise<void> {
+  async deleteDoc(docId: string, options?: DeleteDocOptions): Promise<void> {
+    const clientId = getClientId();
+
     // Create tombstone if store supports it (unless skipped)
     if (this.store.createTombstone && !options?.skipTombstone) {
       const { rev: lastRev } = await this.getDoc(docId);
@@ -185,12 +200,12 @@ export class PatchesServer {
         docId,
         deletedAt: Date.now(),
         lastRev,
-        deletedByClientId: originClientId,
+        deletedByClientId: clientId,
       });
     }
 
     await this.store.deleteDoc(docId);
-    await this.onDocDeleted.emit(docId, options, originClientId);
+    await this.onDocDeleted.emit(docId, options, clientId);
   }
 
   /**

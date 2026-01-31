@@ -1,10 +1,24 @@
 import { signal, type Signal, type Unsubscriber } from '../../event-signal.js';
-import type { AuthContext } from '../websocket/AuthorizationProvider.js';
+import { StatusError } from '../error.js';
+import { clearAuthContext, getAuthContext, setAuthContext } from '../serverContext.js';
+import type { AuthContext, AuthorizationProvider } from '../websocket/AuthorizationProvider.js';
 import type { JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, Message } from './types.js';
 import { rpcError, rpcNotification, rpcResponse } from './utils.js';
 
 export type ConnectionSignalSubscriber = (params: any, clientId?: string) => any;
-export type MessageHandler<P = any, R = any> = (params: P, ctx?: AuthContext) => Promise<R> | R;
+export type MessageHandler<R = any> = (...args: any[]) => Promise<R> | R;
+
+/** Access level for API methods */
+export type AccessLevel = 'read' | 'write';
+
+/** Static API definition mapping method names to access levels */
+export type ApiDefinition = Record<string, AccessLevel>;
+
+/** Options for creating a JSONRPCServer */
+export interface JSONRPCServerOptions {
+  /** Authorization provider for document access control */
+  auth?: AuthorizationProvider;
+}
 
 /**
  * Lightweight JSON-RPC 2.0 server adapter for {@link PatchesServer}.
@@ -28,8 +42,19 @@ export class JSONRPCServer {
   /** Allow external callers to emit server-initiated notifications. */
   private readonly notificationSignals = new Map<string, Signal<ConnectionSignalSubscriber>>();
 
+  /** Authorization provider for document access control */
+  readonly auth?: AuthorizationProvider;
+
   /** Allow external callers to emit server-initiated notifications. */
   public readonly onNotify = signal<(msg: JsonRpcNotification, exceptConnectionId?: string) => void>();
+
+  /**
+   * Creates a new JSONRPCServer instance.
+   * @param options - Configuration options
+   */
+  constructor(options: JSONRPCServerOptions = {}) {
+    this.auth = options.auth;
+  }
 
   // -------------------------------------------------------------------------
   // Registration API
@@ -40,12 +65,39 @@ export class JSONRPCServer {
    *
    * @param method   Fully-qualified method name (e.g. "patches.subscribe").
    * @param handler  Function that performs the work and returns the result.
+   *                 Receives spread arguments followed by AuthContext.
    */
-  registerMethod<TParams = any, TResult = any>(method: string, handler: MessageHandler<TParams, TResult>): void {
+  registerMethod<TResult = any>(method: string, handler: MessageHandler<TResult>): void {
     if (this.handlers.has(method)) {
       throw new Error(`A handler for method '${method}' is already registered.`);
     }
-    this.handlers.set(method, handler as any);
+    this.handlers.set(method, handler);
+  }
+
+  /**
+   * Registers all methods from an object that has a static `api` property.
+   * The `api` property should map method names to access levels ('read' | 'write').
+   *
+   * @param obj - Object instance with methods to register
+   * @throws Error if the object's constructor doesn't have a static `api` property
+   */
+  register<T extends object>(obj: T): void {
+    const api = (obj.constructor as any).api as ApiDefinition | undefined;
+    if (!api) {
+      throw new Error('Object must have static api property');
+    }
+
+    for (const [method, access] of Object.entries(api)) {
+      if (typeof (obj as any)[method] !== 'function') {
+        throw new Error(`Method '${method}' not found on object`);
+      }
+
+      this.registerMethod(method, async (...args: any[]) => {
+        const ctx = getAuthContext();
+        await this.assertAccess(access, ctx, method, args);
+        return (obj as any)[method](...args);
+      });
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -137,20 +189,53 @@ export class JSONRPCServer {
   }
 
   /**
-   * Maps JSON-RPC method names to {@link PatchesServer} calls.
-   * @param connectionId - The WebSocket transport object.
+   * Checks access control before method invocation.
+   * Called before each method invocation when using `register()`.
+   *
+   * @param access - The required access level ('read' or 'write')
+   * @param ctx - The authentication context
+   * @param method - The method being called
+   * @param args - The method arguments (first arg is typically docId)
+   * @throws StatusError if access is denied
+   */
+  protected async assertAccess(
+    access: AccessLevel,
+    ctx: AuthContext | undefined,
+    method: string,
+    args?: any[]
+  ): Promise<void> {
+    if (!this.auth) return; // No auth provider = allow all
+
+    // Most methods have docId as the first parameter
+    const docId = args?.[0];
+    if (typeof docId !== 'string') return; // No docId = allow
+
+    const ok = await this.auth.canAccess(ctx, docId, access, method);
+    if (!ok) {
+      throw new StatusError(401, `${access.toUpperCase()}_FORBIDDEN:${docId}`);
+    }
+  }
+
+  /**
+   * Maps JSON-RPC method names to handler calls.
    * @param method - The JSON-RPC method name.
-   * @param params - The JSON-RPC parameters.
-   * @returns The result of the {@link PatchesServer} call.
+   * @param params - The JSON-RPC parameters (array of arguments).
+   * @param ctx - The authentication context.
+   * @returns The result of the handler call.
    */
   protected async _dispatch(method: string, params: any, ctx?: AuthContext): Promise<any> {
     const handler = this.handlers.get(method);
     if (!handler) {
       throw new Error(`Unknown method '${method}'.`);
     }
-    if (!params || typeof params !== 'object' || Array.isArray(params)) {
-      throw new Error(`Invalid parameters for method '${method}'.`);
-    }
-    return handler(params, ctx);
+
+    // Normalize params to an array
+    const args = Array.isArray(params) ? params : params === undefined ? [] : [params];
+
+    // Make ctx available synchronously via getAuthContext() during handler execution
+    setAuthContext(ctx);
+    const response = handler(...args);
+    clearAuthContext();
+    return response;
   }
 }

@@ -60,7 +60,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving with the list of successfully subscribed document IDs.
    */
   async subscribe(ids: string | string[]): Promise<string[]> {
-    return this.rpc.call('subscribe', { ids });
+    return this.rpc.call('subscribe', ids);
   }
 
   /**
@@ -69,7 +69,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving when the unsubscription is confirmed.
    */
   async unsubscribe(ids: string | string[]): Promise<void> {
-    return this.rpc.call('unsubscribe', { ids });
+    return this.rpc.call('unsubscribe', ids);
   }
 
   // === Document Operations ===
@@ -79,7 +79,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving with the document snapshot.
    */
   async getDoc<T = any>(docId: string, atRev?: number): Promise<PatchesState<T>> {
-    return this.rpc.call('getDoc', { docId, atRev });
+    return this.rpc.call('getDoc', docId, atRev);
   }
 
   /**
@@ -89,7 +89,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving with an array of changes.
    */
   async getChangesSince(docId: string, rev: number): Promise<Change[]> {
-    return this.rpc.call('getChangesSince', { docId, rev });
+    return this.rpc.call('getChangesSince', docId, rev);
   }
 
   /**
@@ -100,7 +100,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving with the changes as committed by the server (potentially transformed).
    */
   async commitChanges(docId: string, changes: ChangeInput[], options?: CommitChangesOptions): Promise<Change[]> {
-    return this.rpc.call('commitChanges', { docId, changes, options });
+    return this.rpc.call('commitChanges', docId, changes, options);
   }
 
   /**
@@ -110,7 +110,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving when the deletion is confirmed.
    */
   async deleteDoc(docId: string, options?: DeleteDocOptions): Promise<void> {
-    return this.rpc.call('deleteDoc', { docId, options });
+    return this.rpc.call('deleteDoc', docId, options);
   }
 
   // === Version Operations ===
@@ -121,7 +121,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving with the unique ID of the newly created version.
    */
   async createVersion(docId: string, metadata: EditableVersionMetadata): Promise<string> {
-    return this.rpc.call('createVersion', { docId, metadata });
+    return this.rpc.call('createVersion', docId, metadata);
   }
 
   /**
@@ -131,7 +131,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving with an array of version metadata objects.
    */
   async listVersions(docId: string, options?: ListVersionsOptions): Promise<VersionMetadata[]> {
-    return this.rpc.call('listVersions', { docId, options });
+    return this.rpc.call('listVersions', docId, options);
   }
 
   /**
@@ -141,7 +141,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving with the document snapshot for that version.
    */
   async getVersionState(docId: string, versionId: string): Promise<PatchesSnapshot> {
-    return this.rpc.call('getVersionState', { docId, versionId });
+    return this.rpc.call('getVersionState', docId, versionId);
   }
 
   /**
@@ -151,7 +151,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving with an array of changes that constitute that version.
    */
   async getVersionChanges(docId: string, versionId: string): Promise<Change[]> {
-    return this.rpc.call('getVersionChanges', { docId, versionId });
+    return this.rpc.call('getVersionChanges', docId, versionId);
   }
 
   /**
@@ -162,7 +162,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving when the update is confirmed.
    */
   async updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void> {
-    return this.rpc.call('updateVersion', { docId, versionId, metadata });
+    return this.rpc.call('updateVersion', docId, versionId, metadata);
   }
 
   // === Branch Operations ===
@@ -173,7 +173,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving with an array of branch metadata objects.
    */
   async listBranches(docId: string): Promise<VersionMetadata[]> {
-    return this.rpc.call('listBranches', { docId });
+    return this.rpc.call('listBranches', docId);
   }
 
   /**
@@ -184,7 +184,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving with the unique ID of the newly created branch.
    */
   async createBranch(docId: string, rev: number, metadata?: EditableVersionMetadata): Promise<string> {
-    return this.rpc.call('createBranch', { docId, rev, metadata });
+    return this.rpc.call('createBranch', docId, rev, metadata);
   }
 
   /**
@@ -193,7 +193,7 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving when the branch is closed.
    */
   async closeBranch(branchId: string): Promise<void> {
-    return this.rpc.call('closeBranch', { branchId });
+    return this.rpc.call('closeBranch', branchId);
   }
 
   /**
@@ -202,6 +202,6 @@ export class PatchesClient implements PatchesAPI {
    * @returns A promise resolving when the merge is confirmed.
    */
   async mergeBranch(branchId: string): Promise<void> {
-    return this.rpc.call('mergeBranch', { branchId });
+    return this.rpc.call('mergeBranch', branchId);
   }
 }

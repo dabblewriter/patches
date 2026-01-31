@@ -2,6 +2,7 @@ import { createId } from 'crypto-id';
 import { breakChanges } from '../algorithms/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import { createVersionMetadata } from '../data/version.js';
+import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
 import type { BranchingStoreBackend } from './types.js';
@@ -12,6 +13,14 @@ import type { BranchingStoreBackend } from './types.js';
  * development of a document with the ability to merge changes back into the original document later.
  */
 export class PatchesBranchManager {
+  static api: ApiDefinition = {
+    listBranches: 'read',
+    createBranch: 'write',
+    updateBranch: 'write',
+    closeBranch: 'write',
+    mergeBranch: 'write',
+  } as const;
+
   constructor(
     private readonly store: BranchingStoreBackend,
     private readonly patchesServer: PatchesServer,

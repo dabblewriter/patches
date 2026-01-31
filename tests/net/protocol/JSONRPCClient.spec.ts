@@ -42,7 +42,7 @@ describe('JSONRPCClient', () => {
 
   describe('request method', () => {
     it('should send JSON-RPC request with auto-incrementing id', async () => {
-      const responsePromise = client.call('testMethod', { param: 'value' });
+      const responsePromise = client.call('testMethod', 'arg1', 'arg2');
 
       expect(mockTransport.send).toHaveBeenCalledTimes(1);
       const sentMessage = JSON.parse(vi.mocked(mockTransport.send).mock.calls[0][0]);
@@ -51,7 +51,7 @@ describe('JSONRPCClient', () => {
         jsonrpc: '2.0',
         id: 1,
         method: 'testMethod',
-        params: { param: 'value' },
+        params: ['arg1', 'arg2'],
       });
 
       // Send response to resolve promise
@@ -142,7 +142,7 @@ describe('JSONRPCClient', () => {
       const responsePromise = client.call('complexMethod', complexParams);
 
       const sentMessage = JSON.parse(vi.mocked(mockTransport.send).mock.calls[0][0]);
-      expect(sentMessage.params).toEqual(complexParams);
+      expect(sentMessage.params).toEqual([complexParams]);
 
       const complexResult = {
         data: { items: ['a', 'b', 'c'] },
@@ -185,7 +185,7 @@ describe('JSONRPCClient', () => {
 
   describe('notify method', () => {
     it('should send notification without id', () => {
-      client.notify('notifyMethod', { data: 'value' });
+      client.notify('notifyMethod', 'arg1', 'arg2');
 
       expect(mockTransport.send).toHaveBeenCalledTimes(1);
       const sentMessage = JSON.parse(vi.mocked(mockTransport.send).mock.calls[0][0]);
@@ -193,7 +193,7 @@ describe('JSONRPCClient', () => {
       expect(sentMessage).toEqual({
         jsonrpc: '2.0',
         method: 'notifyMethod',
-        params: { data: 'value' },
+        params: ['arg1', 'arg2'],
       });
       expect('id' in sentMessage).toBe(false);
     });
@@ -210,8 +210,8 @@ describe('JSONRPCClient', () => {
     });
 
     it('should handle multiple notifications', () => {
-      client.notify('notify1', { param1: 'value1' });
-      client.notify('notify2', { param2: 'value2' });
+      client.notify('notify1', 'value1');
+      client.notify('notify2', 'value2');
 
       expect(mockTransport.send).toHaveBeenCalledTimes(2);
 
@@ -533,7 +533,7 @@ describe('JSONRPCClient', () => {
         JSON.stringify({
           jsonrpc: '2.0',
           method: 'asyncTest',
-          params: { data: 'async' },
+          params: [{ data: 'async' }],
         })
       );
     });

@@ -1,3 +1,4 @@
+import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import type {
   Change,
   EditableVersionMetadata,
@@ -13,6 +14,15 @@ import type { PatchesStoreBackend } from './types.js';
  * using the new versioning model based on IDs and metadata.
  */
 export class PatchesHistoryManager {
+  static api: ApiDefinition = {
+    listVersions: 'read',
+    createVersion: 'write',
+    updateVersion: 'write',
+    getVersionState: 'read',
+    getVersionChanges: 'read',
+    listServerChanges: 'read',
+  } as const;
+
   private readonly store: PatchesStoreBackend;
 
   constructor(private readonly patches: PatchesServer) {
@@ -96,5 +106,23 @@ export class PatchesHistoryManager {
    */
   async listServerChanges(docId: string, options: ListChangesOptions = {}): Promise<Change[]> {
     return await this.store.listChanges(docId, options);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Alias methods for RPC API compatibility
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Alias for getStateAtVersion for RPC API compatibility.
+   */
+  async getVersionState(docId: string, versionId: string): Promise<any> {
+    return this.getStateAtVersion(docId, versionId);
+  }
+
+  /**
+   * Alias for getChangesForVersion for RPC API compatibility.
+   */
+  async getVersionChanges(docId: string, versionId: string): Promise<Change[]> {
+    return this.getChangesForVersion(docId, versionId);
   }
 }

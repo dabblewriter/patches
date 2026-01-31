@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { WebSocketServer } from '../../../src/net/websocket/WebSocketServer';
+import * as serverContext from '../../../src/net/serverContext';
+
+// Mock the serverContext module
+vi.mock('../../../src/net/serverContext', () => ({
+  getAuthContext: vi.fn(),
+}));
 
 // Mock dependencies
 const mockTransport = {
@@ -18,11 +24,6 @@ const mockRPC = {
   onNotify: vi.fn(),
 };
 
-const mockRPCServer = {
-  rpc: mockRPC,
-  auth: mockAuth,
-};
-
 describe('WebSocketServer', () => {
   let webSocketServer: WebSocketServer;
 
@@ -31,8 +32,13 @@ describe('WebSocketServer', () => {
 
     // Reset mock implementations
     mockAuth.canAccess.mockResolvedValue(true);
+    vi.mocked(serverContext.getAuthContext).mockReturnValue(undefined);
 
-    webSocketServer = new WebSocketServer(mockTransport as any, mockRPCServer as any);
+    webSocketServer = new WebSocketServer({
+      transport: mockTransport as any,
+      rpc: mockRPC as any,
+      auth: mockAuth,
+    });
   });
 
   describe('constructor', () => {
@@ -50,9 +56,10 @@ describe('WebSocketServer', () => {
     const mockCtx = { clientId: 'client1' };
 
     it('should handle subscribe with authorization', async () => {
+      vi.mocked(serverContext.getAuthContext).mockReturnValue(mockCtx);
       mockTransport.addSubscription.mockResolvedValue(['doc1']);
 
-      const result = await webSocketServer.subscribe({ ids: 'doc1' }, mockCtx);
+      const result = await webSocketServer.subscribe({ ids: 'doc1' });
 
       expect(mockAuth.canAccess).toHaveBeenCalledWith(mockCtx, 'doc1', 'read', 'subscribe', { ids: 'doc1' });
       expect(mockTransport.addSubscription).toHaveBeenCalledWith('client1', ['doc1']);
@@ -60,22 +67,24 @@ describe('WebSocketServer', () => {
     });
 
     it('should filter unauthorized documents', async () => {
+      vi.mocked(serverContext.getAuthContext).mockReturnValue(mockCtx);
       mockAuth.canAccess
         .mockResolvedValueOnce(true) // doc1 allowed
         .mockResolvedValueOnce(false); // doc2 denied
 
       mockTransport.addSubscription.mockResolvedValue(['doc1']);
 
-      const result = await webSocketServer.subscribe({ ids: ['doc1', 'doc2'] }, mockCtx);
+      const result = await webSocketServer.subscribe({ ids: ['doc1', 'doc2'] });
 
       expect(mockTransport.addSubscription).toHaveBeenCalledWith('client1', ['doc1']);
       expect(result).toEqual(['doc1']);
     });
 
     it('should handle unsubscribe without authorization check', async () => {
+      vi.mocked(serverContext.getAuthContext).mockReturnValue(mockCtx);
       mockTransport.removeSubscription.mockResolvedValue(['doc1']);
 
-      const result = await webSocketServer.unsubscribe({ ids: 'doc1' }, mockCtx);
+      const result = await webSocketServer.unsubscribe({ ids: 'doc1' });
 
       expect(mockAuth.canAccess).not.toHaveBeenCalled();
       expect(mockTransport.removeSubscription).toHaveBeenCalledWith('client1', ['doc1']);
@@ -83,10 +92,11 @@ describe('WebSocketServer', () => {
     });
 
     it('should return empty array when no client ID', async () => {
-      const result = await webSocketServer.subscribe({ ids: 'doc1' }, undefined);
+      vi.mocked(serverContext.getAuthContext).mockReturnValue(undefined);
+      const result = await webSocketServer.subscribe({ ids: 'doc1' });
       expect(result).toEqual([]);
 
-      const result2 = await webSocketServer.unsubscribe({ ids: 'doc1' }, undefined);
+      const result2 = await webSocketServer.unsubscribe({ ids: 'doc1' });
       expect(result2).toEqual([]);
     });
   });
@@ -130,19 +140,21 @@ describe('WebSocketServer', () => {
     const mockCtx = { clientId: 'client1' };
 
     it('should handle authorization exceptions', async () => {
+      vi.mocked(serverContext.getAuthContext).mockReturnValue(mockCtx);
       mockAuth.canAccess.mockRejectedValue(new Error('Auth error'));
 
-      const result = await webSocketServer.subscribe({ ids: 'doc1' }, mockCtx);
+      const result = await webSocketServer.subscribe({ ids: 'doc1' });
 
       expect(result).toEqual([]);
       expect(mockTransport.addSubscription).not.toHaveBeenCalled();
     });
 
     it('should propagate transport errors', async () => {
+      vi.mocked(serverContext.getAuthContext).mockReturnValue(mockCtx);
       const error = new Error('Transport error');
       mockTransport.addSubscription.mockRejectedValue(error);
 
-      await expect(webSocketServer.subscribe({ ids: 'doc1' }, mockCtx)).rejects.toThrow('Transport error');
+      await expect(webSocketServer.subscribe({ ids: 'doc1' })).rejects.toThrow('Transport error');
     });
   });
 });

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { JSONRPCServer } from '../../../src/net/protocol/JSONRPCServer';
 import type { JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, Message } from '../../../src/net/protocol/types';
+import { getAuthContext } from '../../../src/net/serverContext';
 import type { AuthContext } from '../../../src/net/websocket/AuthorizationProvider';
 
 describe('JSONRPCServer', () => {
@@ -257,17 +258,21 @@ describe('JSONRPCServer', () => {
     });
 
     it('should handle request without params', async () => {
+      const handler = vi.fn().mockResolvedValue('no-params-result');
+      server.registerMethod('noParamsMethod', handler);
+
       const request = JSON.stringify({
         jsonrpc: '2.0',
         id: 1,
-        method: 'testMethod',
+        method: 'noParamsMethod',
       });
 
       const response = await server.processMessage(request);
       const parsed = JSON.parse(response as string);
 
-      // Server rejects requests without params
-      expect(parsed.error?.message).toBe("Invalid parameters for method 'testMethod'.");
+      // Server accepts requests without params (treated as empty args)
+      expect(parsed.result).toBe('no-params-result');
+      expect(handler).toHaveBeenCalledWith();
     });
 
     it('should handle request with null id', async () => {
@@ -342,8 +347,12 @@ describe('JSONRPCServer', () => {
   });
 
   describe('authentication context handling', () => {
-    it('should pass auth context to method handlers', async () => {
-      const handler = vi.fn().mockResolvedValue('authenticated');
+    it('should provide auth context via getAuthContext()', async () => {
+      let capturedCtx: AuthContext | undefined;
+      const handler = vi.fn().mockImplementation(() => {
+        capturedCtx = getAuthContext();
+        return 'authenticated';
+      });
       server.registerMethod('authMethod', handler);
 
       const authCtx: AuthContext = {
@@ -360,7 +369,8 @@ describe('JSONRPCServer', () => {
 
       await server.processMessage(request, authCtx);
 
-      expect(handler).toHaveBeenCalledWith({ data: 'test' }, authCtx);
+      expect(handler).toHaveBeenCalledWith({ data: 'test' });
+      expect(capturedCtx).toEqual(authCtx);
     });
 
     it('should pass clientId to notification handlers', async () => {
@@ -381,6 +391,48 @@ describe('JSONRPCServer', () => {
       await server.processMessage(notification, authCtx);
 
       expect(handler).toHaveBeenCalledWith({ message: 'admin action' }, 'client456');
+    });
+
+    it('should handle optional params correctly with sync ctx', async () => {
+      const handler = vi.fn().mockImplementation((required: string, optional?: string) => {
+        const ctx = getAuthContext();
+        return { required, optional, hasCtx: !!ctx };
+      });
+      server.registerMethod('optionalMethod', handler);
+
+      const authCtx: AuthContext = { clientId: 'test', metadata: {} };
+      const request: JsonRpcRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'optionalMethod',
+        params: ['requiredValue'], // No optional param sent
+      };
+
+      const response = (await server.processMessage(request, authCtx)) as JsonRpcResponse;
+
+      expect(response.result).toEqual({
+        required: 'requiredValue',
+        optional: undefined, // Not ctx!
+        hasCtx: true,
+      });
+    });
+
+    it('should clear auth context after handler completes', async () => {
+      const handler = vi.fn().mockResolvedValue('done');
+      server.registerMethod('clearCtxMethod', handler);
+
+      const authCtx: AuthContext = { clientId: 'test', metadata: {} };
+      const request: JsonRpcRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'clearCtxMethod',
+        params: {},
+      };
+
+      await server.processMessage(request, authCtx);
+
+      // After the handler completes, ctx should be cleared
+      expect(getAuthContext()).toBeUndefined();
     });
   });
 
@@ -430,8 +482,9 @@ describe('JSONRPCServer', () => {
   });
 
   describe('parameter validation', () => {
-    it('should reject non-object parameters', async () => {
-      server.registerMethod('paramValidation', vi.fn());
+    it('should accept non-object parameters as single argument', async () => {
+      const handler = vi.fn().mockResolvedValue('string-handled');
+      server.registerMethod('paramValidation', handler);
 
       const requestWithStringParams = JSON.stringify({
         jsonrpc: '2.0',
@@ -443,11 +496,13 @@ describe('JSONRPCServer', () => {
       const response = await server.processMessage(requestWithStringParams);
       const parsed = JSON.parse(response as string);
 
-      expect(parsed.error?.message).toBe("Invalid parameters for method 'paramValidation'.");
+      expect(parsed.result).toBe('string-handled');
+      expect(handler).toHaveBeenCalledWith('string params');
     });
 
-    it('should reject array parameters', async () => {
-      server.registerMethod('arrayParamValidation', vi.fn());
+    it('should accept array parameters and spread them', async () => {
+      const handler = vi.fn().mockResolvedValue('array-handled');
+      server.registerMethod('arrayParamValidation', handler);
 
       const requestWithArrayParams: JsonRpcRequest = {
         jsonrpc: '2.0',
@@ -458,10 +513,11 @@ describe('JSONRPCServer', () => {
 
       const response = (await server.processMessage(requestWithArrayParams)) as JsonRpcResponse;
 
-      expect(response.error?.message).toBe("Invalid parameters for method 'arrayParamValidation'.");
+      expect(response.result).toBe('array-handled');
+      expect(handler).toHaveBeenCalledWith(1, 2, 3);
     });
 
-    it('should accept null/undefined parameters', async () => {
+    it('should accept null/undefined parameters as empty args', async () => {
       const handler = vi.fn().mockResolvedValue('success');
       server.registerMethod('nullParamMethod', handler);
 
@@ -474,10 +530,11 @@ describe('JSONRPCServer', () => {
 
       const response = (await server.processMessage(requestWithNullParams)) as JsonRpcResponse;
 
-      expect(response.error?.message).toBe("Invalid parameters for method 'nullParamMethod'.");
+      expect(response.result).toBe('success');
+      expect(handler).toHaveBeenCalledWith(null);
     });
 
-    it('should accept object parameters', async () => {
+    it('should accept object parameters as single argument', async () => {
       const handler = vi.fn().mockResolvedValue('valid');
       server.registerMethod('validParamMethod', handler);
 
@@ -491,7 +548,7 @@ describe('JSONRPCServer', () => {
       const response = (await server.processMessage(requestWithObjectParams)) as JsonRpcResponse;
 
       expect(response.result).toBe('valid');
-      expect(handler).toHaveBeenCalledWith({ valid: true }, undefined);
+      expect(handler).toHaveBeenCalledWith({ valid: true });
     });
   });
 
@@ -637,7 +694,7 @@ describe('JSONRPCServer', () => {
       const response = (await server.processMessage(request)) as JsonRpcResponse;
 
       expect(response.result).toEqual({ id: 'user123', created: true });
-      expect(typedHandler).toHaveBeenCalledWith({ name: 'John', email: 'john@example.com' }, undefined);
+      expect(typedHandler).toHaveBeenCalledWith({ name: 'John', email: 'john@example.com' });
     });
 
     it('should support typed notification handlers', async () => {

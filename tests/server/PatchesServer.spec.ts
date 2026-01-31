@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createChange } from '../../src/data/change';
 import { JSONPatch } from '../../src/json-patch/JSONPatch';
+import { clearAuthContext, setAuthContext } from '../../src/net/serverContext';
 import { PatchesServer, assertVersionMetadata } from '../../src/server/PatchesServer';
 import type { PatchesStoreBackend } from '../../src/server/types';
 import type { Change, EditableVersionMetadata } from '../../src/types';
@@ -283,9 +284,14 @@ describe('PatchesServer', () => {
     it('should emit onChangesCommitted signal after successful commit', async () => {
       const emitSpy = vi.spyOn(server.onChangesCommitted, 'emit').mockResolvedValue();
 
-      await server.commitChanges('doc1', [mockChange], undefined, 'client1');
-
-      expect(emitSpy).toHaveBeenCalledWith('doc1', expect.any(Array), 'client1');
+      // Set auth context to provide clientId
+      setAuthContext({ clientId: 'client1', metadata: {} });
+      try {
+        await server.commitChanges('doc1', [mockChange]);
+        expect(emitSpy).toHaveBeenCalledWith('doc1', expect.any(Array), 'client1');
+      } finally {
+        clearAuthContext();
+      }
     });
 
     it('should handle notification errors gracefully', async () => {
@@ -356,10 +362,15 @@ describe('PatchesServer', () => {
     it('should delete document and emit signal', async () => {
       const emitSpy = vi.spyOn(server.onDocDeleted, 'emit').mockResolvedValue();
 
-      await server.deleteDoc('doc1', undefined, 'client1');
-
-      expect(mockStore.deleteDoc).toHaveBeenCalledWith('doc1');
-      expect(emitSpy).toHaveBeenCalledWith('doc1', undefined, 'client1');
+      // Set auth context to provide clientId
+      setAuthContext({ clientId: 'client1', metadata: {} });
+      try {
+        await server.deleteDoc('doc1');
+        expect(mockStore.deleteDoc).toHaveBeenCalledWith('doc1');
+        expect(emitSpy).toHaveBeenCalledWith('doc1', undefined, 'client1');
+      } finally {
+        clearAuthContext();
+      }
     });
   });
 

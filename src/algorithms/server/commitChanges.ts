@@ -101,7 +101,7 @@ export async function commitChanges(
   // 2. Check if we need to create a new version - if the last change was created more than a session ago
   // In historicalImport mode, use incoming change timestamp instead of serverNow for accurate gap detection
   const lastChange = currentChanges[currentChanges.length - 1];
-  const compareTime = options?.historicalImport ? changes[0].createdAt : serverNow;
+  const compareTime = options?.historicalImport ? (changes[0].createdAt ?? serverNow) : serverNow;
   if (lastChange && compareTime - lastChange.createdAt > sessionTimeoutMillis) {
     await createVersion(store, docId, currentState, currentChanges);
   }

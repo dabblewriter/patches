@@ -15,8 +15,8 @@ vi.mock('../../src/algorithms/client/makeChange', () => ({
         rev: snapshot.rev + 1,
         baseRev: snapshot.rev,
         ops: [{ op: 'add', path: '/test', value: 'mock' }],
-        createdAt: new Date().toISOString(),
-        committedAt: new Date().toISOString(),
+        createdAt: Date.now(),
+        committedAt: Date.now(),
         ...metadata,
       },
     ];
@@ -62,8 +62,8 @@ describe('PatchesDoc', () => {
     rev,
     baseRev: baseRev ?? rev - 1,
     ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
-    createdAt: new Date().toISOString(),
-    committedAt: new Date().toISOString(),
+    createdAt: Date.now(),
+    committedAt: Date.now(),
   });
 
   const createSnapshot = (state: any, rev: number, changes: Change[] = []): PatchesSnapshot<any> => ({
@@ -310,8 +310,8 @@ describe('PatchesDoc', () => {
           rev: 1,
           baseRev: 0,
           ops: [{ op: 'add', path: '/test', value: 'added' }],
-          createdAt: new Date().toISOString(),
-          committedAt: new Date().toISOString(),
+          createdAt: Date.now(),
+          committedAt: Date.now(),
         },
       ]);
 

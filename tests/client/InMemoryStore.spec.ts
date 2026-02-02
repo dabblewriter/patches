@@ -13,8 +13,8 @@ describe('InMemoryStore', () => {
     rev,
     baseRev,
     ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
-    createdAt: new Date().toISOString(),
-    committedAt: new Date().toISOString(),
+    createdAt: Date.now(),
+    committedAt: Date.now(),
   });
 
   const createState = (data: any, rev: number): PatchesState => ({

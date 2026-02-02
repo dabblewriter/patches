@@ -280,8 +280,8 @@ describe('PatchesSync', () => {
           rev: 1,
           baseRev: 0,
           ops: [],
-          createdAt: '2024-01-01T00:00:00.000Z',
-          committedAt: '2024-01-01T00:00:00.000Z',
+          createdAt: 0,
+          committedAt: 0,
         },
       ];
 
@@ -304,8 +304,8 @@ describe('PatchesSync', () => {
           rev: 6,
           baseRev: 5,
           ops: [],
-          createdAt: '2024-01-01T00:00:00.000Z',
-          committedAt: '2024-01-01T00:00:00.000Z',
+          createdAt: 0,
+          committedAt: 0,
         },
       ];
 
@@ -409,16 +409,16 @@ describe('PatchesSync', () => {
           rev: 1,
           baseRev: 0,
           ops: [],
-          createdAt: '2024-01-01T00:00:00.000Z',
-          committedAt: '2024-01-01T00:00:00.000Z',
+          createdAt: 0,
+          committedAt: 0,
         },
         {
           id: 'c2',
           rev: 2,
           baseRev: 1,
           ops: [],
-          createdAt: '2024-01-01T00:00:01.000Z',
-          committedAt: '2024-01-01T00:00:01.000Z',
+          createdAt: 1000,
+          committedAt: 1000,
         },
       ];
 
@@ -446,8 +446,8 @@ describe('PatchesSync', () => {
           rev: 6,
           baseRev: 5,
           ops: [],
-          createdAt: '2024-01-01T00:00:00.000Z',
-          committedAt: '2024-01-01T00:00:00.000Z',
+          createdAt: 0,
+          committedAt: 0,
         },
       ];
 
@@ -606,8 +606,8 @@ describe('PatchesSync', () => {
           rev: 6,
           baseRev: 5,
           ops: [],
-          createdAt: '2024-01-01T00:00:00.000Z',
-          committedAt: '2024-01-01T00:00:00.000Z',
+          createdAt: 0,
+          committedAt: 0,
         },
       ];
 

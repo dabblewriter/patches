@@ -112,11 +112,7 @@ export class OTServer implements PatchesServer {
    * @param options - Optional commit settings (e.g., forceCommit for migrations).
    * @returns Combined array of catchup changes followed by the client's committed changes.
    */
-  async commitChanges(
-    docId: string,
-    changes: ChangeInput[],
-    options?: CommitChangesOptions
-  ): Promise<Change[]> {
+  async commitChanges(docId: string, changes: ChangeInput[], options?: CommitChangesOptions): Promise<Change[]> {
     const { catchupChanges, newChanges } = await commitChanges(
       this.store,
       docId,

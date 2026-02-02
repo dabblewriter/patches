@@ -45,8 +45,8 @@ describe('IndexedDBStore', () => {
     rev,
     baseRev,
     ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
-    createdAt: '2024-01-01T00:00:00.000Z',
-    committedAt: '2024-01-01T00:00:01.000Z',
+    createdAt: 0,
+    committedAt: 1000,
   });
 
   const createState = (data: any, rev: number): PatchesState => ({

@@ -14,8 +14,8 @@ describe('rebaseChanges', () => {
     rev,
     baseRev,
     ops,
-    createdAt: '2024-01-01T00:00:00.000Z',
-    committedAt: '2024-01-01T00:00:00.000Z',
+    createdAt: 0,
+    committedAt: 0,
   });
 
   beforeEach(() => {
@@ -171,8 +171,8 @@ describe('rebaseChanges', () => {
   it('should preserve other change properties during rebase', () => {
     const serverChange = createChange('server', 3, [{ op: 'add', path: '/server', value: 'data' }]);
     const localChange = createChange('local', 4, [{ op: 'add', path: '/local', value: 'data' }]);
-    localChange.createdAt = '2024-06-15T12:30:00.000Z';
-    localChange.committedAt = '2024-06-15T12:30:01.000Z';
+    localChange.createdAt = 1718450000000;
+    localChange.committedAt = 1718450001000;
     (localChange as any).customField = 'test';
 
     const mockTransform = vi.fn().mockReturnValue({ ops: [{ op: 'add', path: '/local_t', value: 'data' }] });
@@ -185,8 +185,8 @@ describe('rebaseChanges', () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe('local');
-    expect(result[0].createdAt).toBe('2024-06-15T12:30:00.000Z');
-    expect(result[0].committedAt).toBe('2024-06-15T12:30:01.000Z');
+    expect(result[0].createdAt).toBe(1718450000000);
+    expect(result[0].committedAt).toBe(1718450001000);
     expect((result[0] as any).customField).toBe('test');
   });
 

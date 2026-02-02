@@ -16,8 +16,8 @@ export interface ChangeInput {
   baseRev?: number;
   /** Optional revision number. If omitted, server assigns based on current state. */
   rev?: number;
-  /** Unix timestamp in milliseconds when the change was created. */
-  createdAt: number;
+  /** Unix timestamp in milliseconds when the change was created. If omitted, server sets to current time. */
+  createdAt?: number;
   /** Optional batch identifier for grouping changes that belong to the same client batch (for multi-batch offline/large edits). */
   batchId?: string;
   /** Optional arbitrary metadata associated with the change. */
@@ -33,6 +33,8 @@ export interface Change extends ChangeInput {
   baseRev: number;
   /** The revision number assigned by the server after commit. */
   rev: number;
+  /** Unix timestamp in milliseconds when the change was created (always set by server if omitted from input). */
+  createdAt: number;
   /** Unix timestamp in milliseconds when the change was committed. */
   committedAt: number;
 }

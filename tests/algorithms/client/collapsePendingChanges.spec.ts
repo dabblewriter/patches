@@ -8,8 +8,8 @@ describe('collapsePendingChanges', () => {
     rev,
     baseRev: rev - 1,
     ops,
-    createdAt: '2024-01-01T00:00:00.000Z',
-    committedAt: '2024-01-01T00:00:00.000Z',
+    createdAt: 0,
+    committedAt: 0,
   });
 
   describe('basic collapsing', () => {
@@ -369,8 +369,8 @@ describe('collapsePendingChanges', () => {
       const changeWithoutRev: Change = {
         id: 'change-1',
         ops: [{ op: 'replace', path: '/opened', value: true }],
-        createdAt: '2024-01-01T00:00:00.000Z',
-        committedAt: '2024-01-01T00:00:00.000Z',
+        createdAt: 0,
+        committedAt: 0,
         baseRev: 0,
         rev: undefined as any, // Simulating optional rev
       };

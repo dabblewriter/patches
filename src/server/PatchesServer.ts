@@ -1,4 +1,11 @@
-import type { Change, ChangeInput, CommitChangesOptions, DeleteDocOptions, EditableVersionMetadata, PatchesState } from '../types.js';
+import type {
+  Change,
+  ChangeInput,
+  CommitChangesOptions,
+  DeleteDocOptions,
+  EditableVersionMetadata,
+  PatchesState,
+} from '../types.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import type { PatchesStoreBackend } from './types.js';
 

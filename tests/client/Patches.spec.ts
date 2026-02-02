@@ -63,8 +63,8 @@ describe('Patches', () => {
     rev,
     baseRev: rev - 1,
     ops: [{ op: 'add', path: `/change-${id}`, value: `data-${id}` }],
-    createdAt: new Date().toISOString(),
-    committedAt: new Date().toISOString(),
+    createdAt: Date.now(),
+    committedAt: Date.now(),
   });
 
   beforeEach(async () => {

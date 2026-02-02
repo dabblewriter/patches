@@ -39,8 +39,8 @@ describe('breakChanges', () => {
     rev,
     baseRev,
     ops,
-    createdAt: '2024-01-01T00:00:00.000Z',
-    committedAt: '2024-01-01T00:00:00.000Z',
+    createdAt: 0,
+    committedAt: 0,
   });
 
   it('should return original changes if all are under size limit', () => {
@@ -197,8 +197,8 @@ describe('breakChangesIntoBatches', () => {
     rev: 1,
     baseRev: 0,
     ops,
-    createdAt: '2024-01-01T00:00:00.000Z',
-    committedAt: '2024-01-01T00:00:00.000Z',
+    createdAt: 0,
+    committedAt: 0,
   });
 
   it('should return single batch when no maxPayloadBytes specified', () => {
@@ -401,8 +401,8 @@ describe('breakChanges with sizeCalculator', () => {
     rev,
     baseRev,
     ops,
-    createdAt: '2024-01-01T00:00:00.000Z',
-    committedAt: '2024-01-01T00:00:00.000Z',
+    createdAt: 0,
+    committedAt: 0,
   });
 
   it('should use compressed size when sizeCalculator is provided', () => {

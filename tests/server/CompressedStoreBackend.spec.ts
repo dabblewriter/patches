@@ -14,8 +14,8 @@ describe('CompressedStoreBackend', () => {
     rev,
     baseRev: rev - 1,
     ops,
-    createdAt: '2024-01-01T00:00:00.000Z',
-    committedAt: '2024-01-01T00:00:00.000Z',
+    createdAt: 0,
+    committedAt: 0,
   });
 
   beforeEach(() => {
@@ -171,8 +171,8 @@ describe('CompressedStoreBackend', () => {
         endRev: 1,
         startRev: 1,
         origin: 'main' as const,
-        startedAt: '2024-01-01T00:00:00.000Z',
-        endedAt: '2024-01-01T01:00:00.000Z',
+        startedAt: 0,
+        endedAt: 3600000,
       };
 
       await backend.createVersion('doc1', metadata, { state: 'data' }, changes);
@@ -190,8 +190,8 @@ describe('CompressedStoreBackend', () => {
         endRev: 1,
         startRev: 1,
         origin: 'main' as const,
-        startedAt: '2024-01-01T00:00:00.000Z',
-        endedAt: '2024-01-01T01:00:00.000Z',
+        startedAt: 0,
+        endedAt: 3600000,
       };
 
       await backend.createVersion('doc1', metadata, state, []);
@@ -205,7 +205,7 @@ describe('CompressedStoreBackend', () => {
       const backend = new CompressedStoreBackend(mockStore, base64Compressor);
       const changes = [createChange('c2', 2, [{ op: 'replace', path: '/test', value: 'updated' }])];
 
-      await backend.appendVersionChanges('doc1', 'v1', changes, '2024-01-01T02:00:00.000Z', 2, { updated: true });
+      await backend.appendVersionChanges('doc1', 'v1', changes, 7200000, 2, { updated: true });
 
       expect(mockStore.appendVersionChanges).toHaveBeenCalled();
       const appendedChanges = savedVersionChanges[0].changes;

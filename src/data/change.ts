@@ -19,14 +19,14 @@ export function createChange(
   rev?: number | Record<string, any>,
   ops?: JSONPatchOp[],
   metadata?: Record<string, any>
-) {
+): ChangeInput | Change {
   if (typeof baseRev !== 'number' && typeof rev !== 'number') {
     return {
       id: createId(8),
       ops: baseRev,
       createdAt: Date.now(),
       ...rev,
-    };
+    } as ChangeInput;
   } else {
     return {
       id: createChangeId(rev as number),
@@ -35,6 +35,6 @@ export function createChange(
       ops,
       createdAt: Date.now(),
       ...metadata,
-    };
+    } as Change;
   }
 }

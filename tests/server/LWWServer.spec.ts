@@ -23,6 +23,10 @@ function createMockStore(): LWWStoreBackend & {
     ops,
     revs,
 
+    getCurrentRev: vi.fn(async (docId: string) => {
+      return revs.get(docId) || 0;
+    }),
+
     getSnapshot: vi.fn(async (docId: string) => {
       return snapshots.get(docId) || null;
     }),
@@ -562,6 +566,7 @@ describe('LWWServer', () => {
 
       // Set up a document with rev 5
       mockStore.snapshots.set('doc1', { state: { name: 'Alice' }, rev: 5 });
+      mockStore.revs.set('doc1', 5);
 
       const storeWithTombstone = {
         ...mockStore,
@@ -715,6 +720,77 @@ describe('LWWServer', () => {
 
       // Should have saved snapshot at rev 10
       expect(mockStore.saveSnapshot).toHaveBeenCalledWith('doc1', expect.any(Object), 10);
+    });
+  });
+
+  describe('committedAt field', () => {
+    it('should set committedAt on response changes from commitChanges', async () => {
+      const before = Date.now();
+
+      const change: ChangeInput = {
+        id: 'commit1',
+        ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }],
+      };
+
+      const result = await server.commitChanges('doc1', [change]);
+
+      const after = Date.now();
+
+      expect(result).toHaveLength(1);
+      expect(result[0].committedAt).toBeGreaterThanOrEqual(before);
+      expect(result[0].committedAt).toBeLessThanOrEqual(after);
+    });
+
+    it('should set committedAt on broadcast changes', async () => {
+      const before = Date.now();
+      let broadcastedChange: any;
+
+      const emitSpy = vi.spyOn(server.onChangesCommitted, 'emit').mockImplementation(async (_docId, changes) => {
+        broadcastedChange = changes[0];
+      });
+
+      const change: ChangeInput = {
+        id: 'broadcast1',
+        ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }],
+      };
+
+      await server.commitChanges('doc1', [change]);
+
+      const after = Date.now();
+
+      expect(broadcastedChange).toBeDefined();
+      expect(broadcastedChange.committedAt).toBeGreaterThanOrEqual(before);
+      expect(broadcastedChange.committedAt).toBeLessThanOrEqual(after);
+
+      emitSpy.mockRestore();
+    });
+
+    it('should set committedAt on changes from getChangesSince', async () => {
+      // Set up some ops with timestamps
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 1000, rev: 2, value: 'Alice' });
+      mockStore.ops.set('doc1:/age', { op: 'replace', path: '/age', ts: 1500, rev: 3, value: 30 });
+
+      const result = await server.getChangesSince('doc1', 1);
+
+      expect(result).toHaveLength(1);
+      // committedAt should be max timestamp from ops (1500)
+      expect(result[0].committedAt).toBe(1500);
+    });
+
+    it('should use Date.now() for getChangesSince when ops have no timestamps', async () => {
+      const before = Date.now();
+
+      // Set up ops without timestamps
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', rev: 2, value: 'Alice' });
+
+      const result = await server.getChangesSince('doc1', 1);
+
+      const after = Date.now();
+
+      expect(result).toHaveLength(1);
+      // Should use Date.now() as fallback
+      expect(result[0].committedAt).toBeGreaterThanOrEqual(before);
+      expect(result[0].committedAt).toBeLessThanOrEqual(after);
     });
   });
 });

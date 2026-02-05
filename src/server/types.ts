@@ -80,6 +80,14 @@ export type ListFieldsOptions = { sinceRev: number } | { paths: string[] };
  */
 export interface LWWStoreBackend extends ServerStoreBackend {
   /**
+   * Get the current revision number without reconstructing state.
+   * More efficient than getSnapshot() when only the revision is needed.
+   * @param docId - The document ID.
+   * @returns The current revision number, or 0 if document doesn't exist.
+   */
+  getCurrentRev(docId: string): Promise<number>;
+
+  /**
    * Get the latest snapshot of document state.
    * @param docId - The document ID.
    * @returns The snapshot state and revision, or null if no snapshot exists.

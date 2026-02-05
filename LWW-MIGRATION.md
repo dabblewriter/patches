@@ -63,8 +63,9 @@ This migration had an initial pass that did poorly. We are now going through a s
 - [x] **Section 8: Patches integration**
   - Strategy option in Patches.openDoc()
   - Status: **Complete** ✓
-- [ ] **Section 9: Review and improve**
+- [x] **Section 9: Review and improve** - [Plan](/Users/jacob/.claude/plans/shiny-kindling-volcano.md)
   - Review the entire LWW implementation for bugs, inefficiencies, possible improvements, and suggested refactors
+  - Status: **Complete** ✓
 - [ ] **Section 10: Exports & Tests**
   - Package exports, integration tests
 - [ ] **Section 11: Docs**
@@ -80,9 +81,9 @@ This migration had an initial pass that did poorly. We are now going through a s
 
 ## Current Focus
 
-**Section 9: Review and improve** (Ready to start)
+**Section 10: Exports & Tests** (Ready to start)
 
-Next step is to review the entire LWW implementation for bugs, inefficiencies, and possible improvements.
+Next step is to verify package exports and add integration tests.
 
 ## Completed Sections
 
@@ -261,3 +262,42 @@ Refactored algorithm layer to be clean, testable pure functions.
 - Removed `generateChangeId` from stores - now use `createChange`
 
 All 1500 tests pass.
+
+### Section 9: Review and improve ✓
+
+Thorough review of entire LWW implementation for bugs, inefficiencies, and improvements.
+
+**Critical bug fixed:**
+
+- `LWWServer.commitChanges()` was not setting `committedAt` on response changes
+- This caused `doc.committedRev` to never update and `doc.hasPending` to always be true
+- Fixed by adding `committedAt: serverNow` to all `createChange()` calls in LWWServer
+- Also fixed `getChangesSince()` to include `committedAt`
+
+**Performance optimization:**
+
+- Added `getCurrentRev(docId)` method to `LWWStoreBackend` interface
+- More efficient than `getDoc()` when only revision is needed (avoids reconstructing full state)
+- Implemented in `LWWMemoryStoreBackend`
+- Updated `LWWServer.commitChanges()` and `deleteDoc()` to use `getCurrentRev()`
+
+**IndexedDB optimization:**
+
+- Batched `committedOps.put()` calls in `LWWIndexedDBStore.confirmSendingChange()`
+- Batched `committedOps.put()` calls in `LWWIndexedDBStore.applyServerChanges()`
+- Using `Promise.all()` instead of sequential awaits for better performance
+
+**Documentation:**
+
+- Added clarifying comment in `LWWStrategy.handleDocChange()` explaining why original ops (not consolidated) are broadcast
+
+**Files modified:**
+
+- `src/server/LWWServer.ts` - committedAt fix, getCurrentRev usage
+- `src/server/types.ts` - Added getCurrentRev to LWWStoreBackend interface
+- `src/server/LWWMemoryStoreBackend.ts` - Implemented getCurrentRev
+- `src/client/LWWIndexedDBStore.ts` - Batched operations
+- `src/client/LWWStrategy.ts` - Documentation comment
+- `tests/server/LWWServer.spec.ts` - Added committedAt tests, updated mock store
+
+All 1517 tests pass.

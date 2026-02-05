@@ -61,7 +61,10 @@ export class LWWStrategy implements ClientStrategy {
     // Save consolidated ops to store
     await this.store.savePendingOps(docId, opsToSave, pathsToDelete);
 
-    // Create a change for broadcast (uncommitted, so committedAt = 0)
+    // Create a change for broadcast using original timedOps (not consolidated opsToSave).
+    // This preserves user intent for local listeners - e.g., "user incremented by 5 twice"
+    // vs the consolidated "counter increased by 10". Store consolidation is an internal
+    // optimization that shouldn't leak to observers. (uncommitted, so committedAt = 0)
     const committedRev = doc?.committedRev ?? (await this.store.getCommittedRev(docId));
     const changes = [createChange(committedRev, committedRev + 1, timedOps, metadata)];
 

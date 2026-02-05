@@ -324,10 +324,8 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
       return;
     }
 
-    // Move ops to committed (store op directly, strip ts/rev)
-    for (const op of sending.change.ops) {
-      await committedOps.put<CommittedOp>({ docId, op: op.op, path: op.path, value: op.value });
-    }
+    // Move ops to committed (store op directly) - batch for performance
+    await Promise.all(sending.change.ops.map(op => committedOps.put<CommittedOp>({ ...op, docId })));
 
     // Update committed rev
     const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
@@ -349,12 +347,9 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
       'readwrite'
     );
 
-    // Store server ops directly (strip ts/rev)
-    for (const change of serverChanges) {
-      for (const op of change.ops) {
-        await committedOps.put<CommittedOp>({ docId, op: op.op, path: op.path, value: op.value });
-      }
-    }
+    // Store server ops directly - batch for performance
+    const allOps = serverChanges.flatMap(change => change.ops);
+    await Promise.all(allOps.map(op => committedOps.put<CommittedOp>({ ...op, docId })));
 
     // Note: Don't clear sendingChange here - these are changes from other clients,
     // not confirmation of our own change. Only confirmSendingChange should clear it.

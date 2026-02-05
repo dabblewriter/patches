@@ -56,6 +56,12 @@ export class LWWMemoryStoreBackend
     return doc;
   }
 
+  // === Revision ===
+
+  async getCurrentRev(docId: string): Promise<number> {
+    return this.docs.get(docId)?.rev ?? 0;
+  }
+
   // === Snapshot ===
 
   async getSnapshot(docId: string): Promise<{ state: any; rev: number } | null> {

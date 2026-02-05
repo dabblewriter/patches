@@ -123,8 +123,10 @@ export class LWWServer implements PatchesServer {
     // Sort by ts so older ops apply first
     const sortedOps = [...ops].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
     const maxRev = Math.max(...ops.map(op => op.rev ?? 0));
+    // Use max timestamp from ops as committedAt (these are already-committed changes)
+    const maxTs = Math.max(...ops.map(op => op.ts ?? 0));
 
-    return [createChange(rev, maxRev, sortedOps)];
+    return [createChange(rev, maxRev, sortedOps, { committedAt: maxTs || Date.now() })];
   }
 
   /**
@@ -161,8 +163,8 @@ export class LWWServer implements PatchesServer {
     // Convert delta ops (@inc, @bit, etc.) to replace ops with concrete values
     const opsToStore = convertDeltaOps(opsToSave);
 
-    // Get current rev before saving
-    const { rev: currentRev } = await this.getDoc(docId);
+    // Get current rev before saving (efficient - doesn't reconstruct full state)
+    const currentRev = await this.store.getCurrentRev(docId);
     let newRev = currentRev;
 
     // Save ops and delete paths atomically
@@ -190,12 +192,18 @@ export class LWWServer implements PatchesServer {
     }
 
     // Build response using createChange
-    const responseChange = createChange(clientRev ?? 0, newRev, responseOps, { id: change.id });
+    const responseChange = createChange(clientRev ?? 0, newRev, responseOps, {
+      id: change.id,
+      committedAt: serverNow,
+    });
 
     // Emit notification for committed changes (if any updates were made)
     if (opsToStore.length > 0) {
       try {
-        const broadcastChange = createChange(currentRev, newRev, opsToStore, { id: change.id });
+        const broadcastChange = createChange(currentRev, newRev, opsToStore, {
+          id: change.id,
+          committedAt: serverNow,
+        });
         await this.onChangesCommitted.emit(docId, [broadcastChange], getClientId());
       } catch (error) {
         console.error(`Failed to notify clients about committed changes for doc ${docId}:`, error);
@@ -214,7 +222,7 @@ export class LWWServer implements PatchesServer {
    */
   async deleteDoc(docId: string, options?: DeleteDocOptions): Promise<void> {
     const clientId = getClientId();
-    const { rev } = await this.getDoc(docId);
+    const rev = await this.store.getCurrentRev(docId);
     await createTombstoneIfSupported(this.store, docId, rev, clientId, options?.skipTombstone);
     await this.store.deleteDoc(docId);
     await this.onDocDeleted.emit(docId, options, clientId);

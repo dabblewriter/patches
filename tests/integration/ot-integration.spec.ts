@@ -17,8 +17,8 @@ import { OTAlgorithm } from '../../src/client/OTAlgorithm.js';
 import { InMemoryStore } from '../../src/client/InMemoryStore.js';
 import { OTDoc } from '../../src/client/OTDoc.js';
 import { OTServer } from '../../src/server/OTServer.js';
-import type { OTStoreBackend, ListChangesOptions } from '../../src/server/types.js';
-import type { Change, VersionMetadata, EditableVersionMetadata, ListVersionsOptions } from '../../src/types.js';
+import type { OTStoreBackend } from '../../src/server/types.js';
+import type { Change, VersionMetadata, EditableVersionMetadata, ListVersionsOptions, ListChangesOptions } from '../../src/types.js';
 import type { JSONPatchOp } from '../../src/json-patch/types.js';
 
 interface TestDoc {
@@ -55,11 +55,12 @@ class OTMemoryStoreBackend implements OTStoreBackend {
     const doc = this.getOrCreateDoc(docId);
     // Create a version at rev 0 with the initial state
     const versionId = `v0-${docId}`;
+    const now = Date.now();
     doc.versions.set(versionId, {
       metadata: {
         id: versionId,
-        createdAt: Date.now(),
-        endedAt: Date.now(),
+        startedAt: now,
+        endedAt: now,
         startRev: 0,
         endRev: 0,
         origin: 'main',
@@ -163,6 +164,10 @@ class OTTestHarness {
   clients: Map<string, { algorithm: OTAlgorithm; store: InMemoryStore; doc: OTDoc<TestDoc> }> = new Map();
   lastBroadcast: { docId: string; changes: Change[] } | null = null;
 
+  getBroadcastChanges(): Change[] {
+    return this.lastBroadcast?.changes ?? [];
+  }
+
   constructor() {
     this.serverStore = new OTMemoryStoreBackend();
     this.server = new OTServer(this.serverStore);
@@ -255,7 +260,7 @@ class OTTestHarness {
 
     // Return the broadcast change (contains the newly committed ops)
     // This is what should be sent to OTHER clients
-    return this.lastBroadcast?.changes ?? [];
+    return this.getBroadcastChanges();
   }
 
   /**

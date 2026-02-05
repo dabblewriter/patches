@@ -117,8 +117,8 @@ describe('LWW exports', () => {
 
     it('exports LWWServerOptions type', () => {
       // Type-only export - verify it compiles
-      const _options: LWWServerOptions = { compactionThreshold: 100 };
-      expect(_options.compactionThreshold).toBe(100);
+      const _options: LWWServerOptions = { snapshotInterval: 200 };
+      expect(_options.snapshotInterval).toBe(200);
     });
 
     it('exports LWWStoreBackend type', () => {

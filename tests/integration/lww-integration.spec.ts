@@ -38,6 +38,10 @@ class LWWTestHarness {
   clients: Map<string, { algorithm: LWWAlgorithm; store: LWWInMemoryStore; doc: LWWDoc<TestDoc> }> = new Map();
   lastBroadcast: { docId: string; changes: Change[] } | null = null;
 
+  getBroadcastChanges(): Change[] {
+    return this.lastBroadcast?.changes ?? [];
+  }
+
   constructor() {
     this.serverStore = new LWWMemoryStoreBackend();
     this.server = new LWWServer(this.serverStore);
@@ -142,7 +146,7 @@ class LWWTestHarness {
 
     // Return the broadcast change (contains the actual committed ops)
     // This is what should be sent to OTHER clients
-    return this.lastBroadcast?.changes ?? [];
+    return this.getBroadcastChanges();
   }
 
   /**

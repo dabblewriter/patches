@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { PatchesStore, TrackedDoc } from '../../src/client/PatchesStore';
+import type { OTClientStore } from '../../src/client/OTClientStore';
 import type { Change, PatchesSnapshot, PatchesState } from '../../src/types';
 
 describe('PatchesStore interface', () => {
@@ -54,10 +55,6 @@ describe('PatchesStore interface', () => {
         expect(typeof docId).toBe('string');
         return undefined;
       },
-      getPendingChanges: async (docId: string): Promise<Change[]> => {
-        expect(typeof docId).toBe('string');
-        return [];
-      },
       getCommittedRev: async (docId: string): Promise<number> => {
         expect(typeof docId).toBe('string');
         return 0;
@@ -65,15 +62,6 @@ describe('PatchesStore interface', () => {
       saveDoc: async (docId: string, docState: PatchesState) => {
         expect(typeof docId).toBe('string');
         expect(typeof docState).toBe('object');
-      },
-      savePendingChanges: async (docId: string, changes: Change[]) => {
-        expect(typeof docId).toBe('string');
-        expect(Array.isArray(changes)).toBe(true);
-      },
-      applyServerChanges: async (docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]) => {
-        expect(typeof docId).toBe('string');
-        expect(Array.isArray(serverChanges)).toBe(true);
-        expect(Array.isArray(rebasedPendingChanges)).toBe(true);
       },
       deleteDoc: async (docId: string) => {
         expect(typeof docId).toBe('string');
@@ -94,11 +82,8 @@ describe('PatchesStore interface', () => {
       expect(typeof store.untrackDocs).toBe('function');
       expect(typeof store.listDocs).toBe('function');
       expect(typeof store.getDoc).toBe('function');
-      expect(typeof store.getPendingChanges).toBe('function');
       expect(typeof store.getCommittedRev).toBe('function');
       expect(typeof store.saveDoc).toBe('function');
-      expect(typeof store.savePendingChanges).toBe('function');
-      expect(typeof store.applyServerChanges).toBe('function');
       expect(typeof store.deleteDoc).toBe('function');
       expect(typeof store.confirmDeleteDoc).toBe('function');
       expect(typeof store.close).toBe('function');
@@ -132,13 +117,6 @@ describe('PatchesStore interface', () => {
       expect(result === undefined || typeof result === 'object').toBe(true);
     });
 
-    it('should define getPendingChanges method signature', async () => {
-      const store = createMockStore();
-      const result = await store.getPendingChanges('doc1');
-
-      expect(Array.isArray(result)).toBe(true);
-    });
-
     it('should define getCommittedRev method signature', async () => {
       const store = createMockStore();
       const result = await store.getCommittedRev('doc1');
@@ -151,39 +129,6 @@ describe('PatchesStore interface', () => {
       const docState: PatchesState = { state: { test: 'data' }, rev: 5 };
 
       await store.saveDoc('doc1', docState);
-    });
-
-    it('should define savePendingChanges method signature', async () => {
-      const store = createMockStore();
-      const changes: Change[] = [
-        {
-          id: 'c1',
-          rev: 1,
-          baseRev: 0,
-          ops: [{ op: 'add', path: '/test', value: 'data' }],
-          createdAt: 0,
-          committedAt: 0,
-        },
-      ];
-
-      await store.savePendingChanges('doc1', changes);
-    });
-
-    it('should define applyServerChanges method signature', async () => {
-      const store = createMockStore();
-      const serverChanges: Change[] = [
-        {
-          id: 'c1',
-          rev: 1,
-          baseRev: 0,
-          ops: [{ op: 'add', path: '/test', value: 'data' }],
-          createdAt: 0,
-          committedAt: 0,
-        },
-      ];
-      const rebasedPending: Change[] = [];
-
-      await store.applyServerChanges('doc1', serverChanges, rebasedPending);
     });
 
     it('should define deleteDoc method signature', async () => {
@@ -208,17 +153,91 @@ describe('PatchesStore interface', () => {
         untrackDocs: async (docIds: string[]) => {},
         listDocs: async (includeDeleted?: boolean) => [],
         getDoc: async (docId: string) => undefined,
-        getPendingChanges: async (docId: string) => [],
         getCommittedRev: async (docId: string) => 0,
         saveDoc: async (docId: string, docState: PatchesState) => {},
-        savePendingChanges: async (docId: string, changes: Change[]) => {},
-        applyServerChanges: async (docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]) => {},
         deleteDoc: async (docId: string) => {},
         confirmDeleteDoc: async (docId: string) => {},
         close: async () => {},
       };
 
       expect(mockImplementation).toBeDefined();
+    });
+  });
+
+  describe('OTClientStore interface contract', () => {
+    // Create a mock implementation to test OT-specific interface compliance
+    const createMockOTStore = (): OTClientStore => ({
+      trackDocs: async () => {},
+      untrackDocs: async () => {},
+      listDocs: async () => [],
+      getDoc: async () => undefined,
+      getCommittedRev: async () => 0,
+      saveDoc: async () => {},
+      deleteDoc: async () => {},
+      confirmDeleteDoc: async () => {},
+      close: async () => {},
+      getPendingChanges: async (docId: string): Promise<Change[]> => {
+        expect(typeof docId).toBe('string');
+        return [];
+      },
+      savePendingChanges: async (docId: string, changes: Change[]) => {
+        expect(typeof docId).toBe('string');
+        expect(Array.isArray(changes)).toBe(true);
+      },
+      applyServerChanges: async (docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]) => {
+        expect(typeof docId).toBe('string');
+        expect(Array.isArray(serverChanges)).toBe(true);
+        expect(Array.isArray(rebasedPendingChanges)).toBe(true);
+      },
+    });
+
+    it('should implement all required OT methods', () => {
+      const store = createMockOTStore();
+
+      // Verify OT-specific methods exist
+      expect(typeof store.getPendingChanges).toBe('function');
+      expect(typeof store.savePendingChanges).toBe('function');
+      expect(typeof store.applyServerChanges).toBe('function');
+    });
+
+    it('should define getPendingChanges method signature', async () => {
+      const store = createMockOTStore();
+      const result = await store.getPendingChanges('doc1');
+
+      expect(Array.isArray(result)).toBe(true);
+    });
+
+    it('should define savePendingChanges method signature', async () => {
+      const store = createMockOTStore();
+      const changes: Change[] = [
+        {
+          id: 'c1',
+          rev: 1,
+          baseRev: 0,
+          ops: [{ op: 'add', path: '/test', value: 'data' }],
+          createdAt: 0,
+          committedAt: 0,
+        },
+      ];
+
+      await store.savePendingChanges('doc1', changes);
+    });
+
+    it('should define applyServerChanges method signature', async () => {
+      const store = createMockOTStore();
+      const serverChanges: Change[] = [
+        {
+          id: 'c1',
+          rev: 1,
+          baseRev: 0,
+          ops: [{ op: 'add', path: '/test', value: 'data' }],
+          createdAt: 0,
+          committedAt: 0,
+        },
+      ];
+      const rebasedPending: Change[] = [];
+
+      await store.applyServerChanges('doc1', serverChanges, rebasedPending);
     });
   });
 
@@ -238,13 +257,19 @@ describe('PatchesStore interface', () => {
       // Test return types are as expected
       const docs: TrackedDoc[] = await store.listDocs();
       const snapshot: PatchesSnapshot | undefined = await store.getDoc('test');
-      const pending: Change[] = await store.getPendingChanges('test');
       const committedRev: number = await store.getCommittedRev('test');
 
       expect(Array.isArray(docs)).toBe(true);
       expect(snapshot === undefined || typeof snapshot === 'object').toBe(true);
-      expect(Array.isArray(pending)).toBe(true);
       expect(typeof committedRev).toBe('number');
+    });
+
+    it('should ensure OTClientStore method return types', async () => {
+      const store: OTClientStore = createMockOTStore();
+
+      const pending: Change[] = await store.getPendingChanges('test');
+
+      expect(Array.isArray(pending)).toBe(true);
     });
   });
 
@@ -281,6 +306,10 @@ describe('PatchesStore interface', () => {
 
       // Get document snapshot
       await store.getDoc('doc1');
+    });
+
+    it('should support OT pending changes management', async () => {
+      const store = createMockOTStore();
 
       // Manage pending changes
       const changes: Change[] = [
@@ -315,13 +344,25 @@ describe('PatchesStore interface', () => {
     untrackDocs: async () => {},
     listDocs: async () => [],
     getDoc: async () => undefined,
-    getPendingChanges: async () => [],
     getCommittedRev: async () => 0,
     saveDoc: async () => {},
-    savePendingChanges: async () => {},
-    applyServerChanges: async () => {},
     deleteDoc: async () => {},
     confirmDeleteDoc: async () => {},
     close: async () => {},
+  });
+
+  const createMockOTStore = (): OTClientStore => ({
+    trackDocs: async () => {},
+    untrackDocs: async () => {},
+    listDocs: async () => [],
+    getDoc: async () => undefined,
+    getCommittedRev: async () => 0,
+    saveDoc: async () => {},
+    deleteDoc: async () => {},
+    confirmDeleteDoc: async () => {},
+    close: async () => {},
+    getPendingChanges: async () => [],
+    savePendingChanges: async () => {},
+    applyServerChanges: async () => {},
   });
 });

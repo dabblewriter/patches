@@ -10,9 +10,9 @@ describe('consolidateFieldOp', () => {
 
       const result = consolidateFieldOp(existing, incoming);
 
-      expect(result.op).toBe('@inc');
-      expect(result.value).toBe(8);
-      expect(result.ts).toBe(2000);
+      expect(result!.op).toBe('@inc');
+      expect(result!.value).toBe(8);
+      expect(result!.ts).toBe(2000);
     });
 
     it('should handle negative increments', () => {
@@ -21,7 +21,7 @@ describe('consolidateFieldOp', () => {
 
       const result = consolidateFieldOp(existing, incoming);
 
-      expect(result.value).toBe(7);
+      expect(result!.value).toBe(7);
     });
   });
 
@@ -34,10 +34,10 @@ describe('consolidateFieldOp', () => {
 
       const result = consolidateFieldOp(existing, incoming);
 
-      expect(result.op).toBe('@bit');
+      expect(result!.op).toBe('@bit');
       // Both bits should be on
-      expect(result.value & 0b0011).toBe(0b0011);
-      expect(result.ts).toBe(2000);
+      expect(result!.value & 0b0011).toBe(0b0011);
+      expect(result!.ts).toBe(2000);
     });
   });
 
@@ -90,9 +90,9 @@ describe('consolidateFieldOp', () => {
 
       const result = consolidateFieldOp(existing, incoming);
 
-      expect(result.op).toBe('replace');
-      expect(result.value).toBe('Bob');
-      expect(result.ts).toBe(2000);
+      expect(result!.op).toBe('replace');
+      expect(result!.value).toBe('Bob');
+      expect(result!.ts).toBe(2000);
     });
   });
 
@@ -103,8 +103,8 @@ describe('consolidateFieldOp', () => {
 
       const result = consolidateFieldOp(existing, incoming);
 
-      expect(result.op).toBe('remove');
-      expect(result.ts).toBe(2000);
+      expect(result!.op).toBe('remove');
+      expect(result!.ts).toBe(2000);
     });
 
     it('should return incoming remove when existing is replace', () => {
@@ -113,7 +113,7 @@ describe('consolidateFieldOp', () => {
 
       const result = consolidateFieldOp(existing, incoming);
 
-      expect(result.op).toBe('remove');
+      expect(result!.op).toBe('remove');
     });
   });
 
@@ -124,8 +124,8 @@ describe('consolidateFieldOp', () => {
 
       const result = consolidateFieldOp(existing, incoming);
 
-      expect(result.op).toBe('replace');
-      expect(result.value).toBe(100);
+      expect(result!.op).toBe('replace');
+      expect(result!.value).toBe(100);
     });
 
     it('should apply @inc to @max value and preserve @max op', () => {

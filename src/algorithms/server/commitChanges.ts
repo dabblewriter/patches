@@ -1,3 +1,4 @@
+import { createId } from 'crypto-id';
 import type { CommitResult } from '../../server/PatchesServer.js';
 import type { PatchesStoreBackend } from '../../server/types.js';
 import type { Change, ChangeInput, CommitChangesOptions } from '../../types.js';
@@ -15,6 +16,23 @@ export type { CommitResult } from '../../server/PatchesServer.js';
 
 /**
  * Commits a set of changes to a document, applying operational transformation as needed.
+ *
+ * ## Offline-First Catchup Optimization
+ *
+ * When a client that has never synced (baseRev: 0) commits changes to an existing document,
+ * the server applies an optimization to avoid expensive transformation through potentially
+ * thousands of historical changes. Instead of:
+ *
+ * 1. Transforming the client's changes against all N existing changes
+ * 2. Returning all N changes as catchup for the client to apply
+ *
+ * The server:
+ * 1. Rebases the client's baseRev to the current revision (treats changes as if made at head)
+ * 2. Returns a synthetic catchup change with `{ op: 'replace', path: '', value: currentState }`
+ *
+ * This single root-level replace gives the client the full current document state efficiently.
+ * The client's `applyCommittedChanges` recognizes this pattern and allows the revision jump.
+ *
  * @param store - The backend store for persistence.
  * @param docId - The ID of the document.
  * @param changes - The changes to commit.
@@ -22,7 +40,7 @@ export type { CommitResult } from '../../server/PatchesServer.js';
  * @param options - Optional commit settings.
  * @param maxStorageBytes - Optional max bytes per change for storage limits.
  * @returns A CommitResult containing:
- *   - catchupChanges: Changes the client missed from other clients
+ *   - catchupChanges: Changes the client missed (or a synthetic root-replace for offline-first clients)
  *   - newChanges: The client's changes after transformation
  */
 export async function commitChanges(
@@ -48,12 +66,21 @@ export async function commitChanges(
   // Check if this is a batched continuation (later part of an initial batch upload)
   const batchedContinuation = batchId && changes[0].rev! > 1;
 
+  // Track original client baseRev for catchup change generation
+  const clientBaseRev = changes[0].baseRev ?? currentRev;
+
   // Rebase explicit baseRev: 0 on existing docs to current revision for granular changes.
   // This avoids expensive transformation through full history when a never-synced client
   // makes changes to an existing document. Root-level ops are excluded (handled below).
+  //
+  // When this optimization triggers, the client needs to receive the current document state
+  // since they're jumping from rev 0 to currentRev. We create a synthetic catchup change
+  // with a root-level replace containing the full state (see end of function).
+  let needsSyntheticCatchup = false;
   if (changes[0].baseRev === 0 && currentRev > 0 && !batchedContinuation) {
     const hasRootOp = changes.some(c => c.ops.some(op => op.path === ''));
     if (!hasRootOp) {
+      needsSyntheticCatchup = true;
       baseRev = currentRev;
       // Update baseRev, filter soft writes, and remove empty changes in one pass
       changes = changes.filter(c => {
@@ -164,6 +191,22 @@ export async function commitChanges(
 
   if (transformedChanges.length > 0) {
     await store.saveChanges(docId, transformedChanges);
+  }
+
+  // If we applied the baseRev optimization (jumping from rev 0 to currentRev), the client
+  // needs to receive the full document state since they missed all changes in between.
+  // Create a synthetic catchup change with a root-level replace containing the full state.
+  // This is more efficient than returning potentially thousands of individual changes.
+  if (needsSyntheticCatchup && clientBaseRev === 0) {
+    const syntheticCatchup: Change = {
+      id: `catchup-${createId(8)}`,
+      baseRev: clientBaseRev,
+      rev: currentRev,
+      ops: [{ op: 'replace', path: '', value: currentState }],
+      createdAt: serverNow,
+      committedAt: serverNow,
+    };
+    return { catchupChanges: [syntheticCatchup], newChanges: transformedChanges };
   }
 
   // Return catchup changes and newly transformed changes separately

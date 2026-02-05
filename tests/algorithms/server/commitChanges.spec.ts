@@ -222,6 +222,15 @@ describe('commitChanges', () => {
     // Returned change should have baseRev rebased to 5
     expect(result.newChanges).toHaveLength(1);
     expect(result.newChanges[0].baseRev).toBe(5);
+
+    // Should return a synthetic catchup change with full state (root replace)
+    // so the client can jump from rev 0 to rev 5 without receiving 5 individual changes
+    expect(result.catchupChanges).toHaveLength(1);
+    expect(result.catchupChanges[0].ops).toHaveLength(1);
+    expect(result.catchupChanges[0].ops[0].op).toBe('replace');
+    expect(result.catchupChanges[0].ops[0].path).toBe('');
+    expect(result.catchupChanges[0].rev).toBe(5);
+    expect(result.catchupChanges[0].baseRev).toBe(0);
   });
 
   it('should still throw error for root replace with baseRev:0 on existing docs', async () => {
@@ -682,9 +691,11 @@ describe('commitChanges', () => {
     const recentTime = createTimestamp(-1000);
 
     const committedChange = createChange('committed', 2, 0, oldTime);
-    const incomingChanges = [createChange('incoming1', 1, 0, oldTime), createChange('incoming2', 2, 0, recentTime)];
+    // Use baseRev: 2 to avoid triggering the synthetic catchup optimization
+    // (which happens when baseRev === 0 && currentRev > 0)
+    const incomingChanges = [createChange('incoming1', 3, 2, oldTime), createChange('incoming2', 4, 2, recentTime)];
 
-    const processedChanges = [createChange('processed', 1, 0, oldTime)];
+    const processedChanges = [createChange('processed', 3, 2, oldTime)];
     const transformedChanges = [{ ...processedChanges[0], rev: 3 }];
 
     const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');

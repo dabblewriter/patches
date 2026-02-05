@@ -34,6 +34,7 @@ export function createChange(
       rev,
       ops,
       createdAt: Date.now(),
+      committedAt: 0, // Set to 0 for uncommitted changes; server sets actual timestamp on commit
       ...metadata,
     } as Change;
   }

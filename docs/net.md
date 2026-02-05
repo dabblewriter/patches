@@ -1,211 +1,276 @@
-# Network Layer: Keeping Your Data in Harmony! 🔄
+# Network Layer: Keeping Your Data in Sync
 
-Alright, let's dive into the networking nuts and bolts that make your collaborative magic happen. The Patches network layer is all about ensuring that every user's view of a document stays consistent and up-to-date, whether they're hammering away in real-time or have just come back online after a coffee break.
+The Patches network layer handles all communication between your client and the server. It ensures every user's view of a document stays consistent - whether they're actively collaborating in real-time or coming back online after a lunch break.
 
-## Meet `PatchesSync`: Your Sync Conductor 🎶
+## PatchesSync: The Sync Coordinator
 
-Forget juggling different "providers" for different scenarios. The star of our show is `PatchesSync`. This class is your main point of contact for getting your local `Patches` instance talking to a remote server.
+Stop juggling multiple providers for different scenarios. `PatchesSync` is your single point of contact for connecting a local [Patches](Patches.md) instance to a remote server.
 
 ```typescript
 import { Patches, InMemoryStore } from '@dabble/patches';
 import { PatchesSync } from '@dabble/patches/net';
 
-// 1. Set up your Patches instance (with a store)
+// 1. Set up your Patches instance with a store
 const store = new InMemoryStore();
 const patches = new Patches({ store });
 
-// 2. Create and connect PatchesSync
-const sync = new PatchesSync('wss://your-awesome-server.com', patches, {
-  wsOptions: {
-    /* ... any custom WebSocket options ... */
+// 2. Create and connect PatchesSync (note: Patches first, URL second)
+const sync = new PatchesSync(patches, 'wss://your-server.example.com', {
+  websocket: {
+    /* WebSocket options if needed */
   },
 });
 
 try {
   await sync.connect();
-  console.log('Connected and ready to sync!');
+  console.log('Connected and syncing');
 
-  // 3. Open a document through Patches - PatchesSync will handle the rest
+  // 3. Open a document - PatchesSync handles the rest
   const doc = await patches.getDoc<MyDocType>('shared-doc-123');
 
-  // Make changes - Patches tells PatchesSync, which sends them off
+  // Make changes - they sync automatically
   doc.change(draft => {
-    draft.title = 'Syncing Like a Boss!';
-    draft.lastEditor = 'Me';
+    draft.title = 'Updated Title';
+    draft.lastEditor = 'alice';
   });
 } catch (error) {
-  console.error("Couldn't connect:", error);
-  // Handle connection errors, maybe retry or inform the user
+  console.error('Connection failed:', error);
 }
 
-// When you're all done (e.g., app closing)
+// When done
 // sync.disconnect();
 ```
 
-`PatchesSync` takes on several key responsibilities:
+### What PatchesSync Does
 
-- **Connecting to the Server**: It establishes and manages a WebSocket connection using `PatchesWebSocket` under the hood.
-- **State Management**: Keeps track of `online` status (browser online/offline), `connected` status (WebSocket connected/disconnected), and `syncing` status (initial sync, updating, or idle). You can listen to its `onStateChange` signal to react to these changes in your UI.
-- **Document Tracking**: It automatically knows which documents your `Patches` instance is tracking and handles subscribing for server updates for those documents.
-- **Outgoing Changes**: When you make local changes using `PatchesDoc.change()`, `Patches` notifies `PatchesSync`, which then efficiently sends these changes to the server.
-- **Incoming Changes**: When the server sends new changes for a document, `PatchesSync` receives them, tells the `PatchesStore` to save them, and then instructs your `Patches` instance to apply these changes to the local `PatchesDoc`.
-- **Batching**: If you have `maxPayloadBytes` configured, `PatchesSync` (with help from `Patches`) will break down large sets of changes into smaller batches for transmission.
-- **Offline/Online Transitions**: It listens to browser online/offline events. When the browser comes back online, it will attempt to reconnect the WebSocket and resume syncing.
+- **Connection Management**: Establishes and maintains a WebSocket connection via [PatchesWebSocket](websocket.md)
+- **State Tracking**: Monitors `online` (browser connectivity), `connected` (WebSocket status), and `syncing` (sync progress) states
+- **Document Tracking**: Automatically subscribes to server updates for documents your Patches instance tracks
+- **Outgoing Changes**: When you call [doc.change()](PatchesDoc.md), PatchesSync batches and sends changes to the server
+- **Incoming Changes**: Receives server changes and applies them using the appropriate [algorithm functions](algorithms.md)
+- **Batching**: Splits large changesets into smaller network payloads when `maxPayloadBytes` is configured
+- **Offline Handling**: Listens to browser online/offline events and reconnects automatically
 
-The goal is to make synchronization as straightforward as possible: you work with your `Patches` documents, and `PatchesSync` does the heavy lifting of keeping them aligned with the server.
+The goal: you work with your documents, and PatchesSync handles the plumbing.
 
-## How the WebSocket Transport Works 🔌
+## The Architecture
 
-Under the hood, `PatchesSync` uses `PatchesWebSocket`, which itself relies on `WebSocketTransport`. This layered approach handles:
+Under the hood, `PatchesSync` uses `PatchesWebSocket`, which relies on `WebSocketTransport`. This layered approach handles:
 
-- **Connection Management**: Handles connect, disconnect, and reconnect logic for the WebSocket.
-- **JSON-RPC Protocol**: Ensures structured and reliable messages (more on this below).
-- **Document Subscription**: Tells the server which documents the client is interested in.
-- **Change Synchronization**: Manages the bidirectional flow of document changes.
+- **Connection Management**: Connect, disconnect, and reconnect logic
+- **JSON-RPC Protocol**: Structured, reliable message framing (see [json-rpc.md](json-rpc.md))
+- **Document Subscription**: Tells the server which documents the client cares about
+- **Change Synchronization**: Bidirectional flow of document changes
 
-It's the engine room that powers the real-time communication.
+For more details on the WebSocket layer specifically, see [websocket.md](websocket.md).
 
-## Under the Hood: The JSON-RPC Sandwich 🥪
+## The JSON-RPC Layer
 
-At the heart of Patches' networking is a **lean, mean JSON-RPC 2.0 layer**. This is the common language spoken between your client and the server.
+At the core of Patches networking is a lean JSON-RPC 2.0 layer. This is the common language between client and server.
 
-1.  **ClientTransport / ServerTransport** – These are super minimal interfaces. Their only job is to send raw strings and let you know when one arrives. This means you could, in theory, swap out WebSockets for other transports if needed (like WebRTC data channels, though `PatchesSync` is currently wired for WebSockets).
-2.  **JSONRPCClient / JSONRPCServer** – Give these a transport, and they handle the nitty-gritty of framing method calls, matching requests with responses, and managing notifications. No more manual JSON parsing or ID tracking for you!
-3.  **PatchesWebSocket & WebSocketServer** – These are convenience wrappers that pair the JSON-RPC layer with the WebSocket transport and map RPC methods to a clean TypeScript API for `PatchesSync` and your server-side setup.
+1. **ClientTransport / ServerTransport** - Minimal interfaces. Send raw strings, receive raw strings. Swap WebSockets for WebRTC data channels or anything else that moves bytes.
+2. **JSONRPCClient / JSONRPCServer** - Handle method calls, request/response matching, and notifications. No manual JSON parsing required.
+3. **PatchesWebSocket & WebSocketServer** - Pair the JSON-RPC layer with WebSocket transport and map RPC methods to a clean TypeScript API.
 
-This decoupled design means greater flexibility and testability. You can focus on your application logic, knowing the communication details are well-handled.
+This decoupled design means flexibility and testability. Implement the transport interface and the rest just works.
 
-## The Protocol Speak 📡
+## Protocol Messages
 
-Our network layer uses a clean JSON-RPC protocol for communication. Here's a quick peek:
+Patches uses JSON-RPC 2.0 for all communication. Here's what the messages look like:
 
-### Client → Server Requests (e.g., committing changes)
+### Client to Server Request
 
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 123, // Unique request ID
+  "id": 123,
   "method": "commitChanges",
-  "params": {
-    "docId": "doc123",
-    "changes": [{ "op": "replace", "path": "/title", "value": "New Title", "rev": 10, "baseRev": 9 }]
-  }
+  "params": ["doc123", [{ "ops": [...], "rev": 10, "id": "change-id" }]]
 }
 ```
 
-### Server → Client Responses (e.g., acknowledging committed changes)
+### Server Response
 
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 123, // Corresponds to the request ID
-  "result": {
-    // Usually includes the committed changes, possibly transformed or with server-assigned revs
-    "changes": [
-      { "op": "replace", "path": "/title", "value": "New Title", "rev": 10, "baseRev": 9, "committedRev": 101 }
-    ]
-  }
+  "id": 123,
+  "result": [
+    { "ops": [...], "rev": 10, "id": "change-id", "committedRev": 101 }
+  ]
 }
 ```
 
-### Server → Client Notifications (e.g., new changes from another user)
+### Server Notification (pushed to other clients)
 
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "changesCommitted", // No ID, it's a notification
+  "method": "changesCommitted",
   "params": {
     "docId": "doc123",
-    "changes": [{ "op": "replace", "path": "/content", "value": "...", "rev": 11, "baseRev": 10, "committedRev": 102 }]
+    "changes": [{ "ops": [...], "rev": 11, "committedRev": 102 }]
   }
 }
 ```
 
-(Note: The exact structure of `changes` within the protocol messages will align with your `Change` type, including necessary metadata like `rev`, `baseRev`, `id`, etc.)
+For the full protocol reference, see [json-rpc.md](json-rpc.md).
 
-## Pro Tips for Network Zen 🙏
+## Working with Connection State
 
-### 1. Gracefully Handle Connection State Changes
-
-Your app should react to changes in the connection. `PatchesSync` helps by providing an `onStateChange` signal:
+Your app should react to connection changes. `PatchesSync` provides an `onStateChange` signal:
 
 ```typescript
 sync.onStateChange(state => {
-  console.log('Sync state changed:', state);
+  // state: { online: boolean, connected: boolean, syncing: SyncingState }
+  // where SyncingState = 'initial' | 'updating' | null | Error
+
   if (state.connected) {
-    // Green light! Things are good.
     hideOfflineWarning();
     updateStatusUI('Connected');
   } else if (!state.online) {
-    // Browser is offline
     showOfflineWarning('You are offline. Changes saved locally.');
   } else if (state.syncing === 'initial' || state.syncing === 'updating') {
-    // Working on it...
     showSyncingIndicator('Syncing...');
   } else if (state.syncing instanceof Error) {
-    // Uh oh, sync ran into an issue.
     showErrorUI('Sync failed: ' + state.syncing.message);
   } else {
-    // Disconnected, but browser is online. May attempt to reconnect.
-    showOfflineWarning('Disconnected. Trying to reconnect...');
+    showOfflineWarning('Disconnected. Reconnecting...');
   }
 });
 ```
 
-### 2. Smart Error Handling
+## Error Handling
 
-Network operations can fail. `PatchesSync` also emits an `onError` signal:
+Network operations fail. Handle them gracefully:
 
 ```typescript
 sync.onError((error, context) => {
-  console.error(`Network error for doc ${context?.docId || 'general'}:`, error);
+  console.error(`Sync error for doc ${context?.docId || 'general'}:`, error);
 
-  // You might want to log this to a monitoring service
-  // or display a user-friendly message.
+  // Log to monitoring, display user message, etc.
   if (isRetryableError(error)) {
-    // You'd define isRetryableError
-    showTemporaryError("A network blip occurred. We'll keep trying.");
+    showTemporaryError('Network hiccup. Retrying...');
   } else {
-    showPersistentError('A connection problem occurred. Please check your internet.');
+    showPersistentError('Connection problem. Check your internet.');
   }
 });
 ```
 
-### 3. Understand `maxPayloadBytes` for Large Changes
+## Handling Remote Document Deletion
 
-If you anticipate very large changes (e.g., embedding a big base64 image in one go), `Patches` (and by extension `PatchesSync`) can automatically break these into smaller network messages if you set `maxPayloadBytes` in `PatchesOptions` (passed to `Patches` constructor) or `PatchesSyncOptions`.
+When a document is deleted by another client (or discovered deleted when coming back online), `PatchesSync` notifies you:
+
+```typescript
+sync.onRemoteDocDeleted((docId, pendingChanges) => {
+  console.log(`Document ${docId} was deleted remotely`);
+
+  if (pendingChanges.length > 0) {
+    // User had unsaved changes - you might want to handle this
+    showWarning(`Your changes to "${docId}" were lost because the document was deleted.`);
+  }
+
+  // Update your UI to reflect the deletion
+  removeDocumentFromList(docId);
+});
+```
+
+## Configuration Options
+
+### PatchesSyncOptions
+
+```typescript
+interface PatchesSyncOptions {
+  // Filter which docs to subscribe to (useful for multi-tenant apps)
+  subscribeFilter?: (docIds: string[]) => string[];
+
+  // WebSocket connection options
+  websocket?: WebSocketOptions;
+
+  // Max bytes per network message (default: 1MB)
+  maxPayloadBytes?: number;
+
+  // Per-change storage limit for backend
+  maxStorageBytes?: number;
+
+  // Custom size calculator
+  sizeCalculator?: SizeCalculator;
+}
+```
+
+### Handling Large Changes
+
+If you anticipate large changes (e.g., embedding base64 images), configure `maxPayloadBytes` to automatically batch them:
 
 ```typescript
 const patches = new Patches({
   store,
-  docOptions: { maxPayloadBytes: 1024 * 100 }, // e.g., 100KB
+  docOptions: { maxPayloadBytes: 1024 * 100 }, // 100KB
 });
-// or
-const sync = new PatchesSync(URL, patches, { maxPayloadBytes: 1024 * 100 });
+
+// or on sync directly
+const sync = new PatchesSync(patches, url, {
+  maxPayloadBytes: 1024 * 100,
+});
 ```
 
-This helps prevent issues with WebSocket message size limits on servers or intermediaries.
+This prevents issues with WebSocket message size limits on servers or proxies.
 
-## How It All Fits Together 🧩
+### Subscribe Filtering
 
-The network layer is a key piece of the collaborative puzzle:
+For multi-tenant apps or when you need fine-grained control over subscriptions:
 
-1.  **`PatchesDoc`**: Your client-side document representation. It creates and tracks changes locally.
-2.  **`Patches`**: The main client-side orchestrator. It manages multiple `PatchesDoc` instances and interfaces with `PatchesStore` and `PatchesSync`.
-3.  **`PatchesStore`**: Handles local persistence of document state and changes, crucial for resilience and quick load times.
-4.  **`PatchesSync`**: Connects to the server, sends local changes queued by `Patches` (via the store), and receives remote changes to be applied.
-5.  **Server-Side (`OTServer`, etc.)**: Your backend receives changes, applies Operational Transformation for conflict resolution, and broadcasts changes to other connected clients.
+```typescript
+const sync = new PatchesSync(patches, url, {
+  subscribeFilter: docIds => {
+    // Only subscribe to docs the current user can access
+    return docIds.filter(id => userCanAccess(id));
+  },
+});
+```
 
-Together, these components aim to provide a robust and relatively seamless collaborative experience.
+## How It All Fits Together
 
-## Want to Learn More?
+The network layer is one piece of the collaborative puzzle:
 
-Check out these related guides:
+1. **[PatchesDoc](PatchesDoc.md)**: Your document interface. Creates and tracks changes locally.
+2. **[Patches](Patches.md)**: The client orchestrator. Manages multiple docs, stores, and sync.
+3. **[PatchesStore](persist.md)**: Local persistence. Crucial for offline support and fast loads.
+4. **PatchesSync**: Connects to the server, sends queued changes, receives remote changes.
+5. **Server ([OTServer](OTServer.md) or [LWWServer](LWWServer.md))**: Receives changes, resolves conflicts, broadcasts to other clients.
 
-- [PatchesDoc](./PatchesDoc.md) - How to work with documents on the client.
-- [Patches](./Patches.md) - The main client-side entry point (you might need to create this doc if it focuses on `Patches` itself).
-- [persist.md](./persist.md) - Delve into local storage and how `PatchesStore` works.
-- [awareness.md](./awareness.md) - Adding presence indicators (cursors, selections) using WebRTC, which can complement the WebSocket sync.
-- `json-patch.md` - If you're using or interested in the JSON Patch capabilities.
+## OT vs LWW Sync
 
-Happy syncing! 🚀
+Patches supports two sync strategies, and PatchesSync handles both:
+
+**OT (Operational Transformation)**: For collaborative editing where concurrent changes need intelligent merging. Uses [algorithms](algorithms.md) like `rebaseChanges` to handle conflicts. See [operational-transformation.md](operational-transformation.md).
+
+**LWW (Last-Write-Wins)**: For settings, preferences, and status data where the most recent write should simply win. Uses timestamp comparison instead of transformation. See [last-write-wins.md](last-write-wins.md).
+
+PatchesSync is strategy-agnostic - it delegates to the appropriate strategy for each document type.
+
+## Accessing the RPC Layer
+
+Need to make custom RPC calls beyond the Patches protocol? Access the underlying JSON-RPC client:
+
+```typescript
+// Make custom RPC calls
+const result = await sync.rpc.call('myCustomMethod', arg1, arg2);
+
+// Listen for custom notifications
+sync.rpc.on('myCustomNotification', params => {
+  console.log('Custom notification:', params);
+});
+```
+
+## Related Documentation
+
+- [Patches](Patches.md) - The main client-side entry point
+- [PatchesDoc](PatchesDoc.md) - Working with individual documents
+- [persist.md](persist.md) - Local storage and how PatchesStore works
+- [websocket.md](websocket.md) - WebSocket transport details
+- [json-rpc.md](json-rpc.md) - The JSON-RPC protocol layer
+- [awareness.md](awareness.md) - Presence indicators using WebRTC
+- [OTServer](OTServer.md) - Server-side OT implementation
+- [LWWServer](LWWServer.md) - Server-side LWW implementation
+- [algorithms.md](algorithms.md) - Pure functions that power sync operations

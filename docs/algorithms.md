@@ -1,154 +1,319 @@
-# Unleash the Algorithms! 🧙‍♂️
+# Algorithm Functions
 
-Alright, let's peek behind the curtain at the brains of the Patches operation. This isn't just a pile of code; it's where the real magic happens. We've split out the core Operational Transformation (OT) and sync logic into its own neat little corner: `src/algorithms/`. Why? Because making things easy to test, reuse, and understand is how we roll.
+The core sync logic lives in `src/algorithms/`. This is where [Operational Transformation](operational-transformation.md) and [Last-Write-Wins](last-write-wins.md) actually happen - pure functions that transform, rebase, and reconcile changes.
 
-## The Big Idea: Keep It Clean, Keep It Clear
+Why separate algorithms from classes? Because testability isn't optional. Pure functions with no side effects are trivial to unit test. The main orchestration classes ([PatchesSync](PatchesSync.md), [PatchesDoc](PatchesDoc.md), [OTServer](OTServer.md), [LWWServer](LWWServer.md)) coordinate _when_ these functions run. The algorithms handle _what_ happens.
 
-Think of it like a well-organized kitchen. You've got your chefs (the main classes like `PatchesSync`, `PatchesDoc`, `OTServer`) who decide what needs to be done. Then you've got your specialized tools and recipe cards (that's our algorithms module!).
+**Table of Contents**
 
-Here's the breakdown:
+- [Architecture](#architecture)
+- [Directory Structure](#directory-structure)
+- [Client Algorithms](#client-algorithms)
+- [Shared Algorithms](#shared-algorithms)
+- [LWW Algorithms](#lww-algorithms)
+- [Server Algorithms](#server-algorithms)
+- [The Strategy Layer](#the-strategy-layer)
+- [How It Fits Together](#how-it-fits-together)
 
-- **Chef's Orders (Orchestration)**: `PatchesSync`, `PatchesDoc`, `OTServer` call the shots.
-- **Recipe Cards (Algorithm Logic)**: Pure functions in `src/algorithms/` that do the heavy lifting of OT and syncing without messing with anything else.
-- **Sous Chefs (Strategies)**: `OTStrategy` and `LWWStrategy` know _when_ to use which recipe and handle algorithm-specific coordination.
-- **Pantry (Storage)**: Your chosen store (like `IndexedDBStore`) just holds the ingredients - no cooking allowed!
-- **Waiter Service (Networking)**: The WebSocket and protocol layers just shuttle messages back and forth.
+## Architecture
 
-**Important distinction**: Stores are intentionally "dumb" - they save and load data, period. The _strategies_ are the ones that invoke algorithm functions. This keeps stores simple and testable, while strategies handle the smart coordination work.
+The separation of concerns:
 
-This setup means:
+| Layer             | Components                                           | Responsibility                  |
+| ----------------- | ---------------------------------------------------- | ------------------------------- |
+| **Orchestration** | `PatchesSync`, `PatchesDoc`, `OTServer`, `LWWServer` | Coordination and event handling |
+| **Strategy**      | `OTStrategy`, `LWWStrategy`                          | Algorithm-specific coordination |
+| **Algorithms**    | Pure functions in `src/algorithms/`                  | The actual OT/LWW logic         |
+| **Storage**       | `IndexedDBStore`, `InMemoryStore`, etc.              | Data persistence only           |
+| **Transport**     | WebSocket, WebRTC                                    | Message delivery                |
 
-1.  **Testing is a Breeze**: Pure functions are a dream to unit test. No fuss, no muss.
-2.  **Reusability Rocks**: Got your own way of doing sync? Grab these algorithms and plug 'em in.
-3.  **Clarity for Days**: The main classes stay lean and mean, focusing on coordinating the work.
-4.  **Maintenance Made Easy**: Tweaking an algorithm doesn't mean you have to relearn how the whole kitchen runs.
+Stores are intentionally "dumb" - they save and load data, nothing more. Strategies invoke algorithm functions and handle coordination. This keeps each layer focused and testable.
 
-## The Lay of the Land
-
-Here's how we've laid out the `src/algorithms/` directory:
+## Directory Structure
 
 ```
 src/algorithms/
-├── client/                     # Client-side smarts
-│   ├── applyCommittedChanges.ts  # Logic for when server changes land
-│   ├── createStateFromSnapshot.ts # Building current state from history
-│   └── makeChange.ts             # Crafting new local changes
-├── lww/                        # LWW-specific algorithms
-│   ├── applyLWWChange.ts         # Apply changes with timestamp comparison
-│   └── makeLWWChange.ts          # Create LWW changes with timestamps
-├── server/                     # Server-side algorithms
-│   ├── commitChanges.ts          # Complete change commit workflow
-│   ├── createVersion.ts          # Version creation with persistence
-│   ├── getSnapshotAtRevision.ts  # Server snapshot retrieval
-│   ├── getStateAtRevision.ts     # Server state retrieval
+├── client/                        # Client-side algorithms
+│   ├── applyCommittedChanges.ts   # Merge server changes with local state
+│   ├── createStateFromSnapshot.ts # Build state from snapshot + pending
+│   └── makeChange.ts              # Create changes from mutations
+├── lww/                           # LWW-specific algorithms
+│   ├── consolidateOps.ts          # Op consolidation with timestamp comparison
+│   ├── mergeServerWithLocal.ts    # Merge server changes with pending local ops
+│   └── index.ts                   # Exports
+├── server/                        # Server-side algorithms
+│   ├── commitChanges.ts           # Complete change commit workflow
+│   ├── createVersion.ts           # Version creation with persistence
+│   ├── getSnapshotAtRevision.ts   # Server snapshot retrieval
+│   ├── getStateAtRevision.ts      # Server state retrieval
 │   ├── handleOfflineSessionsAndBatches.ts # Offline sync handling
 │   └── transformIncomingChanges.ts # Core OT transformation logic
-├── shared/                     # Bits everyone can use
-│   ├── applyChanges.ts         # Applying a list of changes to a state
-│   ├── changeBatching.ts       # Bundling and splitting changes for network
-│   └── rebaseChanges.ts        # The core OT rebasing dance
-└── index.ts                    # The friendly neighborhood exporter
+└── shared/                        # Used by client and server
+    ├── applyChanges.ts            # Apply changes to state
+    ├── changeBatching.ts          # Split/batch changes for network
+    ├── lz.ts                      # LZ-String compression utilities
+    └── rebaseChanges.ts           # Core OT rebasing
 ```
 
-## Client-Side Algorithms: The Nitty-Gritty
+## Client Algorithms
 
-### `applyCommittedChanges.ts`
+These handle client-side state management. Used by [PatchesDoc](PatchesDoc.md) and client strategies.
 
-- **`applyCommittedChanges(snapshot, committedChanges)`**: This is your go-to when the server sends down a fresh batch of confirmed changes. It takes the current document snapshot (base state + pending changes) and the server's changes, then intelligently merges them. It'll rebase your pending changes so they play nice with what the server said. Super important for keeping everyone on the same page.
-
-### `createStateFromSnapshot.ts`
-
-- **`createStateFromSnapshot(snapshot)`**: Takes a `PatchesSnapshot` (which includes a base state and a list of pending changes) and computes the live, in-memory state of the document by applying those pending changes to the base state.
-
-### `makeChange.ts`
-
-- **`makeChange(snapshot, mutator, changeMetadata?, maxPayloadBytes?)`**: This is what `PatchesDoc.change()` uses under the hood. You give it the current snapshot, a mutator function (how you want to change the doc), and it figures out the JSON Patch operations. It then creates the actual `Change` object(s). If the resulting change is too big (based on `maxPayloadBytes`), it'll use `breakChanges` to split it up automatically.
-
-## Shared Algorithms: The Common Ground
-
-### `applyChanges.ts`
-
-- **`applyChanges(state, changes)`**: Simple but vital. Takes a state object and an array of `Change` objects, and applies each change's operations to the state, one by one. This is how you get from one version of your data to the next.
-
-### `changeBatching.ts`
-
-- **`breakChanges(changes, maxBytes)`**: Sometimes changes are just too big for one network message. This function takes an array of changes and splits any oversized ones into smaller, more manageable pieces. It first tries to split by individual JSON Patch operations. If an op itself (like a massive text insert) is still too big, it'll even attempt to break that specific operation down further.
-
-- **`breakChangesIntoBatches(changes, maxPayloadBytes?)`**: Got a bunch of changes to send? This function wraps them up into neat batches, respecting any `maxPayloadBytes` you set. Keeps your network calls efficient.
-
-- **`getJSONByteSize(data)`**: A handy utility to get a rough estimate of how big a piece of data will be when turned into a JSON string. Crucial for the batching functions above.
-
-### `rebaseChanges.ts`
-
-- **`rebaseChanges(serverChanges, localChanges)`**: The heart of client-side Operational Transformation. When the server has new changes that your local (pending) changes didn't know about, this function rewrites your local changes so they can be applied _after_ the server's changes, as if you made them on top of the server's latest version. It's what prevents your work from overwriting someone else's, and vice-versa.
-
-## LWW Algorithms: The Simpler Path
-
-For Last-Write-Wins sync, we have a separate set of algorithms in `src/algorithms/lww/`:
-
-### `makeLWWChange.ts`
-
-- **`makeLWWChange(snapshot, mutator, timestamp?)`**: Creates a change object with timestamps on each operation. If no timestamp is provided, it uses the current time. The timestamp determines which write wins when there are conflicts.
-
-### `applyLWWChange.ts`
-
-- **`applyLWWChange(state, change)`**: Applies a change using LWW semantics. For each operation, it compares timestamps - if the incoming timestamp is >= the existing one, the incoming value wins. Simple and predictable!
-
-LWW is great for data where you don't need to merge concurrent edits - just let the latest write win. User preferences, settings, status data - that kind of thing.
-
-## Server-Side Algorithms: The Authority
-
-### `commitChanges.ts`
-
-- **`commitChanges(store, docId, changes, sessionTimeoutMillis, options?)`**: The complete workflow for committing client changes to the server. This algorithm handles the entire change commit process: validation, idempotency checks, offline session management, version creation, operational transformation against concurrent changes, and persistence. Returns both committed changes found on the server and the newly transformed changes. Pass `options.forceCommit: true` to preserve changes even if they result in no state modification (useful for migrations). This is the brain behind `OTServer.commitChanges()`.
-
-### `createVersion.ts`
-
-- **`createVersion(store, docId, state, changes, metadata?)`**: Creates and persists a new version snapshot. Takes the document state, changes since the last version, and optional metadata, then handles all the version creation logic including ID generation, metadata setup, and storage persistence. This is what `OTServer.captureCurrentVersion()` uses internally.
-
-### `transformIncomingChanges.ts`
-
-- **`transformIncomingChanges(changes, stateAtBaseRev, committedChanges, currentRev, forceCommit?)`**: The heart of server-side Operational Transformation. Takes incoming client changes and transforms them against any changes that were committed since the client's base revision. This ensures proper conflict resolution and sequential revision assignment. When `forceCommit` is true, changes are preserved even if they result in no state modification or have empty ops (useful for migrations). Core to the `commitChanges` workflow.
-
-### `getSnapshotAtRevision.ts` & `getStateAtRevision.ts`
-
-These handle the server's version of state reconstruction - loading the appropriate snapshot and applying changes to get the state at any given revision.
-
-### `handleOfflineSessionsAndBatches.ts`
-
-Manages the complex logic for processing offline sessions and multi-batch uploads, including version creation for offline work.
-
-## How This Makes Everything Better
-
-Remember that messy kitchen? Now it's sparkling!
-
-### The Strategy Layer
-
-Between the orchestration classes and the algorithm functions, we have **strategies**:
-
-- **`OTStrategy`**: Knows when to call OT algorithms like `rebaseChanges` and `applyCommittedChanges`
-- **`LWWStrategy`**: Knows when to call LWW algorithms and handles field consolidation
-
-Strategies work with their matching stores (`OTClientStore` or `LWWClientStore`) and invoke the right algorithms at the right time. This keeps the stores "dumb" (just data in, data out) while strategies handle the smarts.
-
-**`PatchesSync` (Client's Network Captain):**
-
-- **Before**: Had to know all the fiddly details of rebasing and applying changes.
-- **After**: Just calls `applyCommittedChanges` when server updates arrive. Clean. Simple. Gets an updated snapshot and tells the `PatchesDoc` and `PatchesStore` what's new.
+### applyCommittedChanges
 
 ```typescript
-// PatchesSync._applyServerChangesToDoc simplified:
+function applyCommittedChanges(snapshot: PatchesSnapshot, committedChangesFromServer: Change[]): PatchesSnapshot;
+```
+
+The workhorse of client sync. When the server sends confirmed changes:
+
+1. Filters out changes already reflected in the snapshot
+2. Applies new server changes to the committed state
+3. Rebases pending local changes against the server changes (using `rebaseChanges`)
+4. Returns updated snapshot with new state, revision, and rebased pending changes
+
+Handles a special case: root-level replace (`path: ''`) is allowed to skip revisions. This happens when an offline client syncs with an existing document - instead of replaying thousands of historical changes, the server sends one synthetic change with the full current state.
+
+### createStateFromSnapshot
+
+```typescript
+function createStateFromSnapshot(snapshot: PatchesSnapshot): any;
+```
+
+Computes the live document state from a snapshot. Applies pending changes to the base state. Simple, but essential for reconstructing what the user should see.
+
+### makeChange
+
+```typescript
+function makeChange(
+  snapshot: PatchesSnapshot,
+  mutator: (draft: any) => void,
+  changeMetadata?: object,
+  maxPayloadBytes?: number
+): { changes: Change[]; state: any };
+```
+
+Powers `PatchesDoc.change()`. Give it a snapshot and a mutator function, and it:
+
+1. Creates a proxy draft of the current state
+2. Runs your mutator against the draft
+3. Extracts [JSON Patch](json-patch.md) operations from the mutations
+4. Builds `Change` object(s) with proper metadata
+5. Splits oversized changes using `breakChanges` if needed
+
+## Shared Algorithms
+
+Used by both client and server. The core building blocks.
+
+### applyChanges
+
+```typescript
+function applyChanges(state: any, changes: Change[]): any;
+```
+
+Applies a sequence of changes to a state object. Each change's operations execute in order. Returns the new state. Fundamental to everything else.
+
+### changeBatching
+
+Three functions for handling large changes:
+
+**`breakChanges(changes, maxBytes)`** - Splits oversized changes into smaller pieces. Tries splitting by individual ops first. If a single op is still too big (like a massive text insert), it breaks that op down further using compression-aware splitting.
+
+**`breakChangesIntoBatches(changes, maxPayloadBytes?)`** - Groups changes into network-sized batches. Respects the byte limit while keeping changes together when possible.
+
+**`getJSONByteSize(data)`** - Estimates the JSON-serialized size of data. Used by the batching functions to stay under limits.
+
+### lz (compression utilities)
+
+LZ-String compression for efficient storage and transmission:
+
+```typescript
+function compress(input: string): string;
+function decompress(compressed: string): string | null;
+function compressToBase64(input: string): string;
+function decompressFromBase64(compressed: string): string | null;
+function compressToUint8Array(input: string): Uint8Array;
+function decompressFromUint8Array(compressed: Uint8Array): string | null;
+```
+
+Used internally for compressing large payloads. The Base64 variants work well for storage; Uint8Array variants for binary protocols.
+
+### rebaseChanges
+
+```typescript
+function rebaseChanges(serverChanges: Change[], localChanges: Change[]): Change[];
+```
+
+The heart of client-side [Operational Transformation](operational-transformation.md). When the server has changes your local pending changes don't know about, this function rewrites your local changes to work _on top of_ the server's version.
+
+The algorithm:
+
+1. Filters out local changes already present in server changes (by ID)
+2. Creates a transform patch from the remaining server changes
+3. Transforms each local change's ops against that patch
+4. Updates revision numbers to follow the server's latest
+5. Drops any changes that become empty after transformation
+
+This prevents your edits from overwriting someone else's work. Your pending changes get "rebased" - rewritten as if you made them after seeing the server's changes.
+
+## LWW Algorithms
+
+[Last-Write-Wins](last-write-wins.md) uses a simpler conflict resolution model: compare timestamps, higher wins. These algorithms live in `src/algorithms/lww/`.
+
+### consolidateFieldOp
+
+```typescript
+function consolidateFieldOp(existing: JSONPatchOp, incoming: JSONPatchOp): JSONPatchOp | null;
+```
+
+Consolidates two ops on the same path. Returns `null` if existing wins (incoming should be dropped).
+
+**Combinable ops** (`@inc`, `@bit`, `@max`, `@min`) merge intelligently:
+
+| Op     | Behavior          |
+| ------ | ----------------- |
+| `@inc` | Sums the values   |
+| `@bit` | Combines bitmasks |
+| `@max` | Keeps the maximum |
+| `@min` | Keeps the minimum |
+
+**All other ops**: Incoming wins unless existing has a strictly newer timestamp. Ties go to incoming.
+
+### consolidateOps
+
+```typescript
+function consolidateOps(
+  existingOps: JSONPatchOp[],
+  newOps: JSONPatchOp[]
+): { opsToSave: JSONPatchOp[]; pathsToDelete: string[]; opsToReturn: JSONPatchOp[] };
+```
+
+The main [LWWServer](LWWServer.md) algorithm. Consolidates incoming ops against existing state:
+
+- **Timestamp comparison**: `incoming.ts >= existing.ts` means incoming wins
+- **Parent hierarchy**: Setting `/user` to a primitive deletes all ops under `/user/name`, `/user/email`, etc.
+- **Invalid hierarchies**: If a parent is primitive, child ops can't apply. Returns correction ops for the client.
+
+Returns:
+
+- `opsToSave`: Consolidated ops to persist
+- `pathsToDelete`: Child paths to remove
+- `opsToReturn`: Correction ops for the client
+
+### convertDeltaOps
+
+```typescript
+function convertDeltaOps(ops: JSONPatchOp[]): JSONPatchOp[];
+```
+
+Converts delta ops into concrete `replace` ops with computed values. Used when sending ops to clients that expect standard [JSON Patch](json-patch.md) operations.
+
+### mergeServerWithLocal
+
+```typescript
+function mergeServerWithLocal(serverChanges: Change[], localOps: JSONPatchOp[]): Change[];
+```
+
+Client-side algorithm for combining server changes with pending local ops. Used when applying server responses:
+
+- For paths the server touched: If local has a delta op (`@inc`, etc.), apply it to server value. Otherwise, keep server value.
+- For paths the server didn't touch: Keep local ops so they still apply to state.
+
+This ensures delta ops accumulate correctly even when the server returns intermediate values.
+
+## Server Algorithms
+
+Server-side state management. Used by [OTServer](OTServer.md).
+
+### commitChanges
+
+```typescript
+function commitChanges(
+  store: PatchesStoreBackend,
+  docId: string,
+  changes: Change[],
+  sessionTimeoutMillis: number,
+  options?: { forceCommit?: boolean }
+): Promise<{ committedChanges: Change[]; newChanges: Change[] }>;
+```
+
+The complete workflow for committing client changes. Handles:
+
+- Validation and idempotency checks
+- Offline session management
+- Version creation
+- Operational transformation against concurrent changes
+- Persistence
+
+Returns both previously committed changes (for catchup) and newly transformed changes. Pass `forceCommit: true` to preserve changes even when they result in no state modification (useful for migrations).
+
+This is the brain behind `OTServer.commitChanges()`.
+
+### createVersion
+
+```typescript
+function createVersion(
+  store: PatchesStoreBackend,
+  docId: string,
+  state: any,
+  changes: Change[],
+  metadata?: EditableVersionMetadata
+): Promise<void>;
+```
+
+Creates and persists a new version snapshot. Handles ID generation, metadata setup, and storage. Used by `OTServer.captureCurrentVersion()`. See [PatchesHistoryManager](PatchesHistoryManager.md) for version management.
+
+### transformIncomingChanges
+
+```typescript
+function transformIncomingChanges(
+  changes: Change[],
+  stateAtBaseRev: any,
+  committedChanges: Change[],
+  currentRev: number,
+  forceCommit?: boolean
+): Change[];
+```
+
+Server-side [Operational Transformation](operational-transformation.md). Transforms incoming client changes against any changes committed since the client's base revision. Ensures proper conflict resolution and sequential revision assignment.
+
+When `forceCommit` is true, changes are preserved even if they result in empty ops. Core to the `commitChanges` workflow.
+
+### getSnapshotAtRevision / getStateAtRevision
+
+Server state reconstruction - loads the appropriate snapshot and applies changes to reconstruct state at any revision. Essential for historical queries and transformation.
+
+### handleOfflineSessionsAndBatches
+
+Manages offline sync complexity: processing offline sessions, multi-batch uploads, and version creation for offline work. See [persist](persist.md) for offline support details.
+
+## The Strategy Layer
+
+Between orchestration classes and algorithm functions, **strategies** handle coordination:
+
+- **`OTStrategy`**: Invokes OT algorithms like `rebaseChanges` and `applyCommittedChanges`
+- **`LWWStrategy`**: Invokes LWW algorithms and handles field consolidation
+
+Strategies work with their matching stores (`OTClientStore` or `LWWClientStore`) and call the right algorithms at the right time. Stores stay "dumb" (data in, data out). Strategies handle the smarts.
+
+## How It Fits Together
+
+Here's [PatchesSync](PatchesSync.md) applying server changes - notice how the algorithm does the heavy lifting:
+
+```typescript
 async _applyServerChangesToDoc(docId, serverChanges, sentPendingRange?) {
   const currentSnapshot = await this.store.getDoc(docId);
-  // 👇 Look Ma, pure function!
+
+  // Pure function handles the OT complexity
   const { state, rev, changes: pendingChanges } = applyCommittedChanges(currentSnapshot, serverChanges);
 
+  // Store just persists the result
   await this.store.saveCommittedChanges(docId, serverChanges, sentPendingRange);
   await this.store.replacePendingChanges(docId, pendingChanges);
 
+  // Doc just updates its state
   const doc = this.patches.getOpenDoc(docId);
   if (doc) {
-    // Smartly updates the open doc
     if (doc.committedRev === serverChanges[0].rev - 1) {
       doc.applyCommittedChanges(serverChanges, pendingChanges);
     } else {
@@ -158,9 +323,12 @@ async _applyServerChangesToDoc(docId, serverChanges, sentPendingRange?) {
 }
 ```
 
-**`PatchesDoc` (Your Local Document Guardian):**
+[PatchesDoc](PatchesDoc.md) uses `makeChange` to create edits. When server updates arrive, it either imports the new snapshot or applies committed changes directly. The sync coordinator ([PatchesSync](PatchesSync.md)) tells it what happened; the doc just updates its state.
 
-- **Before**: Also had to juggle its own version of rebasing and applying server confirmations.
-- **After**: Mostly just holds onto the latest `PatchesSnapshot` and uses `makeChange` to create new edits. When `PatchesSync` tells it about server updates, it either imports the new snapshot or applies the committed changes directly via its new `applyCommittedChanges` method (which is just a state updater now).
+This separation pays off in three ways:
 
-This new structure is a big win for clarity and robustness. You can dive into the `algorithms` directory to see exactly how the OT magic works, or you can look at `PatchesSync` and `PatchesDoc` for the higher-level flow. Your choice! And if you ever want to build your own sync layer, the algorithms are right there for you to reuse.
+1. **Testability**: Algorithm functions are trivial to unit test in isolation
+2. **Reusability**: Building your own sync layer? Import the algorithms directly
+3. **Clarity**: Each layer has one job, making the codebase navigable
+
+The algorithms directory shows you exactly how OT and LWW work. The orchestration classes show you the higher-level flow. Both are approachable because neither tries to do the other's job.

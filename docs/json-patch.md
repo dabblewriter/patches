@@ -1,122 +1,127 @@
-# JSON Patch: The Ultimate Document Changer! 🔄
+# JSON Patch
 
-Wanna track and apply changes to JSON documents? That's what JSON Patch is all about! This library includes a full-featured implementation of the JSON Patch standard (RFC 6902) with some extra superpowers sprinkled on top!
+Patches implements RFC 6902 JSON Patch with custom extensions for collaborative editing. If you're building real-time apps, you need operations that can be transformed, inverted, and composed. Standard JSON Patch gets you part of the way there. Our implementation gets you the rest.
 
 **Table of Contents**
 
-- [What is JSON Patch?](#what-is-json-patch)
+- [The Basics](#the-basics)
 - [Array Append Syntax and OT](#array-append-syntax-and-ot)
-- [The Awesome `JSONPatch` Class](#the-awesome-jsonpatch-class)
-- [The Magical `createJSONPatch()` Helper](#the-magical-createjsonpatch-helper)
-- [The Super Cool Proxy Approach](#the-super-cool-proxy-approach)
-- [Applying Patches like a Pro](#applying-patches-like-a-pro)
-- [Patch Operation Handlers](#patch-operation-handlers)
-- [Advanced Patch Magic](#advanced-patch-magic)
+- [The JSONPatch Class](#the-jsonpatch-class)
+- [The createJSONPatch Helper](#the-createjsonpatch-helper)
+- [Type-Safe Paths with createPathProxy](#type-safe-paths-with-createpathproxy)
+- [Applying Patches](#applying-patches)
+- [Supported Operations](#supported-operations)
+- [OT Functions](#ot-functions)
 
-## What is JSON Patch?
+## The Basics
 
-JSON Patch is like a recipe for changing JSON documents. Instead of sending the whole document every time something changes, you just send little instructions like:
+JSON Patch is a format for describing changes to JSON documents. Instead of sending entire documents over the wire, you send a list of operations: add this, remove that, replace something else.
 
-- "Add this value here" ✨
-- "Remove that part there" ❌
-- "Replace this with that" 🔄
-- "Move this over there" 🚚
-- "Copy this to there" 📋
-- "Check that this matches" ✅
+Each operation has:
 
-It's super efficient, especially for large documents where you're only changing a tiny bit!
-
-Each patch is an array of operations, and each operation has:
-
-- An `op` (like "add", "remove", "replace")
-- A `path` to where the change happens (like "/users/0/name")
+- An `op` field (like `add`, `remove`, `replace`)
+- A `path` pointing to the location (like `/users/0/name`)
 - Usually a `value` (what to add or change to)
-- Sometimes a `from` path (for move and copy operations)
+- Sometimes a `from` path (for `move` and `copy`)
+
+```typescript
+// A simple patch
+const patch = [
+  { op: 'replace', path: '/title', value: 'New Title' },
+  { op: 'add', path: '/tags/-', value: 'important' },
+  { op: 'remove', path: '/draft' },
+];
+```
+
+The Patches library uses JSON Patch as its fundamental unit of change. When you call `doc.change()`, you're generating JSON Patch operations under the hood. See [PatchesDoc](PatchesDoc.md) for how this works in practice.
 
 ## Array Append Syntax and OT
 
-The `-` character in paths like `/items/-` means "append to the end of the array." This is convenient, but has implications for Operational Transformations.
+The `-` character in paths like `/items/-` means "append to the end of the array." Convenient, but it creates problems for [Operational Transformation](operational-transformation.md).
 
-### When `-` is Safe
+### When `-` Works Fine
 
-- **Appending values that won't be modified** — If you're adding items that are complete and final, `-` works fine
-- **Appending before sync** — If the append commits to the server before any operations reference the item by index, concurrent operations will correctly transform around it
+- Appending values that won't be modified afterward
+- Appending before sync, when the operation commits to the server before any operations reference the item by index
 
-### When `-` Causes Problems
+### When `-` Causes Trouble
 
-The issue arises when you:
+The issue:
 
-1. Append an object with `/items/-`
-2. Then modify a property with `/items/3/name` (expecting it landed at index 3)
+1. You append an object with `/items/-`
+2. You modify a property with `/items/3/name` (expecting it landed at index 3)
 
-If concurrent operations insert or remove items, the index `3` will be transformed (e.g., to `4`), but the `-` in the first operation cannot be transformed — it still means "end of array." This can cause the operations to target different items.
+If concurrent operations insert or remove items, the index `3` gets transformed (maybe to `4`), but the `-` in the first operation cannot be transformed. It still means "end of array." Now your operations target different items.
 
-**The root cause:** `-` is resolved at execution time, not creation time. OT algorithms need concrete indices to compute transformations.
+The root cause: `-` is resolved at execution time, not creation time. OT algorithms need concrete indices to compute transformations.
 
-### Recommendation
+### The Fix
 
-For OT-heavy workflows, resolve `-` to a concrete index at operation creation time. If the array has 5 items, use `/items/5` instead of `/items/-`. This preserves intent and enables proper transformations.
+For OT-heavy workflows, resolve `-` to a concrete index at operation creation time. If the array has 5 items, use `/items/5` instead of `/items/-`.
 
-For simple append-only workflows where appended items aren't subsequently modified, `-` works fine.
+For simple append-only workflows where you never modify the appended items, `-` is fine.
 
-## The Awesome `JSONPatch` Class
+## The JSONPatch Class
 
-The `JSONPatch` class gives you a delightful way to build patches:
+The `JSONPatch` class provides a fluent API for building patches:
 
 ```typescript
 import { JSONPatch } from '@dabble/patches';
 
-// Create a shiny new patch
 const patch = new JSONPatch()
-  .add('/users/-', { id: 123, name: 'Alice' }) // Add a user to the end of the array
-  .replace('/title', 'My Awesome Document') // Change the title
-  .remove('/metadata/draft') // Remove the draft flag
-  .move('/oldSection', '/archive/section1') // Move content to archive
-  .copy('/template', '/newSection') // Clone a template
-  .test('/version', 5); // Verify the version
+  .add('/users/-', { id: 123, name: 'Alice' })
+  .replace('/title', 'Updated Document')
+  .remove('/metadata/draft')
+  .move('/oldSection', '/archive/section1')
+  .copy('/template', '/newSection')
+  .test('/version', 5);
 ```
 
-### Standard Operations - The Basics!
+### Standard Operations
 
 ```typescript
-// Add stuff!
-patch.add('/tags/-', 'collaborative'); // Add to an array
-patch.add('/user/address', { city: 'NYC' }); // Add an object
-patch.add('/count', 42); // Add a value
+// Add values
+patch.add('/tags/-', 'collaborative'); // Append to array
+patch.add('/user/address', { city: 'NYC' }); // Add object
+patch.add('/count', 42); // Add primitive
 
-// Remove stuff!
-patch.remove('/oldField'); // Bye bye field!
+// Remove values
+patch.remove('/oldField');
 
-// Replace stuff!
-patch.replace('/user/name', 'Bob'); // New name!
-patch.replace('/settings', { theme: 'dark' }); // All new settings!
+// Replace values
+patch.replace('/user/name', 'Bob');
+patch.replace('/settings', { theme: 'dark' });
 
-// Move stuff!
-patch.move('/temp/field', '/result/field'); // Moving things around
+// Move values
+patch.move('/temp/field', '/result/field');
 
-// Copy stuff!
-patch.copy('/template', '/newItem'); // Cloning!
+// Copy values
+patch.copy('/template', '/newItem');
 
-// Test stuff!
-patch.test('/user/id', 123); // Make sure value matches
+// Test values (assertion - patch fails if value doesn't match)
+patch.test('/user/id', 123);
 ```
 
-### Custom Operations - The Power-Ups! 💪
+### Custom Operations
 
-Our JSON Patch adds some super useful custom operations:
+These go beyond RFC 6902. They're designed for common collaborative editing patterns and work correctly with OT:
 
 ```typescript
-// Increment a number (no need to read-then-update!)
+// Increment/decrement numbers (no read-then-update race conditions)
 patch.increment('/counter'); // +1
 patch.increment('/points', 5); // +5
-patch.increment('/score', -10); // -10
+patch.decrement('/score', 10); // -10
 
-// Bit operations - play with binary flags!
-patch.bit('/permissions', 0b001); // OR operation (add a permission)
-patch.bit('/permissions', 0b010, 'and'); // AND operation (check a permission)
-patch.bit('/permissions', 0b100, 'xor'); // XOR operation (toggle a permission)
+// Min/max operations (great for timestamps like lastModifiedAt, createdAt)
+patch.max('/lastSeen', '2024-01-15T10:00:00Z'); // Only updates if value is greater
+patch.min('/firstSeen', '2024-01-01T00:00:00Z'); // Only updates if value is smaller
 
-// Text operations - for collaborative text editing!
+// Bitmask operations (pack up to 15 booleans in one number)
+patch.bit('/permissions', 0, true); // Set bit 0 on
+patch.bit('/permissions', 3, false); // Set bit 3 off
+patch.bit('/flags', 7, true); // Set bit 7 on
+
+// Rich text operations (Quill Delta format)
 patch.text('/content', [
   { retain: 10 }, // Keep first 10 characters
   { delete: 5 }, // Delete next 5
@@ -124,90 +129,91 @@ patch.text('/content', [
 ]);
 ```
 
-### Utility Methods - The Toolbox! 🧰
+### Why These Custom Operations Matter
 
-`JSONPatch` comes with a bunch of handy methods:
+Standard JSON Patch has a race condition problem. If two clients want to increment a counter:
+
+1. Both read `counter: 5`
+2. Both send `{ op: 'replace', path: '/counter', value: 6 }`
+3. Final result: `counter: 6` (one increment lost)
+
+The `@inc` operation solves this. Both clients send `increment by 1`, and OT composes them correctly. Same logic applies to `@bit`, `@max`, `@min`, and `@txt`.
+
+### Utility Methods
 
 ```typescript
-// Add more operations
+// Add raw operations
 const moreOps = [{ op: 'add', path: '/tags/-', value: 'new' }];
-patch.addUpdates(moreOps);
+patch.addUpdates({ field1: 'value1', field2: undefined }); // undefined = remove
 
-// Apply the patch to a document
+// Apply the patch to a document (immutable)
 const newState = patch.apply(currentState);
 
-// Transform this patch against another one (OT magic!)
+// Transform against another patch (OT)
 const transformedPatch = patch.transform(otherPatch);
 
-// Create the opposite patch (for undo!)
+// Create inverse patch (for undo)
 const undoPatch = patch.invert(originalState);
 
-// Combine two patches into one
-const combinedPatch = patch.compose(laterPatch);
+// Combine patches
+const combined = patch.compose(laterPatch); // Collapse into fewer ops
+const concatenated = patch.concat(anotherPatch); // Just append ops
 
-// Merge patches
-const bigPatch = patch.concat(anotherPatch);
-
-// Convert to/from JSON
-const patchData = patch.toJSON();
-const loadedPatch = JSONPatch.fromJSON(patchData);
+// Serialization
+const json = patch.toJSON();
+const loaded = JSONPatch.fromJSON(json);
 ```
 
-## The Magical `createJSONPatch()` Helper
+## The createJSONPatch Helper
 
-Don't want to build operations by hand? Use this helper to generate a patch by comparing objects:
+Build patches with type-safe paths instead of string literals:
 
 ```typescript
 import { createJSONPatch } from '@dabble/patches';
 
-const before = { name: 'Alice', count: 5, tags: ['old'] };
-const after = { name: 'Alice', count: 6, tags: ['old', 'new'] };
+interface MyDoc {
+  name: { first: string; last: string };
+  age: number;
+  tags: string[];
+}
 
-// Creates a patch with the minimal changes needed
-const patch = createJSONPatch(before, after);
-// Result: [
-//   { op: 'replace', path: '/count', value: 6 },
-//   { op: 'add', path: '/tags/-', value: 'new' }
+const patch = createJSONPatch<MyDoc>((patch, path) => {
+  patch.replace(path.name.first, 'Bob'); // Type-safe: path is '/name/first'
+  patch.increment(path.age, 1); // Type-safe: path is '/age'
+  patch.add(path.tags[1], 'new-tag'); // Type-safe: path is '/tags/1'
+});
+
+console.log(patch.ops);
+// [
+//   { op: 'replace', path: '/name/first', value: 'Bob' },
+//   { op: '@inc', path: '/age', value: 1 },
+//   { op: 'add', path: '/tags/1', value: 'new-tag' }
 // ]
 ```
 
-This is perfect when you have a before and after state and need to figure out what changed!
+The callback receives a `JSONPatch` instance and a path proxy. The proxy generates JSON Pointer strings as you access properties. TypeScript catches typos at compile time.
 
-## The Super Cool Proxy Approach
+## Type-Safe Paths with createPathProxy
 
-Want something even cooler? Use a proxy to track changes as you make them:
+If you want just the path proxy without the callback pattern:
 
 ```typescript
-import { createPatchProxy } from '@dabble/patches';
+import { createPathProxy, JSONPatch } from '@dabble/patches';
 
-// Path Generation Mode (manual patch creation)
-const obj = { users: [{ name: 'Alice' }], count: 0 };
-const proxy = createPatchProxy(obj);
+interface User {
+  name: string;
+  settings: { theme: string };
+}
 
-// These lines just build paths!
-const path1 = proxy.users[0].name; // '/users/0/name'
-const path2 = proxy.count; // '/count'
-
-// Now create your patch
-const patch = new JSONPatch().replace(path1, 'Alicia').increment(path2, 5);
-
-// Automatic Patch Generation Mode
-const [newObj, generatedPatch] = createPatchProxy(obj, true);
-
-// Every change you make is tracked automatically!
-newObj.users[0].name = 'Bob';
-newObj.count = 10;
-newObj.users.push({ name: 'Charlie' });
-delete newObj.users[0].oldProp;
-
-// generatedPatch now contains all these operations!
+const path = createPathProxy<User>();
+const patch = new JSONPatch()
+  .replace(path.name, 'Alice') // '/name'
+  .replace(path.settings.theme, 'dark'); // '/settings/theme'
 ```
 
-This proxy approach is pure magic - especially the automatic mode! Make changes naturally and get a patch for free! 🎁
+The proxy throws errors if you try to set or delete properties directly. It's for path generation only. Use `JSONPatch` methods for mutations.
 
-## Applying Patches like a Pro
-
-Need to apply a patch? We've got you covered:
+## Applying Patches
 
 ```typescript
 import { applyPatch } from '@dabble/patches';
@@ -215,75 +221,62 @@ import { applyPatch } from '@dabble/patches';
 const doc = { name: 'Original', count: 5 };
 const patch = [
   { op: 'replace', path: '/name', value: 'Updated' },
-  { op: 'increment', path: '/count', value: 3 },
+  { op: '@inc', path: '/count', value: 3 },
 ];
 
-// Apply the patch! (immutably - the original doesn't change)
+// Immutable application - original unchanged
 const newDoc = applyPatch(doc, patch);
 // Result: { name: 'Updated', count: 8 }
 
-// Handle errors gracefully
+// Error handling
 try {
   const result = applyPatch(doc, patch);
 } catch (err) {
   console.error('Patch failed:', err.message);
-  console.log('Failed at operation:', err.index);
+  console.log('Failed at operation index:', err.index);
 }
 ```
 
-The `applyPatch` function:
+`applyPatch` creates a new document. The original stays untouched. This immutability is fundamental to how Patches handles state - see [Patches](Patches.md) for the bigger picture.
 
-- Creates a new document (immutable!)
-- Validates the patch format
-- Applies each operation in sequence
-- Provides clear error messages if something goes wrong
+## Supported Operations
 
-## Patch Operation Handlers
+| Operation | Description                                                                                  |
+| --------- | -------------------------------------------------------------------------------------------- |
+| `add`     | Adds a value at the specified path. For arrays, inserts at the given index.                  |
+| `remove`  | Removes the value at the specified path.                                                     |
+| `replace` | Replaces the value at the specified path.                                                    |
+| `move`    | Moves a value from one path to another.                                                      |
+| `copy`    | Copies a value from one path to another.                                                     |
+| `test`    | Asserts a value matches. Patch fails if it doesn't.                                          |
+| `@inc`    | Increments (or decrements) a number. OT-safe: concurrent increments compose.                 |
+| `@bit`    | Sets or clears a bit in a bitmask (indices 0-14). OT-safe: concurrent bit ops compose.       |
+| `@max`    | Sets a value only if greater than current. Great for `lastModifiedAt` timestamps.            |
+| `@min`    | Sets a value only if less than current. Great for `createdAt` timestamps.                    |
+| `@txt`    | Applies a rich text delta (Quill Delta format). Full OT support for concurrent text editing. |
 
-Each operation type has its own handler that knows how to:
+## OT Functions
 
-- **Apply** the operation to a document
-- **Transform** it against other operations
-- **Invert** it (for undo)
-- **Validate** it has the correct format
-
-This modular system makes it easy to add custom operations while maintaining all the OT functionality!
-
-## Advanced Patch Magic
-
-For the true JSON Patch wizards, we've got some standalone utilities:
+For direct access to the transformation engine:
 
 ```typescript
 import { transformPatch, invertPatch, composePatch } from '@dabble/patches';
 
-// Transform patch A against patch B (OT style)
-const transformed = transformPatch(patchA, patchB);
+// Transform otherOps against thisOps (thisOps happened first)
+// Returns transformed version of otherOps
+const transformed = transformPatch(currentState, thisOps, otherOps);
 
-// Create an undo patch
-const undoPatch = invertPatch(patch, originalDoc);
+// Create an undo patch (requires the original state before patch was applied)
+const undoPatch = invertPatch(originalState, patch);
 
-// Combine sequential patches into one
-const combined = composePatch(patchA, patchB);
+// Collapse sequential operations into fewer operations
+const collapsed = composePatch(ops);
 ```
 
-### Supported Operations
-
-| Operation | Description                                                                                         |
-| --------- | --------------------------------------------------------------------------------------------------- |
-| `add`     | Adds a value at the specified path. For arrays, inserts at the given index.                         |
-| `remove`  | Removes the value at the specified path. For arrays, removes the item at the given index.           |
-| `replace` | Replaces the value at the specified path with a new value.                                          |
-| `move`    | Moves a value from one path to another.                                                             |
-| `copy`    | Copies a value from one path to another.                                                            |
-| `test`    | Tests that a value at the specified path matches the provided value. Used for assertions.           |
-| `@inc`    | Increments (or decrements) a number at the specified path by the given value.                       |
-| `@bit`    | Sets or clears a specific bit in a bitmask at the specified path. Useful for compact boolean flags. |
-| `@txt`    | Applies a rich text delta (e.g., Quill Delta) to a text field at the specified path.                |
-
-These utilities are the core of our Operational Transformation engine - they make sure concurrent edits play nice together!
+These are the building blocks of the [OT system](operational-transformation.md). The [algorithms module](algorithms.md) uses them for rebasing client changes against server changes.
 
 ---
 
-Even though our library is focusing more on the core OT functionality now, this JSON Patch implementation remains super powerful and battle-tested. You can use it standalone or as part of the full collaborative editing system!
+This JSON Patch implementation is battle-tested at scale. It handles documents with hundreds of thousands of operations. The custom operations (`@inc`, `@bit`, `@max`, `@min`, `@txt`) solve real problems that standard JSON Patch ignores.
 
-Happy patching! 🩹✨
+Use it standalone for patch generation and application, or as part of the full Patches collaborative editing system.

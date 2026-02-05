@@ -1,194 +1,217 @@
-# Persistence: Your Doc's Local Hideout
+# Persistence: Local Storage for Offline Support
 
-So, you're building something awesome and collaborative. But what happens when the internet decides to take a nap? Or when your users just want to work on their stuff locally without waiting for the network? That's where persistence swoops in, cape and all!
+Real-time collaboration is great when you have a network connection. But networks fail, go offline, or just get flaky. Your users will close laptop lids, walk into tunnels, and switch between WiFi networks.
 
-In the Patches world, persistence means giving your documents a cozy local home. This makes your app feel snappy, lets users work offline, and generally makes life better. The `Patches` client works with a **store** to manage all this local data goodness. `PatchesSync` then handles the job of talking to the server when a connection is available.
+Without local persistence, every one of these scenarios means lost work or a frustrating "reconnecting..." spinner.
 
-## The Store Family Tree
+Patches solves this by giving documents a local home. The [Patches](Patches.md) client works with a **store** that manages local data, while [PatchesSync](PatchesSync.md) handles server communication when a connection is available. Your users can keep working regardless of network state.
 
-Patches uses a hierarchy of store interfaces, each adding capabilities for different sync strategies:
+## The Store Interface Hierarchy
+
+Patches uses a hierarchy of store interfaces because OT and LWW have different storage needs:
 
 ```
-PatchesStore (base - shared by all strategies)
-├── OTClientStore (for Operational Transformation)
-└── LWWClientStore (for Last-Write-Wins)
+PatchesStore (base interface - 9 methods)
+├── OTClientStore (+3 methods for change rebasing)
+└── LWWClientStore (+6 methods for field-level operations)
 ```
 
-**Why the split?** OT and LWW handle syncing very differently:
+**Why the split?**
 
-- **OT** tracks a history of changes that get rebased against server changes
-- **LWW** tracks individual field values with timestamps - simpler, but different storage needs
+- **OT** tracks a history of changes that get rebased against server changes. It needs to store pending changes and apply server changes atomically.
+- **LWW** tracks individual field values with timestamps. It needs path-based storage and a "sending change" lifecycle for idempotent retries.
 
-The good news? You don't need to think about this much. Just pick the right store for your strategy and you're golden!
+You don't need to understand these internals. Just pick the right store for your sync strategy.
 
-## Meet the Stores: Your Local Data Keepers
+## Available Stores
 
 ### OT Stores (For Collaborative Editing)
 
-These stores work with OT (Operational Transformation) - perfect for collaborative editing where you need to merge concurrent changes intelligently.
+Use these with [Operational Transformation](operational-transformation.md) for collaborative editing where concurrent changes need intelligent merging.
 
-#### `InMemoryStore`: Quick & Clean (But Not Forever)
+#### `InMemoryStore`
 
-Sometimes, you just need a place to stash things temporarily. Maybe for testing, a super short-lived session, or when you explicitly _don't_ want data to stick around.
+Data lives only in memory. Gone when you refresh the page.
 
 ```typescript
-import { Patches, InMemoryStore } from '@dabble/patches';
+import { Patches, InMemoryStore } from '@dabble/patches/client';
 
-// Create an in-memory store
 const store = new InMemoryStore();
-
-// Hook it up to Patches
 const patches = new Patches({ store });
-
-// Now, when you use patches.getDoc(), etc.,
-// data will be held in memory for this session.
-// It's gone if you refresh the page!
 ```
 
-`InMemoryStore` is your go-to for:
+Use `InMemoryStore` for:
 
 - Unit tests where you need a clean slate every time
-- Scenarios where data persistence isn't a requirement
-- Keeping things ultra-simple if you're just trying things out
+- Scenarios where persistence isn't required
+- Quick prototyping
 
-#### `IndexedDBStore`: Robust & Ready for Offline
+#### `OTIndexedDBStore`
 
-When you need your data to survive browser restarts, flaky connections, and the occasional coffee spill on the modem, `IndexedDBStore` is your champion. It uses the browser's IndexedDB to give your documents a proper, persistent home.
+Persists to the browser's IndexedDB. Survives browser restarts, crashes, and offline periods.
 
 ```typescript
-import { Patches, IndexedDBStore } from '@dabble/patches';
+import { Patches, OTIndexedDBStore } from '@dabble/patches/client';
 
-// Create an IndexedDB store. Give your app's data a unique name!
-const store = new IndexedDBStore('my-amazing-collab-app-data');
-
-// Hook it up to Patches
+const store = new OTIndexedDBStore('my-app-documents');
 const patches = new Patches({ store });
-
-// Now, Patches will save document states and changes to IndexedDB.
-// Users can close the tab, go offline, and their work will be waiting.
 ```
 
-Use `IndexedDBStore` when:
+Use `OTIndexedDBStore` when:
 
-- Offline capability is a must-have
+- Offline capability is a requirement
 - You want fast document loads from local storage
-- You need to reliably queue up changes made offline for later syncing
+- You need to reliably queue changes made offline for later syncing
 
-### LWW Stores (For Settings & Preferences)
+### LWW Stores (For Settings and Status Data)
 
-These stores work with LWW (Last-Write-Wins) - ideal for simpler data like user settings, preferences, or status where the most recent write should just... win.
+Use these with [Last-Write-Wins](last-write-wins.md) for simpler data where the most recent write should just win.
 
-#### `LWWInMemoryStore`: In-Memory LWW
+#### `LWWInMemoryStore`
 
-The LWW equivalent of `InMemoryStore`. Great for testing LWW-based features.
+In-memory storage for LWW. Great for testing LWW features.
 
 ```typescript
-import { LWWInMemoryStore } from '@dabble/patches/client';
+import { Patches, LWWInMemoryStore } from '@dabble/patches/client';
 
 const store = new LWWInMemoryStore();
+const patches = new Patches({ store });
 ```
 
-#### `LWWIndexedDBStore`: Persistent LWW
+#### `LWWIndexedDBStore`
 
-The LWW equivalent of `IndexedDBStore`. Persists field values and timestamps to IndexedDB.
+Persistent storage for LWW. Stores field values and timestamps to IndexedDB.
 
 ```typescript
-import { LWWIndexedDBStore } from '@dabble/patches/client';
+import { Patches, LWWIndexedDBStore } from '@dabble/patches/client';
 
 const store = new LWWIndexedDBStore('my-app-settings');
+const patches = new Patches({ store });
 ```
 
-## How OT Stores Work: The Shelves
+## How OT Stores Organize Data
 
-When you're using OT stores (`InMemoryStore` or `IndexedDBStore`), think of the store as having a few dedicated shelves:
+OT stores (both `InMemoryStore` and `OTIndexedDBStore`) maintain four categories of data:
 
-### Shelf 1: Snapshots (The Latest Good Copy)
+### 1. Snapshots
 
-- **What:** The most recent server-confirmed state of each document
-- **Why:** For loading documents super-fast. When `patches.getDoc()` is called, this is often the first place it looks
-- **Details:** Keyed by document ID. Stores `{ docId, state, rev }`
+The most recent compacted state of each document. When you load a document, this is the starting point.
 
-### Shelf 2: Committed Changes (The Official History)
+- Stored as: `{ docId, state, rev }`
+- Updated periodically via compaction (every 200 committed changes)
 
-- **What:** A log of all changes that the server has successfully processed and confirmed
-- **Why:** Useful for history, and can be used to reconstruct a document state if needed
-- **Details:** Keyed by `[docId, rev]`. Stores your `Change` objects
+### 2. Committed Changes
 
-### Shelf 3: Pending Changes (Your Work-in-Progress)
+Server-confirmed changes that haven't been compacted into a snapshot yet. Applied on top of the snapshot to reconstruct current state.
 
-- **What:** Changes you've made locally that haven't been sent to the server yet, or are waiting for confirmation
-- **Why:** This is CRITICAL for offline work! These are your unsaved changes, kept safe locally until they can be synced
-- **Details:** Keyed by `[docId, rev]`. Stores your `Change` objects
+- Stored as: `Change` objects keyed by `[docId, rev]`
+- Cleared when compacted into a snapshot
 
-### Shelf 4: Deleted Documents (The Tombstones)
+### 3. Pending Changes
 
-- **What:** A list of documents that have been marked for deletion
-- **Why:** Ensures that if a document is deleted locally (even offline), the server will be notified later
-- **Details:** Keyed by document ID
+Local edits that haven't been confirmed by the server. These are your unsaved changes, kept safe locally until they can sync.
 
-## How LWW Stores Work: A Different Approach
+- Stored as: `Change` objects keyed by `[docId, rev]`
+- Rebased when server changes arrive
 
-LWW stores organize things differently because they don't need change history:
+### 4. Document Metadata
 
-### Committed Fields
+Tracking information for each document: whether it's being tracked, the last committed revision, and deletion status (tombstones).
 
-Server-confirmed field values. Each field path maps to its current value.
-
-### Pending Ops
-
-Local changes waiting to be sent. Stored as JSON Patch operations keyed by path.
-
-### Sending Change
-
-The in-flight change currently being sent to the server. Stays put until the server acknowledges it (idempotency!).
-
-**State reconstruction** works like this:
+**State reconstruction:**
 
 ```
-snapshot → apply committed fields → apply sending change → apply pending ops → done!
+snapshot state + committed changes = current server state
+current server state + pending changes = local state
 ```
 
-## The Strategy Connection
+## How LWW Stores Organize Data
 
-Here's the thing: stores are intentionally "dumb". They just save and load data. The smart stuff - like consolidating multiple edits to the same field, or rebasing changes against server updates - happens in **strategies**.
+LWW stores organize data differently because they don't need change history:
+
+### 1. Snapshots
+
+Same as OT - the compacted base state.
+
+### 2. Committed Ops
+
+Server-confirmed operations stored by path. Each path maps to a single operation (the latest value wins).
+
+### 3. Pending Ops
+
+Local changes waiting to be sent. Stored as JSON Patch operations keyed by path. Multiple edits to the same path consolidate into one op.
+
+### 4. Sending Change
+
+The in-flight change currently being sent to the server. Stays put until the server acknowledges it. This enables idempotent retries - if you lose connection mid-send, you can retry the exact same change on reconnect.
+
+**State reconstruction:**
+
+```
+snapshot -> apply committed ops -> apply sending change -> apply pending ops -> done
+```
+
+## Stores Are "Dumb"
+
+Stores just save and load data. The smart stuff - rebasing changes against server updates, consolidating field edits, timestamp comparison - happens in **strategies**.
 
 - `OTStrategy` works with `OTClientStore` implementations
 - `LWWStrategy` works with `LWWClientStore` implementations
 
-This separation keeps stores simple and testable, while strategies handle the algorithm-specific logic.
+See [algorithms.md](algorithms.md) for the pure functions that handle sync logic.
 
-## Pro Tips for Smooth Storing
+## Compaction
 
-- **IndexedDB Naming:** Choose a unique and descriptive name for your store database (e.g., `'yourAppName-docs'`). This helps avoid conflicts if other apps on the same domain use IndexedDB.
-- **Storage Limits & Quotas:** Browsers have limits on IndexedDB storage. While generous, it's not infinite. Be mindful of how much data you're storing.
-- **Error Handling:** Operations with IndexedDB stores can sometimes throw errors (e.g., if storage is full). Wrap your setup in try/catch blocks.
-- **Compaction:** `IndexedDBStore` has a smart compaction strategy. Periodically, it consolidates older changes into new snapshots to save space and keep reads fast.
+Both `OTIndexedDBStore` and `LWWIndexedDBStore` compact automatically. After 200 changes (or 200 ops for LWW), the store consolidates committed data into a new snapshot and clears the old records.
 
-## Why This Local-First Approach is Sweet
+This keeps storage bounded and reads fast. You don't need to manage this manually.
 
-Using `Patches` with a persistent store gives you:
+## Practical Considerations
 
-- **Real Offline Power:** Users can create, edit, and browse documents even with zero internet. Their work is safe.
-- **Snappy Performance:** Loading data from a local store is way faster than waiting for the network every single time.
-- **Resilience:** Your app feels more robust because it's not entirely dependent on a perfect network connection.
-- **Automatic Syncing:** When a connection is available, `PatchesSync` picks up the pending changes and gets them to the server.
+**Database naming:** Use a unique, descriptive name for your IndexedDB database (e.g., `'myapp-documents'` or `'myapp-settings'`). This prevents conflicts if other apps on the same origin use IndexedDB.
 
-It's about building apps that respect your users' time and work, no matter what their internet connection is doing.
+**Storage quotas:** Browsers have limits on IndexedDB storage. While typically generous (50MB-unlimited depending on browser), be mindful with very large documents or many offline edits.
+
+**Error handling:** IndexedDB operations can throw errors (storage full, private browsing mode, etc.). Handle these gracefully:
+
+```typescript
+try {
+  const store = new OTIndexedDBStore('my-app');
+  const patches = new Patches({ store });
+} catch (error) {
+  // Fall back to in-memory, warn user, etc.
+  const store = new InMemoryStore();
+  const patches = new Patches({ store });
+}
+```
+
+## Why Local-First Matters
+
+Using Patches with a persistent store gives you:
+
+- **Real offline capability:** Users create, edit, and browse documents with zero internet. Their work is safe.
+- **Fast performance:** Loading from local storage is orders of magnitude faster than waiting for a network round-trip.
+- **Resilience:** Your app works even when the network doesn't.
+- **Automatic sync:** When a connection returns, [PatchesSync](PatchesSync.md) picks up pending changes and gets them to the server.
+
+This isn't just a nice-to-have. Users lose trust in apps that lose their work. Local persistence is table stakes for any serious collaborative application.
 
 ## When to Use OT vs LWW
 
-| Use Case                   | Strategy | Why                                              |
-| -------------------------- | -------- | ------------------------------------------------ |
-| Collaborative text editing | OT       | Need to merge concurrent character-level changes |
-| Rich document editing      | OT       | Multiple users editing same content              |
-| User preferences           | LWW      | Last setting should win, no merging needed       |
-| Application settings       | LWW      | Simple key-value updates                         |
-| Presence/status data       | LWW      | Latest status is what matters                    |
+| Use Case                   | Strategy | Reason                                          |
+| -------------------------- | -------- | ----------------------------------------------- |
+| Collaborative text editing | OT       | Concurrent character-level changes need merging |
+| Rich document editing      | OT       | Multiple users editing same content             |
+| User preferences           | LWW      | Last setting wins, no merging needed            |
+| Application settings       | LWW      | Simple key-value updates                        |
+| Presence/status data       | LWW      | Latest status is what matters                   |
 
-## Want to Learn More?
+## Related Documentation
 
-- [Patches.md](./Patches.md) - The main client-side API that uses these stores
-- [net.md](./net.md) - How `PatchesSync` gets your locally stored changes talking to the server
-- [PatchesDoc.md](./PatchesDoc.md) - Working with individual documents
-- [algorithms.md](./algorithms.md) - The pure functions that handle sync logic
-- [operational-transformation.md](./operational-transformation.md) - Deep dive into OT
+- [Patches.md](Patches.md) - The main client-side API that uses these stores
+- [PatchesDoc.md](PatchesDoc.md) - Working with individual documents
+- [PatchesSync.md](PatchesSync.md) - How sync gets your locally stored changes to the server
+- [algorithms.md](algorithms.md) - The pure functions that handle sync logic
+- [operational-transformation.md](operational-transformation.md) - Deep dive into OT concepts
+- [last-write-wins.md](last-write-wins.md) - Deep dive into LWW concepts
+- [net.md](net.md) - Networking and transport layer overview

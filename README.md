@@ -1,26 +1,42 @@
 # Patches
 
-**Hello, friend!** Meet your new favorite realtime library. It's based on operational transformations, but don't let that scare you!
+A TypeScript library for building real-time collaborative applications. You get two sync strategies: Operational Transformation for collaborative text, and Last-Write-Wins for everything else.
 
 <img src="./patches.png" alt="Patches the Dog" style="width: 300px;">
 
-## What Is This Thing?
+## What Problem Does This Solve?
 
-Patches is a TypeScript library that makes building collaborative apps _delightfully_ straightforward. You know, the kind where multiple people can edit the same document at once without everything exploding? Yeah, those!
+Building real-time collaborative features is hard. Users edit simultaneously, connections drop mid-change, and conflict resolution gets gnarly fast. Patches handles all of this so you don't have to.
 
-It uses something called Operational Transformation (fancy, I know) with a centralized server model. Translation: Your users can collaborate without weird conflicts, even when their internet connection gets flaky.
-
-The BEST part? It handles massive documents with loooong histories. We're talking documents with 480,000+ operations that load in 1-2ms. Not a typo!
-
-## Why You'll Love It
-
-When working with Patches, you're just using normal JavaScript data. If JSON supports it, Patches supports it. Your document's `state` is immutable (fancy word for "won't change unexpectedly"). When you want to change something, you just do:
+Your document state is just JSON. Change it with a simple callback:
 
 ```js
-doc.change(state => (state.prop = 'new value'));
+doc.change(state => (state.title = 'New Title'));
 ```
 
-And bam! You get a fresh new state with your changes applied.
+Changes apply immediately for snappy UIs, then sync to the server in the background. Offline? No problem. Changes queue up and sync when you're back online.
+
+## Two Sync Strategies
+
+Patches gives you two conflict resolution approaches. Pick the right tool for the job.
+
+**[Operational Transformation (OT)](./docs/operational-transformation.md)** - When users edit the same content simultaneously
+
+- Changes get intelligently merged
+- Required for collaborative text editing
+- Example: Google Docs-style collaboration
+
+**[Last-Write-Wins (LWW)](./docs/last-write-wins.md)** - When the latest timestamp should win
+
+- Simpler, faster, more predictable
+- Perfect for settings, dashboards, canvas objects
+- [Figma uses this approach](https://www.figma.com/blog/how-figmas-multiplayer-technology-works/) for their multiplayer
+
+**The decision is simple:** If users aren't editing the same _text_ collaboratively, use LWW. It's faster, easier to debug, and handles most real-time scenarios perfectly.
+
+Need ordered lists with LWW? Use [fractional indexing](./docs/fractional-indexing.md) to maintain order without OT.
+
+Most apps use both strategies: OT for document content, LWW for everything else.
 
 ## Table of Contents
 
@@ -30,69 +46,50 @@ And bam! You get a fresh new state with your changes applied.
 - [Getting Started](#getting-started)
   - [Client Example](#client-example)
   - [Server Example](#server-example)
+  - [LWW Quick Start](#lww-quick-start)
 - [Core Components](#core-components)
 - [Basic Workflow](#basic-workflow)
 - [Examples](#examples)
 - [Advanced Topics](#advanced-topics)
-- [JSON Patch (Legacy)](#json-patch-legacy)
 - [Contributing](#contributing)
 - [License](#license)
 
 ## Why Operational Transformations?
 
-**"Wait, shouldn't I be using CRDTs instead?"**
+"Shouldn't I use CRDTs instead?"
 
-Look, there are [lots](https://thom.ee/blog/crdt-vs-operational-transformation/) of [opinions](https://www.tiny.cloud/blog/real-time-collaboration-ot-vs-crdt/) about [this](https://fiberplane.com/blog/why-we-at-fiberplane-use-operational-transformation-instead-of-crdt/). Here's the deal: at [Dabble Writer](https://www.dabblewriter.com/), we tried CRDTs. We REALLY wanted them to work. Even the super-optimized [Y.js](https://yjs.dev/) couldn't handle our power users' documents.
+There are [lots](https://thom.ee/blog/crdt-vs-operational-transformation/) of [opinions](https://www.tiny.cloud/blog/real-time-collaboration-ot-vs-crdt/) about [this](https://fiberplane.com/blog/why-we-at-fiberplane-use-operational-transformation-instead-of-crdt/). Here's what we learned at [Dabble Writer](https://www.dabblewriter.com/): CRDTs don't scale for long-lived documents.
 
-Some of our users have projects with 480k+ operations. 😱 These monsters took hours to re-create in Y.js, ~4 seconds to load in optimized Y.js, and ~20ms to add a change. With our OT library? 1-2ms to load and 0.2ms to apply a change.
+Some of our users have projects with 480,000+ operations. These monsters took hours to rebuild in [Y.js](https://yjs.dev/), ~4 seconds to load in optimized Y.js, and ~20ms to add a change. With our OT library? **1-2ms to load and 0.2ms to apply a change.**
 
-As projects grow larger or longer-lived, OT performance stays zippy while CRDTs slow down. For most use cases, CRDTs might be perfect! But if you have very large or long-lived documents (especially ones that accumulate tons of changes over time), OT could save your bacon.
+As documents grow larger or live longer, OT performance stays flat while CRDTs slow down. For most use cases, CRDTs work fine. But if you're building for scale or longevity, OT wins.
 
 ## Key Concepts
 
-- **Centralized OT:** Using a server as the authority makes everything WAY simpler. No complicated peer-to-peer conflict resolution!
-- **Rebasing:** Client changes get "rebased" on top of server changes. Like git rebase, but for your real-time edits!
-- **Linear History:** The server keeps one straight timeline of revisions. No timeline branches = no headaches.
-- **Client-Server Dance:** Clients send batches of changes tagged with the server revision they're based on. The server transforms them, applies them, gives them a new revision number, and broadcasts them back.
+**Centralized OT** - A server acts as the single source of truth. No peer-to-peer complexity, no vector clocks, no distributed consensus headaches. The server sees all changes in order and broadcasts the canonical state.
 
-**Why Centralized?**
+**Rebasing** - When the server has new changes your client hasn't seen, your pending changes get "rebased" on top. Think `git rebase`, but for real-time edits.
 
-We use an algorithm that only transforms operations in one direction (like git rebase), inspired by [Marijn Haverbeke's article](https://marijnhaverbeke.nl/blog/collaborative-editing.html). Originally, we made the server reject changes if new ones came in before them, forcing clients to transform and resubmit. BUT! This could theoretically make slow clients keep resubmitting forever and never committing.
+**Linear History** - The server maintains one straight timeline. No branches, no forks, no merge conflicts at the infrastructure level.
 
-So we leveled up! Now the server does the transform and commit, sending back both new changes AND the transformed submitted ones. Everyone gets equal time with the server, even the slowpokes!
+**Snapshots** - OT documents accumulate changes over time. To avoid replaying 480k operations on load, we snapshot periodically. Load the latest snapshot, apply recent changes, done.
 
-**Snapshots = Performance Magic**
+**Immutable State** - Every change creates a new state object. Unchanged parts stay unchanged. This makes React/Vue/Solid rendering trivial and enables cheap equality checks.
 
-OT documents are just arrays of changes. To create the current document state, you replay each change from first to last. For looooong documents (like our 480k changes monster), this would be painfully slow.
-
-That's why we snapshot the data every so often. Grab the latest snapshot, add recent changes, and you're good to go! This is how OT maintains consistent performance over time.
-
-**Versions as Snapshots**
-
-Most collaborative work happens in bursts. We combine snapshots with versions by creating new snapshots when there's a 30+ minute gap between changes. This clever trick turns a technical requirement into a user-facing feature – versioning!
-
-**Immutable State**
-
-Patches uses gentleman's immutability – each change creates a new object, keeping unchanged objects as-is and only replacing what changed. This brings tons of [benefits](https://www.freecodecamp.org/news/immutable-javascript-improve-application-performance/) for [performance](http://www.cowtowncoder.com/blog/archives/2010/08/entry_409.html) and [code quality](https://medium.com/@mohitgadhavi1/the-power-of-immutability-improving-javascript-performance-and-code-quality-96d82134d8da).
+Read more: [Operational Transformation deep dive](./docs/operational-transformation.md) | [Algorithm functions](./docs/algorithms.md)
 
 ## Installation
 
 ```bash
 npm install @dabble/patches
-# or
-yarn add @dabble/patches
 ```
 
 ## Getting Started
 
-Let's set up a basic client and server. (These examples are simplified – real-world apps need error handling, proper network communication, auth, and persistence.)
-
 ### Client Example
 
-Here's how to get rolling with Patches on the client:
-
 ```typescript
-import { Patches, InMemoryStore } from '@dabble/patches';
+import { Patches, OTStrategy, InMemoryStore } from '@dabble/patches';
 import { PatchesSync } from '@dabble/patches/net';
 
 interface MyDoc {
@@ -100,279 +97,295 @@ interface MyDoc {
   count: number;
 }
 
-// 1. Create a store (just using in-memory for this demo)
-const store = new InMemoryStore();
+// 1. Create a strategy with its store
+const strategy = new OTStrategy(new InMemoryStore());
 
-// 2. Create the main Patches client
-const patches = new Patches({ store });
+// 2. Create the Patches instance
+const patches = new Patches({
+  strategies: { ot: strategy },
+  defaultStrategy: 'ot',
+});
 
-// 3. Set up real-time sync with your server
-const sync = new PatchesSync('wss://your-server-url', patches);
-await sync.connect(); // Connect to the server!
+// 3. Set up real-time sync
+const sync = new PatchesSync(patches, 'wss://your-server-url');
+await sync.connect();
 
-// 4. Open or create a document by ID
+// 4. Open a document
 const doc = await patches.openDoc<MyDoc>('my-doc-1');
 
-// 5. React to updates (update your UI here)
+// 5. React to updates
 doc.onUpdate(newState => {
   console.log('Document updated:', newState);
   // Update your UI here
 });
 
-// 6. Make local changes
-// (Changes apply immediately locally and sync to the server automatically)
+// 6. Make changes - they sync automatically
 doc.change(draft => {
   draft.text = 'Hello World!';
   draft.count = (draft.count || 0) + 1;
 });
-
-// 7. That's it! Changes sync automatically with PatchesSync
 ```
+
+See [Patches](./docs/Patches.md), [PatchesDoc](./docs/PatchesDoc.md), and [PatchesSync](./docs/PatchesSync.md) for full API documentation.
 
 ### Server Example
 
-Here's a basic Express server using `OTServer`:
-
 ```typescript
 import express from 'express';
-import { OTServer, PatchesStoreBackend, Change } from '@dabble/patches/server';
+import { OTServer } from '@dabble/patches/server';
 
-// Server Setup
-const store = new InMemoryStore(); // Use a real database in production!
+// Your backend store implementation
+const store = new MyOTStoreBackend();
 const server = new OTServer(store);
+
 const app = express();
 app.use(express.json());
 
-// Endpoint to receive changes
-app.post('/docs/:docId/changes', async (req, res) => {
-  const docId = req.params.docId;
-  const clientChanges = req.body.changes;
-
-  if (!Array.isArray(clientChanges)) {
-    return res.status(400).json({ error: 'Invalid request' });
-  }
-
-  try {
-    // Process incoming changes
-    const committedChanges = await server.receiveChanges(docId, clientChanges);
-    // Send confirmation back to the sender
-    res.json(committedChanges);
-    // Broadcast committed changes to other connected clients (via WebSockets, etc.)
-    // broadcastChanges(docId, committedChanges, req.headers['x-client-id']);
-  } catch (error) {
-    console.error(`Error processing changes for ${docId}:`, error);
-    const statusCode = error.message.includes('out of sync') ? 409 : 500;
-    res.status(statusCode).json({ error: error.message });
-  }
-});
-
-// Endpoint to get initial state
+// Get document state
 app.get('/docs/:docId', async (req, res) => {
-  const docId = req.params.docId;
+  const { state, rev } = await server.getDoc(req.params.docId);
+  res.json({ state: state ?? {}, rev });
+});
+
+// Commit changes
+app.post('/docs/:docId/changes', async (req, res) => {
   try {
-    const { state, rev } = await server.getLatestDocumentStateAndRev(docId);
-    res.json({ state: state ?? {}, rev }); // Default to empty obj if new
+    const changes = await server.commitChanges(req.params.docId, req.body.changes);
+    res.json(changes);
+    // Broadcast to other clients via WebSocket
   } catch (error) {
-    console.error(`Error fetching state for ${docId}:`, error);
-    res.status(500).json({ error: 'Failed to fetch document state.' });
+    const status = error.message.includes('out of sync') ? 409 : 500;
+    res.status(status).json({ error: error.message });
   }
 });
 
-const PORT = 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(3000);
 ```
 
-For more details and advanced features, check out the rest of the docs!
+See [OTServer](./docs/OTServer.md) for full API documentation.
+
+### LWW Quick Start
+
+For Last-Write-Wins sync, use LWW-specific stores and strategies:
+
+```typescript
+// Client
+import { Patches, LWWStrategy, LWWInMemoryStore } from '@dabble/patches';
+import { PatchesSync } from '@dabble/patches/net';
+
+const strategy = new LWWStrategy(new LWWInMemoryStore());
+const patches = new Patches({
+  strategies: { lww: strategy },
+  defaultStrategy: 'lww',
+});
+
+const sync = new PatchesSync(patches, 'wss://your-server-url');
+await sync.connect();
+
+const doc = await patches.openDoc<UserPrefs>('user-prefs');
+
+doc.change(draft => {
+  draft.theme = 'dark';
+  draft.fontSize = 16;
+});
+```
+
+```typescript
+// Server
+import { LWWServer } from '@dabble/patches/server';
+
+const store = new MyLWWStoreBackend();
+const server = new LWWServer(store);
+
+app.post('/docs/:docId/changes', async (req, res) => {
+  const result = await server.commitChanges(req.params.docId, req.body.changes);
+  res.json(result);
+});
+```
+
+See [LWWServer](./docs/LWWServer.md) and [Last-Write-Wins concepts](./docs/last-write-wins.md) for more details.
 
 ## Core Components
 
-Centralized OT has two very different areas: server and client. They do completely different jobs!
+### Client Side
 
-### Patches (Main Client)
+**[Patches](./docs/Patches.md)** - Main entry point. Manages document lifecycle, coordinates strategies, handles persistence.
 
-([`docs/Patches.md`](./docs/Patches.md))
+**[PatchesDoc](./docs/PatchesDoc.md)** - A single collaborative document. Tracks state, applies changes optimistically, emits update events.
 
-This is your main entry point on the client. It manages document instances and persistence. You get a `PatchesDoc` by calling `patches.openDoc(docId)`.
+**[PatchesSync](./docs/PatchesSync.md)** - WebSocket connection manager. Handles reconnection, batching, and bidirectional sync.
 
-- **Document Management:** Opens, tracks, and closes collaborative documents
-- **Persistence:** Works with pluggable storage (in-memory, IndexedDB, custom)
-- **Sync Integration:** Pairs with `PatchesSync` for real-time server communication
-- **Event Emitters:** Hooks like `onError` and `onServerCommit` for reacting to events
+**Strategies** - Algorithm-specific logic:
 
-### PatchesDoc (Document Instance)
+- `OTStrategy` - Owns an `OTClientStore`, handles rebasing and change tracking
+- `LWWStrategy` - Owns an `LWWClientStore`, handles timestamp consolidation
 
-([`docs/PatchesDoc.md`](./docs/PatchesDoc.md))
+**Stores** - Persistence adapters:
 
-This represents a single collaborative document. You don't create this directly; use `patches.openDoc(docId)` instead.
+- `InMemoryStore` / `LWWInMemoryStore` - For testing and simple apps
+- `OTIndexedDBStore` / `LWWIndexedDBStore` - Browser persistence with offline support
 
-- **Local State Management:** Tracks committed state, sending changes, and pending changes
-- **Optimistic Updates:** Applies local changes immediately for snappy UIs
-- **Synchronization:** Handles client-side OT magic:
-  - Sends pending changes to server
-  - Applies server confirmations
-  - Applies external updates, rebasing local changes as needed
-- **Event Emitters:** Hooks like `onUpdate` and `onChange` to react to state changes
+### Server Side
 
-### OTServer
+**[OTServer](./docs/OTServer.md)** - OT authority. Transforms concurrent changes, assigns revisions, maintains history.
 
-([`docs/OTServer.md`](./docs/OTServer.md))
+**[LWWServer](./docs/LWWServer.md)** - LWW authority. Compares timestamps, stores current field values, no history.
 
-The heart of server-side logic!
+**[PatchesHistoryManager](./docs/PatchesHistoryManager.md)** - Query document versions and history.
 
-- **Receives Changes:** Handles incoming `Change` objects from clients
-- **Transformation:** Transforms client changes against concurrent server changes
-- **Applies Changes:** Applies transformed changes to the authoritative document state
-- **Versioning:** Creates version snapshots based on user sessions
-- **Persistence:** Uses `PatchesStoreBackend` to save/load document state and history
+**[PatchesBranchManager](./docs/PatchesBranchManager.md)** - Create, list, and merge branches.
 
-### PatchesHistoryManager
+**Backend Stores** - You implement these interfaces for your database:
 
-([`docs/PatchesHistoryManager.md`](./docs/PatchesHistoryManager.md))
+- `OTStoreBackend` - For OT: changes, snapshots, versions
+- `LWWStoreBackend` - For LWW: fields with timestamps, snapshots
 
-Helps you query document history.
+See [Persistence](./docs/persist.md) for storage patterns and [Backend Store Interface](./docs/operational-transformation.md#backend-store-interface) for implementation details.
 
-- **List Versions:** Get metadata about saved document versions
-- **Get Version State/Changes:** Load the full state or specific changes for a version
-- **List Server Changes:** Query raw server changes by revision numbers
+### Networking
 
-### PatchesBranchManager
+**[WebSocket Transport](./docs/websocket.md)** - Standard server-mediated communication via `PatchesWebSocket`.
 
-([`docs/PatchesBranchManager.md`](./docs/PatchesBranchManager.md))
+**[WebRTC Transport](./docs/net.md)** - Peer-to-peer for awareness features (cursors, presence).
 
-Manages branching and merging workflows.
+**[JSON-RPC Protocol](./docs/json-rpc.md)** - The wire protocol between client and server.
 
-- **Create Branch:** Makes a new document branching off from a source doc
-- **List Branches:** Shows info about existing branches
-- **Merge Branch:** Merges changes back into the source document
-- **Close Branch:** Marks a branch as closed, merged, or abandoned
+When to use which? WebSocket for document sync. WebRTC for presence/cursors to reduce server load. See [Networking overview](./docs/net.md).
 
-### Backend Store
+### Awareness (Presence & Cursors)
 
-([`docs/operational-transformation.md#backend-store-interface`](./docs/operational-transformation.md#backend-store-interface))
+Show who's online, where their cursor is, what they're selecting. Works over both WebSocket and WebRTC.
 
-This is an interface you implement, not a specific class. It defines how the server components interact with your chosen storage (database, file system, memory).
-
-You're responsible for making it work with your backend!
-
-### Transport & Networking
-
-Patches gives you flexible networking options:
-
-- **WebSocket Transport:** For most apps, use [`PatchesWebSocket`](./docs/websocket.md) to connect to a central server
-- **WebRTC Transport:** For peer-to-peer, use [`WebRTCTransport`](./docs/operational-transformation.md#webrtc) and [`WebRTCAwareness`](./docs/awareness.md)
-
-**When to use which?**
-
-- WebSocket for most collaborative apps with a central server
-- WebRTC for peer-to-peer or to reduce server load for awareness/presence
-
-### Awareness (Presence, Cursors, etc.)
-
-"Awareness" lets you show who's online, where their cursor is, and more. Patches supports awareness over both WebSocket and WebRTC.
-
-Check the [Awareness documentation](./docs/awareness.md) for how to build collaborative cursors, user lists, and other cool features.
+See [Awareness documentation](./docs/awareness.md) for implementation details.
 
 ## Basic Workflow
 
-### Client-Side
+### Client
 
-1. **Initialize `Patches`** with a store
-2. **Track and Open a Document** with `patches.trackDocs([docId])` and `patches.openDoc(docId)`
-3. **Subscribe to Updates** with `doc.onUpdate`
-4. **Make Local Changes** with `doc.change()`
-5. **Sync Changes** automatically with `PatchesSync` or manually with your own logic
+1. Create a `Patches` instance with strategies
+2. Connect `PatchesSync` to your server
+3. Open documents with `patches.openDoc(docId)`
+4. Subscribe to updates with `doc.onUpdate()`
+5. Make changes with `doc.change()` - they sync automatically
 
-### Server-Side
+### Server
 
-1. **Initialize `OTServer`** with your backend store
-2. **Receive Client Changes** with `server.receiveChanges()`
-3. **Handle History/Branching** with `PatchesHistoryManager` and `PatchesBranchManager`
+1. Create `OTServer` or `LWWServer` with your backend store
+2. Handle `commitChanges()` requests
+3. Broadcast committed changes to other clients
+4. Optionally use `PatchesHistoryManager` for versioning and `PatchesBranchManager` for branching
 
 ## Examples
 
-### Simple Client Setup
+### Complete Client Setup
 
 ```typescript
-import { Patches, InMemoryStore } from '@dabble/patches';
+import { Patches, OTStrategy, OTIndexedDBStore } from '@dabble/patches';
+import { PatchesSync } from '@dabble/patches/net';
 
 interface MyDoc {
-  text: string;
-  count: number;
+  title: string;
+  content: string;
 }
 
-const store = new InMemoryStore();
-const patches = new Patches({ store });
-const docId = 'doc123';
-await patches.trackDocs([docId]);
-const doc = await patches.openDoc<MyDoc>(docId);
+// Production setup with IndexedDB for offline support
+const strategy = new OTStrategy(new OTIndexedDBStore('my-app'));
+const patches = new Patches({
+  strategies: { ot: strategy },
+});
 
-doc.onUpdate(newState => {
-  console.log('Document updated:', newState);
+const sync = new PatchesSync(patches, 'wss://api.example.com/sync');
+
+// Handle connection state
+sync.onStateChange(state => {
+  if (state.connected) {
+    console.log('Connected and syncing');
+  } else if (!state.online) {
+    console.log('Offline - changes saved locally');
+  }
+});
+
+// Handle errors
+sync.onError((error, context) => {
+  console.error(`Sync error for ${context?.docId}:`, error);
+});
+
+await sync.connect();
+
+// Open and use a document
+const doc = await patches.openDoc<MyDoc>('doc-123');
+
+doc.onUpdate(state => {
+  renderUI(state);
 });
 
 doc.change(draft => {
-  draft.text = 'Hello';
-  draft.count = 0;
+  draft.title = 'My Document';
+  draft.content = 'Hello, world!';
 });
-// With PatchesSync, changes sync automatically
 ```
 
-### Simple Server Setup
+### Using Both Strategies
 
 ```typescript
-import express from 'express';
-import {
-  OTServer,
-  PatchesStoreBackend,
-  Change,
-  VersionMetadata, //... other types
-} from '@dabble/patches/server';
+import { Patches, OTStrategy, LWWStrategy, InMemoryStore, LWWInMemoryStore } from '@dabble/patches';
 
-// --- Basic In-Memory Store (Use a real database!) ---
-class InMemoryStore implements PatchesStoreBackend {
-  private docs = new Map<string, { state: any; rev: number; changes: Change[]; versions: VersionMetadata[] }>();
-
-  // Implementation details omitted for brevity...
-}
-
-// --- Server Setup ---
-const store = new InMemoryStore();
-const server = new OTServer(store);
-const app = express();
-app.use(express.json());
-
-// API endpoints for changes and state...
-// (see full example in code)
-
-const PORT = 3000;
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+// Configure both strategies
+const patches = new Patches({
+  strategies: {
+    ot: new OTStrategy(new InMemoryStore()),
+    lww: new LWWStrategy(new LWWInMemoryStore()),
+  },
+  defaultStrategy: 'ot',
 });
+
+// OT for collaborative document editing
+const manuscript = await patches.openDoc('manuscript-123'); // Uses default (ot)
+
+// LWW for user settings
+const settings = await patches.openDoc('settings-user-456', { strategy: 'lww' });
 ```
 
 ## Advanced Topics
 
-### Offline Support & Versioning
+### Versioning & History
 
-See [`OTServer Versioning`](./docs/OTServer.md#versioning) and [`PatchesHistoryManager`](./docs/PatchesHistoryManager.md).
+Documents automatically snapshot after 30 minutes of inactivity. Browse versions with `PatchesHistoryManager`.
 
-### Branching and Merging
+See [OTServer Versioning](./docs/OTServer.md#versioning) and [PatchesHistoryManager](./docs/PatchesHistoryManager.md).
 
-See [`PatchesBranchManager`](./docs/PatchesBranchManager.md).
+### Branching
 
-### Custom OT Types
+Create document branches, work in isolation, merge back. Useful for "what if" scenarios or staged editing.
 
-See [`Operational Transformation > Operation Handlers`](./docs/operational-transformation.md#operation-handlers).
+See [Branching](./docs/branching.md) and [PatchesBranchManager](./docs/PatchesBranchManager.md).
 
-## JSON Patch (Legacy)
+### SharedWorker
 
-For legacy JSON Patch features, see [`docs/json-patch.md`](./docs/json-patch.md).
+Run Patches in a SharedWorker for cross-tab coordination and reduced memory usage.
+
+See [SharedWorker documentation](./docs/shared-worker.md).
+
+### Framework Integrations
+
+- **Vue 3**: See [src/vue/README.md](src/vue/README.md)
+- **Solid.js**: See [src/solid/README.md](src/solid/README.md)
+
+### Custom OT Operations
+
+Extend the operation handlers for domain-specific transformations.
+
+See [Operation Handlers](./docs/operational-transformation.md#operation-handlers).
+
+### JSON Patch
+
+Patches uses JSON Patch (RFC 6902) under the hood. You rarely need to work with it directly, but it's there.
+
+See [JSON Patch documentation](./docs/json-patch.md).
 
 ## Contributing
 
-Contributions are welcome! Please feel free to open issues or submit pull requests.
-
-_(TODO: Add contribution guidelines)_
+Contributions welcome. Open issues or submit pull requests.
 
 ## License
 

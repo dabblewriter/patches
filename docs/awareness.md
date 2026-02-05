@@ -1,110 +1,154 @@
-# Awareness: Making Your Collaborative App Feel ALIVE! 👥
+# Awareness: Real-Time Presence for Collaborative Apps
 
-## What the Heck is "Awareness"?
+## What Awareness Actually Is
 
-You know that magical feeling when you're using Google Docs and you see other people's cursors dancing around the page? That's _awareness_ in action!
+You know that feature in Google Docs where you see other people's cursors moving around? That's awareness.
 
-Awareness is all the real-time "who's doing what" info that makes collaborative apps feel like actual _collaboration_ instead of just "taking turns editing the same document." It's the digital equivalent of seeing your coworkers in the same room.
+Awareness is the real-time "who's doing what" information that transforms collaborative editing from "taking turns on the same file" into actual collaboration. It's what makes users feel like they're in the same room, even when they're not.
 
 With awareness, you can show:
 
-- Who's looking at the doc right now (hello, little profile pics!)
-- Where everyone's cursor is hanging out
-- What text Jane is selecting
-- That Bob is currently typing (those animated dots...)
-- Whatever else your app needs to feel like a bustling hive of activity!
+- Who's currently viewing the document
+- Where everyone's cursor is positioned
+- What text someone has selected
+- Typing indicators
+- Any other ephemeral state your app needs
 
-## Awareness in Patches: Where the Magic Happens
+The key distinction: awareness data is _ephemeral_. It doesn't get persisted. When a user disconnects, their awareness state disappears. This is by design - nobody cares where Bob's cursor was three days ago.
 
-Patches gives you `WebRTCAwareness` - a super handy utility that lets clients share their status directly with each other using WebRTC. No server needed for this part!
+## WebRTCAwareness: Peer-to-Peer Presence
 
-The best part? Your awareness state can be _any JSON object_ you want. Go wild! Include user photos, fancy cursor colors, emoji mood indicators - whatever makes your app awesome.
+Patches provides `WebRTCAwareness` - a utility that lets clients share presence state directly with each other via WebRTC. The server only handles the initial handshake; after that, awareness data flows peer-to-peer.
 
-## Getting Started with WebRTC Awareness
+Your awareness state can be any JSON object. User photos, cursor colors, emoji status indicators - whatever your app needs.
 
-Ready to make your app feel alive? Let's do this!
+## Getting Started
 
-### Setting Things Up
+### Setup
 
 ```typescript
-import { WebRTCTransport, WebRTCAwareness } from '@dabble/patches/net';
+import { WebRTCTransport, WebRTCAwareness } from '@dabble/patches/webrtc';
 
-// First, create your transport
-const transport = new WebRTCTransport(/* your signaling config */);
+// Create your transport (requires a signaling server URL)
+const transport = new WebRTCTransport(signalingServerUrl);
 
-// Then create your awareness instance
+// Create awareness instance
 const awareness = new WebRTCAwareness(transport);
 
-// Connect to the magic awareness network!
+// Connect to start syncing
 await awareness.connect();
 ```
 
-### Sharing Your State (and Seeing Others)
+### Setting Your Local State
 
 ```typescript
-// Tell the world about yourself!
+// Set your presence data - broadcasts to all connected peers
 awareness.localState = {
   name: 'Alice',
   color: '#FF5733',
   avatar: 'https://example.com/alice.jpg',
   cursor: { line: 7, column: 12 },
-  mood: '🔥', // Why not?
 };
-
-// Listen for updates from your collaborators
-awareness.onUpdate(states => {
-  // states is an array of everyone's current state
-  // Time to update your UI!
-
-  console.log(`${states.length} people are currently active!`);
-
-  // Now you can show cursors, highlight selections, etc.
-});
-
-// Want to check who's around right now?
-const currentStates = awareness.states;
-console.log(`${Object.keys(currentStates).length} people online`);
 ```
 
-## Pro Tips for Amazing Awareness UIs
+When you set `localState`, two things happen:
 
-### 1. Don't Flood the Network!
+1. Your peer ID gets attached automatically
+2. The state broadcasts to all connected peers
+
+### Listening for Updates
 
 ```typescript
-// BAD: Updating on every keystroke
-editor.on('cursorActivity', () => {
-  awareness.localState = { cursor: editor.getCursor() };
+// Subscribe to state changes from all peers
+awareness.onUpdate(states => {
+  // states is an array of all connected peer states
+  console.log(`${states.length} people online`);
+
+  // Each state includes the peer's ID plus whatever they set
+  states.forEach(state => {
+    console.log(`${state.name} is at line ${state.cursor?.line}`);
+  });
 });
 
-// GOOD: Debounce those updates
+// Get current states synchronously
+const currentStates = awareness.states;
+```
+
+### Cleaning Up
+
+```typescript
+// Disconnect when done
+awareness.disconnect();
+```
+
+## TypeScript Support
+
+`WebRTCAwareness` is generic. Define your state shape for type safety:
+
+```typescript
+interface MyAwarenessState {
+  id: string; // Added automatically
+  name: string;
+  color: string;
+  cursor?: { line: number; column: number };
+  selection?: { start: number; end: number };
+}
+
+const awareness = new WebRTCAwareness<MyAwarenessState>(transport);
+
+// Now localState and states are properly typed
+awareness.localState = {
+  name: 'Alice',
+  color: '#FF5733',
+  cursor: { line: 10, column: 5 },
+};
+```
+
+## Practical Considerations
+
+### Throttle Your Updates
+
+Cursor movements can fire hundreds of times per second. Don't flood the network.
+
+```typescript
 import { debounce } from 'lodash';
 
 const updateAwareness = debounce(() => {
-  awareness.localState = { cursor: editor.getCursor() };
-}, 50); // 50ms delay feels responsive but won't swamp the network
+  awareness.localState = {
+    ...awareness.localState,
+    cursor: editor.getCursor(),
+  };
+}, 50); // 50ms feels responsive without overwhelming peers
 
 editor.on('cursorActivity', updateAwareness);
 ```
 
-### 2. Make It Personal
+### Sanitize Incoming Data
 
-Give each user a distinct identity:
+Peers can send any JSON they want. Don't blindly trust it.
 
 ```typescript
-// When your user logs in:
-const userColor = generateUniqueColor(username); // Your function to assign colors
+awareness.onUpdate(states => {
+  const sanitized = states.map(state => ({
+    ...state,
+    // Clamp cursor to valid range
+    cursor: state.cursor
+      ? {
+          line: Math.max(0, Math.min(state.cursor.line, editor.lineCount() - 1)),
+          column: Math.max(0, state.cursor.column),
+        }
+      : undefined,
+    // Strip HTML from names
+    name: state.name ? sanitizeHTML(state.name) : 'Anonymous',
+  }));
 
-awareness.localState = {
-  name: username,
-  color: userColor,
-  avatar: userAvatarUrl,
-  // ... other state
-};
+  renderCollaborators(sanitized);
+});
 ```
 
-### 3. Transitions Make Everything Better
+### Smooth Cursor Movement
 
-When rendering other users' cursors, add some CSS transitions for smooth movement:
+Add CSS transitions so remote cursors don't teleport:
 
 ```css
 .remote-cursor {
@@ -115,119 +159,21 @@ When rendering other users' cursors, add some CSS transitions for smooth movemen
 }
 ```
 
-### 4. Be Cautious with What You Trust
+## Server-Side: SignalingService
 
-Remember, clients can send any JSON they want as their awareness state. Don't blindly trust it!
+WebRTC is peer-to-peer, but peers need help finding each other initially. That's where `SignalingService` comes in.
 
-```typescript
-// Sanitize incoming awareness data
-awareness.onUpdate(states => {
-  states.forEach(state => {
-    // Check that cursor positions are within bounds
-    if (state.cursor) {
-      state.cursor.line = Math.min(state.cursor.line, editor.lineCount() - 1);
-      state.cursor.column = Math.min(state.cursor.column, editor.getLine(state.cursor.line).length);
-    }
-    // Sanitize any HTML in names
-    if (state.name) {
-      state.name = sanitizeHTML(state.name);
-    }
-  });
+`SignalingService` is an abstract class that handles:
 
-  // Now update your UI with the sanitized data
-});
-```
+1. Tracking connected clients
+2. Notifying new clients about existing peers
+3. Relaying WebRTC signaling messages (offers, answers, ICE candidates)
 
-## A Full Example: Building a Collaborative Editor with Cursors
+Once peers establish direct connections, the server is out of the picture for awareness data.
 
-Here's a quick example using a fictional editor:
+### Implementing SignalingService
 
-```typescript
-import { WebRTCTransport, WebRTCAwareness } from '@dabble/patches/net';
-import { debounce } from 'lodash';
-
-// Set up awareness
-const transport = new WebRTCTransport(signalingServerUrl);
-const awareness = new WebRTCAwareness(transport);
-await awareness.connect();
-
-// Initialize editor (fictitious API)
-const editor = createEditor('#editor');
-
-// Set up a function to update your local awareness state
-const updateLocalAwareness = debounce(() => {
-  awareness.localState = {
-    name: currentUser.name,
-    color: currentUser.color,
-    avatar: currentUser.avatarUrl,
-    cursor: editor.getCursor(),
-    selection: editor.getSelection(),
-  };
-}, 50);
-
-// Call it whenever your cursor or selection changes
-editor.on('cursorActivity', updateLocalAwareness);
-editor.on('selectionChange', updateLocalAwareness);
-
-// Set initial state
-updateLocalAwareness();
-
-// Render other users' cursors and selections
-awareness.onUpdate(states => {
-  // Clear existing cursors first
-  document.querySelectorAll('.remote-cursor, .remote-selection').forEach(el => el.remove());
-
-  // For each remote user
-  Object.entries(states).forEach(([clientId, state]) => {
-    // Skip our own state
-    if (clientId === awareness.clientId) return;
-
-    // Create cursor element
-    if (state.cursor) {
-      const pos = editor.positionToCoords(state.cursor);
-      const cursorEl = document.createElement('div');
-      cursorEl.className = 'remote-cursor';
-      cursorEl.style.left = `${pos.left}px`;
-      cursorEl.style.top = `${pos.top}px`;
-      cursorEl.style.height = `${pos.height}px`;
-      cursorEl.style.backgroundColor = state.color;
-
-      // Add name label
-      const labelEl = document.createElement('div');
-      labelEl.className = 'cursor-label';
-      labelEl.textContent = state.name;
-      labelEl.style.backgroundColor = state.color;
-      cursorEl.appendChild(labelEl);
-
-      document.body.appendChild(cursorEl);
-    }
-
-    // Render selection if it exists
-    if (state.selection && state.selection.start !== state.selection.end) {
-      // Highlight the selected text
-      // This is editor-specific - just a conceptual example
-      const selectionEl = document.createElement('div');
-      selectionEl.className = 'remote-selection';
-      selectionEl.style.backgroundColor = `${state.color}40`; // 25% opacity
-      editor.addOverlay(state.selection, selectionEl);
-    }
-  });
-});
-```
-
-## The Server Side: SignalingService
-
-WebRTC is peer-to-peer, but peers need help finding each other. That's where `SignalingService` comes in. It's a lightweight server-side helper that:
-
-1. Tracks which clients are connected
-2. Tells new clients about existing peers
-3. Relays WebRTC signaling messages (offers, answers, ICE candidates) between peers
-
-Once peers establish a direct WebRTC connection, the server is out of the picture for awareness data. It only handles the initial handshake.
-
-### Basic Server Setup
-
-`SignalingService` is an abstract class. You extend it and implement one method: `send()`.
+Extend the class and implement `send()`:
 
 ```typescript
 import { SignalingService, type JsonRpcMessage } from '@dabble/patches/net';
@@ -240,27 +186,31 @@ class WebSocketSignalingService extends SignalingService {
     if (ws) ws.send(JSON.stringify(message));
   }
 
-  addClient(ws: WebSocket): Promise<string> {
+  async addClient(ws: WebSocket): Promise<string> {
     const id = await this.onClientConnected();
     this.sockets.set(id, ws);
     return id;
   }
 
-  removeClient(id: string): Promise<void> {
+  async removeClient(id: string): Promise<void> {
     this.sockets.delete(id);
-    return this.onClientDisconnected(id);
+    await this.onClientDisconnected(id);
   }
 }
+```
 
+### Wiring It Up
+
+```typescript
 const signaling = new WebSocketSignalingService();
 
-websocket.on('connection', async ws => {
+websocketServer.on('connection', async ws => {
   const clientId = await signaling.addClient(ws);
 
   ws.on('message', async data => {
     const handled = await signaling.handleClientMessage(clientId, data.toString());
     if (!handled) {
-      // Not a signaling message - handle it yourself
+      // Not a signaling message - handle your app's messages here
     }
   });
 
@@ -268,24 +218,97 @@ websocket.on('connection', async ws => {
 });
 ```
 
-Three methods do the heavy lifting: `onClientConnected()`, `handleClientMessage()`, `onClientDisconnected()`. Your `send()` implementation handles the actual message delivery.
+The three key methods:
 
-## Why Awareness Makes Your App 10x Cooler
+- `onClientConnected()` - Registers a client, returns their ID, sends them a welcome with peer list
+- `handleClientMessage()` - Routes signaling messages between peers, returns `true` if it was a signaling message
+- `onClientDisconnected()` - Removes client and notifies remaining peers
 
-With awareness, your collaborative app transforms from "a document multiple people can edit" to "a shared space where people work together." It's the difference between a static document and a living, breathing collaborative environment.
+## Full Example: Collaborative Editor with Cursors
 
-Users can:
+```typescript
+import { WebRTCTransport, WebRTCAwareness } from '@dabble/patches/webrtc';
+import { debounce } from 'lodash';
+
+interface EditorAwareness {
+  id: string;
+  name: string;
+  color: string;
+  cursor?: { line: number; column: number };
+  selection?: { start: { line: number; column: number }; end: { line: number; column: number } };
+}
+
+// Setup
+const transport = new WebRTCTransport(signalingServerUrl);
+const awareness = new WebRTCAwareness<EditorAwareness>(transport);
+await awareness.connect();
+
+// Set initial local state
+awareness.localState = {
+  name: currentUser.name,
+  color: currentUser.color,
+};
+
+// Update on cursor/selection changes (throttled)
+const updateLocalAwareness = debounce(() => {
+  awareness.localState = {
+    ...awareness.localState,
+    cursor: editor.getCursor(),
+    selection: editor.getSelection(),
+  };
+}, 50);
+
+editor.on('cursorActivity', updateLocalAwareness);
+editor.on('selectionChange', updateLocalAwareness);
+
+// Render remote cursors
+awareness.onUpdate(states => {
+  // Clear existing remote cursors
+  document.querySelectorAll('.remote-cursor').forEach(el => el.remove());
+
+  states.forEach(state => {
+    // Skip our own state (it has our ID)
+    if (state.id === transport.id) return;
+    if (!state.cursor) return;
+
+    const pos = editor.positionToCoords(state.cursor);
+
+    const cursor = document.createElement('div');
+    cursor.className = 'remote-cursor';
+    cursor.style.cssText = `
+      left: ${pos.left}px;
+      top: ${pos.top}px;
+      height: ${pos.height}px;
+      background-color: ${state.color};
+    `;
+
+    const label = document.createElement('div');
+    label.className = 'cursor-label';
+    label.textContent = state.name;
+    label.style.backgroundColor = state.color;
+    cursor.appendChild(label);
+
+    document.body.appendChild(cursor);
+  });
+});
+```
+
+## Why Awareness Matters
+
+Without awareness, collaborative apps feel like version control with auto-merge. Users don't know who else is editing, where they're working, or whether they're about to step on each other's toes.
+
+With awareness, users can:
 
 - See exactly where others are working
-- Avoid edit conflicts naturally
-- Feel connected, even when working remotely
-- Coordinate work more efficiently
-- Experience that "wow factor" that makes your app memorable
+- Naturally avoid edit conflicts
+- Coordinate without explicit communication
+- Feel connected to remote collaborators
 
-So don't skip on awareness - it's the secret ingredient that turns good collaborative apps into great ones!
+It's the difference between a shared document and a shared workspace.
 
-## Want to Learn More?
+## Related Documentation
 
-- [WebRTC Transport](./operational-transformation.md#webrtc) - How the networking part works
-- [PatchesDoc](./PatchesDoc.md) - All about document management
-- [operational-transformation.md](./operational-transformation.md) - The core magic that makes it all work
+- [WebSocket Transport](websocket.md) - Server-mediated communication for document sync
+- [Networking Overview](net.md) - How PatchesSync coordinates synchronization
+- [JSON-RPC Protocol](json-rpc.md) - The messaging protocol used by SignalingService
+- [PatchesDoc](PatchesDoc.md) - Document management on the client

@@ -1,89 +1,93 @@
-# Operational Transformation: The Magic Behind the Curtain 🧙‍♂️
+# Operational Transformation: How Collaborative Editing Actually Works
 
-Ever wondered how your changes don't collide when multiple people edit the same document? That's Operational Transformation (OT) at work - and Patches has a particularly clever implementation!
+Ever wondered how your changes don't collide when multiple people edit the same document? That's Operational Transformation (OT) at work. Most articles about OT get lost in academic abstractions. Let's skip that and look at how Patches actually implements it.
 
-After our big refactor, the OT logic has been moved into pure algorithm functions, making it easier to understand, test, and reuse. The main classes now orchestrate these algorithms rather than implementing OT themselves.
+After a major refactor, the OT logic lives in pure algorithm functions. This makes the code easier to understand, test, and reuse. The main classes orchestrate these algorithms rather than implementing OT themselves.
 
 **Table of Contents**
 
 - [Core Concepts](#core-concepts)
-- [The New Architecture](#the-new-architecture)
-- [Client-Server Dance](#client-server-dance)
-- [The Key Players](#the-key-players)
+- [Architecture](#architecture)
+- [Client-Server Flow](#client-server-flow)
+- [Key Components](#key-components)
 - [Algorithm Functions](#algorithm-functions)
 - [Backend Store Interface](#backend-store-interface)
-- [How Transformation Actually Works](#how-transformation-actually-works)
-- [Why Our Approach Rocks](#why-our-approach-rocks)
+- [How Transformation Works](#how-transformation-works)
+- [Why Centralized OT](#why-centralized-ot)
 
 ## Core Concepts
 
-Let's break down the big ideas behind Patches' OT system in plain English:
+Here's what you actually need to know about Patches' OT system:
 
-### Centralized Authority 🏛️
+### Centralized Authority
 
-Most OT systems try to work in a peer-to-peer way, which gets SUPER complicated. We decided to make things simpler (and WAY more reliable) by using a central server as the ultimate decision-maker.
+Most OT systems attempt peer-to-peer coordination, which gets complicated fast. Patches takes a simpler approach: a central server acts as the ultimate decision-maker.
 
-Think of it like this: instead of everyone shouting changes at each other and trying to figure out who goes first, everyone sends their changes to a referee (the server), who decides the official order.
+Instead of everyone shouting changes at each other and trying to figure out who goes first, everyone sends their changes to a referee (the server), who decides the official order.
 
-This approach makes the whole system more predictable and easier to reason about. No more weird edge cases where Alice's changes and Bob's changes can't be reconciled!
+This makes the whole system more predictable. No weird edge cases where Alice's changes and Bob's changes can't be reconciled. The server says "this is the order," and that's that.
 
-### Rebasing 🔄
+### Rebasing
 
 Patches uses a concept borrowed from Git: rebasing. When the server accepts new changes, clients need to "rebase" their pending local changes on top of the server changes.
 
-Imagine you're editing a paragraph while someone else inserts a sentence at the beginning. The server will tell you: "Hey, someone added a sentence that shifts your edit position - let me adjust your changes to account for that." That's rebasing!
+Imagine you're editing a paragraph while someone else inserts a sentence at the beginning. The server will tell you: "Hey, someone added a sentence that shifts your edit position - let me adjust your changes to account for that." That's rebasing.
 
-### Linear History 📚
+The key insight: your _intent_ is preserved, but the _positions_ get adjusted to account for what happened before you.
 
-One big advantage of our approach is that we get a single, linear history of changes. There are no branching timelines or parallel universes to reconcile - just one clear sequence of changes.
+### Linear History
 
-This makes it easier to implement features like versioning, history browsing, and "time travel" to previous document states.
+One big advantage of centralized OT: a single, linear history of changes. No branching timelines or parallel universes to reconcile - just one clear sequence of changes.
 
-### Changes and Revisions 🔢
+This makes versioning, history browsing, and "time travel" to previous document states straightforward to implement. See [PatchesHistoryManager](PatchesHistoryManager.md) for how this works.
+
+### Changes and Revisions
 
 Every change in Patches has:
 
-1. A unique ID
-2. A set of operations (add text, delete character, move property, etc.)
+1. A unique ID (generated client-side)
+2. A set of [JSON Patch operations](json-patch.md) (add, remove, replace, etc.)
 3. A `baseRev` (the server revision it was based on)
 4. A `rev` (the server revision after applying this change)
 
-When the server confirms a change, it assigns the next available revision number. This keeps everything in order and helps clients know when they need to rebase.
+When the server confirms a change, it assigns the next available revision number. This keeps everything ordered and helps clients know when they need to rebase.
 
-## The New Architecture
+## Architecture
 
-With the refactor, we've separated concerns beautifully:
+The codebase separates concerns into distinct layers:
 
 ### Orchestration Layer
 
-- **Patches:** Main coordinator and public API
-- **PatchesSync:** Sync coordinator between client and server
-- **PatchesDoc:** Document interface and local state manager
-- **OTServer:** Server-side request handler
+- **[Patches](Patches.md):** Main coordinator and public API
+- **[PatchesSync](PatchesSync.md):** Sync coordinator between client and server
+- **[PatchesDoc](PatchesDoc.md):** Document interface and local state manager
+- **[OTServer](OTServer.md):** Server-side request handler
 
 ### Algorithm Layer
 
-- **Client algorithms:** `makeChange`, `applyCommittedChanges`, `createStateFromSnapshot`, etc.
+- **Client algorithms:** `makeChange`, `applyCommittedChanges`, `createStateFromSnapshot`
 - **Shared algorithms:** `applyChanges`, `rebaseChanges` (the core OT logic)
-- **Server algorithms:** Functions for server-side state management
+- **Server algorithms:** Functions for transformation and state management
 
-### Storage & Transport
+See [algorithms.md](algorithms.md) for the complete breakdown.
 
-- **PatchesStore:** Persistence interface
-- **WebSocket/WebRTC:** Network transport
+### Storage and Transport
+
+- **[PatchesStore](persist.md):** Client-side persistence interface
+- **[WebSocket/WebRTC](net.md):** Network transport options
 
 This separation means:
 
-1. **Pure algorithms** are easy to test and reason about
-2. **Main classes** focus on coordination and user interface
+1. **Pure algorithms** are easy to test - no mocking needed
+2. **Main classes** focus on coordination, not math
 3. **OT logic** is centralized and reusable
-4. **Testing** is much simpler with isolated functions
+4. **Stores stay "dumb"** - they just save and load data
 
-## Client-Server Dance
+## Client-Server Flow
 
-Let's see how all these pieces work together in a typical collaboration flow:
+Here's how the pieces work together in a typical collaboration flow:
 
-### 1. Client Makes a Change 💻
+### 1. Client Makes a Change
 
 Alice adds a paragraph to the document:
 
@@ -93,7 +97,7 @@ doc.change(draft => {
 });
 ```
 
-Here's what happens under the hood:
+Under the hood:
 
 - `PatchesDoc.change()` calls the `makeChange` algorithm
 - `makeChange` creates proper change objects with operations
@@ -101,22 +105,21 @@ Here's what happens under the hood:
 - `PatchesDoc` emits change events
 - `PatchesSync` hears the event and queues the change for sending
 
-### 2. Client Sends Changes to Server 📤
+### 2. Client Sends Changes to Server
 
-`PatchesSync` automatically handles this:
+`PatchesSync` handles batching and transmission automatically:
 
 ```typescript
 // PatchesSync batches and sends changes
-// Uses breakChangesIntoBatches algorithm if needed
-const batches = breakChangesIntoBatches(pendingChanges, maxPayloadBytes);
+const batches = breakChangesIntoBatches(pendingChanges, { maxPayloadBytes: 1_000_000 });
 for (const batch of batches) {
-  await websocket.send('commitChanges', { docId, changes: batch });
+  await transport.send('commitChanges', { docId, changes: batch });
 }
 ```
 
-### 3. Server Processes Changes ⚙️
+### 3. Server Processes Changes
 
-The server receives Alice's change based on revision 42, but oh no! Bob already submitted a change that was assigned revision 43.
+The server receives Alice's change based on revision 42, but Bob already submitted a change that was assigned revision 43.
 
 The server:
 
@@ -126,7 +129,7 @@ The server:
 4. Applies the transformed version of Alice's change
 5. Assigns Alice's change revision 44
 
-### 4. Server Confirms and Broadcasts 📢
+### 4. Server Confirms and Broadcasts
 
 The server sends back two things to Alice:
 
@@ -135,22 +138,21 @@ The server sends back two things to Alice:
 
 The server also broadcasts Alice's change to all other clients (including Bob).
 
-### 5. Clients Apply Updates 📥
+### 5. Clients Apply Updates
 
-This is where the `applyCommittedChanges` algorithm shines:
+This is where the `applyCommittedChanges` algorithm handles the complexity:
 
 ```typescript
 // In PatchesSync when server changes arrive
 const currentSnapshot = await store.getDoc(docId);
-const { state, rev, changes: rebasedPending } = applyCommittedChanges(currentSnapshot, serverChanges);
+const newSnapshot = applyCommittedChanges(currentSnapshot, serverChanges);
 
 // Update storage and notify open documents
-await store.saveCommittedChanges(docId, serverChanges);
-await store.replacePendingChanges(docId, rebasedPending);
+await store.applyServerChanges(docId, serverChanges);
 
 const doc = patches.getOpenDoc(docId);
 if (doc) {
-  doc.applyCommittedChanges(serverChanges, rebasedPending);
+  doc.applyCommittedChanges(serverChanges, newSnapshot.changes);
 }
 ```
 
@@ -165,11 +167,11 @@ Bob's `PatchesSync`:
 - Receives Alice's change and applies it normally
 - If he has pending changes, they get rebased automatically
 
-And just like that, both Alice and Bob see the same document, with both of their changes applied in the correct order!
+Both Alice and Bob see the same document, with both of their changes applied in the correct order.
 
-## The Key Players
+## Key Components
 
-### `Patches` 🎯
+### Patches
 
 The main client-side coordinator. It handles:
 
@@ -178,41 +180,47 @@ The main client-side coordinator. It handles:
 - Event coordination between components
 - Public API surface
 
-### `PatchesSync` 🎼
+See [Patches.md](Patches.md) for details.
 
-The sync conductor (new with the refactor). It:
+### PatchesSync
+
+The sync conductor. It:
 
 - Coordinates between Patches, store, and server
 - Uses algorithm functions for all OT operations
 - Handles connection management and batching
 - Orchestrates the sync flow without implementing OT logic
 
-### `PatchesDoc` 📄
+See [PatchesSync.md](PatchesSync.md) for details.
 
-Now focused on the app interface. It:
+### PatchesDoc
+
+Focused on the app interface. It:
 
 - Manages local state and provides the `change()` API
 - Handles optimistic updates using the `makeChange` algorithm
 - Emits events for UI updates
-- No longer handles sync or OT logic directly
+- Does not handle sync or OT logic directly
 
-### `Change` Object 📦
+See [PatchesDoc.md](PatchesDoc.md) for details.
+
+### Change Object
 
 The data packet that represents a single edit:
 
 ```typescript
 interface Change {
-  id: string; // Unique identifier
-  ops: Operation[]; // Array of operations (add, remove, replace, etc.)
+  id: string; // Unique identifier (generated client-side)
+  ops: JSONPatchOp[]; // Array of operations (add, remove, replace, etc.)
   baseRev: number; // Server revision this change is based on
   rev: number; // Server-assigned revision after applying this change
-  createdAt: string; // ISO timestamp when this change was created (with client timezone)
-  committedAt: string; // ISO timestamp when the server committed this change (UTC)
-  batchId?: string; // Optional group ID for related changes
+  createdAt: number; // Unix timestamp (ms) when the change was created
+  committedAt: number; // Unix timestamp (ms) when the server committed this change
+  batchId?: string; // Optional group ID for related changes (multi-batch uploads)
 }
 ```
 
-### `OTServer` 🏢
+### OTServer
 
 The server-side authority that:
 
@@ -222,6 +230,8 @@ The server-side authority that:
 - Broadcasts changes to other clients
 - Coordinates with storage backends
 
+See [OTServer.md](OTServer.md) for details.
+
 ## Algorithm Functions
 
 The heart of the OT system - pure functions that handle the mathematical operations:
@@ -229,7 +239,7 @@ The heart of the OT system - pure functions that handle the mathematical operati
 ### Client-Side Algorithms
 
 - **`makeChange(snapshot, mutator, metadata?, maxBytes?)`**: Creates change objects from mutations
-- **`applyCommittedChanges(snapshot, serverChanges)`**: Merges server changes with local state
+- **`applyCommittedChanges(snapshot, serverChanges)`**: Merges server changes with local state, returns updated snapshot
 - **`createStateFromSnapshot(snapshot)`**: Builds current state from committed + pending
 
 ### Shared Algorithms
@@ -237,155 +247,230 @@ The heart of the OT system - pure functions that handle the mathematical operati
 - **`applyChanges(state, changes)`**: Applies a list of changes to state
 - **`rebaseChanges(serverChanges, localChanges)`**: The core OT transformation logic
 - **`breakChanges(changes, maxBytes)`**: Splits large changes into smaller ones
-- **`breakChangesIntoBatches(changes, maxBytes?)`**: Groups changes into network-sized batches
+- **`breakChangesIntoBatches(changes, options?)`**: Groups changes into network-sized batches
 
 ### Server-Side Algorithms
 
-- **`getStateAtRevision(docId, rev)`**: Retrieves state at a specific revision
-- **`getSnapshotAtRevision(docId, rev)`**: Gets snapshot for a revision
+- **`transformIncomingChanges(...)`**: Transforms client changes against concurrent server changes
+- **`commitChanges(...)`**: Complete change commit workflow with validation and persistence
+- **`getStateAtRevision(store, docId, rev)`**: Retrieves state at a specific revision
+- **`getSnapshotAtRevision(store, docId, rev)`**: Gets snapshot for a revision
 - **`handleOfflineSessionsAndBatches(...)`**: Manages offline sync scenarios
 
 These functions are pure - no side effects, easy to test, and reusable across different contexts.
 
+See [algorithms.md](algorithms.md) for detailed documentation.
+
 ## Backend Store Interface
 
-The server needs somewhere to store all this data. Rather than tying you to a specific database, Patches defines interfaces you can implement for your preferred storage solution.
+The server needs storage. Rather than tying you to a specific database, Patches defines interfaces you implement for your preferred storage solution.
 
-### `PatchesStoreBackend` 💾
+### OTStoreBackend
 
-This interface handles the core storage operations:
+The primary interface for OT storage operations:
 
 ```typescript
-interface PatchesStoreBackend {
-  // Core revision management
-  getLatestRevision(docId: string): Promise<number>;
-  getLatestState(docId: string): Promise<any | undefined>;
-  getStateAtRevision(docId: string, rev: number): Promise<any | undefined>;
+interface OTStoreBackend extends ServerStoreBackend, VersioningStoreBackend {
+  /** Saves a batch of committed server changes. */
+  saveChanges(docId: string, changes: Change[]): Promise<void>;
 
-  // Change management
-  saveChange(docId: string, change: Change): Promise<void>;
-  listChanges(docId: string, options: ChangesQueryOptions): Promise<Change[]>;
+  /** Lists committed server changes based on revision numbers. */
+  listChanges(docId: string, options: ListChangesOptions): Promise<Change[]>;
 
-  // Version/snapshot management
-  saveVersion(docId: string, version: VersionMetadata): Promise<void>;
-  listVersions(docId: string, options: VersionQueryOptions): Promise<VersionMetadata[]>;
-  loadVersionMetadata(docId: string, versionId: string): Promise<VersionMetadata | null>;
-  loadVersionState(docId: string, versionId: string): Promise<any | undefined>;
+  /** Loads the original Change objects associated with a specific version ID. */
   loadVersionChanges(docId: string, versionId: string): Promise<Change[]>;
-  getLatestVersionMetadata(docId: string): Promise<VersionMetadata | null>;
+
+  /** Appends changes to an existing version (for multi-batch sessions). */
+  appendVersionChanges(
+    docId: string,
+    versionId: string,
+    changes: Change[],
+    newEndedAt: number,
+    newEndRev: number,
+    newState: any
+  ): Promise<void>;
 }
 ```
 
-### `BranchingStoreBackend` 🌿
+### VersioningStoreBackend
 
-If you want to support document branching, implement this extended interface:
+For version/snapshot management:
 
 ```typescript
-interface BranchingStoreBackend extends PatchesStoreBackend {
-  // Branch-specific operations
-  createBranch(branch: Branch): Promise<void>;
-  updateBranch(docId: string, branchId: string, updates: Partial<Branch>): Promise<void>;
-  getBranch(docId: string, branchId: string): Promise<Branch | null>;
-  listBranches(docId: string, options?: BranchQueryOptions): Promise<Branch[]>;
+interface VersioningStoreBackend {
+  /** Creates a version with metadata, state snapshot, and optionally changes. */
+  createVersion(docId: string, metadata: VersionMetadata, state: any, changes?: Change[]): Promise<void>;
+
+  /** Lists version metadata based on filtering/sorting options. */
+  listVersions(docId: string, options: ListVersionsOptions): Promise<VersionMetadata[]>;
+
+  /** Loads the state snapshot for a specific version ID. */
+  loadVersionState(docId: string, versionId: string): Promise<any | undefined>;
+
+  /** Update a version's metadata. */
+  updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void>;
 }
 ```
 
-Patches provides an in-memory implementation (`InMemoryStore`) for testing and simple use cases, and `IndexedDBStore` for browser-based client persistence.
+### BranchingStoreBackend
 
-## How Transformation Actually Works
+If you want to support document branching (see [branching.md](branching.md)):
 
-This is where the real magic happens! The core transformation logic lives in the `rebaseChanges` algorithm:
+```typescript
+interface BranchingStoreBackend {
+  /** Lists metadata records for branches originating from a document. */
+  listBranches(docId: string): Promise<Branch[]>;
 
-### The `rebaseChanges` Function ✨
+  /** Loads the metadata record for a specific branch ID. */
+  loadBranch(branchId: string): Promise<Branch | null>;
+
+  /** Creates a branch. */
+  createBranch(branch: Branch): Promise<void>;
+
+  /** Updates branch metadata. */
+  updateBranch(branchId: string, updates: Partial<Pick<Branch, 'status' | 'name' | 'metadata'>>): Promise<void>;
+}
+```
+
+Patches provides `InMemoryStore` for testing and simple use cases, and `IndexedDBStore` for browser-based client persistence. See [persist.md](persist.md) for details.
+
+## How Transformation Works
+
+This is where the real work happens. The core transformation logic lives in the `rebaseChanges` algorithm.
+
+### The rebaseChanges Function
 
 ```typescript
 // src/algorithms/shared/rebaseChanges.ts
 export function rebaseChanges(serverChanges: Change[], localChanges: Change[]): Change[] {
-  // Transform each local change against all server changes
-  return localChanges.map(localChange => {
-    let transformedOps = localChange.ops;
+  if (!serverChanges.length || !localChanges.length) {
+    return localChanges;
+  }
 
-    // Transform against each server change
-    for (const serverChange of serverChanges) {
-      transformedOps = transformPatch(transformedOps, serverChange.ops);
+  const lastChange = serverChanges[serverChanges.length - 1];
+  const receivedIds = new Set(serverChanges.map(change => change.id));
+  const transformAgainstIds = new Set(receivedIds);
+
+  // Filter out local changes that are already in server changes
+  const filteredLocalChanges: Change[] = [];
+  for (const change of localChanges) {
+    if (receivedIds.has(change.id)) {
+      transformAgainstIds.delete(change.id);
+    } else {
+      filteredLocalChanges.push(change);
     }
+  }
 
-    // Return new change with transformed operations
-    return { ...localChange, ops: transformedOps };
-  });
+  // Create a patch from server changes that need to be transformed against
+  const transformPatch = new JSONPatch(
+    serverChanges
+      .filter(change => transformAgainstIds.has(change.id))
+      .map(change => change.ops)
+      .flat()
+  );
+
+  // Rebase local changes against server changes
+  const baseRev = lastChange.rev;
+  let rev = lastChange.rev;
+  return filteredLocalChanges
+    .map(change => {
+      rev++;
+      const ops = transformPatch.transform(change.ops).ops;
+      if (!ops.length) return null;
+      return { ...change, baseRev, rev, ops };
+    })
+    .filter(Boolean) as Change[];
 }
 ```
 
-### The `transformPatch` Function 🔧
+Key details:
 
-This function (in the JSON Patch module) handles the mathematical transformation:
+1. **Filters out duplicates** - If a local change ID appears in server changes, it's already committed
+2. **Creates a transform patch** - Combines all server ops we need to transform against
+3. **Transforms each local change** - Uses `JSONPatch.transform()` for the actual OT math
+4. **Updates revision numbers** - Rebased changes get new revisions based on the latest server rev
+
+### The JSONPatch.transform Method
+
+The `JSONPatch` class (in `src/json-patch/`) handles the mathematical transformation:
 
 ```typescript
-function transformPatch(sourceOps: Operation[], againstOps: Operation[]): Operation[] {
-  // For each source operation...
-  return sourceOps.map(sourceOp => {
-    // Get the appropriate transformer for this operation type
-    const transformer = operationHandlers[sourceOp.op];
-
-    // Transform it against each operation we're transforming against
-    return againstOps.reduce((op, againstOp) => {
-      return transformer.transform(op, againstOp);
-    }, sourceOp);
-  });
+// Each operation type has its own handler that knows how to transform
+transform(patch: JSONPatch | JSONPatchOp[], obj?: any): this {
+  return new JSONPatch(
+    transformPatch(obj, this.ops, Array.isArray(patch) ? patch : patch.ops, this.custom),
+    this.custom
+  );
 }
 ```
 
-### Operation Handlers 🔧
+See [json-patch.md](json-patch.md) for details on operations and transformation rules.
 
-Each type of operation (add, remove, replace, etc.) has its own handler that knows how to:
+### Operation Handlers
+
+Each type of operation (add, remove, replace, move, copy, test) has its own handler that knows how to:
 
 1. **Apply** the operation to a document
 2. **Transform** the operation against other operations
 3. **Invert** the operation (for undo functionality)
 
-For example, when transforming an "add" operation against a "remove" operation that comes before it, the path might need to be adjusted if the removal changed the structure.
+For example, when transforming an "add" operation against a "remove" operation that comes before it in an array, the index path gets adjusted to account for the removal.
 
-### How `applyCommittedChanges` Orchestrates Everything
+### How applyCommittedChanges Orchestrates Everything
 
-This algorithm is the bridge between server updates and local state:
+This algorithm bridges server updates and local state:
 
 ```typescript
-// Simplified version of the algorithm
-export function applyCommittedChanges<T>(
-  snapshot: PatchesSnapshot<T>,
-  serverChanges: Change[]
-): { state: T; rev: number; changes: Change[] } {
-  // Apply server changes to committed state
-  const newCommittedState = applyChanges(snapshot.state, serverChanges);
-  const newRev = serverChanges[serverChanges.length - 1]?.rev ?? snapshot.rev;
+// Simplified from src/algorithms/client/applyCommittedChanges.ts
+export function applyCommittedChanges(
+  snapshot: PatchesSnapshot,
+  committedChangesFromServer: Change[]
+): PatchesSnapshot {
+  let { state, rev, changes } = snapshot;
 
-  // Rebase pending changes on top of new committed state
-  const rebasedPending = rebaseChanges(serverChanges, snapshot.changes);
+  // Filter out server changes already reflected in current revision
+  const newServerChanges = committedChangesFromServer.filter(change => change.rev > rev);
 
-  // Create final state (committed + rebased pending)
-  const finalState = applyChanges(newCommittedState, rebasedPending);
+  if (newServerChanges.length === 0) {
+    return { state, rev, changes };
+  }
 
-  return {
-    state: finalState,
-    rev: newRev,
-    changes: rebasedPending,
-  };
+  // 1. Apply server changes to committed state
+  state = applyChanges(state, newServerChanges);
+
+  // 2. Update committed revision
+  rev = newServerChanges[newServerChanges.length - 1].rev;
+
+  // 3. Rebase pending local changes against the newly applied server changes
+  if (changes && changes.length > 0) {
+    changes = rebaseChanges(newServerChanges, changes);
+  }
+
+  return { state, rev, changes };
 }
 ```
 
-## Why Our Approach Rocks
+## Why Centralized OT
 
-Our centralized OT approach gives you:
+The centralized approach gives you:
 
-1. **Simplicity** - The server is the ultimate authority, eliminating weird edge cases
+1. **Simplicity** - The server is the ultimate authority, eliminating edge cases
 2. **Predictability** - Changes are applied in a definite order
 3. **Performance** - Transformation is simpler and faster than in peer-to-peer OT
-4. **Flexibility** - Works with any back-end storage system
+4. **Flexibility** - Works with any backend storage system
 5. **Robustness** - Handles network disconnections gracefully
 6. **Scalability** - Supports extremely large and long-lived documents
 
-The tradeoff? You need a central server. But for most collaborative apps, you already have one anyway!
+The tradeoff? You need a central server. But for most collaborative apps, you already have one anyway.
 
-By combining this OT system with Patches' other features (offline support, versioning, branching), you get a complete collaboration platform that's both powerful and easy to use.
+By combining this OT system with Patches' other features ([offline support](persist.md), [versioning](PatchesHistoryManager.md), [branching](branching.md)), you get a complete collaboration platform that handles the hard problems so you don't have to.
 
-Now you know the secret sauce that makes Patches so magical! ✨
+## Related Documentation
+
+- [algorithms.md](algorithms.md) - Deep dive into all algorithm functions
+- [json-patch.md](json-patch.md) - JSON Patch operations and transformation
+- [OTServer.md](OTServer.md) - Server-side OT authority
+- [PatchesSync.md](PatchesSync.md) - Client-side sync coordination
+- [persist.md](persist.md) - Storage and persistence
+- [branching.md](branching.md) - Branch and merge workflows
+- [last-write-wins.md](last-write-wins.md) - Alternative sync strategy for simpler use cases

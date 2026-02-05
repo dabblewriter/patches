@@ -1,218 +1,323 @@
 # `OTServer`
 
-The central authority for your OT system.
+The central authority for your OT system. It decides which changes go where and in what order.
 
-`OTServer` is the server-side implementation of the Operational Transformation algorithm. It keeps everything running smoothly. It's like the air traffic controller for your collaborative documents – directing traffic, preventing collisions, and making sure everyone sees the same thing.
+`OTServer` is the server-side brain of Operational Transformation. Think of it as the referee: clients send their changes, the server decides the official order, transforms conflicts, and tells everyone what actually happened.
 
 **Table of Contents**
 
 - [Overview](#overview)
 - [Initialization](#initialization)
 - [Core Method: `commitChanges()`](#core-method-commitchanges)
+- [Server-Side Changes with `change()`](#server-side-changes-with-change)
+- [Document Retrieval](#document-retrieval)
+- [Document Deletion](#document-deletion)
 - [Versioning](#versioning)
-- [State and History Retrieval](#state-and-history-retrieval)
-- [Subscription Operations](#subscription-operations)
+- [Events](#events)
 - [Backend Store Dependency](#backend-store-dependency)
-- [Example Usage](#example-usage)
+- [JSON-RPC API](#json-rpc-api)
 
 ## Overview
 
-`OTServer` does **all the important stuff**:
+`OTServer` handles five responsibilities:
 
-1. **Central Authority:** It's the one source of truth that decides the correct order of operations
-2. **Transformation:** Takes client changes and transforms them against other clients' changes so everything works perfectly
-3. **State Management:** Keeps track of the real, authoritative document state and revision numbers
-4. **Algorithm Integration:** Uses server-side algorithm functions for state retrieval and offline session handling
-5. **Persistence:** Works with your backend store to save everything important
-6. **Versioning:** Creates snapshots of document states at key moments (perfect for history features!)
+1. **Central Authority**: The one source of truth that decides the correct order of operations
+2. **Transformation**: Takes client changes and transforms them against concurrent changes from other clients
+3. **State Management**: Maintains the authoritative document state and revision numbers
+4. **Versioning**: Creates snapshots of document states based on editing sessions
+5. **Persistence**: Delegates storage to your [`OTStoreBackend`](#backend-store-dependency) implementation
+
+For the conceptual background on how OT works, see [Operational Transformation](operational-transformation.md).
 
 ## Initialization
 
-Getting started is super easy. Just give `OTServer` a store that implements [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) and some optional config options:
-
 ```typescript
-import { OTServer, OTServerOptions } from '@dabble/patches/server';
-import { MyDatabaseStore } from './my-store'; // Your backend implementation
+import { OTServer } from '@dabble/patches/server';
+import { MyDatabaseStore } from './my-store'; // Your OTStoreBackend implementation
 
-// Instantiate your backend store
-const store = new MyDatabaseStore(/* connection details, etc. */);
+const store = new MyDatabaseStore();
 
-// Configure options (optional)
-const options: OTServerOptions = {
-  // Create version snapshots if gap between ops in a batch > 15 mins
-  sessionTimeoutMinutes: 15,
-};
-
-const server = new OTServer(store, options);
+const server = new OTServer(store, {
+  // Create version snapshots after 30 minutes of inactivity (default)
+  sessionTimeoutMinutes: 30,
+  // Optional: limit change size for databases with row size limits
+  maxStorageBytes: 1024 * 1024, // 1MB
+});
 ```
+
+### Options
+
+| Option                  | Type     | Default     | Description                                                         |
+| ----------------------- | -------- | ----------- | ------------------------------------------------------------------- |
+| `sessionTimeoutMinutes` | `number` | `30`        | Minutes of inactivity before creating a new version snapshot        |
+| `maxStorageBytes`       | `number` | `undefined` | Maximum bytes per change. Useful for databases with row size limits |
 
 ## Core Method: `commitChanges()`
 
-This is where the **magic happens**! When clients send changes, this method processes them, transforms them against concurrent changes, and makes sure everything stays in sync.
+This is where the work happens. When clients send changes, this method processes them, transforms them against concurrent changes, and keeps everything in sync.
 
 ```typescript
 async commitChanges(
   docId: string,
-  changes: Change[],
+  changes: ChangeInput[],
   options?: CommitChangesOptions
-): Promise<[Change[], Change[]]> {
-    // ... implementation ...
-}
+): Promise<Change[]>
 ```
 
-### What Goes In
+### Parameters
 
-- **`docId`**: Which document are we changing?
-- **`changes`**: An array of `Change` objects from a client with a `baseRev` property telling us what server revision they were based on
-- **`options`**: Optional commit settings:
-  - **`forceCommit`**: If `true`, save changes even if they result in no state modification. Useful for migrations where change history must be preserved exactly.
+- **`docId`**: The document identifier
+- **`changes`**: Array of changes from the client, each with a `baseRev` indicating which server revision they were based on
+- **`options`**: Optional settings:
+  - **`forceCommit`**: Save changes even if they result in no state modification. Useful for migrations where change history must be preserved exactly.
+  - **`historicalImport`**: Import historical changes, preserving their original timestamps.
 
 ### What Happens Inside
 
-The heavy lifting is handled by the `commitChanges` algorithm in `src/algorithms/server/commitChanges.ts`. Here's the workflow:
+The heavy lifting is handled by the `commitChanges` [algorithm](algorithms.md) in `src/algorithms/server/commitChanges.ts`. Here's the workflow:
 
-1. **Validation First!**
-   - Is the changes array empty? (Returns `[]` if so)
-   - Do all changes have the same `baseRev`?
-   - Is the `baseRev` valid? (Not greater than the current server revision)
+1. **Validate and Normalize**
+   - Empty changes array? Returns `[]`
+   - Ensures all changes have consistent `baseRev`
+   - Clamps `createdAt` timestamps to not be in the future
+   - Assigns sequential revision numbers
 
-2. **Clean Up Changes**
-   - Make sure no timestamps are from the future
-   - Update each change's `rev` to be sequential (baseRev + 1, baseRev + 2, etc.)
-   - Set the correct `baseRev` on each change
+2. **Check for Version Snapshots**
+   - If enough time has passed since the last change (based on `sessionTimeoutMinutes`), creates a new version
 
-3. **Check for Version Snapshots**
-   - Were these changes made after a long idle period? Create a new version if so!
+3. **Filter Duplicates**
+   - Checks change IDs to prevent reprocessing already-committed changes
 
-4. **Filter Out Duplicates**
-   - Have we already seen any of these changes? (Checked using their `id`)
+4. **Handle Offline Work**
+   - Detects offline sessions by time gaps between changes
+   - Creates version snapshots for offline editing sessions
+   - Groups multi-batch uploads by `batchId`
 
-5. **Handle Offline Work**
-   - Did the client make these changes offline? Group them by time gaps
-   - Create version snapshots for each offline session
-   - Check if there are concurrent server changes to transform against:
-     - **No concurrent changes (fast-forward):** Save changes directly with `origin: 'main'`
-     - **Has concurrent changes (divergent):** Collapse offline changes and transform
+5. **Transform Against Concurrent Changes**
+   - If there are changes committed since the client's `baseRev`, transforms incoming changes against them
+   - This is the core [OT transformation](operational-transformation.md#how-transformation-actually-works)
 
-6. **Transform Against Concurrent Changes** (if divergent)
-   - Get any changes committed since `baseRev`
-   - Transform the incoming ops against already-committed ops
-   - This is where OT saves the day!
+6. **Persist and Return**
+   - Saves transformed changes to the store
+   - Emits `onChangesCommitted` event for broadcasting
+   - Returns combined array: catchup changes first, then the client's committed changes
 
-7. **Persist and Return**
-   - Save the transformed changes to the store
-   - Send back both committed changes by others AND the transformed version of the client's changes
+### Return Value
 
-### What Comes Out
+Returns `Promise<Change[]>` containing:
 
-- `Promise<[Change[], Change[]]>`: A tuple containing:
-  - `committedChanges`: Changes already committed since the client's base revision
-  - `transformedChanges`: The client's changes after transformation
+- **Catchup changes**: Changes committed by other clients since the client's `baseRev`
+- **Client's changes**: The client's own changes after transformation (with assigned revisions)
+
+The client receives both in a single array. Their own changes appear at the end with server-assigned revision numbers.
 
 ### Error Handling
 
-`commitChanges` might throw errors if:
+`commitChanges` throws errors for:
 
-- **Invalid `baseRev`:** Missing, inconsistent, or ahead of the server
-- **Transformation Failure:** Something went wrong during OT transformation
-- **Application Failure:** Couldn't apply the changes
-- **Store Errors:** Backend store issues
+- **Invalid `baseRev`**: Client's `baseRev` is ahead of server revision (client needs to reload)
+- **Root-level replace on existing doc**: Prevents stale clients from accidentally wiping documents
+- **Inconsistent `baseRev`**: All changes in a batch must have the same `baseRev`
+- **Store errors**: Backend storage failures
 
-If a client gets an error, they might need to resync with the server. Use `409 Conflict` for `baseRev` mismatches.
+When clients receive errors, they typically need to resync with the server. Use HTTP `409 Conflict` for `baseRev` mismatches.
 
 ### Multi-Batch Uploads
 
-Got a client submitting a ton of changes (maybe after being offline)? They can split them into multiple batches and include the same `batchId` in each batch. This helps with correct OT and versioning.
+Clients with many offline changes can split them into multiple batches using the same `batchId`. The server groups these correctly for OT and versioning.
 
-## Versioning
+```typescript
+// Client sends batches with the same batchId
+await server.commitChanges(docId, batch1); // batchId: 'abc123'
+await server.commitChanges(docId, batch2); // batchId: 'abc123'
+await server.commitChanges(docId, batch3); // batchId: 'abc123'
+```
 
-`OTServer` automatically creates version snapshots to make history tracking and offline work a breeze.
+### Offline-First Optimization
 
-### Offline Snapshots
+When a client that has never synced (`baseRev: 0`) commits changes to an existing document, the server applies an optimization. Instead of transforming through potentially thousands of historical changes, it:
 
-When a client submits changes after working offline (detected by time gaps between `createdAt` timestamps), the server generates snapshots to preserve the document state at key points in time.
+1. Rebases the client's changes to the current revision
+2. Returns a synthetic catchup change with a root-level replace containing the full current state
 
-- **Fast-forward (no concurrent changes):** Versions are created with `origin: 'main'` and `isOffline: true`. The offline changes become a seamless part of the main timeline.
-- **Divergent (has concurrent changes):** Versions are created with `origin: 'offline-branch'` to indicate they diverged from main and required transformation.
+This single operation gives the client the complete document state efficiently.
 
-### Online Snapshots
+## Server-Side Changes with `change()`
 
-Each time the server processes changes, it checks if enough time has passed since the last change (based on `sessionTimeoutMinutes`). If so, it creates a new version snapshot.
+Need to make changes from the server itself? Use the `change()` method:
 
-### Configuration (`sessionTimeoutMinutes`)
+```typescript
+const change = await server.change<MyDoc>(
+  docId,
+  draft => {
+    draft.status = 'approved';
+    draft.approvedAt = Date.now();
+  },
+  { approvedBy: 'admin' }
+); // Optional metadata
 
-Defaults to 30 minutes. This setting controls when new version snapshots are created for both offline and online changes. Adjust it to balance storage usage vs. version granularity.
+if (change) {
+  console.log('Change committed:', change.rev);
+}
+// Returns null if the mutation made no actual changes
+```
 
-## State and History Retrieval
+This creates a proper change, applies it through the standard OT flow, and triggers the `onChangesCommitted` event for broadcasting.
 
-Need to get document state or history? `OTServer` has you covered!
+## Document Retrieval
 
 ### `getDoc()`
 
-Get the latest version of a document and changes since the last version.
+Get the current state and revision of a document:
 
 ```typescript
-const { state, rev, changes } = await server.getDoc(docId);
-// Perfect for initializing new clients!
-
-// Want a specific revision? No problem:
-const snapshot = await server.getDoc(docId, 50);
+const { state, rev } = await server.getDoc(docId);
 ```
 
-### `getVersionState()`
+Returns a `PatchesState` object with:
 
-Get a snapshot of a specific version.
+- `state`: The current document state
+- `rev`: The current revision number
+
+### `getChangesSince()`
+
+Get all changes after a specific revision:
 
 ```typescript
-const versionState = await server.getVersionState(docId, specificVersionId);
+const changes = await server.getChangesSince(docId, 50);
+// Returns all changes with rev > 50
 ```
 
-### `listVersions()`
+Useful for clients reconnecting after being offline.
 
-List version metadata with tons of filtering options.
+## Document Deletion
+
+### `deleteDoc()`
+
+Delete a document and all its associated data:
 
 ```typescript
-// Get the last 10 divergent offline version snapshots (had concurrent changes)
-const offlineBranchVersions = await server.listVersions(docId, {
-  origin: 'offline-branch',
-  limit: 10,
-  reverse: true, // Latest first
-  orderBy: 'startedAt',
+await server.deleteDoc(docId);
+
+// Skip tombstone creation (for testing or when you don't need undelete)
+await server.deleteDoc(docId, { skipTombstone: true });
+```
+
+If your store implements `TombstoneStoreBackend`, a tombstone record is created before deletion, enabling potential recovery.
+
+### `undeleteDoc()`
+
+Remove a tombstone to allow recreating a deleted document:
+
+```typescript
+const wasDeleted = await server.undeleteDoc(docId);
+// Returns true if tombstone was found and removed
+```
+
+## Versioning
+
+`OTServer` automatically creates version snapshots to make history tracking and offline work manageable.
+
+### Session-Based Snapshots
+
+When the server processes changes, it checks the time gap since the last change. If it exceeds `sessionTimeoutMinutes`, a new version snapshot is created. This naturally captures editing sessions.
+
+### Offline Snapshots
+
+When clients submit changes after working offline (detected by time gaps in `createdAt` timestamps), the server generates snapshots:
+
+- **Fast-forward (no concurrent changes)**: Versions created with `origin: 'main'` and `isOffline: true`
+- **Divergent (has concurrent changes)**: Versions created with `origin: 'offline-branch'` to indicate transformation was required
+
+### `captureCurrentVersion()`
+
+Manually capture a version snapshot:
+
+```typescript
+const versionId = await server.captureCurrentVersion(docId, {
+  name: 'Before major refactor',
+  description: 'Saving state before restructuring',
+});
+// Returns null if the document has no changes since the last version
+```
+
+For querying version history, use [PatchesHistoryManager](PatchesHistoryManager.md).
+
+## Events
+
+`OTServer` emits signals you can subscribe to:
+
+### `onChangesCommitted`
+
+Fires when changes are successfully committed. Use this to broadcast updates to other clients:
+
+```typescript
+server.onChangesCommitted((docId, changes, originClientId) => {
+  // Broadcast to all clients except the sender
+  broadcastToClients(docId, changes, { exclude: originClientId });
 });
 ```
 
-## Subscription Operations
+### `onDocDeleted`
 
-Manage which clients are subscribed to which documents.
-
-### `subscribe()`
-
-Sign a client up for updates on one or more documents.
+Fires when a document is deleted:
 
 ```typescript
-const subscribedIds = await server.subscribe(clientId, docId);
-// Or subscribe to multiple docs at once:
-const subscribedIds = await server.subscribe(clientId, [docId1, docId2]);
-```
-
-### `unsubscribe()`
-
-Remove a client's subscriptions.
-
-```typescript
-const unsubscribedIds = await server.unsubscribe(clientId, docId);
-// Or unsubscribe from multiple docs:
-const unsubscribedIds = await server.unsubscribe(clientId, [docId1, docId2]);
+server.onDocDeleted((docId, options, originClientId) => {
+  // Notify clients the document is gone
+  notifyClientsDocDeleted(docId, { exclude: originClientId });
+});
 ```
 
 ## Backend Store Dependency
 
-`OTServer` relies 100% on your implementation of the [`PatchesStoreBackend`](./operational-transformation.md#patchstorebackend) interface. It doesn't do its own storage – it delegates all that to your backend.
+`OTServer` requires an implementation of `OTStoreBackend`. It doesn't do its own storage - it delegates everything to your backend.
 
-Check out the [Backend Store Interface](./operational-transformation.md#backend-store-interface) for all the methods you need to implement.
+```typescript
+interface OTStoreBackend extends ServerStoreBackend, VersioningStoreBackend {
+  // Change operations
+  saveChanges(docId: string, changes: Change[]): Promise<void>;
+  listChanges(docId: string, options: ListChangesOptions): Promise<Change[]>;
 
-## Example Usage
+  // Version operations (inherited from VersioningStoreBackend)
+  createVersion(docId: string, metadata: VersionMetadata, state: any, changes?: Change[]): Promise<void>;
+  listVersions(docId: string, options: ListVersionsOptions): Promise<VersionMetadata[]>;
+  loadVersionState(docId: string, versionId: string): Promise<any | undefined>;
+  loadVersionChanges(docId: string, versionId: string): Promise<Change[]>;
+  appendVersionChanges(docId, versionId, changes, newEndedAt, newEndRev, newState): Promise<void>;
+  updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void>;
 
-See the [Simple Server Setup example in the main README.md](../README.md#simple-server-setup).
+  // Document deletion (inherited from ServerStoreBackend)
+  deleteDoc(docId: string): Promise<void>;
+}
+```
 
-Also check the [Simple Client Setup example](../README.md#simple-client-setup) to see how clients interact with the server.
+For tombstone support (soft delete with recovery), also implement `TombstoneStoreBackend`.
+
+For branching support, implement `BranchingStoreBackend` and use [OTBranchManager](PatchesBranchManager.md).
+
+See [persist.md](persist.md) for storage implementation guidance.
+
+## JSON-RPC API
+
+`OTServer` includes a static API definition for use with the JSON-RPC server:
+
+```typescript
+import { JSONRPCServer } from '@dabble/patches/net';
+import { OTServer } from '@dabble/patches/server';
+
+const rpcServer = new JSONRPCServer();
+rpcServer.register(server, OTServer.api);
+```
+
+The API definition maps methods to required access levels:
+
+| Method            | Access Level |
+| ----------------- | ------------ |
+| `getDoc`          | `read`       |
+| `getChangesSince` | `read`       |
+| `commitChanges`   | `write`      |
+| `deleteDoc`       | `write`      |
+| `undeleteDoc`     | `write`      |
+
+See [json-rpc.md](json-rpc.md) for the JSON-RPC protocol details and [websocket.md](websocket.md) for WebSocket transport setup.

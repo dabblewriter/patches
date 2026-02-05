@@ -1,54 +1,50 @@
-# PatchesSync: Your Sync Conductor 🎼
+# PatchesSync: The Sync Coordinator
 
-Meet `PatchesSync` - the maestro that orchestrates the beautiful symphony of real-time collaboration! This is where all the sync magic happens, coordinating between your local documents and the server to keep everyone in perfect harmony.
+`PatchesSync` handles the WebSocket connection between your [Patches](Patches.md) client and the server. It coordinates document subscriptions, sends local changes, receives server changes, and manages connection state. You set it up once, and it handles the rest.
 
 **Table of Contents**
 
-- [What's the Big Deal?](#whats-the-big-deal)
-- [How It Fits Into the Orchestra](#how-it-fits-into-the-orchestra)
-- [Setting Up Your Sync Connection](#setting-up-your-sync-connection)
-- [The Sync Dance](#the-sync-dance)
+- [What It Does](#what-it-does)
+- [How It Fits Together](#how-it-fits-together)
+- [Setting Up](#setting-up)
+- [The Sync Flow](#the-sync-flow)
 - [State Management](#state-management)
 - [Event Handling](#event-handling)
 - [Configuration Options](#configuration-options)
 - [Real-World Example](#real-world-example)
 - [Error Handling and Resilience](#error-handling-and-resilience)
 
-## What's the Big Deal?
+## What It Does
 
-`PatchesSync` is the brain behind real-time collaboration. While `PatchesDoc` focuses on your app's interface and the algorithms handle the mathematical heavy lifting, `PatchesSync` is the coordinator that makes everything work together seamlessly.
+`PatchesSync` sits between your local documents and the server. Here's what it handles:
 
-Here's what makes it special:
+- **WebSocket Connection**: Connects to your server, handles reconnection on failures
+- **Document Subscriptions**: Subscribes to tracked documents so you receive server updates
+- **Outgoing Changes**: Batches and sends local changes to the server
+- **Incoming Changes**: Receives server changes and applies them locally via the appropriate [strategy](algorithms.md)
+- **State Tracking**: Reports online status, connection status, and sync status
 
-- **Sync Orchestration:** Coordinates between Patches, PatchesStore, and the server
-- **Algorithm Integration:** Uses the pure algorithm functions for all OT operations
-- **Connection Management:** Handles WebSocket connections, reconnections, and offline scenarios
-- **Event Coordination:** Listens to document changes and server updates, routing them properly
-- **Batching Intelligence:** Groups changes efficiently for network transmission
+The key insight: `PatchesSync` is strategy-agnostic. It works with both [OT (Operational Transformation)](operational-transformation.md) and [LWW (Last-Write-Wins)](last-write-wins.md) documents. It delegates the actual sync logic to strategy objects that know how to handle each type.
 
-The key insight: `PatchesSync` doesn't do the complex OT math itself - it calls the right algorithm functions at the right time with the right data.
+## How It Fits Together
 
-## How It Fits Into the Orchestra
+Here's the architecture:
 
-Think of your collaborative system like a symphony orchestra:
+- **[Patches](Patches.md)**: The conductor - manages documents and provides your app's API
+- **[PatchesDoc](PatchesDoc.md)**: Your document interface - handles local state and changes
+- **PatchesSync**: The sync coordinator - manages server communication
+- **[Strategies](algorithms.md)**: Algorithm-specific sync logic (OT or LWW)
+- **[Stores](persist.md)**: Persistence - saves documents and pending changes locally
 
-- **Patches:** The conductor - coordinates everything and provides the public API
-- **PatchesDoc:** The musicians - each plays their part (manages local document state)
-- **PatchesSync:** The section leader - ensures everyone stays in sync with the sheet music (server state)
-- **Algorithms:** The sheet music - the pure logic that tells everyone exactly what to do
-- **PatchesStore:** The music library - stores and retrieves all the documents and changes
+`PatchesSync` listens to events from `Patches` (document changes, tracking changes) and coordinates with the server. When server changes arrive, it delegates to the appropriate strategy to apply them.
 
-`PatchesSync` sits between your local world (Patches + PatchesDoc) and the server world, translating and coordinating between them.
-
-## Setting Up Your Sync Connection
-
-Getting started with `PatchesSync` is straightforward:
+## Setting Up
 
 ```typescript
 import { Patches, InMemoryStore } from '@dabble/patches';
 import { PatchesSync } from '@dabble/patches/net';
 
-// First, create your Patches instance
+// Create your Patches instance
 const patches = new Patches({
   store: new InMemoryStore(),
   metadata: {
@@ -56,38 +52,32 @@ const patches = new Patches({
   },
 });
 
-// Then create PatchesSync with your server URL
+// Create PatchesSync with your server URL
 const sync = new PatchesSync(patches, 'wss://your-server.example.com');
 
 // Connect to start syncing
 await sync.connect();
 
-// That's it! Your documents will now sync automatically
+// That's it. Documents sync automatically.
 ```
 
-### Constructor Options
+### Constructor Signature
 
 ```typescript
-const sync = new PatchesSync(patches, url, {
-  // WebSocket connection options
-  reconnectInterval: 1000, // How long to wait before reconnecting
-  maxReconnectAttempts: 10, // Max reconnection attempts
-  pingInterval: 30000, // Heartbeat interval
-
-  // Custom headers for authentication
-  headers: {
-    Authorization: 'Bearer your-token-here',
-  },
-});
+const sync = new PatchesSync(patches, url, options?);
 ```
 
-## The Sync Dance
+The constructor takes:
 
-Here's how `PatchesSync` orchestrates the collaboration dance:
+1. `patches` - Your [Patches](Patches.md) instance
+2. `url` - WebSocket server URL
+3. `options` - Optional configuration (see [Configuration Options](#configuration-options))
 
-### 1. Local Changes Flow Out
+## The Sync Flow
 
-When you make a change in a `PatchesDoc`:
+### Local Changes Going Out
+
+When you make a change:
 
 ```typescript
 doc.change(draft => {
@@ -95,54 +85,72 @@ doc.change(draft => {
 });
 ```
 
-Behind the scenes:
+Here's what happens:
 
-1. `PatchesDoc` uses the `makeChange` algorithm to create change objects
-2. `PatchesDoc` emits a change event
-3. `PatchesSync` hears this event and queues the changes for sending
-4. `PatchesSync` batches changes using the `breakChangesIntoBatches` algorithm
-5. Changes are sent to the server via WebSocket
+1. [PatchesDoc](PatchesDoc.md) creates the change using [makeChange](algorithms.md)
+2. [Patches](Patches.md) emits a change event
+3. `PatchesSync` hears the event and flushes the document
+4. Changes get batched using [breakChangesIntoBatches](algorithms.md) if they're large
+5. Batches are sent to the server via WebSocket
 
-### 2. Server Changes Flow In
+### Server Changes Coming In
 
 When the server sends changes (from other users or confirmations):
 
 1. `PatchesSync` receives the changes via WebSocket
-2. It uses the `applyCommittedChanges` algorithm to figure out the new state
-3. It updates the `PatchesStore` with the new committed changes
-4. It updates any open `PatchesDoc` instances with the new state
-5. Your UI gets updated via the `PatchesDoc` event system
+2. It gets the appropriate strategy for the document (OT or LWW)
+3. The strategy applies the changes, handling any rebasing or conflict resolution
+4. The store is updated with committed changes
+5. Any open [PatchesDoc](PatchesDoc.md) instances get the new state
+6. Your UI updates via the document's event system
 
-### 3. Conflict Resolution
+### Conflict Resolution
 
-When conflicts happen (you and someone else edit the same thing):
+When you and another user edit concurrently:
 
-1. Server sends you their changes that you didn't know about
-2. `PatchesSync` uses `applyCommittedChanges` which internally calls `rebaseChanges`
-3. The algorithm transforms your pending changes to work on top of their changes
-4. Your UI updates to show the merged result
-5. Your rebased changes get sent to the server
+**With OT:**
+
+1. Server sends changes your pending changes didn't know about
+2. The OT strategy uses [rebaseChanges](algorithms.md) to transform your pending changes
+3. Your rebased changes get sent to the server
+
+**With LWW:**
+
+1. Server sends changes with timestamps
+2. The LWW strategy compares timestamps - higher timestamp wins
+3. Your local state updates to reflect the resolution
+
+See [Operational Transformation](operational-transformation.md) or [Last-Write-Wins](last-write-wins.md) for details on each approach.
 
 ## State Management
 
-`PatchesSync` tracks several important states:
+`PatchesSync` tracks three pieces of state:
 
 ```typescript
 interface PatchesSyncState {
-  online: boolean; // Are we connected to the internet?
-  connected: boolean; // Are we connected to the server?
-  syncing: SyncingState; // Are we currently syncing? (null | 'syncing' | Error)
+  online: boolean; // Is the browser online?
+  connected: boolean; // Is the WebSocket connected?
+  syncing: SyncingState; // 'initial' | 'updating' | null | Error
 }
+```
 
-// Check the current state
+The `syncing` property tells you:
+
+- `'initial'` - First sync in progress
+- `'updating'` - Syncing with server
+- `null` - Idle, fully synced
+- `Error` - Sync failed
+
+```typescript
+// Check current state
 console.log(sync.state);
 // { online: true, connected: true, syncing: null }
 
-// Listen for state changes
+// React to state changes
 sync.onStateChange(state => {
   if (state.syncing instanceof Error) {
     showError('Sync failed: ' + state.syncing.message);
-  } else if (state.syncing === 'syncing') {
+  } else if (state.syncing === 'updating') {
     showSpinner('Syncing...');
   } else if (state.connected) {
     showSuccess('All synced up!');
@@ -152,59 +160,85 @@ sync.onStateChange(state => {
 
 ## Event Handling
 
-`PatchesSync` provides clean event handling:
-
 ```typescript
 // State changes (connection, online status, sync status)
 sync.onStateChange(state => {
   updateConnectionIndicator(state);
 });
 
-// Errors (network issues, server errors, etc.)
+// Errors (network issues, server errors)
 sync.onError((error, context) => {
   console.error('Sync error:', error);
   if (context?.docId) {
-    console.log('Error was related to document:', context.docId);
+    console.log('Error related to document:', context.docId);
+  }
+});
+
+// Remote document deletion
+sync.onRemoteDocDeleted((docId, pendingChanges) => {
+  console.log(`Document ${docId} was deleted remotely`);
+  if (pendingChanges.length > 0) {
+    // Handle lost pending changes
+    showWarning(`You had ${pendingChanges.length} unsaved changes`);
   }
 });
 ```
 
+### Available Events
+
+| Event                | Parameters                                     | Description                        |
+| -------------------- | ---------------------------------------------- | ---------------------------------- |
+| `onStateChange`      | `(state: PatchesSyncState)`                    | Connection/sync state changed      |
+| `onError`            | `(error: Error, context?: { docId?: string })` | An error occurred                  |
+| `onRemoteDocDeleted` | `(docId: string, pendingChanges: Change[])`    | Document deleted by another client |
+
 ## Configuration Options
 
-### Batching and Performance
+```typescript
+interface PatchesSyncOptions {
+  // Filter which tracked docs to subscribe to
+  subscribeFilter?: (docIds: string[]) => string[];
+
+  // WebSocket options (protocol subprotocols)
+  websocket?: WebSocketOptions;
+
+  // Maximum payload size for network transmission (default: 1MB)
+  maxPayloadBytes?: number;
+
+  // Per-change storage limit (falls back to patches.docOptions.maxStorageBytes)
+  maxStorageBytes?: number;
+
+  // Custom size calculator for storage limits
+  sizeCalculator?: SizeCalculator;
+}
+```
+
+### Batching and Payload Limits
+
+Large changes get split into batches automatically:
 
 ```typescript
 const sync = new PatchesSync(patches, url, {
-  // Batch changes for efficiency
-  maxBatchSize: 1024 * 1024, // 1MB max per batch
-  batchDelay: 100, // Wait 100ms to batch changes together
-
-  // Connection tuning
-  reconnectInterval: 2000, // Wait 2s between reconnection attempts
-  maxReconnectAttempts: 5, // Give up after 5 attempts
+  maxPayloadBytes: 1024 * 1024, // 1MB max per network message
+  maxStorageBytes: 512 * 1024, // 512KB max per stored change
 });
 ```
 
-### Document Tracking
+The [breakChangesIntoBatches](algorithms.md) algorithm handles splitting changes that exceed these limits.
 
-`PatchesSync` automatically syncs documents that your `Patches` instance is tracking:
+### Subscribe Filtering
+
+If you only want to subscribe to certain tracked documents:
 
 ```typescript
-// Track documents for background syncing
-await patches.trackDocs(['doc1', 'doc2', 'doc3']);
-
-// PatchesSync will automatically:
-// 1. Subscribe to these docs on the server
-// 2. Receive updates even when docs aren't open locally
-// 3. Keep the store updated with latest changes
-
-// Open a tracked doc (it's already synced!)
-const doc = await patches.openDoc('doc1'); // Already up to date!
+const sync = new PatchesSync(patches, url, {
+  subscribeFilter: docIds => docIds.filter(id => !id.startsWith('local-')),
+});
 ```
 
 ## Real-World Example
 
-Here's how you might use `PatchesSync` in a real application:
+Here's a production-style setup:
 
 ```typescript
 import { Patches, IndexedDBStore } from '@dabble/patches';
@@ -226,40 +260,42 @@ class CollaborativeApp {
         deviceId: this.getDeviceId(),
       },
       docOptions: {
-        maxPayloadBytes: 1024 * 1024, // 1MB max changes
+        maxStorageBytes: 1024 * 1024, // 1MB max changes
       },
     });
 
     // Set up sync
     this.sync = new PatchesSync(this.patches, 'wss://api.myapp.com/sync', {
-      headers: {
-        Authorization: `Bearer ${this.getAuthToken()}`,
-      },
-      reconnectInterval: 2000,
-      maxReconnectAttempts: 10,
+      maxPayloadBytes: 1024 * 1024,
     });
 
     this.setupEventListeners();
   }
 
   private setupEventListeners() {
-    // Handle sync state changes
     this.sync.onStateChange(state => {
       this.updateUI({
         isOnline: state.online,
         isConnected: state.connected,
-        isSyncing: state.syncing === 'syncing',
+        isSyncing: state.syncing === 'updating',
         syncError: state.syncing instanceof Error ? state.syncing : null,
       });
     });
 
-    // Handle sync errors
     this.sync.onError((error, context) => {
       console.error('Sync error:', error);
       this.showNotification({
         type: 'error',
         message: `Sync failed: ${error.message}`,
         docId: context?.docId,
+      });
+    });
+
+    this.sync.onRemoteDocDeleted((docId, pendingChanges) => {
+      this.showNotification({
+        type: 'warning',
+        message: `Document was deleted`,
+        details: pendingChanges.length > 0 ? `${pendingChanges.length} unsaved changes were lost` : undefined,
       });
     });
   }
@@ -272,53 +308,33 @@ class CollaborativeApp {
     // Connect to server
     await this.sync.connect();
 
-    console.log('App initialized and syncing!');
+    console.log('App initialized and syncing');
   }
 
   async openDocument(docId: string) {
-    // Document is already synced if tracked
     const doc = await this.patches.openDoc(docId);
 
-    // Set up UI bindings
     doc.onUpdate(state => {
       this.renderDocument(docId, state);
-    });
-
-    doc.onSyncing(syncState => {
-      this.updateDocumentSyncStatus(docId, syncState);
     });
 
     return doc;
   }
 
-  makeDocumentChange(docId: string, changeFn: (draft: any) => void) {
-    const doc = this.patches.getOpenDoc(docId);
-    if (doc) {
-      // This change will automatically sync via PatchesSync
-      doc.change(changeFn);
-    }
-  }
-
-  // Helper methods
+  // Helper methods (implement based on your app)
   private getCurrentUser() {
     /* ... */
   }
   private getDeviceId() {
     /* ... */
   }
-  private getAuthToken() {
-    /* ... */
-  }
-  private getUserRecentDocs() {
+  private getUserRecentDocs(): Promise<string[]> {
     /* ... */
   }
   private updateUI(state: any) {
     /* ... */
   }
   private renderDocument(docId: string, state: any) {
-    /* ... */
-  }
-  private updateDocumentSyncStatus(docId: string, syncState: any) {
     /* ... */
   }
   private showNotification(notification: any) {
@@ -330,25 +346,23 @@ class CollaborativeApp {
 const app = new CollaborativeApp();
 await app.initialize();
 
-// Open and edit a document
 const doc = await app.openDocument('project-notes');
-app.makeDocumentChange('project-notes', draft => {
+doc.change(draft => {
   draft.title = 'Updated Project Notes';
   draft.sections.push({
     id: 'new-section',
-    content: 'This change will sync automatically!',
+    content: 'This change syncs automatically',
   });
 });
 ```
 
 ## Error Handling and Resilience
 
-`PatchesSync` is built to be resilient:
-
 ### Automatic Reconnection
 
+`PatchesSync` handles reconnection automatically with exponential backoff:
+
 ```typescript
-// PatchesSync handles reconnection automatically
 sync.onStateChange(state => {
   if (!state.connected && state.online) {
     // PatchesSync is attempting to reconnect
@@ -357,31 +371,48 @@ sync.onStateChange(state => {
 });
 ```
 
+The WebSocket transport starts with a 1-second delay and backs off up to 30 seconds between attempts. It resets the backoff on successful connection.
+
 ### Offline Handling
 
+Changes made while offline are stored locally and sent when you reconnect:
+
 ```typescript
-// Changes made while offline are queued and sent when reconnected
 sync.onStateChange(state => {
   if (!state.online) {
     showMessage('Offline - changes will sync when reconnected');
   } else if (state.connected) {
-    showMessage('Back online and syncing!');
+    showMessage('Back online and syncing');
   }
 });
 ```
+
+The [IndexedDBStore](persist.md) persists pending changes, so they survive browser restarts.
 
 ### Error Recovery
 
 ```typescript
 sync.onError((error, context) => {
   if (error.message.includes('authentication')) {
-    // Handle auth errors
     this.refreshAuthToken();
-  } else if (error.message.includes('network')) {
-    // Handle network errors
-    this.showRetryOption();
+    this.sync.disconnect();
+    this.sync.connect(); // Reconnect with new token
   }
 });
 ```
 
-`PatchesSync` makes real-time collaboration feel effortless by handling all the complex coordination behind the scenes. Set it up once, and your documents just work together automatically! 🎯
+### Document Tombstones
+
+When a document is deleted locally while offline, `PatchesSync` creates a tombstone. On reconnect, it attempts to delete the document on the server. If that succeeds, the tombstone is removed. If it fails, the tombstone persists for retry.
+
+## Related Documentation
+
+- [Patches](Patches.md) - The main client coordinator
+- [PatchesDoc](PatchesDoc.md) - Document interface
+- [Persistence](persist.md) - Storage options
+- [Algorithms](algorithms.md) - Sync algorithms and strategies
+- [Networking Overview](net.md) - Network layer architecture
+- [WebSocket Transport](websocket.md) - WebSocket implementation details
+- [JSON-RPC Protocol](json-rpc.md) - Wire protocol
+- [OT Server](OTServer.md) - Server-side OT implementation
+- [LWW Server](LWWServer.md) - Server-side LWW implementation

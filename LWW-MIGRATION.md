@@ -66,11 +66,12 @@ This migration had an initial pass that did poorly. We are now going through a s
 - [x] **Section 9: Review and improve** - [Plan](/Users/jacob/.claude/plans/shiny-kindling-volcano.md)
   - Review the entire LWW implementation for bugs, inefficiencies, possible improvements, and suggested refactors
   - Status: **Complete** ✓
-- [ ] **Section 10: Exports & Tests**
+- [x] **Section 10: Exports & Tests**
   - Package exports, integration tests
-- [ ] **Section 11: Docs**
+  - Status: **Complete** ✓
+- [x] **Section 11: Docs**
   - Write, fix, and improve documentation for end users
-  - Status: **Started**
+  - Status: **Complete** ✓
 
 ## How to Resume Work
 
@@ -81,9 +82,9 @@ This migration had an initial pass that did poorly. We are now going through a s
 
 ## Current Focus
 
-**Section 10: Exports & Tests** (Ready to start)
+**LWW Migration Complete!** 🎉
 
-Next step is to verify package exports and add integration tests.
+All sections have been completed. The LWW implementation is fully documented and ready for use.
 
 ## Completed Sections
 
@@ -301,3 +302,80 @@ Thorough review of entire LWW implementation for bugs, inefficiencies, and impro
 - `tests/server/LWWServer.spec.ts` - Added committedAt tests, updated mock store
 
 All 1517 tests pass.
+
+### Section 10: Exports & Tests ✓
+
+Verified all LWW exports and added comprehensive integration tests.
+
+**Export verification:**
+
+All LWW exports confirmed working from:
+
+- `@dabble/patches` - LWWDoc, LWWStrategy, factory functions
+- `@dabble/patches/client` - All client LWW classes + LWWClientStore type
+- `@dabble/patches/server` - LWWServer, LWWBranchManager, LWWMemoryStoreBackend + types
+
+LWW algorithms (`consolidateOps`, `mergeServerWithLocal`) kept internal - used by LWWStrategy.
+
+**Integration tests created:**
+
+New `tests/integration/` directory with:
+
+- `exports.spec.ts` - Verifies all LWW exports compile and instantiate (14 tests)
+- `lww-integration.spec.ts` - End-to-end tests using real components (17 tests)
+
+**Integration test scenarios:**
+
+1. Basic round-trip (change → server → confirmation)
+2. Concurrent changes to different fields (both succeed)
+3. Same-field conflict resolution (timestamp-higher wins)
+4. Delta ops consolidation (@inc, @max, @min combining)
+5. Offline simulation (queue changes, sync on reconnect)
+
+**Key insight discovered:**
+
+The LWW server returns **catchup ops** to the sending client (ops from other clients), not the ops the client just sent. The actual committed ops are broadcast via `onChangesCommitted` to other clients. The sending client already applied changes locally.
+
+All 1548 tests pass.
+
+### Section 11: Docs ✓
+
+Comprehensive LWW documentation for end users.
+
+**New files created:**
+
+- `docs/last-write-wins.md` - Complete LWW guide covering:
+  - Decision framework (when to use LWW vs OT)
+  - Core concepts (timestamps, fields, parent hierarchy)
+  - Architecture (client and server components)
+  - Client-server flow (step-by-step sync cycle)
+  - Algorithm functions (consolidateOps, delta ops)
+  - Backend store interfaces
+  - Using LWW and OT together
+
+- `docs/LWWServer.md` - Server API reference covering:
+  - All public methods (commitChanges, getDoc, getChangesSince, etc.)
+  - Configuration options
+  - Event signals
+  - Backend store requirements
+  - Example usage with Express
+
+**Files updated:**
+
+- `README.md` - Added:
+  - "Two Sync Strategies" section explaining OT vs LWW
+  - LWW Quick Start examples (client and server)
+  - LWWServer in Core Components
+  - Strategy option in Basic Workflow
+
+- `docs/algorithms.md` - Fixed:
+  - Removed references to deleted files (makeLWWChange.ts, applyLWWChange.ts)
+  - Added documentation for consolidateOps.ts functions
+  - Updated directory tree
+
+- `docs/shared-worker.md` - Expanded:
+  - LWW section now explains actual store structure
+  - State reconstruction order documented
+  - Same benefits as OT explained
+
+Documentation follows Amy Hoy style: direct, blunt, concrete examples, conversational but assertive.

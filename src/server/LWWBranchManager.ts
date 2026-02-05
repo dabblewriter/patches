@@ -14,7 +14,7 @@ import type { BranchingStoreBackend, LWWStoreBackend } from './types.js';
 
 /**
  * Combined store type for LWW branch management.
- * Requires LWW field operations and branch metadata operations.
+ * Requires LWW ops operations and branch metadata operations.
  */
 type LWWBranchStore = LWWStoreBackend & BranchingStoreBackend;
 
@@ -22,14 +22,14 @@ type LWWBranchStore = LWWStoreBackend & BranchingStoreBackend;
  * LWW-specific branch manager implementation.
  *
  * Manages branches for documents using Last-Write-Wins semantics:
- * - Creates branches from the current document state (copies fields with timestamps)
- * - Merges by applying branch field changes to source; timestamps resolve conflicts automatically
+ * - Creates branches from the current document state (copies ops with timestamps)
+ * - Merges by applying branch ops changes to source; timestamps resolve conflicts automatically
  * - No transformation needed - LWW conflicts resolve deterministically by timestamp
  *
  * LWW branching is simpler than OT because:
  * - Timestamps are immutable and survive branching/merging
  * - Conflict resolution is deterministic (later timestamp wins)
- * - Merging is idempotent - merge the same fields multiple times, get the same result
+ * - Merging is idempotent - merge the same ops multiple times, get the same result
  */
 export class LWWBranchManager implements BranchManager {
   static api = branchManagerApi;
@@ -37,7 +37,7 @@ export class LWWBranchManager implements BranchManager {
   constructor(
     private readonly store: LWWBranchStore,
     private readonly lwwServer: LWWServer
-  ) {}
+  ) { }
 
   /**
    * Lists all branches for a document.
@@ -63,9 +63,9 @@ export class LWWBranchManager implements BranchManager {
   async createBranch(docId: string, atPoint: number, metadata?: EditableBranchMetadata): Promise<string> {
     await assertNotABranch(this.store, docId);
 
-    // Get current state and all field metadata
+    // Get current state and all ops metadata
     const doc = await this.lwwServer.getDoc(docId);
-    const fields = await this.store.listOps(docId);
+    const ops = await this.store.listOps(docId);
 
     // Generate branch document ID
     const branchDocId = await generateBranchId(this.store, docId);
@@ -73,9 +73,9 @@ export class LWWBranchManager implements BranchManager {
     // Initialize the branch document with current state as snapshot
     await this.store.saveSnapshot(branchDocId, doc.state, doc.rev);
 
-    // Copy field metadata to the branch document (preserving timestamps)
-    if (fields.length > 0) {
-      await this.store.saveOps(branchDocId, fields);
+    // Copy ops metadata to the branch document (preserving timestamps)
+    if (ops.length > 0) {
+      await this.store.saveOps(branchDocId, ops);
     }
 
     // Create the branch metadata record
@@ -87,7 +87,7 @@ export class LWWBranchManager implements BranchManager {
   /**
    * Updates branch metadata.
    * @param branchId - The branch document ID.
-   * @param metadata - The metadata fields to update.
+   * @param metadata - The metadata ops to update.
    */
   async updateBranch(branchId: string, metadata: EditableBranchMetadata): Promise<void> {
     assertBranchMetadata(metadata);
@@ -107,7 +107,7 @@ export class LWWBranchManager implements BranchManager {
    * Merges a branch back into its source document.
    *
    * LWW merge strategy:
-   * 1. Get all field changes made on the branch since it was created
+   * 1. Get all ops changes made on the branch since it was created
    * 2. Apply those changes to the source document
    * 3. Timestamps automatically resolve any conflicts (later wins)
    *
@@ -121,7 +121,7 @@ export class LWWBranchManager implements BranchManager {
 
     const sourceDocId = branch.docId;
 
-    // Get all changes made on the branch (synthesized from fields)
+    // Get all changes made on the branch (synthesized from ops)
     const branchChanges = await this.lwwServer.getChangesSince(branchId, branch.branchedAtRev);
 
     if (branchChanges.length === 0) {

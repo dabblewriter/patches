@@ -1,369 +1,321 @@
-# WebSocket Transport: Your Real-Time Superhighway! 🚀
+# WebSocket Transport
 
-## What Is This Thing?
+The WebSocket transport is the primary way Patches clients communicate with servers. It handles the bidirectional, persistent connection that makes real-time collaboration possible.
 
-The WebSocket transport is your **direct line** to collaboration bliss. It's how your client app stays connected to your Patches server for that sweet, sweet real-time magic. Think of it as the digital nervous system that keeps everything in sync!
+This document covers two levels of WebSocket usage:
 
-`PatchesWebSocket` gives you a super-friendly API to:
+1. **Client-side**: `PatchesWebSocket` and the higher-level `PatchesSync`
+2. **Server-side**: `WebSocketServer` for building your backend
 
-- Subscribe to documents (and get updates when they change)
-- Send your changes (and watch them magically appear for everyone else)
-- Work with document history and versions
-- Keep everything running smoothly even when connections get wonky
+Most applications should use [PatchesSync](PatchesSync.md) rather than `PatchesWebSocket` directly. `PatchesSync` handles all the coordination between your documents and the server automatically.
 
-## When Should You Use This?
+## Client-Side: PatchesWebSocket
 
-Use WebSocket transport when you want:
+`PatchesWebSocket` is a thin wrapper around `WebSocketTransport` that provides the [Patches API](json-rpc.md) over a WebSocket connection. It inherits from `PatchesClient`, giving you methods for subscriptions, document operations, versioning, and branching.
 
-- ⚡ **Real-time, super-fast collaboration** between clients
-- 🤖 **Zero-hassle document updates** that just work
-- 🔄 **Simple yet powerful versioning** for your docs
-- 🧠 **Smart reconnection** when the internet hiccups
-- 💪 **A robust connection** to your central server
+### When to Use PatchesWebSocket Directly
 
-## Let's Get This Party Started!
+You probably don't need to. `PatchesSync` uses `PatchesWebSocket` internally and handles:
 
-### 1. Import the Goods
+- Automatic subscription management
+- Change batching and sending
+- Server change application
+- Reconnection and offline handling
+- Document lifecycle coordination
+
+Use `PatchesWebSocket` directly only if you're building custom sync logic or need fine-grained control over the protocol.
+
+### Basic Usage
 
 ```typescript
 import { PatchesWebSocket } from '@dabble/patches/net';
-```
 
-### 2. Connect to Your Server
+const ws = new PatchesWebSocket('wss://your-server.example.com');
 
-```typescript
-// Create your WebSocket connection
-const ws = new PatchesWebSocket('wss://your-awesome-server.example.com');
-
-// Connect and you're off to the races!
 await ws.connect();
-```
 
-### 3. Subscribe to Documents
+// Subscribe to documents
+await ws.subscribe(['doc-1', 'doc-2']);
 
-```typescript
-// Subscribe to one document
-await ws.subscribe('doc123');
-
-// Or subscribe to a bunch at once!
-await ws.subscribe(['shopping-list', 'team-notes', 'project-plan']);
-```
-
-### 4. Listen for Updates From Others
-
-```typescript
-// Set up a listener for incoming changes
-ws.onChangesCommitted(({ docId, changes }) => {
-  console.log(`New changes for ${docId}!`);
-
-  // Now you can update your local document state
-  myDocsMap[docId].applyExternalServerUpdate(changes);
-
-  // Or trigger a confetti explosion, your call 🎉
+// Listen for changes from other clients
+ws.onChangesCommitted((docId, changes) => {
+  console.log(`Received ${changes.length} changes for ${docId}`);
 });
+
+// Send changes to the server
+const committed = await ws.commitChanges('doc-1', myChanges);
 ```
 
-### 5. Send Your Own Changes
+### API Reference
+
+**Connection Management:**
+
+- `connect()` - Establish the WebSocket connection
+- `disconnect()` - Close the connection
+- `onStateChange` - Signal for connection state changes (`connecting`, `connected`, `disconnected`, `error`)
+
+**Subscriptions:**
+
+- `subscribe(ids: string | string[])` - Subscribe to document updates
+- `unsubscribe(ids: string | string[])` - Unsubscribe from documents
+
+**Document Operations:**
+
+- `getDoc(docId, atRev?)` - Fetch document state (optionally at a specific revision)
+- `getChangesSince(docId, rev)` - Get changes after a revision
+- `commitChanges(docId, changes, options?)` - Send changes to the server
+- `deleteDoc(docId, options?)` - Delete a document
+
+**Versioning:**
+
+- `createVersion(docId, metadata)` - Create a named snapshot
+- `listVersions(docId, options?)` - List saved versions
+- `getVersionState(docId, versionId)` - Get state at a version
+- `getVersionChanges(docId, versionId)` - Get changes for a version
+- `updateVersion(docId, versionId, metadata)` - Update version metadata
+
+**Branching:**
+
+- `listBranches(docId)` - List document branches
+- `createBranch(docId, rev, metadata?)` - Create a branch at a revision
+- `closeBranch(branchId)` - Close a branch
+- `mergeBranch(branchId)` - Merge a branch back
+
+**Events:**
+
+- `onChangesCommitted` - Signal when server pushes changes
+- `onDocDeleted` - Signal when a document is deleted
+
+## The Recommended Approach: PatchesSync
+
+For actual applications, use [PatchesSync](PatchesSync.md). It coordinates between [Patches](Patches.md), the store, and the WebSocket connection automatically.
 
 ```typescript
-// Got some local changes? Share them with the world!
-try {
-  const serverResponse = await ws.commitChanges('shopping-list', myChangesArray);
+import { Patches, IndexedDBStore } from '@dabble/patches';
+import { PatchesSync } from '@dabble/patches/net';
 
-  // Tell your PatchesDoc that the server confirmed these changes
-  myShoppingListDoc.applyServerConfirmation(serverResponse);
+// Set up your client
+const patches = new Patches({
+  store: new IndexedDBStore('my-app'),
+});
 
-  console.log('Changes sent and confirmed! 🎉');
-} catch (err) {
-  console.error('Oops, something went wrong:', err);
-}
-```
+// Create and connect PatchesSync
+const sync = new PatchesSync(patches, 'wss://your-server.example.com');
+await sync.connect();
 
-### 6. Work With Document History
+// Now just work with documents normally
+const doc = await patches.getDoc('project-notes');
 
-```typescript
-// Just finished a major milestone? Create a named version!
-const versionId = await ws.createVersion('project-plan', 'First Draft Complete');
-
-// Want to see all versions?
-const allVersions = await ws.listVersions('project-plan');
-console.log(`You have ${allVersions.length} saved versions!`);
-
-// Need to go back in time? Get a snapshot of a past version
-const oldSnapshot = await ws.getVersionState('project-plan', versionId);
-console.log('Here's what things looked like before:', oldSnapshot);
-```
-
-## The Cool Stuff You Can Do
-
-Here are the key methods that make `PatchesWebSocket` so handy:
-
-### Connection Management
-
-- `connect()` - Start the WebSocket connection
-- `disconnect()` - Close the connection gracefully
-- `onStateChange` - React when connection status changes
-
-### Document Subscriptions
-
-- `subscribe(ids)` - Start getting updates for specific docs
-- `unsubscribe(ids)` - Stop getting updates when you don't need them
-- `getSubscribedIds()` - Check which docs you're currently subscribed to
-
-### Document Operations
-
-- `getDoc(docId)` - Fetch the latest state and revision
-- `commitChanges(docId, changes, options?)` - Send your changes to everyone (use `{ forceCommit: true }` for migrations)
-- `onChangesCommitted` - Get notified when someone makes changes
-
-### Versioning (Your Personal Time Machine)
-
-- `createVersion(docId, name?)` - Create a snapshot with an optional name
-- `listVersions(docId, options?)` - See all versions with customizable filtering
-- `getVersionState(docId, versionId)` - Get a document's state at a specific version
-- `getVersionChanges(docId, versionId)` - See exactly what changed in a version
-- `updateVersion(docId, versionId, metadata)` - Update version info like name or notes
-
-## Real-World Example: A Complete Collaboration Setup
-
-Here's how to wire everything up for a robust collaborative app:
-
-```typescript
-import { Patches, PatchesDoc, IndexedDBStore } from '@dabble/patches';
-import { PatchesWebSocket } from '@dabble/patches/net';
-
-class CollaborativeEditor {
-  private patches: Patches;
-  private ws: PatchesWebSocket;
-  private docs: Map<string, PatchesDoc<any>> = new Map();
-
-  constructor() {
-    // 1. Set up persistence for offline support
-    const store = new IndexedDBStore('my-cool-app');
-    this.patches = new Patches({ store });
-
-    // 2. Create WebSocket connection
-    this.ws = new PatchesWebSocket('wss://your-server.example');
-
-    // 3. Set up connection state handling
-    this.ws.onStateChange(state => {
-      if (state === 'connected') {
-        this.showOnlineStatus();
-      } else {
-        this.showOfflineWarning();
-      }
-    });
-
-    // 4. Listen for incoming changes
-    this.ws.onChangesCommitted(({ docId, changes }) => {
-      const doc = this.docs.get(docId);
-      if (doc) {
-        doc.applyExternalServerUpdate(changes);
-      }
-    });
-  }
-
-  async start() {
-    // Connect to the server
-    await this.ws.connect();
-    console.log('Connected and ready!');
-  }
-
-  async openDocument(docId: string) {
-    // 1. Subscribe to updates from the server
-    await this.ws.subscribe(docId);
-
-    // 2. Open or create the document locally
-    const doc = await this.patches.openDoc(docId);
-    this.docs.set(docId, doc);
-
-    // 3. Set up a change handler to sync to server
-    doc.onChange(() => {
-      if (doc.hasPending && !doc.isSending) {
-        const changes = doc.getUpdatesForServer();
-
-        this.ws
-          .commitChanges(docId, changes)
-          .then(serverCommit => {
-            doc.applyServerConfirmation(serverCommit);
-          })
-          .catch(err => {
-            console.error('Failed to send changes:', err);
-            doc.handleSendFailure();
-            this.showRetryNotification();
-          });
-      }
-    });
-
-    return doc;
-  }
-
-  async createVersion(docId: string, name: string) {
-    return await this.ws.createVersion(docId, name);
-  }
-
-  async loadVersion(docId: string, versionId: string) {
-    const versionState = await this.ws.getVersionState(docId, versionId);
-    // Now you can display this historical state or revert to it
-    return versionState;
-  }
-
-  // UI helper methods
-  private showOnlineStatus() {
-    /* ... */
-  }
-  private showOfflineWarning() {
-    /* ... */
-  }
-  private showRetryNotification() {
-    /* ... */
-  }
-}
-
-// Usage:
-const editor = new CollaborativeEditor();
-await editor.start();
-
-// Open a document and start editing
-const doc = await editor.openDocument('my-novel');
-
-// Make changes locally
 doc.change(draft => {
-  draft.chapters[0].title = 'A New Beginning';
+  draft.title = 'Updated Title';
 });
-
-// Create a version after significant changes
-await editor.createVersion('my-novel', 'Chapter 1 Complete');
+// Changes sync automatically - no manual handling needed
 ```
 
-## Pro Tips for WebSocket Champions
+`PatchesSync` listens to [Patches](Patches.md) events, tracks which documents need syncing, handles batching, applies server changes correctly (including [OT rebasing](operational-transformation.md) or [LWW merging](last-write-wins.md)), and manages reconnection. You write application code; it handles the plumbing.
 
-### 1. Handle Connection Drops Like a Pro
+### Handling Connection State
 
 ```typescript
-ws.onStateChange(state => {
-  if (state === 'connecting') {
-    showSpinner();
-  } else if (state === 'connected') {
-    hideSpinner();
-    showGreenStatus();
-  } else if (state === 'disconnected') {
-    showRedStatus();
+sync.onStateChange(state => {
+  // state.online - browser online/offline
+  // state.connected - WebSocket connected
+  // state.syncing - null, 'initial', 'updating', or Error
+
+  if (!state.online) {
+    showOfflineBanner();
+  } else if (!state.connected) {
     showReconnectingMessage();
+  } else if (state.syncing === 'updating') {
+    showSyncingIndicator();
+  } else if (state.syncing instanceof Error) {
+    showSyncError(state.syncing);
+  } else {
+    showConnectedStatus();
   }
 });
 ```
 
-### 2. Batch Your Changes for Better Performance
-
-Instead of sending every tiny change, consider batching them:
+### Error Handling
 
 ```typescript
-// Track if we should send changes
-let shouldSendChanges = false;
-let sendTimer = null;
-
-// Listen for document changes
-doc.onChange(() => {
-  shouldSendChanges = true;
-
-  // If we don't already have a timer, set one
-  if (!sendTimer) {
-    sendTimer = setTimeout(() => {
-      if (shouldSendChanges && doc.hasPending) {
-        const changes = doc.getUpdatesForServer();
-        ws.commitChanges(docId, changes).then(/*...*/);
-
-        shouldSendChanges = false;
-      }
-      sendTimer = null;
-    }, 300); // Adjust timing based on your app's needs
+sync.onError((error, context) => {
+  if (context?.docId) {
+    console.error(`Error syncing ${context.docId}:`, error);
+  } else {
+    console.error('Sync error:', error);
   }
 });
 ```
 
-### 3. Version Your Document at Smart Moments
+## Server-Side: WebSocketServer
 
-Don't just create versions randomly - do it at meaningful moments:
+`WebSocketServer` handles subscription management and message routing on your backend. It works with a `JSONRPCServer` that has your Patches servers registered.
+
+### Architecture
+
+The server side has a clean separation:
+
+- **ServerTransport** - Raw WebSocket handling (you provide this for your framework)
+- **JSONRPCServer** - Handles the RPC protocol layer
+- **WebSocketServer** - Manages subscriptions and notification routing
+- **OTServer / LWWServer** - The actual document logic
+
+### Basic Setup
 
 ```typescript
-// Create a version when a user explicitly saves
-async function handleSaveButton() {
-  const name = await promptUserForVersionName();
-  const versionId = await ws.createVersion(docId, name);
-  showSavedNotification(name);
-
-  // Add to version history UI
-  updateVersionHistoryList();
-}
-
-// Or automatically version at key points
-function detectMilestone(changes) {
-  // Example: If a new chapter is added to a book
-  return changes.some(change => change.ops.some(op => op.path.match(/^\/chapters\/\d+$/) && op.op === 'add'));
-}
-
-doc.onChange(change => {
-  if (detectMilestone(change)) {
-    ws.createVersion(docId, 'New Chapter Added');
-  }
-});
-```
-
-## Running the Show on the Server 🛎️
-
-Patches gives you a ready-made **WebSocketServer** class that mirrors the client's niceties on the backend:
-
-```ts
-import { WebSocketServer } from '@dabble/patches/net';
+import { JSONRPCServer, WebSocketServer } from '@dabble/patches/net';
 import { OTServer } from '@dabble/patches/server';
-import { MyWebSocketAdaptor } from './your-ws-lib';
 
-const transport = new MyWebSocketAdaptor(/* underlying ws library */);
-const core = new OTServer(myStoreBackend);
-const webSocketApi = new WebSocketServer({ transport, patches: core });
+// 1. Create your document server
+const otServer = new OTServer(storeBackend);
 
-// Need history or branching?  Just pass the managers as well:
+// 2. Create the RPC server and register your document server
+const rpc = new JSONRPCServer();
+rpc.register(otServer); // Registers getDoc, getChangesSince, commitChanges, deleteDoc
 
-import { PatchesHistoryManager } from '@dabble/patches/server';
-import { PatchesBranchManager } from '@dabble/patches/server';
+// 3. Create your transport adaptor (framework-specific)
+const transport = new MyWebSocketTransportAdaptor(httpServer);
 
-const history = new PatchesHistoryManager(core, myStoreBackend);
-const branches = new PatchesBranchManager(myBranchingStore, core);
-
-const api = new WebSocketServer({
+// 4. Create the WebSocket server
+const wsServer = new WebSocketServer({
   transport,
-  patches: core,
-  history, // ➜ adds listVersions, getVersionState, …
-  branches, // ➜ adds listBranches, mergeBranch, …
+  rpc,
+  auth: myAuthProvider, // Optional authorization
+});
+
+// 5. Wire up the commit notification to broadcast changes
+otServer.onChangesCommitted((docId, changes, originClientId) => {
+  rpc.notify('changesCommitted', { docId, changes }, originClientId);
 });
 ```
 
-Highlights:
+### Adding History and Branching
 
-1. **Authorization hooks** – Pass an `auth` object to decide, per call, whether a connection may _read_ or _write_ a given doc. Need ACLs? Multi-tenant rules? Just implement the `AuthorizationProvider` interface.
-2. **Automatic fan-out** – When one client commits changes, `WebSocketServer` fires a `changesCommitted` notification to everyone else who's subscribed.
-3. **Pluggable managers** – Hand over a `PatchesHistoryManager` or `PatchesBranchManager` and the corresponding RPC methods instantly become available.
-   • `history` option wires in **seven** extra methods: `listVersions`, `createVersion`, `updateVersion`, `getVersionState`, `getVersionChanges`, `listServerChanges`, plus the server-side helper for incremental change dumps.
-   • `branches` option wires in **four** methods: `listBranches`, `createBranch`, `closeBranch`, `mergeBranch`.
+```typescript
+import { PatchesHistoryManager, OTBranchManager } from '@dabble/patches/server';
 
-   The client side (using `PatchesWebSocket`) gains those calls automatically—no extra code needed.
+const history = new PatchesHistoryManager(otServer, storeBackend);
+const branches = new OTBranchManager(branchStore, otServer);
 
-## Why WebSockets Rock for Real-Time Apps
+// Register their methods with the RPC server
+rpc.register(history); // Adds listVersions, createVersion, getVersionState, etc.
+rpc.register(branches); // Adds listBranches, createBranch, closeBranch, mergeBranch
+```
 
-Using WebSockets for your collaborative app gives you:
+When you register these managers, their methods become available to clients automatically. See [PatchesHistoryManager](PatchesHistoryManager.md) and [PatchesBranchManager](PatchesBranchManager.md) for details.
 
-1. **Lightning-fast updates** - changes appear almost instantly
-2. **Efficient network usage** - no polling overhead
-3. **Stateful connections** - the server knows who's editing what
-4. **Built-in reconnection** - keeps working even with shaky internet
-5. **Two-way communication** - both pull and push in one connection
+### Authorization
 
-## Want to Learn More?
+The `auth` parameter accepts an `AuthorizationProvider` that controls access:
 
-- [Awareness](./awareness.md) - Add collaborative cursors and presence
-- [PatchesDoc](./PatchesDoc.md) - How to work with document state locally
-- [operational-transformation.md](./operational-transformation.md) - The magic under the hood
-- [json-rpc.md](./json-rpc.md) - The tiny RPC layer that glues client & server
+```typescript
+const auth: AuthorizationProvider = {
+  async canAccess(ctx, docId, accessType, method, params) {
+    // ctx contains clientId and any data you attached during connection
+    // accessType is 'read' or 'write'
+    // method is the RPC method being called
 
-Now go forth and build amazing collaborative experiences! 🚀
+    const user = await getUserFromSession(ctx.sessionId);
+    if (!user) return false;
+
+    const doc = await getDocumentMeta(docId);
+    if (accessType === 'write') {
+      return doc.editors.includes(user.id);
+    }
+    return doc.viewers.includes(user.id) || doc.editors.includes(user.id);
+  },
+};
+```
+
+If you don't provide an auth provider, the default denies all access. This is intentional - you should always implement authorization for production.
+
+### Message Processing
+
+Your transport adaptor should call `processMessage` for each incoming message:
+
+```typescript
+// In your WebSocket handler
+ws.on('message', async data => {
+  const ctx = { clientId: ws.id, sessionId: ws.sessionId };
+  const response = await wsServer.processMessage(data.toString(), ctx);
+  if (response) {
+    ws.send(response);
+  }
+});
+```
+
+### Notification Fan-Out
+
+When a client commits changes, `WebSocketServer` automatically notifies all other subscribed clients. This happens through the RPC server's `onNotify` callback, which the `WebSocketServer` wires up in its constructor.
+
+## Protocol Details
+
+The WebSocket transport uses [JSON-RPC 2.0](json-rpc.md) for all communication. Request/response pairs use IDs; notifications (like `changesCommitted`) don't.
+
+Example commit request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 42,
+  "method": "commitChanges",
+  "params": {
+    "docId": "doc-1",
+    "changes": [...]
+  }
+}
+```
+
+Example notification to other clients:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "changesCommitted",
+  "params": {
+    "docId": "doc-1",
+    "changes": [...]
+  }
+}
+```
+
+## Performance Considerations
+
+### Change Batching
+
+Large changes get split into batches automatically. Configure this via `PatchesSyncOptions`:
+
+```typescript
+const sync = new PatchesSync(patches, url, {
+  maxPayloadBytes: 1024 * 1024, // 1MB per batch (wire limit)
+  maxStorageBytes: 100 * 1024, // 100KB per change (storage limit)
+});
+```
+
+Batching prevents WebSocket message size limits from causing failures and keeps your backend storage efficient.
+
+### Subscription Filtering
+
+If you have many tracked documents but only want to subscribe to some:
+
+```typescript
+const sync = new PatchesSync(patches, url, {
+  subscribeFilter: docIds => {
+    // Only subscribe to active project documents
+    return docIds.filter(id => id.startsWith('project-'));
+  },
+});
+```
+
+## Related Documentation
+
+- [PatchesSync](PatchesSync.md) - The sync coordinator (what you should actually use)
+- [net.md](net.md) - Network layer overview
+- [json-rpc.md](json-rpc.md) - The underlying protocol
+- [OTServer](OTServer.md) - Server-side OT implementation
+- [LWWServer](LWWServer.md) - Server-side LWW implementation
+- [operational-transformation.md](operational-transformation.md) - How OT conflict resolution works
+- [last-write-wins.md](last-write-wins.md) - How LWW resolution works
+- [persist.md](persist.md) - Client-side storage
+- [awareness.md](awareness.md) - Presence and cursors (complements WebSocket sync)

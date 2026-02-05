@@ -1,99 +1,112 @@
-# `PatchesDoc<T>`
+# `PatchesDoc<T>` - Your Document Interface
 
-Say hello to your document's friendly neighborhood manager! 🌟
+`PatchesDoc<T>` is the interface your app uses to interact with a single collaborative document. It tracks state, emits events when things change, and provides the `change()` method for making edits.
 
-`PatchesDoc<T>` is your direct interface to a single collaborative document. Think of it as your document's personal assistant - it handles your local changes, keeps track of what's happening, and provides a clean API for your app to work with.
-
-**Here's the deal:** Don't create these yourself! Let the main `Patches` client create them for you with `patches.openDoc()`.
+Here's the deal: You don't create these yourself. Let the main [`Patches`](Patches.md) client create them for you with `patches.openDoc()`.
 
 **Table of Contents**
 
-- [What's Its Job?](#whats-its-job)
-- [Getting Your Hands on One](#getting-your-hands-on-one)
-- [State Management Made Simple](#state-management-made-simple)
+- [What It Does](#what-it-does)
+- [Getting One](#getting-one)
+- [The State Model](#the-state-model)
 - [Making Changes](#making-changes)
-- [Accessing State and Status](#accessing-state-and-status)
-- [Event Hooks](#event-hooks)
+- [Reading State and Status](#reading-state-and-status)
+- [Events](#events)
+- [OT vs LWW: Two Implementations](#ot-vs-lww-two-implementations)
 - [Example Usage](#example-usage)
 
-## What's Its Job?
+## What It Does
 
-After the big refactor, `PatchesDoc` has a much cleaner, focused role. It's your app's interface to a document. No more juggling complex sync logic - that's handled elsewhere now!
+`PatchesDoc` has a focused job. It's your app's interface to a document - nothing more.
 
-Here's what it actually does:
+**It handles:**
 
-- **State Management:** Keeps track of your document's current state (committed + pending changes)
-- **Change Interface:** Provides the `change()` method for making edits
-- **Status Tracking:** Tells you if there are pending changes, syncing status, etc.
-- **Event Emission:** Lets you know when things change so your UI can update
+- **State Management**: Tracks committed state plus pending local changes
+- **Change Interface**: Provides `change()` for making edits
+- **Status Tracking**: Reports pending changes and sync status
+- **Event Emission**: Notifies your UI when things change
 
-Here's what it does NOT do anymore:
+**It does NOT handle:**
 
-- ❌ Operational Transformation (that's in the algorithms now)
-- ❌ Server communication (that's PatchesSync's job)
-- ❌ Complex rebasing logic (also in algorithms)
+- Operational Transformation (that's in the [algorithms](algorithms.md))
+- Server communication (that's [`PatchesSync`](PatchesSync.md)'s job)
+- Rebasing logic (also in algorithms)
+- Storage (that's the store's job)
 
-## Getting Your Hands on One
+The separation is intentional. Pure algorithm functions handle the math. Stores handle persistence. `PatchesDoc` is just the interface your app touches.
 
-Remember, you almost never create a `PatchesDoc` directly. Let `Patches` do it for you:
+## Getting One
+
+Almost always, let `Patches` create documents for you:
 
 ```typescript
 import { Patches, InMemoryStore } from '@dabble/patches';
 
-// Create the main Patches client
 const patches = new Patches({ store: new InMemoryStore() });
 
-// Get a PatchesDoc instance
+// Open a document (creates it if it doesn't exist)
 const doc = await patches.openDoc<MyDocType>('my-document-id');
 ```
 
-If you really need to create one directly (rare!):
+If you need to create one directly (rare - usually only for testing):
 
 ```typescript
-import { PatchesDoc } from '@dabble/patches/client';
+import { OTDoc } from '@dabble/patches/client';
 
-const doc = new PatchesDoc<MyDocType>(
-  {
+const doc = new OTDoc<MyDocType>('my-document-id', {
+  state: {
     /* initial state */
   },
-  {
-    /* initial metadata */
-  },
-  {
-    maxPayloadBytes: 1024 * 1024, // 1MB max per change
-  }
-);
+  rev: 0,
+  changes: [], // pending changes
+});
 ```
 
-## State Management Made Simple
+For LWW documents:
 
-`PatchesDoc` manages a simple but powerful state model:
+```typescript
+import { LWWDoc } from '@dabble/patches/client';
+
+const doc = new LWWDoc<MyDocType>('my-document-id', {
+  state: {
+    /* initial state */
+  },
+  rev: 0,
+  changes: [],
+});
+```
+
+## The State Model
+
+`PatchesDoc` manages a straightforward state model:
 
 ### Current State
 
-What you see via `doc.state` - this includes all confirmed server changes PLUS your local pending changes. This makes your app feel super responsive since you see your changes immediately.
+What you get from `doc.state` - this includes all server-confirmed changes plus your local pending changes merged together. Your changes appear immediately (optimistic updates), so the UI feels responsive.
+
+### Committed Revision
+
+The `doc.committedRev` property tells you the last revision number confirmed by the server.
 
 ### Pending Changes
 
-Your local edits that haven't been confirmed by the server yet. These live in the document's internal snapshot and get handled by the sync layer.
+Local edits waiting for server confirmation. The `doc.hasPending` boolean tells you if there are any. The sync layer handles getting these to the server.
 
-### Metadata
+### Syncing Status
 
-Information about the document's revision, sync status, and change metadata.
+The `doc.syncing` property tells you the current sync state: `null` when idle, `'syncing'` when actively syncing, or an `Error` if something went wrong.
 
-The beauty is that you don't need to think about the complexity. Just make changes and check the status!
+You don't need to manage this complexity directly. Make changes, check status, and let the system handle the rest.
 
 ## Making Changes
 
-Changing your document is dead simple:
+The `change()` method captures your edits as [JSON Patch](json-patch.md) operations:
 
 ```typescript
-// Make a change to your document
 doc.change(draft => {
-  draft.title = 'My Amazing Document';
+  draft.title = 'My Document';
   draft.count = (draft.count || 0) + 1;
 
-  // You can do whatever you want to the draft object
   if (draft.items) {
     draft.items.push({ id: 'new-item', text: 'Hello world' });
   } else {
@@ -102,105 +115,144 @@ doc.change(draft => {
 });
 ```
 
-The `change` method:
+**Important**: The `change()` method emits JSON Patch ops via `onChange` - it does NOT apply them locally. The strategy layer packages these ops into Change objects, persists them, and calls back to update the doc's state.
 
-1. Takes your changes and applies them to a draft object
-2. Uses the `makeChange` algorithm to create proper change objects
-3. Updates the local state immediately (optimistic update)
-4. Adds the changes to the pending queue
-5. Emits events so your UI can update
+This design means:
 
-The sync layer (PatchesSync) will handle getting these changes to the server and dealing with any conflicts.
+1. Changes are captured as pure JSON Patch operations
+2. The strategy decides how to package and persist them (differently for OT vs LWW)
+3. State updates happen through a consistent path
 
-## Accessing State and Status
+The sync layer ([`PatchesSync`](PatchesSync.md)) handles getting changes to the server and dealing with conflicts.
 
-There are several ways to access your document's state and metadata:
+## Reading State and Status
 
-### `state` Getter
+### `id`
+
+```typescript
+const docId = doc.id; // The unique document identifier
+```
+
+### `state`
 
 ```typescript
 const currentState = doc.state;
 ```
 
-This gives you the current state (committed + pending changes). This is what you use for rendering your UI.
+The live state with committed plus pending changes applied. Use this for rendering your UI.
 
-### `committedRev` Getter
+### `committedRev`
 
 ```typescript
 const serverRevision = doc.committedRev;
 ```
 
-Get the current server revision number.
+The revision number of the last server-confirmed state.
 
-### Status Getters
+### `hasPending`
 
 ```typescript
 if (doc.hasPending) {
-  // Show an "unsaved changes" indicator
-}
-
-if (doc.syncing) {
-  // Show sync status - could be an error or "syncing" state
+  // Show "unsaved changes" indicator
 }
 ```
 
-### Import/Export for Persistence
+### `syncing`
 
 ```typescript
-// Get the full document snapshot
-const snapshot = doc.export();
-
-// Import a document snapshot (e.g., when loading from storage)
-doc.import({
-  state: {
-    /* ... */
-  },
-  rev: 42,
-  changes: [
-    /* pending changes */
-  ],
-});
+if (doc.syncing === 'syncing') {
+  // Currently syncing with server
+} else if (doc.syncing instanceof Error) {
+  // Sync error occurred
+} else {
+  // Idle - no sync in progress
+}
 ```
 
-## Event Hooks
+## Events
 
-Listen to document events to update your UI:
+### `onUpdate` - State Changes
+
+Called whenever the document state changes, from any source (local changes, server updates, imports):
 
 ```typescript
-// Called whenever the document state changes (from any source)
 doc.onUpdate(newState => {
   console.log('Document updated:', newState);
-  updateUI(newState);
+  renderUI(newState);
 });
+```
 
-// Called when a local change is made
-doc.onChange(changes => {
-  console.log('Local changes made:', changes);
+### `onChange` - Local Changes
+
+Called when `change()` captures local edits. Emits the raw JSON Patch ops:
+
+```typescript
+doc.onChange(ops => {
+  console.log('Local changes captured:', ops);
+  // ops is an array of JSONPatchOp objects
 });
+```
 
-// Called before applying a local change (can be used for validation)
-doc.onBeforeChange(change => {
-  console.log('About to apply change:', change);
-});
+### `onSyncing` - Sync Status Changes
 
-// Called when syncing state changes
+Called when the sync status changes:
+
+```typescript
 doc.onSyncing(syncingState => {
-  if (syncingState) {
-    console.log('Syncing or sync error:', syncingState);
+  if (syncingState === 'syncing') {
+    showSpinner();
+  } else if (syncingState instanceof Error) {
+    showError(syncingState.message);
   } else {
-    console.log('Sync completed successfully');
+    hideSpinner();
   }
 });
 ```
 
+### `subscribe` - Immediate + Ongoing Updates
+
+Like `onUpdate`, but calls immediately with the current state, then on every subsequent change. Returns an unsubscribe function:
+
+```typescript
+const unsub = doc.subscribe(state => {
+  // Called immediately with current state
+  // Then called on every subsequent update
+  renderUI(state);
+});
+
+// Later, when done:
+unsub();
+```
+
+This is particularly useful for reactive frameworks that need the current value right away.
+
+## OT vs LWW: Two Implementations
+
+`PatchesDoc<T>` is an interface with two implementations:
+
+### OTDoc (Operational Transformation)
+
+Used with OT sync strategy. Tracks a separate committed state and pending changes array. When server changes arrive, pending changes get rebased using the [OT algorithms](algorithms.md).
+
+Best for: Collaborative editing where concurrent changes need intelligent merging.
+
+### LWWDoc (Last-Write-Wins)
+
+Used with LWW sync strategy. Simpler model - timestamps determine which value wins when there's a conflict.
+
+Best for: Settings, preferences, status data where the latest write should simply win.
+
+See [Operational Transformation](operational-transformation.md) and [Last-Write-Wins](last-write-wins.md) for the concepts, or [persist.md](persist.md) for guidance on which strategy to use.
+
 ## Example Usage
 
-Here's a full example of using `PatchesDoc` with a React component:
+Here's a complete example using `PatchesDoc` with React:
 
 ```typescript
 import React, { useEffect, useState } from 'react';
 import { Patches, InMemoryStore } from '@dabble/patches';
 import { PatchesSync } from '@dabble/patches/net';
+import type { PatchesDoc } from '@dabble/patches/client';
 
 interface TodoItem {
   id: string;
@@ -219,17 +271,14 @@ function TodoApp() {
   const [hasUnsaved, setHasUnsaved] = useState(false);
   const [syncError, setSyncError] = useState<Error | null>(null);
 
-  // Set up Patches on component mount
   useEffect(() => {
     const setup = async () => {
       const store = new InMemoryStore();
       const patches = new Patches({ store });
 
-      // Connect to server (PatchesSync handles all the sync logic)
       const sync = new PatchesSync(patches, 'wss://your-server.example.com');
       await sync.connect();
 
-      // Open the todos document
       const todoDoc = await patches.openDoc<TodoDoc>('my-todos');
 
       // Initialize if empty
@@ -239,19 +288,14 @@ function TodoApp() {
         });
       }
 
-      // Listen for state updates
-      todoDoc.onUpdate(newState => {
-        setTodos(newState.items || []);
-      });
-
-      // Track pending changes
-      todoDoc.onChange(() => {
+      // Use subscribe for immediate + ongoing updates
+      todoDoc.subscribe(state => {
+        setTodos(state.items || []);
         setHasUnsaved(todoDoc.hasPending);
       });
 
-      // Track sync errors
-      todoDoc.onSyncing(syncingState => {
-        setSyncError(syncingState instanceof Error ? syncingState : null);
+      todoDoc.onSyncing(syncState => {
+        setSyncError(syncState instanceof Error ? syncState : null);
         setHasUnsaved(todoDoc.hasPending);
       });
 
@@ -261,7 +305,6 @@ function TodoApp() {
     setup();
   }, []);
 
-  // Add a new todo
   const addTodo = () => {
     if (!newTodo.trim() || !doc) return;
 
@@ -276,7 +319,6 @@ function TodoApp() {
     setNewTodo('');
   };
 
-  // Toggle a todo's completion status
   const toggleTodo = (id: string) => {
     if (!doc) return;
 
@@ -292,7 +334,6 @@ function TodoApp() {
     <div>
       <h1>Collaborative Todo List</h1>
 
-      {/* Status indicators */}
       {syncError && (
         <div className="error">Sync error: {syncError.message}</div>
       )}
@@ -326,4 +367,12 @@ function TodoApp() {
 }
 ```
 
-That's it! Your todo list now has real-time collaboration. The `PatchesDoc` handles your local state and changes, while `PatchesSync` (behind the scenes) makes sure everything stays in sync with other users. Clean separation of concerns! ✨
+The `PatchesDoc` handles local state and change capture. [`PatchesSync`](PatchesSync.md) handles server communication. The [algorithm functions](algorithms.md) handle conflict resolution. Clean separation - each piece does one thing well.
+
+## Related Documentation
+
+- [Patches](Patches.md) - The main client that creates and manages documents
+- [PatchesSync](PatchesSync.md) - Sync coordination with the server
+- [algorithms](algorithms.md) - Pure functions for OT and change processing
+- [json-patch](json-patch.md) - The JSON Patch format used for changes
+- [persist](persist.md) - Storage options and OT vs LWW guidance

@@ -1,78 +1,104 @@
-# `Patches` — Your Collaboration Command Center 🎮
+# `Patches` - The Client Coordinator
 
-Meet `Patches` - the brains of your collaborative app operation! This class is where it all starts - your home base for managing documents, keeping everything in sync, and making the magic happen.
+`Patches` is the central hub of your collaborative app on the client side. One instance, many documents. It manages document lifecycle, coordinates events, and provides the public API your app interacts with.
 
 **Table of Contents**
 
-- [What Is It?](#what-is-it)
+- [What It Does](#what-it-does)
 - [Getting Started](#getting-started)
 - [Working with Documents](#working-with-documents)
-- [Plugging Into Real-Time Sync](#plugging-into-real-time-sync)
-- [Event Hooks](#event-hooks)
-- [See It in Action](#see-it-in-action)
-- [The Rest of the Family](#the-rest-of-the-family)
+- [Real-Time Sync](#real-time-sync)
+- [Events](#events)
+- [Complete Example](#complete-example)
+- [Related Components](#related-components)
 
-## What Is It?
+## What It Does
 
-`Patches` is like the conductor of your collaborative symphony. It's focused on coordination rather than doing the heavy lifting itself. It:
+`Patches` is a coordinator, not a worker. It doesn't do the heavy lifting - it orchestrates the pieces that do:
 
 - **Document Management**: Opens, tracks, and closes your collaborative docs
 - **Event Coordination**: Listens to document events and re-emits them for your app
-- **Storage Interface**: Manages persistence through your chosen store
-- **Strategy Support**: Works with OT (default) or LWW sync strategies
+- **Strategy Delegation**: Routes operations to the right sync strategy (OT or LWW)
 - **Public API**: Provides the clean interface your app uses
 
-Here's the key: You create **one** `Patches` instance for your whole app, then use it to open as many documents as you need. Think of it as your document orchestrator and public API.
-
-**Quick note on strategies:** By default, Patches uses OT (Operational Transformation) which is perfect for collaborative editing. If you're building something simpler like user settings or preferences, LWW (Last-Write-Wins) might be a better fit. Check out [persist.md](./persist.md) for the full scoop on when to use which.
+The pattern: create **one** `Patches` instance for your whole app, then use it to open as many documents as you need.
 
 ## Getting Started
 
-Starting with `Patches` is super simple:
+### The Easy Way: Factory Functions
+
+For most apps, factory functions are the simplest way to get started:
 
 ```typescript
-import { Patches, InMemoryStore } from '@dabble/patches';
+import { createOTPatches, createOTIndexedDBPatches } from '@dabble/patches';
 
-// Create a store for persistence
-const store = new InMemoryStore(); // For testing - use IndexedDBStore for production!
+// For testing or when persistence isn't needed
+const patches = createOTPatches();
 
-// Create your main Patches instance
-const patches = new Patches({ store });
-
-// You're ready to rock! 🎸
+// For production with IndexedDB persistence
+const patches = createOTIndexedDBPatches({ dbName: 'my-app' });
 ```
 
-### Configuration Options
+Available factories:
 
-When creating your `Patches` instance, you can customize it:
+| Factory                     | Strategy | Storage   | Use Case                         |
+| --------------------------- | -------- | --------- | -------------------------------- |
+| `createOTPatches`           | OT       | Memory    | Testing, ephemeral sessions      |
+| `createOTIndexedDBPatches`  | OT       | IndexedDB | Production collaborative editing |
+| `createLWWPatches`          | LWW      | Memory    | Testing LWW features             |
+| `createLWWIndexedDBPatches` | LWW      | IndexedDB | Production settings/preferences  |
+| `createAllPatches`          | Both     | Memory    | Testing multi-strategy apps      |
+| `createAllIndexedDBPatches` | Both     | IndexedDB | Production multi-strategy apps   |
+
+All factories accept optional `metadata` for attaching user info to changes:
 
 ```typescript
-const patches = new Patches({
-  // REQUIRED: Where should changes be saved?
-  store: new IndexedDBStore('my-cool-app'),
-
-  // OPTIONAL: Default metadata for changes from this client
+const patches = createOTIndexedDBPatches({
+  dbName: 'my-app',
   metadata: {
-    user: {
-      id: 'user-123',
-      name: 'Alice',
-      color: '#FF5733',
-    },
+    user: { id: 'user-123', name: 'Alice', color: '#FF5733' },
     deviceId: 'mobile-ios-12345',
   },
 });
 ```
 
-The metadata is super handy for tracking who made what changes!
+### The Manual Way: Full Configuration
+
+If you need more control, construct `Patches` directly with a strategies map:
+
+```typescript
+import { Patches, OTStrategy, InMemoryStore } from '@dabble/patches';
+
+const store = new InMemoryStore();
+const otStrategy = new OTStrategy(store);
+
+const patches = new Patches({
+  strategies: { ot: otStrategy },
+  defaultStrategy: 'ot',
+  metadata: { user: { id: 'user-123' } },
+});
+```
+
+This approach lets you:
+
+- Use custom store implementations
+- Configure strategy-specific options
+- Mix strategies with different storage backends
+
+### Choosing a Strategy
+
+**OT (Operational Transformation)** is for collaborative editing where concurrent changes need intelligent merging. Multiple users editing the same paragraph? OT handles that.
+
+**LWW (Last-Write-Wins)** is for simpler data where the most recent write should just... win. User settings, preferences, dashboard positions - timestamps resolve conflicts.
+
+See [operational-transformation.md](operational-transformation.md) and [last-write-wins.md](last-write-wins.md) for deeper dives into each approach.
 
 ## Working with Documents
-
-Now for the fun part - actually working with documents!
 
 ### Opening a Document
 
 ```typescript
-// Define your document type (TypeScript goodness!)
+// Define your document type
 interface MyDoc {
   title: string;
   items: Array<{ id: string; text: string; done: boolean }>;
@@ -81,11 +107,11 @@ interface MyDoc {
 // Open a document (creates it if it doesn't exist)
 const doc = await patches.openDoc<MyDoc>('shopping-list');
 
-// Now you can access the state
+// Access the state
 console.log(`Shopping List: ${doc.state.title}`);
 console.log(`${doc.state.items.length} items`);
 
-// And make changes
+// Make changes
 doc.change(draft => {
   draft.title = 'Grocery Shopping';
   draft.items.push({ id: Date.now().toString(), text: 'Milk', done: false });
@@ -94,64 +120,74 @@ doc.change(draft => {
 
 The `openDoc` method:
 
-- Returns a `PatchesDoc<T>` instance
+- Returns a [`PatchesDoc<T>`](PatchesDoc.md) instance
 - Creates the document if it doesn't exist
 - Loads the latest state from your store
 - Sets up change tracking
+
+You can also specify a different strategy when opening:
+
+```typescript
+// Open with LWW strategy instead of default
+const settingsDoc = await patches.openDoc('user-settings', { strategy: 'lww' });
+```
 
 ### Tracking Documents
 
 Before opening docs, you might want to tell Patches which ones you care about:
 
 ```typescript
-// Start tracking a set of documents (loads metadata from store)
+// Start tracking a set of documents
 await patches.trackDocs(['shopping-list', 'todo-list', 'workout-plan']);
 
 // Later, when you're done with some
 await patches.untrackDocs(['workout-plan']);
 ```
 
-Tracking helps Patches be smart about loading and managing documents.
+Tracked documents stay in sync with the server even when not open locally. This enables background syncing and receiving updates for documents you're not actively viewing.
 
 ### Closing Documents
 
-When you're done with a document, let Patches know:
+When you're done with a document:
 
 ```typescript
 // Close a document (saves pending changes, removes from memory)
 await patches.closeDoc('shopping-list');
 
-// Or if you're done with it FOREVER:
+// Or close and also untrack it
+await patches.closeDoc('shopping-list', { untrack: true });
+
+// For permanent deletion
 await patches.deleteDoc('old-shopping-list');
 ```
 
-Closing docs helps free up memory and ensures everything is saved properly.
+Closing docs frees memory and ensures pending changes are persisted.
 
-## Plugging Into Real-Time Sync
+## Real-Time Sync
 
-`Patches` works beautifully with `PatchesSync` for real-time collaboration:
+`Patches` works with [`PatchesSync`](PatchesSync.md) for real-time collaboration:
 
 ```typescript
 import { PatchesSync } from '@dabble/patches/net';
 
-// Create your sync connection (note the parameter order!)
+// Create sync connection (patches instance first, then URL)
 const sync = new PatchesSync(patches, 'wss://your-server.example.com');
 
 // Connect to the server
 await sync.connect();
 
-// That's it! Changes now automatically sync to/from the server
+// That's it - changes now automatically sync to/from the server
 ```
 
-The magic of this setup:
+The flow:
 
-- `Patches` emits events when documents change
-- `PatchesSync` listens to these events and handles server communication
-- Server changes flow back through `PatchesSync` to update documents
-- All the complex OT logic happens in pure algorithm functions
-- Your app just sees clean, coordinated state updates
+1. `Patches` emits events when documents change
+2. `PatchesSync` listens and handles server communication
+3. Server changes flow back through `PatchesSync` to update documents
+4. All the sync logic happens in pure [algorithm functions](algorithms.md)
+5. Your app just sees clean, coordinated state updates
 
-## Event Hooks
+## Events
 
 Listen for important events from the `Patches` system:
 
@@ -167,10 +203,9 @@ patches.onError((error, context) => {
   showErrorNotification('Something went wrong. Retrying...');
 });
 
-// When any document changes locally
-patches.onChange((docId, changes) => {
-  console.log(`Document ${docId} changed locally:`, changes);
-  updateRecentActivity(docId);
+// When any document has pending changes ready to send
+patches.onChange(docId => {
+  console.log(`Document ${docId} has pending changes`);
 });
 
 // When documents are tracked/untracked
@@ -181,28 +216,30 @@ patches.onTrackDocs(docIds => {
 patches.onUntrackDocs(docIds => {
   console.log('No longer tracking:', docIds);
 });
+
+// When a document is deleted
+patches.onDeleteDoc(docId => {
+  console.log(`Document ${docId} was deleted`);
+});
 ```
 
-## See It in Action
+## Complete Example
 
-Here's a complete example of using `Patches` in a real application:
+Here's a real-world setup for a collaborative application:
 
 ```typescript
-import { Patches, IndexedDBStore } from '@dabble/patches';
+import { createOTIndexedDBPatches } from '@dabble/patches';
 import { PatchesSync } from '@dabble/patches/net';
 
 class CollaborativeApp {
-  private patches: Patches;
-  private sync: PatchesSync;
+  private patches;
+  private sync;
   private activeDocuments = new Map();
 
   constructor() {
-    // Set up persistence
-    const store = new IndexedDBStore('my-collaborative-app');
-
-    // Create Patches instance with user info
-    this.patches = new Patches({
-      store,
+    // Create Patches with IndexedDB persistence and user info
+    this.patches = createOTIndexedDBPatches({
+      dbName: 'my-collaborative-app',
       metadata: {
         user: this.getCurrentUser(),
       },
@@ -211,7 +248,7 @@ class CollaborativeApp {
     // Set up error handling
     this.patches.onError(this.handleError.bind(this));
 
-    // Set up sync (note: patches comes first now)
+    // Set up sync
     this.sync = new PatchesSync(this.patches, 'wss://collab.example.com');
 
     // Handle connection state
@@ -228,19 +265,17 @@ class CollaborativeApp {
     // Connect to server
     await this.sync.connect();
 
-    console.log('Collaborative app ready!');
+    console.log('Collaborative app ready');
   }
 
   async openDocument(docId) {
-    // Open the document
     const doc = await this.patches.openDoc(docId);
 
-    // Set up listeners
+    // Set up UI updates
     doc.onUpdate(state => {
       this.updateDocumentUI(docId, state);
     });
 
-    // Remember this document
     this.activeDocuments.set(docId, doc);
     this.addToRecentDocs(docId);
 
@@ -252,6 +287,10 @@ class CollaborativeApp {
     if (doc) {
       doc.change(changeFn);
     }
+  }
+
+  async shutdown() {
+    await this.patches.close();
   }
 
   // Helper methods
@@ -279,24 +318,23 @@ class CollaborativeApp {
 const app = new CollaborativeApp();
 await app.initialize();
 
-// Open a document
 const doc = await app.openDocument('project-notes');
 
-// Make changes
 app.makeChange('project-notes', draft => {
   draft.title = 'Project X Planning';
   draft.notes.push('Meeting scheduled for Friday');
 });
 ```
 
-## The Rest of the Family
+## Related Components
 
-The `Patches` class is just one piece of the puzzle. Check out these related components:
+`Patches` coordinates several other components. Understand these to get the full picture:
 
-- [`PatchesDoc`](./PatchesDoc.md) - Individual document instances that `Patches` creates for you
-- [`PatchesSync`](./PatchesSync.md) - Real-time synchronization coordinator with a server
-- [`PatchesStore`](./persist.md) - The interface for document persistence (OT and LWW stores)
-- [`OTServer`](./OTServer.md) - The server-side component that handles collaboration
-- [`Algorithms`](./algorithms.md) - The pure functions that handle OT and change processing
-
-Remember, `Patches` is your friendly neighborhood document orchestrator. It coordinates everything so you can focus on building an awesome collaborative experience! 🚀
+- [PatchesDoc](PatchesDoc.md) - Individual document instances that `Patches` creates for you
+- [PatchesSync](PatchesSync.md) - Real-time synchronization coordinator
+- [persist.md](persist.md) - Storage interfaces and implementations
+- [algorithms.md](algorithms.md) - Pure functions that handle OT and change processing
+- [OTServer](OTServer.md) - Server-side OT implementation
+- [LWWServer](LWWServer.md) - Server-side LWW implementation
+- [operational-transformation.md](operational-transformation.md) - Deep dive into OT concepts
+- [last-write-wins.md](last-write-wins.md) - Deep dive into LWW concepts

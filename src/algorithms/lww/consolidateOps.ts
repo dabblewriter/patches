@@ -1,19 +1,34 @@
-import { combineBitmasks } from '../../json-patch/ops/bitmask.js';
+import { applyBitmask, combineBitmasks } from '../../json-patch/ops/bitmask.js';
 import type { JSONPatchOp } from '../../json-patch/types.js';
 
 /**
  * Combiner for consolidating same-type ops on the same path.
  */
-type Combiner = (a: any, b: any) => any;
+type Combiner = {
+  apply: (a: any, b: any) => any;
+  combine: (a: any, b: any) => any;
+};
 
 /**
  * Combinable operations - ops that can be merged rather than replaced.
  */
 const combinableOps: Record<string, Combiner> = {
-  '@inc': (a, b) => a + b,
-  '@bit': combineBitmasks,
-  '@max': (a, b) => (a > b ? a : b),
-  '@min': (a, b) => (a < b ? a : b),
+  '@inc': {
+    apply: (a: number, b: number) => a + b,
+    combine: (a: number, b: number) => a + b,
+  },
+  '@bit': {
+    apply: applyBitmask,
+    combine: combineBitmasks,
+  },
+  '@max': {
+    apply: (a: number, b: number) => (a > b ? a : b),
+    combine: (a: number, b: number) => (a > b ? a : b),
+  },
+  '@min': {
+    apply: (a: number, b: number) => (a < b ? a : b),
+    combine: (a: number, b: number) => (a < b ? a : b),
+  },
 };
 
 /**
@@ -43,12 +58,15 @@ export function consolidateFieldOp(existing: JSONPatchOp, incoming: JSONPatchOp)
   const combiner = combinableOps[incoming.op];
 
   // If incoming is combinable AND existing has same op type, combine
-  if (combiner && existing.op === incoming.op) {
-    const value = combiner(existing.value ?? 0, incoming.value ?? 0);
+  if (combiner) {
+    const op = existing.op === incoming.op ? incoming.op : existing.op;
+    const value = existing.op === incoming.op
+      ? combiner.combine(existing.value ?? 0, incoming.value ?? 0) :
+      combiner.apply(existing.value ?? 0, incoming.value ?? 0);
     if (value === existing.value) {
       return null;
     }
-    return { ...incoming, value };
+    return { ...incoming, op, value };
   }
 
   // For non-combinable ops: existing wins if newer
@@ -65,17 +83,23 @@ export function consolidateFieldOp(existing: JSONPatchOp, incoming: JSONPatchOp)
 export function consolidateOps(
   existingOps: JSONPatchOp[],
   newOps: JSONPatchOp[]
-): { opsToSave: JSONPatchOp[]; pathsToDelete: string[] } {
+): { opsToSave: JSONPatchOp[]; pathsToDelete: string[]; opsToReturn: JSONPatchOp[] } {
   const opsToSave: JSONPatchOp[] = [];
-  const pathsToDelete: string[] = [];
-  const existingByPath = new Map<string, JSONPatchOp>();
-
-  for (const op of existingOps) {
-    existingByPath.set(op.path, op);
-  }
+  const pathsToDelete = new Set<string>();
+  const existingByPath = new Map(existingOps.map(op => [op.path, op]));
+  const opsToReturnMap = new Map<string, JSONPatchOp>();
 
   for (const newOp of newOps) {
     const existing = existingByPath.get(newOp.path);
+
+    // Check if parent is primitive (invalid hierarchy)
+    const fix = parentFixes(newOp.path, existingByPath);
+    if (!Array.isArray(fix)) {
+      if (!opsToReturnMap.has(fix.path)) opsToReturnMap.set(fix.path, fix);
+      continue; // Skip this op, will send correction
+    } else if (fix.length > 0) {
+      fix.forEach(path => pathsToDelete.add(path));
+    }
 
     if (existing) {
       // Consolidate with existing op
@@ -88,12 +112,52 @@ export function consolidateOps(
       // Check if this op overwrites child paths (parent write deletes children)
       for (const existingPath of existingByPath.keys()) {
         if (existingPath.startsWith(newOp.path + '/')) {
-          pathsToDelete.push(existingPath);
+          pathsToDelete.add(existingPath);
         }
       }
       opsToSave.push(newOp);
     }
   }
 
-  return { opsToSave, pathsToDelete };
+  return { opsToSave, pathsToDelete: Array.from(pathsToDelete), opsToReturn: Array.from(opsToReturnMap.values()) };
+}
+
+/**
+ * Any delta ops that aren't combined in consolidateOps need to be converted to replace ops.
+ */
+export function convertDeltaOps(ops: JSONPatchOp[]): JSONPatchOp[] {
+  return ops.map(op => {
+    const combiner = combinableOps[op.op];
+    const value = typeof op.value === 'string' ? '' : 0;
+    if (combiner) return { ...op, op: 'replace', value: combiner.apply(value, op.value) };
+    return { ...op, op: 'replace', value: op.value };
+  });
+}
+
+/**
+ * Find if any parent of this path is a primitive value.
+ * Returns the path of the primitive parent, or null if hierarchy is valid.
+ */
+function parentFixes(path: string, existing: Map<string, JSONPatchOp>): JSONPatchOp | string[] {
+  let parent = path;
+  const pathsToDelete: string[] = [];
+  while (parent.lastIndexOf('/') > 0) {
+    parent = parent.substring(0, parent.lastIndexOf('/'));
+    const parentOp = existing.get(parent);
+    if (parentOp) {
+      if (parentOp.value === undefined || parentOp.op === 'remove') {
+        pathsToDelete.push(parent);
+      } else if (!isObject(parentOp.value)) {
+        return parentOp;
+      }
+    }
+  }
+  return pathsToDelete;
+}
+
+/**
+ * Check if a value is an object (or array).
+ */
+function isObject(value: any): boolean {
+  return value !== null && typeof value === 'object';
 }

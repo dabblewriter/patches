@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createApp, defineComponent, h } from 'vue';
 import { Patches } from '../../src/client/Patches.js';
-import { InMemoryStore } from '../../src/client/InMemoryStore.js';
+import { createOTPatches } from '../../src/client/factories.js';
 import {
   providePatchesContext,
   providePatches,
@@ -15,7 +15,7 @@ describe('Vue Provider', () => {
   let mockSync: any;
 
   beforeEach(() => {
-    patches = new Patches({ store: new InMemoryStore() });
+    patches = createOTPatches();
     mockSync = { state: { connected: false, syncing: null, online: true } };
   });
 

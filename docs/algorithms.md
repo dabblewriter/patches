@@ -10,8 +10,11 @@ Here's the breakdown:
 
 - **Chef's Orders (Orchestration)**: `PatchesSync`, `PatchesDoc`, `OTServer` call the shots.
 - **Recipe Cards (Algorithm Logic)**: Pure functions in `src/algorithms/` that do the heavy lifting of OT and syncing without messing with anything else.
-- **Pantry (Storage)**: Your chosen store (like `IndexedDBStore`) just holds the ingredients.
+- **Sous Chefs (Strategies)**: `OTStrategy` and `LWWStrategy` know _when_ to use which recipe and handle algorithm-specific coordination.
+- **Pantry (Storage)**: Your chosen store (like `IndexedDBStore`) just holds the ingredients - no cooking allowed!
 - **Waiter Service (Networking)**: The WebSocket and protocol layers just shuttle messages back and forth.
+
+**Important distinction**: Stores are intentionally "dumb" - they save and load data, period. The _strategies_ are the ones that invoke algorithm functions. This keeps stores simple and testable, while strategies handle the smart coordination work.
 
 This setup means:
 
@@ -30,6 +33,9 @@ src/algorithms/
 │   ├── applyCommittedChanges.ts  # Logic for when server changes land
 │   ├── createStateFromSnapshot.ts # Building current state from history
 │   └── makeChange.ts             # Crafting new local changes
+├── lww/                        # LWW-specific algorithms
+│   ├── applyLWWChange.ts         # Apply changes with timestamp comparison
+│   └── makeLWWChange.ts          # Create LWW changes with timestamps
 ├── server/                     # Server-side algorithms
 │   ├── commitChanges.ts          # Complete change commit workflow
 │   ├── createVersion.ts          # Version creation with persistence
@@ -76,6 +82,20 @@ src/algorithms/
 
 - **`rebaseChanges(serverChanges, localChanges)`**: The heart of client-side Operational Transformation. When the server has new changes that your local (pending) changes didn't know about, this function rewrites your local changes so they can be applied _after_ the server's changes, as if you made them on top of the server's latest version. It's what prevents your work from overwriting someone else's, and vice-versa.
 
+## LWW Algorithms: The Simpler Path
+
+For Last-Write-Wins sync, we have a separate set of algorithms in `src/algorithms/lww/`:
+
+### `makeLWWChange.ts`
+
+- **`makeLWWChange(snapshot, mutator, timestamp?)`**: Creates a change object with timestamps on each operation. If no timestamp is provided, it uses the current time. The timestamp determines which write wins when there are conflicts.
+
+### `applyLWWChange.ts`
+
+- **`applyLWWChange(state, change)`**: Applies a change using LWW semantics. For each operation, it compares timestamps - if the incoming timestamp is >= the existing one, the incoming value wins. Simple and predictable!
+
+LWW is great for data where you don't need to merge concurrent edits - just let the latest write win. User preferences, settings, status data - that kind of thing.
+
 ## Server-Side Algorithms: The Authority
 
 ### `commitChanges.ts`
@@ -98,9 +118,18 @@ These handle the server's version of state reconstruction - loading the appropri
 
 Manages the complex logic for processing offline sessions and multi-batch uploads, including version creation for offline work.
 
-## How This Makes `PatchesSync` and `PatchesDoc` Better
+## How This Makes Everything Better
 
 Remember that messy kitchen? Now it's sparkling!
+
+### The Strategy Layer
+
+Between the orchestration classes and the algorithm functions, we have **strategies**:
+
+- **`OTStrategy`**: Knows when to call OT algorithms like `rebaseChanges` and `applyCommittedChanges`
+- **`LWWStrategy`**: Knows when to call LWW algorithms and handles field consolidation
+
+Strategies work with their matching stores (`OTClientStore` or `LWWClientStore`) and invoke the right algorithms at the right time. This keeps the stores "dumb" (just data in, data out) while strategies handle the smarts.
 
 **`PatchesSync` (Client's Network Captain):**
 

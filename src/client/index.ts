@@ -1,6 +1,18 @@
+export * from './BaseDoc.js';
+export * from './factories.js';
 export * from './IndexedDBStore.js';
+export * from './OTIndexedDBStore.js';
+export * from './LWWIndexedDBStore.js';
 export * from './InMemoryStore.js';
+export * from './LWWInMemoryStore.js';
+export * from './LWWDoc.js';
+export * from './LWWStrategy.js';
+export * from './OTDoc.js';
+export * from './OTStrategy.js';
 export * from './Patches.js';
 export * from './PatchesDoc.js';
 export * from './PatchesHistoryClient.js';
 export type * from './PatchesStore.js';
+export type * from './OTClientStore.js';
+export type * from './LWWClientStore.js';
+export type * from './ClientStrategy.js';

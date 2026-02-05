@@ -33,14 +33,17 @@ This is perfect for creating features like:
 Using `PatchesHistoryManager` is super easy:
 
 ```typescript
-import { PatchesHistoryManager } from '@dabble/patches/server';
+import { PatchesHistoryManager, OTServer } from '@dabble/patches/server';
 import { MyDatabaseStore } from './my-store'; // Your backend implementation
 
 // Create your store
 const store = new MyDatabaseStore(/* connection details */);
 
-// Create the history manager
-const historyManager = new PatchesHistoryManager(store);
+// Create the OT server
+const server = new OTServer(store);
+
+// Create the history manager (requires both server and store)
+const historyManager = new PatchesHistoryManager(server, store);
 
 // Now you're ready to start exploring the past!
 ```
@@ -151,7 +154,7 @@ This design makes it flexible enough to work with any storage system - from in-m
 Here's a simple example of building a document history UI:
 
 ```typescript
-import { PatchesHistoryManager } from '@dabble/patches/server';
+import { PatchesHistoryManager, OTServer } from '@dabble/patches/server';
 import { MyDatabaseStore } from './my-store';
 
 class DocumentHistoryExplorer {
@@ -160,7 +163,8 @@ class DocumentHistoryExplorer {
 
   constructor(docId: string) {
     const store = new MyDatabaseStore();
-    this.historyManager = new PatchesHistoryManager(store);
+    const server = new OTServer(store);
+    this.historyManager = new PatchesHistoryManager(server, store);
     this.docId = docId;
   }
 

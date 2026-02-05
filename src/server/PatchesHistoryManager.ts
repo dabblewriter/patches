@@ -12,7 +12,10 @@ import type { PatchesStoreBackend } from './types.js';
 
 /**
  * Helps retrieve historical information (versions, changes) for a document
- * using the new versioning model based on IDs and metadata.
+ * using the versioning model based on IDs and metadata.
+ *
+ * Works with any PatchesServer that implements captureCurrentVersion
+ * (both OTServer and LWWServer with LWWVersioningStoreBackend).
  */
 export class PatchesHistoryManager {
   static api: ApiDefinition = {
@@ -26,8 +29,11 @@ export class PatchesHistoryManager {
 
   private readonly store: PatchesStoreBackend;
 
-  constructor(private readonly patches: PatchesServer) {
-    this.store = patches.store;
+  constructor(
+    private readonly patches: PatchesServer,
+    store: PatchesStoreBackend
+  ) {
+    this.store = store;
   }
 
   /**

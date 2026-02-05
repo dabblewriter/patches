@@ -1,28 +1,44 @@
-import { createId } from 'crypto-id';
+import { getStateAtRevision } from '../algorithms/server/getStateAtRevision.js';
 import { breakChanges } from '../algorithms/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import { createVersionMetadata } from '../data/version.js';
-import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata } from '../types.js';
+import type { BranchManager } from './BranchManager.js';
+import {
+  assertBranchMetadata,
+  assertBranchOpenForMerge,
+  assertNotABranch,
+  branchManagerApi,
+  createBranchRecord,
+  generateBranchId,
+  wrapMergeCommit,
+} from './branchUtils.js';
 import type { PatchesServer } from './PatchesServer.js';
-import type { BranchingStoreBackend } from './types.js';
+import type { BranchingStoreBackend, OTStoreBackend } from './types.js';
 
 /**
- * Helps manage branches for a document. A branch is a document that is branched from another document. Its first
- * version will be the point-in-time of the original document at the time of the branch. Branches allow for parallel
- * development of a document with the ability to merge changes back into the original document later.
+ * Combined store backend type for OT branch management.
+ * Requires both OT operations and branch metadata operations.
  */
-export class PatchesBranchManager {
-  static api: ApiDefinition = {
-    listBranches: 'read',
-    createBranch: 'write',
-    updateBranch: 'write',
-    closeBranch: 'write',
-    mergeBranch: 'write',
-  } as const;
+type OTBranchStore = OTStoreBackend & BranchingStoreBackend;
+
+/**
+ * OT-specific branch manager implementation.
+ *
+ * Manages branches for documents using Operational Transformation semantics:
+ * - Creates branches at specific revision points
+ * - Uses fast-forward merge when possible (no concurrent changes on source)
+ * - Falls back to flattened merge for divergent histories
+ *
+ * A branch is a document that originates from another document at a specific revision.
+ * Its first version represents the source document's state at that revision.
+ * Branches allow parallel development with the ability to merge changes back.
+ */
+export class OTBranchManager implements BranchManager {
+  static api = branchManagerApi;
 
   constructor(
-    private readonly store: BranchingStoreBackend,
+    private readonly store: OTBranchStore,
     private readonly patchesServer: PatchesServer,
     private readonly maxPayloadBytes?: number
   ) {}
@@ -45,17 +61,13 @@ export class PatchesBranchManager {
    * @returns The ID of the new branch document.
    */
   async createBranch(docId: string, rev: number, metadata?: EditableBranchMetadata): Promise<string> {
-    // Prevent branching off a branch
-    const maybeBranch = await this.store.loadBranch(docId);
-    if (maybeBranch) {
-      throw new Error('Cannot create a branch from another branch.');
-    }
-    // 1. Get the state at the branch point
-    const stateAtRev = (await this.patchesServer.getDoc(docId, rev)).state;
-    const branchDocId = this.store.createBranchId
-      ? await Promise.resolve(this.store.createBranchId(docId))
-      : createId(22);
+    await assertNotABranch(this.store, docId);
+
+    // Get the state at the branch point
+    const { state: stateAtRev } = await getStateAtRevision(this.store, docId, rev);
+    const branchDocId = await generateBranchId(this.store, docId);
     const now = Date.now();
+
     // Create an initial version at the branch point rev (for snapshotting/large docs)
     const initialVersionMetadata = createVersionMetadata({
       origin: 'main', // Branch doc versions are 'main' until merged
@@ -68,15 +80,9 @@ export class PatchesBranchManager {
       branchName: metadata?.name,
     });
     await this.store.createVersion(branchDocId, initialVersionMetadata, stateAtRev, []);
-    // 2. Create the branch metadata record
-    const branch: Branch = {
-      ...metadata,
-      id: branchDocId,
-      docId: docId,
-      branchedAtRev: rev,
-      createdAt: now,
-      status: 'open',
-    };
+
+    // Create the branch metadata record
+    const branch = createBranchRecord(branchDocId, docId, rev, metadata);
     await this.store.createBranch(branch);
     return branchDocId;
   }
@@ -107,18 +113,14 @@ export class PatchesBranchManager {
    * @throws Error if branch not found, already closed/merged, or merge fails.
    */
   async mergeBranch(branchId: string): Promise<Change[]> {
-    // 1. Load branch metadata
+    // Load and validate branch
     const branch = await this.store.loadBranch(branchId);
-    if (!branch) {
-      throw new Error(`Branch with ID ${branchId} not found.`);
-    }
-    if (branch.status !== 'open') {
-      throw new Error(`Branch ${branchId} is not open (status: ${branch.status}). Cannot merge.`);
-    }
+    assertBranchOpenForMerge(branch, branchId);
+
     const sourceDocId = branch.docId;
     const branchStartRevOnSource = branch.branchedAtRev;
 
-    // 2. Get all committed server changes made on the branch document since it was created.
+    // Get all committed server changes made on the branch document since it was created
     const branchChanges = await this.store.listChanges(branchId, {});
     if (branchChanges.length === 0) {
       console.log(`Branch ${branchId} has no changes to merge.`);
@@ -126,17 +128,17 @@ export class PatchesBranchManager {
       return [];
     }
 
-    // 3. Check if we can fast-forward (no concurrent changes on source since branch)
+    // Check if we can fast-forward (no concurrent changes on source since branch)
     const sourceChanges = await this.store.listChanges(sourceDocId, {
       startAfter: branchStartRevOnSource,
     });
     const canFastForward = sourceChanges.length === 0;
 
-    // 4. Get all versions from the branch doc (skip offline-branch versions)
+    // Get all versions from the branch doc (skip offline-branch versions)
     const branchVersions = await this.store.listVersions(branchId, { origin: 'main' });
 
-    // 5. For each version, create a corresponding version in the main doc
-    //    Use 'main' origin if fast-forward, 'branch' if divergent
+    // For each version, create a corresponding version in the main doc
+    // Use 'main' origin if fast-forward, 'branch' if divergent
     const versionOrigin = canFastForward ? 'main' : 'branch';
     let lastVersionId: string | undefined;
     for (const v of branchVersions) {
@@ -154,9 +156,8 @@ export class PatchesBranchManager {
       lastVersionId = newVersionMetadata.id;
     }
 
-    // 6. Commit changes to source doc
-    let committedMergeChanges: Change[] = [];
-    try {
+    // Commit changes to source doc with error handling
+    const committedMergeChanges = await wrapMergeCommit(branchId, sourceDocId, async () => {
       if (canFastForward) {
         // Fast-forward: commit branch changes individually with adjusted revs
         const adjustedChanges = branchChanges.map(c => ({
@@ -164,7 +165,7 @@ export class PatchesBranchManager {
           baseRev: branchStartRevOnSource,
           rev: undefined, // Let commitChanges assign sequential revs
         }));
-        committedMergeChanges = await this.patchesServer.commitChanges(sourceDocId, adjustedChanges);
+        return this.patchesServer.commitChanges(sourceDocId, adjustedChanges);
       } else {
         // Divergent: flatten and transform (current behavior)
         const rev = branchStartRevOnSource + branchChanges.length;
@@ -180,26 +181,20 @@ export class PatchesBranchManager {
           changesToCommit = breakChanges(changesToCommit, this.maxPayloadBytes);
         }
 
-        committedMergeChanges = await this.patchesServer.commitChanges(sourceDocId, changesToCommit);
+        return this.patchesServer.commitChanges(sourceDocId, changesToCommit);
       }
-    } catch (error) {
-      console.error(`Failed to merge branch ${branchId} into ${sourceDocId}:`, error);
-      throw new Error(`Merge failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    });
 
-    // 7. Merge succeeded. Update the branch status.
+    // Merge succeeded. Update the branch status.
     await this.closeBranch(branchId, 'merged');
     return committedMergeChanges;
   }
 }
 
-const nonModifiableMetadataFields = new Set(['id', 'docId', 'branchedAtRev', 'createdAt', 'status']);
+// Re-export for backwards compatibility
+export { assertBranchMetadata } from './branchUtils.js';
 
-export function assertBranchMetadata(metadata?: EditableBranchMetadata) {
-  if (!metadata) return;
-  for (const key in metadata) {
-    if (nonModifiableMetadataFields.has(key)) {
-      throw new Error(`Cannot modify branch field ${key}`);
-    }
-  }
-}
+/**
+ * @deprecated Use OTBranchManager instead. This alias will be removed in a future version.
+ */
+export const PatchesBranchManager = OTBranchManager;

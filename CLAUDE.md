@@ -14,7 +14,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Patches is a TypeScript library for building real-time collaborative applications. It leverages Operational Transformation (OT) with a centralized server model to ensure document consistency across multiple clients.
+Patches is a TypeScript library for building real-time collaborative applications. It supports two sync strategies:
+- **OT (Operational Transformation)**: Centralized server model with change rebasing for collaborative editing
+- **LWW (Last-Write-Wins)**: Simpler timestamp-based resolution for settings, preferences, and status data
 
 ### Import Paths
 
@@ -48,10 +50,19 @@ The codebase is divided into client-side and server-side components:
    - Local state management and change API
    - Uses algorithm functions for change creation
 3. **PatchesSync**: Sync coordinator between client and server
-   - Orchestrates OT operations using algorithm functions
+   - Orchestrates sync operations using algorithm functions
    - Handles connection management and batching
-4. **PatchesStore**: Client-side storage interface
-   - Implementations: InMemoryStore, IndexedDBStore
+4. **SyncStrategy**: Algorithm-specific sync logic
+   - `OTStrategy`: OT-specific operations (rebasing, change tracking)
+   - `LWWStrategy`: LWW-specific operations (field consolidation, timestamp handling)
+5. **PatchesStore**: Client-side storage interface hierarchy
+   ```
+   PatchesStore (base - 9 methods: track, list, get, save, delete, close)
+   ├── OTClientStore (+3 methods: getPendingChanges, savePendingChanges, applyServerChanges)
+   └── LWWClientStore (+6 methods: getPendingOps, savePendingOps, getSendingChange, saveSendingChange, confirmSendingChange, applyServerChanges)
+   ```
+   - OT implementations: `InMemoryStore`, `IndexedDBStore` (via `OTIndexedDBStore`)
+   - LWW implementations: `LWWInMemoryStore`, `LWWIndexedDBStore`
 
 ### Server-Side Components
 
@@ -59,9 +70,13 @@ The codebase is divided into client-side and server-side components:
    - Processes incoming changes, assigns revisions
    - Uses server algorithm functions for state management
    - Maintains document history
-2. **PatchesStoreBackend**: Server-side storage interface
-3. **PatchesHistoryManager**: Handles document history and versioning
-4. **PatchesBranchManager**: Manages branching and merging workflows
+2. **LWWServer**: Server-side LWW authority
+   - Field-based storage with timestamp comparison
+   - No change history, just current field values
+3. **PatchesStoreBackend**: Server-side storage interface
+   - `LWWStoreBackend`: LWW-specific storage (fields, snapshots)
+4. **PatchesHistoryManager**: Handles document history and versioning
+5. **OTBranchManager / LWWBranchManager**: Manages branching and merging workflows
 
 ### Algorithm Layer
 
@@ -70,14 +85,20 @@ The codebase is divided into client-side and server-side components:
    - `applyCommittedChanges`: Merges server updates with local state
    - `createStateFromSnapshot`: Builds current state from snapshots
 
-2. **Shared Algorithms**: Core OT logic used by both client and server
+2. **LWW Algorithms**: LWW-specific operations
+   - `makeLWWChange`: Creates LWW change objects with timestamps
+   - `applyLWWChange`: Applies LWW changes with timestamp comparison
+
+3. **Shared Algorithms**: Core OT logic used by both client and server
    - `applyChanges`: Applies change sequences to states
    - `rebaseChanges`: Core operational transformation logic
    - `breakChanges`, `breakChangesIntoBatches`: Handles large change splitting for network transmission
 
-3. **Server Algorithms**: Server-specific state management
+4. **Server Algorithms**: Server-specific state management
    - `getStateAtRevision`, `getSnapshotAtRevision`: Historical state retrieval
    - `handleOfflineSessionsAndBatches`: Offline sync processing
+
+**Note**: Strategies invoke algorithm functions; stores are "dumb storage" that persist data without algorithm logic.
 
 ### Networking & Persistence
 
@@ -85,18 +106,36 @@ The codebase is divided into client-side and server-side components:
    - **WebSocketTransport**: Server-mediated communication
    - **WebRTCTransport**: Peer-to-peer communication
 
-### OT Implementation
+### Sync Strategy Implementation
 
-The system uses JSON Patch operations (RFC 6902) with custom OT transformations to handle concurrent edits. The OT logic has been extracted into pure algorithm functions, making it easier to test and reuse.
+**OT (Operational Transformation)**:
+- Uses JSON Patch operations (RFC 6902) with custom OT transformations
+- Stores maintain change history for rebasing
+- Server transforms concurrent changes and assigns revisions
+- Best for: collaborative editing where concurrent changes need merging
+
+**LWW (Last-Write-Wins)**:
+- Uses JSON Patch operations with timestamps
+- Stores maintain current field values, no change history
+- Server compares timestamps: `incoming.ts >= existing.ts` → incoming wins
+- Best for: settings, preferences, status data where last write should win
+
+Both strategies use pure algorithm functions, making them easy to test and reuse.
 
 ## Code Structure
 
 - `/src/client`: Client-side implementation
+  - Stores: `InMemoryStore`, `IndexedDBStore`, `LWWInMemoryStore`, `LWWIndexedDBStore`
+  - Strategies: `OTStrategy`, `LWWStrategy`
+  - Store interfaces: `PatchesStore`, `OTClientStore`, `LWWClientStore`
 - `/src/server`: Server-side implementation
-- `/src/algorithms`: Pure algorithm functions for OT and sync operations
+  - Servers: `OTServer`, `LWWServer`
+  - Branch managers: `OTBranchManager`, `LWWBranchManager`
+- `/src/algorithms`: Pure algorithm functions for sync operations
   - `/client`: Client-specific algorithms
   - `/server`: Server-specific algorithms
   - `/shared`: Common algorithms used by both client and server
+  - `/lww`: LWW-specific algorithms
 - `/src/net`: Networking and transport layer
 - `/src/json-patch`: JSON Patch operations and transformations
 - `/tests`: Test files matching the source structure

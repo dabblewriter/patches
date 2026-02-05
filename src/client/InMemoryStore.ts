@@ -1,13 +1,13 @@
 import { applyChanges } from '../algorithms/shared/applyChanges.js';
 import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
-import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
+import type { OTClientStore } from './OTClientStore.js';
+import type { TrackedDoc } from './PatchesStore.js';
 
 interface DocBuffers {
   snapshot?: PatchesState;
   committed: Change[];
   pending: Change[];
   deleted?: true;
-  lastAttemptedSubmissionRev?: number;
 }
 
 /**
@@ -15,7 +15,7 @@ interface DocBuffers {
  * All data lives in JS objects – nothing survives a page reload.
  * Useful for unit tests or when you want the old 'stateless realtime' behaviour.
  */
-export class InMemoryStore implements PatchesStore {
+export class InMemoryStore implements OTClientStore {
   private docs: Map<string, DocBuffers> = new Map();
 
   // ─── Reconstruction ────────────────────────────────────────────────────
@@ -103,17 +103,5 @@ export class InMemoryStore implements PatchesStore {
 
   async close(): Promise<void> {
     this.docs.clear();
-  }
-
-  // ─── Submission Bookmark ───────────────────────────────────────────────
-  async getLastAttemptedSubmissionRev(docId: string): Promise<number | undefined> {
-    return this.docs.get(docId)?.lastAttemptedSubmissionRev;
-  }
-
-  async setLastAttemptedSubmissionRev(docId: string, rev: number): Promise<void> {
-    const buf = this.docs.get(docId);
-    if (buf) {
-      buf.lastAttemptedSubmissionRev = rev;
-    }
   }
 }

@@ -328,7 +328,7 @@ const webSocketApi = new WebSocketServer({ transport, patches: core });
 import { PatchesHistoryManager } from '@dabble/patches/server';
 import { PatchesBranchManager } from '@dabble/patches/server';
 
-const history = new PatchesHistoryManager(core);
+const history = new PatchesHistoryManager(core, myStoreBackend);
 const branches = new PatchesBranchManager(myBranchingStore, core);
 
 const api = new WebSocketServer({

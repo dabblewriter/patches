@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { CompressedStoreBackend } from '../../src/server/CompressedStoreBackend';
 import { base64Compressor, uint8Compressor } from '../../src/compression';
-import type { PatchesStoreBackend } from '../../src/server/types';
+import type { OTStoreBackend, TombstoneStoreBackend } from '../../src/server/types';
 import type { Change, VersionMetadata } from '../../src/types';
 
+// CompressedStoreBackend accepts OTStoreBackend with optional TombstoneStoreBackend methods
+type CompressibleStore = OTStoreBackend & Partial<TombstoneStoreBackend>;
+
 describe('CompressedStoreBackend', () => {
-  let mockStore: PatchesStoreBackend;
+  let mockStore: CompressibleStore;
   let savedChanges: any[];
   let savedVersionChanges: { changes: any[]; state: any }[];
 
@@ -270,41 +273,6 @@ describe('CompressedStoreBackend', () => {
       await backend.deleteDoc('doc1');
 
       expect(mockStore.deleteDoc).toHaveBeenCalledWith('doc1');
-    });
-  });
-
-  describe('optional methods', () => {
-    it('should pass through loadLastVersionState when available', async () => {
-      const mockLoadLastVersionState = vi.fn().mockResolvedValue({ rev: 5, state: {} });
-      mockStore.loadLastVersionState = mockLoadLastVersionState;
-
-      const backend = new CompressedStoreBackend(mockStore, base64Compressor);
-
-      expect(backend.loadLastVersionState).toBeDefined();
-      const result = await backend.loadLastVersionState!('doc1');
-
-      expect(mockLoadLastVersionState).toHaveBeenCalledWith('doc1');
-      expect(result).toEqual({ rev: 5, state: {} });
-    });
-
-    it('should return undefined for loadLastVersionState when not available', () => {
-      delete mockStore.loadLastVersionState;
-
-      const backend = new CompressedStoreBackend(mockStore, base64Compressor);
-
-      expect(backend.loadLastVersionState).toBeUndefined();
-    });
-
-    it('should pass through saveLastVersionState when available', async () => {
-      const mockSaveLastVersionState = vi.fn();
-      mockStore.saveLastVersionState = mockSaveLastVersionState;
-
-      const backend = new CompressedStoreBackend(mockStore, base64Compressor);
-
-      expect(backend.saveLastVersionState).toBeDefined();
-      await backend.saveLastVersionState!('doc1', 5, { test: true });
-
-      expect(mockSaveLastVersionState).toHaveBeenCalledWith('doc1', 5, { test: true });
     });
   });
 

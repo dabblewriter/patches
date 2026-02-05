@@ -1,4 +1,4 @@
-import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
+import type { PatchesSnapshot, PatchesState } from '../types.js';
 /** Represents metadata for a document tracked by the store. */
 export interface TrackedDoc {
   docId: string;
@@ -6,8 +6,6 @@ export interface TrackedDoc {
   committedRev: number;
   /** Optional flag indicating the document has been locally deleted. */
   deleted?: true;
-  /** The last revision that was attempted to be submitted to the server. */
-  lastAttemptedSubmissionRev?: number;
 }
 
 /**
@@ -82,21 +80,6 @@ export interface PatchesStore {
   getDoc(docId: string): Promise<PatchesSnapshot | undefined>;
 
   /**
-   * Retrieves all pending (unconfirmed) changes for a document.
-   *
-   * Pending changes are local edits that haven't been confirmed by the server yet.
-   * Returns changes in chronological order as they were created locally.
-   * Used during sync to resend unconfirmed operations.
-   *
-   * @param docId Document identifier
-   * @returns Array of pending changes in chronological order
-   * @example
-   * const pendingChanges = await store.getPendingChanges('my-document');
-   * console.log(`${pendingChanges.length} changes waiting for server confirmation`);
-   */
-  getPendingChanges(docId: string): Promise<Change[]>;
-
-  /**
    * Returns the last committed revision for a document.
    *
    * The committed revision is the last revision confirmed by the server.
@@ -128,40 +111,6 @@ export interface PatchesStore {
    * });
    */
   saveDoc(docId: string, docState: PatchesState): Promise<void>;
-
-  /**
-   * Appends new pending changes to the document's local change queue.
-   *
-   * Adds changes to the end of the pending changes list without replacing existing ones.
-   * Called when the user makes local edits that haven't been sent to the server yet.
-   * Changes should have sequential revision numbers starting after the last pending change.
-   *
-   * @param docId Document identifier
-   * @param changes Array of new changes to append
-   * @example
-   * // User made a local edit
-   * const newChange = { rev: 15, patches: [...], clientId: 'client-123' };
-   * await store.savePendingChanges('my-document', [newChange]);
-   */
-  savePendingChanges(docId: string, changes: Change[]): Promise<void>;
-
-  /**
-   * Atomically applies server-confirmed changes and updates pending changes.
-   *
-   * This is the core sync operation that must be atomic: server changes become
-   * committed history, and pending changes are replaced with their rebased versions.
-   * Implementations must ensure both operations complete together (single transaction
-   * for databases) to prevent inconsistent state if the app crashes mid-operation.
-   *
-   * @param docId Document identifier
-   * @param serverChanges Changes confirmed by the server to add to committed history
-   * @param rebasedPendingChanges Pending changes after OT rebasing (replaces all existing pending)
-   * @example
-   * // After receiving server changes and rebasing pending
-   * const rebased = rebaseChanges(serverChanges, pending);
-   * await store.applyServerChanges('my-document', serverChanges, rebased);
-   */
-  applyServerChanges(docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]): Promise<void>;
 
   /**
    * Marks a document for collaborative deletion.
@@ -207,35 +156,4 @@ export interface PatchesStore {
    * // Store is no longer usable
    */
   close(): Promise<void>;
-
-  /**
-   * Gets the last revision that was attempted to be submitted to the server.
-   *
-   * This bookmark is used by change collapsing to avoid modifying changes that
-   * may have been partially committed by the server. Returns undefined if no
-   * submission has been attempted yet.
-   *
-   * @param docId Document identifier
-   * @returns The last attempted submission revision, or undefined if none
-   * @example
-   * const lastAttempted = await store.getLastAttemptedSubmissionRev('my-document');
-   * // Use this to protect changes from collapsing
-   */
-  getLastAttemptedSubmissionRev?(docId: string): Promise<number | undefined>;
-
-  /**
-   * Sets the last revision that was attempted to be submitted to the server.
-   *
-   * Called before sending changes to the server to mark them as "in flight".
-   * This prevents change collapsing from modifying these changes in case the
-   * server commits them but the client doesn't receive confirmation.
-   *
-   * @param docId Document identifier
-   * @param rev The revision being submitted
-   * @example
-   * // Before sending batch to server
-   * await store.setLastAttemptedSubmissionRev('my-document', lastChange.rev);
-   * await sendToServer(batch);
-   */
-  setLastAttemptedSubmissionRev?(docId: string, rev: number): Promise<void>;
 }

@@ -27,6 +27,7 @@ vi.mock('../../src/algorithms/shared/changeBatching', () => ({
 describe('PatchesSync', () => {
   let mockPatches: any;
   let mockStore: any;
+  let mockStrategy: any;
   let mockWebSocket: any;
   let sync: PatchesSync;
 
@@ -48,12 +49,30 @@ describe('PatchesSync', () => {
       setLastAttemptedSubmissionRev: vi.fn().mockResolvedValue(undefined),
     };
 
+    // Mock strategy
+    mockStrategy = {
+      name: 'ot',
+      store: mockStore,
+      getPendingToSend: vi.fn().mockResolvedValue(null),
+      applyServerChanges: vi.fn().mockResolvedValue([]),
+      confirmSent: vi.fn().mockResolvedValue(undefined),
+      getCommittedRev: vi.fn().mockResolvedValue(0),
+      deleteDoc: vi.fn().mockResolvedValue(undefined),
+      confirmDeleteDoc: vi.fn().mockResolvedValue(undefined),
+      loadDoc: vi.fn().mockResolvedValue(undefined),
+      trackDocs: vi.fn().mockResolvedValue(undefined),
+      untrackDocs: vi.fn().mockResolvedValue(undefined),
+      listDocs: vi.fn().mockResolvedValue([]),
+    };
+
     // Mock Patches
     mockPatches = {
-      store: mockStore,
+      strategies: { ot: mockStrategy },
+      defaultStrategy: 'ot',
       trackedDocs: ['doc1', 'doc2'],
       docOptions: { maxPayloadBytes: 1000 },
       getOpenDoc: vi.fn().mockReturnValue(null),
+      getDocStrategy: vi.fn().mockReturnValue(mockStrategy),
       onTrackDocs: vi.fn(),
       onUntrackDocs: vi.fn(),
       onDeleteDoc: vi.fn(),
@@ -230,7 +249,8 @@ describe('PatchesSync', () => {
         { docId: 'doc2', committedRev: 0 },
       ];
 
-      mockStore.listDocs.mockResolvedValue(activeDocs);
+      // Sync now calls strategy.listDocs, not store.listDocs
+      mockStrategy.listDocs.mockResolvedValue(activeDocs);
 
       const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
 
@@ -248,13 +268,15 @@ describe('PatchesSync', () => {
         { docId: 'doc2', deleted: true, committedRev: 0 },
       ];
 
-      mockStore.listDocs.mockResolvedValue(docs);
+      // Sync now calls strategy.listDocs, not store.listDocs
+      mockStrategy.listDocs.mockResolvedValue(docs);
 
       await sync['syncAllKnownDocs']();
 
       expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc1']);
       expect(mockWebSocket.deleteDoc).toHaveBeenCalledWith('doc2');
-      expect(mockStore.confirmDeleteDoc).toHaveBeenCalledWith('doc2');
+      // Sync now calls strategy.confirmDeleteDoc, not store.confirmDeleteDoc
+      expect(mockStrategy.confirmDeleteDoc).toHaveBeenCalledWith('doc2');
     });
 
     it('should not sync if not connected', async () => {
@@ -285,7 +307,8 @@ describe('PatchesSync', () => {
         },
       ];
 
-      mockStore.getPendingChanges.mockResolvedValue(pendingChanges);
+      // Sync now calls strategy methods
+      mockStrategy.getPendingToSend.mockResolvedValue(pendingChanges);
 
       const flushDocSpy = vi.spyOn(sync as any, 'flushDoc').mockResolvedValue(undefined);
 
@@ -295,8 +318,9 @@ describe('PatchesSync', () => {
     });
 
     it('should sync document without pending changes', async () => {
-      mockStore.getPendingChanges.mockResolvedValue([]);
-      mockStore.getCommittedRev.mockResolvedValue(5);
+      // Sync now calls strategy methods
+      mockStrategy.getPendingToSend.mockResolvedValue(null);
+      mockStrategy.getCommittedRev.mockResolvedValue(5);
 
       const serverChanges: Change[] = [
         {
@@ -320,16 +344,18 @@ describe('PatchesSync', () => {
     });
 
     it('should get full document snapshot if no committed rev', async () => {
-      mockStore.getPendingChanges.mockResolvedValue([]);
-      mockStore.getCommittedRev.mockResolvedValue(0); // No committed rev
+      // Sync now calls strategy methods
+      mockStrategy.getPendingToSend.mockResolvedValue(null);
+      mockStrategy.getCommittedRev.mockResolvedValue(0); // No committed rev
 
-      const snapshot = { state: { content: 'new' }, rev: 1 };
+      const snapshot = { state: { content: 'new' }, rev: 1, changes: [] };
       mockWebSocket.getDoc.mockResolvedValue(snapshot);
 
       await sync['syncDoc']('doc1');
 
       expect(mockWebSocket.getDoc).toHaveBeenCalledWith('doc1');
-      expect(mockStore.saveDoc).toHaveBeenCalledWith('doc1', snapshot);
+      // Sync saves the doc via strategy.store.saveDoc (no open doc, so no importDoc)
+      expect(mockStrategy.store.saveDoc).toHaveBeenCalledWith('doc1', snapshot);
     });
 
     it('should update open document syncing state', async () => {
@@ -342,8 +368,9 @@ describe('PatchesSync', () => {
       mockWebSocket.getDoc.mockResolvedValue(snapshot);
 
       mockPatches.getOpenDoc.mockReturnValue(mockDoc);
-      mockStore.getPendingChanges.mockResolvedValue([]);
-      mockStore.getCommittedRev.mockResolvedValue(0);
+      // Sync now calls strategy methods
+      mockStrategy.getPendingToSend.mockResolvedValue(null);
+      mockStrategy.getCommittedRev.mockResolvedValue(0);
 
       await sync['syncDoc']('doc1');
 
@@ -361,11 +388,13 @@ describe('PatchesSync', () => {
       mockWebSocket.getDoc.mockResolvedValue(snapshot);
 
       mockPatches.getOpenDoc.mockReturnValue(mockDoc);
-      mockStore.getPendingChanges.mockResolvedValue([]);
-      mockStore.getCommittedRev.mockResolvedValue(0);
+      // Sync now calls strategy methods
+      mockStrategy.getPendingToSend.mockResolvedValue(null);
+      mockStrategy.getCommittedRev.mockResolvedValue(0);
 
       await sync['syncDoc']('doc1');
 
+      // Sync now calls doc.import directly (via BaseDoc cast)
       expect(mockDoc.import).toHaveBeenCalledWith({ ...snapshot, changes: [] });
     });
 
@@ -374,7 +403,8 @@ describe('PatchesSync', () => {
 
       await sync['syncDoc']('doc1');
 
-      expect(mockStore.getPendingChanges).not.toHaveBeenCalled();
+      // Sync now calls strategy methods
+      expect(mockStrategy.getPendingToSend).not.toHaveBeenCalled();
     });
   });
 
@@ -395,7 +425,8 @@ describe('PatchesSync', () => {
     });
 
     it('should return early if no pending changes', async () => {
-      mockStore.getPendingChanges.mockResolvedValue([]);
+      // Sync now calls strategy.getPendingToSend
+      mockStrategy.getPendingToSend.mockResolvedValue(null);
 
       await sync['flushDoc']('doc1');
 
@@ -422,9 +453,10 @@ describe('PatchesSync', () => {
         },
       ];
 
-      mockStore.getPendingChanges
+      // Sync now calls strategy.getPendingToSend
+      mockStrategy.getPendingToSend
         .mockResolvedValueOnce(pendingChanges) // Initial call
-        .mockResolvedValueOnce([]); // After flush
+        .mockResolvedValueOnce(null); // After flush
 
       const committed = pendingChanges.map(c => ({ ...c, rev: c.rev + 10 }));
       mockWebSocket.commitChanges.mockResolvedValue(committed);
@@ -451,29 +483,18 @@ describe('PatchesSync', () => {
         },
       ];
 
-      const currentSnapshot = {
-        state: { content: 'current' },
-        rev: 5,
-        changes: [],
-      };
-
-      mockStore.getDoc.mockResolvedValue(currentSnapshot);
-
       await sync['_applyServerChangesToDoc']('doc1', serverChanges);
 
-      expect(mockStore.applyServerChanges).toHaveBeenCalledWith('doc1', serverChanges, []);
+      // Sync now calls strategy.applyServerChanges, not store.applyServerChanges
+      // Third arg is the open doc (or null if not open)
+      expect(mockStrategy.applyServerChanges).toHaveBeenCalledWith('doc1', serverChanges, null);
     });
 
-    it('should handle non-existent documents', async () => {
-      mockStore.getDoc.mockResolvedValue(null);
-
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
+    it('should handle empty changes array', async () => {
+      // Empty changes should still call applyServerChanges (strategy handles the empty case)
       await sync['_applyServerChangesToDoc']('doc1', []);
 
-      expect(consoleSpy).toHaveBeenCalledWith('Cannot apply server changes to non-existent doc: doc1');
-
-      consoleSpy.mockRestore();
+      expect(mockStrategy.applyServerChanges).toHaveBeenCalledWith('doc1', [], null);
     });
   });
 
@@ -577,7 +598,8 @@ describe('PatchesSync', () => {
       await deleteHandler('doc1');
 
       expect(mockWebSocket.deleteDoc).toHaveBeenCalledWith('doc1');
-      expect(mockStore.confirmDeleteDoc).toHaveBeenCalledWith('doc1');
+      // Sync now calls strategy.confirmDeleteDoc, not store.confirmDeleteDoc
+      expect(mockStrategy.confirmDeleteDoc).toHaveBeenCalledWith('doc1');
     });
 
     it('should defer deletion when offline', async () => {
@@ -640,8 +662,9 @@ describe('PatchesSync', () => {
 
       await Promise.all([syncPromise1, syncPromise2]);
 
-      expect(mockStore.getPendingChanges).toHaveBeenCalledWith('doc1');
-      expect(mockStore.getPendingChanges).toHaveBeenCalledWith('doc2');
+      // Sync now calls strategy.getPendingToSend, not store.getPendingChanges
+      expect(mockStrategy.getPendingToSend).toHaveBeenCalledWith('doc1');
+      expect(mockStrategy.getPendingToSend).toHaveBeenCalledWith('doc2');
     });
   });
 });

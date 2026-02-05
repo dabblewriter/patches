@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRoot, createSignal, type JSX } from 'solid-js';
 import { Patches } from '../../src/client/Patches.js';
-import { InMemoryStore } from '../../src/client/InMemoryStore.js';
+import { createOTPatches } from '../../src/client/factories.js';
 import { PatchesProvider } from '../../src/solid/context.js';
 import { usePatchesDoc, usePatchesSync, createPatchesDoc } from '../../src/solid/primitives.js';
 import { getDocManager } from '../../src/solid/doc-manager.js';
@@ -13,7 +13,7 @@ describe('Solid Primitives', () => {
   let patches: Patches;
 
   beforeEach(() => {
-    patches = new Patches({ store: new InMemoryStore() });
+    patches = createOTPatches();
   });
 
   afterEach(async () => {
@@ -112,7 +112,10 @@ describe('Solid Primitives', () => {
           patch.replace(root.title!, 'Hello World');
         });
 
-        // Solid's reactivity is synchronous after initial setup
+        // Wait for async strategy handler
+        await tick();
+
+        // Now check state
         expect(data()?.title).toBe('Hello World');
 
         dispose();
@@ -151,6 +154,9 @@ describe('Solid Primitives', () => {
         change((patch: any, root: any) => {
           patch.replace(root.count!, 42);
         });
+
+        // Wait for async strategy handler
+        await tick();
 
         expect(data()?.count).toBe(42);
 

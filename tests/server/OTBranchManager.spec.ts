@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { PatchesBranchManager, assertBranchMetadata } from '../../src/server/PatchesBranchManager';
+import { OTBranchManager, assertBranchMetadata } from '../../src/server/OTBranchManager';
 import type { PatchesServer } from '../../src/server/PatchesServer';
-import type { BranchingStoreBackend } from '../../src/server/types';
+import type { BranchingStoreBackend, OTStoreBackend } from '../../src/server/types';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata, VersionMetadata } from '../../src/types';
 
 // Mock the dependencies
@@ -21,30 +21,40 @@ import { createId } from 'crypto-id';
 import { createChange } from '../../src/data/change';
 import { createVersionMetadata } from '../../src/data/version';
 
-describe('PatchesBranchManager', () => {
-  let branchManager: PatchesBranchManager;
-  let mockStore: BranchingStoreBackend;
+// OTBranchManager requires a store that implements both OTStoreBackend and BranchingStoreBackend
+type OTBranchStore = OTStoreBackend & BranchingStoreBackend;
+
+describe('OTBranchManager', () => {
+  let branchManager: OTBranchManager;
+  let mockStore: OTBranchStore;
   let mockServer: PatchesServer;
 
   beforeEach(() => {
     mockStore = {
+      // BranchingStoreBackend methods
       listBranches: vi.fn(),
       loadBranch: vi.fn(),
       createBranch: vi.fn(),
       updateBranch: vi.fn(),
+      closeBranch: vi.fn(),
+      // OTStoreBackend methods (extends ServerStoreBackend and VersioningStoreBackend)
+      deleteDoc: vi.fn(),
+      saveChanges: vi.fn(),
+      listChanges: vi.fn(),
+      loadVersionChanges: vi.fn(),
+      appendVersionChanges: vi.fn(),
       createVersion: vi.fn(),
       listVersions: vi.fn(),
       loadVersionState: vi.fn(),
-      loadVersionChanges: vi.fn(),
-      listChanges: vi.fn(),
-    } as any;
+      updateVersion: vi.fn(),
+    } as OTBranchStore;
 
     mockServer = {
       getDoc: vi.fn(),
       commitChanges: vi.fn(),
     } as any;
 
-    branchManager = new PatchesBranchManager(mockStore, mockServer);
+    branchManager = new OTBranchManager(mockStore, mockServer);
 
     // Reset all mocks
     vi.clearAllMocks();
@@ -107,9 +117,22 @@ describe('PatchesBranchManager', () => {
       branchName: 'Test Branch',
     };
 
+    // Source document version used by getStateAtRevision
+    const sourceVersion: VersionMetadata = {
+      id: 'source-version',
+      origin: 'main' as const,
+      startedAt: Date.now(),
+      endedAt: Date.now(),
+      endRev: 5,
+      startRev: 0,
+    };
+
     beforeEach(() => {
       vi.mocked(mockStore.loadBranch).mockResolvedValue(null);
-      vi.mocked(mockServer.getDoc).mockResolvedValue({ state: mockState, rev: 5 });
+      // Mock store methods needed by getStateAtRevision
+      vi.mocked(mockStore.listVersions).mockResolvedValue([sourceVersion]);
+      vi.mocked(mockStore.loadVersionState).mockResolvedValue(mockState);
+      vi.mocked(mockStore.listChanges).mockResolvedValue([]);
       vi.mocked(createId).mockReturnValue('generated-id');
       vi.mocked(createVersionMetadata).mockReturnValue(mockVersion);
       vi.mocked(mockStore.createVersion).mockResolvedValue();
@@ -125,7 +148,8 @@ describe('PatchesBranchManager', () => {
       const result = await branchManager.createBranch('doc1', 5, metadata);
 
       expect(mockStore.loadBranch).toHaveBeenCalledWith('doc1');
-      expect(mockServer.getDoc).toHaveBeenCalledWith('doc1', 5);
+      // getStateAtRevision calls listVersions and loadVersionState
+      expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', expect.objectContaining({ orderBy: 'endRev' }));
       expect(createVersionMetadata).toHaveBeenCalledWith({
         origin: 'main',
         startedAt: expect.any(Number),
@@ -179,7 +203,7 @@ describe('PatchesBranchManager', () => {
     });
 
     it('should handle state retrieval errors', async () => {
-      vi.mocked(mockServer.getDoc).mockRejectedValue(new Error('State not found'));
+      vi.mocked(mockStore.listVersions).mockRejectedValue(new Error('State not found'));
 
       await expect(branchManager.createBranch('doc1', 5)).rejects.toThrow('State not found');
     });

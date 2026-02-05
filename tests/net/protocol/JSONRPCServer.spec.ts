@@ -67,7 +67,7 @@ describe('JSONRPCServer', () => {
 
       const typedHandler = vi.fn().mockResolvedValue({ success: true, id: 'test123' });
 
-      server.registerMethod<TestParams, TestResult>('typedMethod', typedHandler);
+      server.registerMethod<TestResult>('typedMethod', typedHandler);
 
       // Registration should succeed without type errors
       expect(true).toBe(true);
@@ -682,7 +682,7 @@ describe('JSONRPCServer', () => {
 
       const typedHandler = vi.fn().mockResolvedValue({ id: 'user123', created: true });
 
-      server.registerMethod<CreateUserParams, CreateUserResult>('createUser', typedHandler);
+      server.registerMethod<CreateUserResult>('createUser', typedHandler);
 
       const request: JsonRpcRequest = {
         jsonrpc: '2.0',

@@ -9,7 +9,7 @@
  * ```typescript
  * import { compressedSizeBase64 } from '@dabble/patches/compression';
  *
- * new PatchesDoc(state, {}, {
+ * new OTDoc(state, {}, {
  *   sizeCalculator: compressedSizeBase64,
  *   maxStorageBytes: 1_000_000
  * });

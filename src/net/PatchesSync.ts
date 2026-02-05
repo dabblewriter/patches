@@ -1,9 +1,9 @@
 import { isEqual } from '@dabble/delta';
-import { applyCommittedChanges } from '../algorithms/client/applyCommittedChanges.js';
-import { collapsePendingChanges } from '../algorithms/client/collapsePendingChanges.js';
 import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/shared/changeBatching.js';
+import { BaseDoc } from '../client/BaseDoc.js';
 import { Patches } from '../client/Patches.js';
-import type { PatchesStore, TrackedDoc } from '../client/PatchesStore.js';
+import type { TrackedDoc } from '../client/PatchesStore.js';
+import type { ClientStrategy, StrategyName } from '../client/ClientStrategy.js';
 import { signal } from '../event-signal.js';
 import type { Change, SyncingState } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
@@ -32,15 +32,21 @@ export interface PatchesSyncOptions {
 /**
  * Handles WebSocket connection, document subscriptions, and syncing logic between
  * the Patches instance and the server.
+ *
+ * PatchesSync is strategy-agnostic. It delegates to strategy methods for:
+ * - Getting pending changes to send
+ * - Applying server changes
+ * - Confirming sent changes
  */
 export class PatchesSync {
   protected ws: PatchesWebSocket;
   protected patches: Patches;
-  protected store: PatchesStore;
   protected maxPayloadBytes?: number;
   protected maxStorageBytes?: number;
   protected sizeCalculator?: SizeCalculator;
   protected trackedDocs: Set<string>;
+  /** Maps docId to the strategy name used for that doc */
+  protected docStrategies: Map<string, StrategyName> = new Map();
   protected _state: PatchesSyncState = { online: false, connected: false, syncing: null };
 
   /**
@@ -63,7 +69,6 @@ export class PatchesSync {
     protected options?: PatchesSyncOptions
   ) {
     this.patches = patches;
-    this.store = patches.store;
     // Use options if provided, otherwise fall back to patches.docOptions
     this.maxPayloadBytes = options?.maxPayloadBytes;
     this.maxStorageBytes = options?.maxStorageBytes ?? patches.docOptions?.maxStorageBytes;
@@ -83,6 +88,24 @@ export class PatchesSync {
     patches.onUntrackDocs(this._handleDocsUntracked.bind(this));
     patches.onDeleteDoc(this._handleDocDeleted.bind(this));
     patches.onChange(this._handleDocChange.bind(this));
+  }
+
+  /**
+   * Gets the strategy for a document. Uses the open doc's strategy if available,
+   * otherwise falls back to the default strategy.
+   */
+  protected _getStrategy(docId: string): ClientStrategy {
+    // First check if doc is open (Patches knows its strategy)
+    const docStrategy = this.patches.getDocStrategy(docId);
+    if (docStrategy) return docStrategy;
+
+    // Fall back to cached strategy name or default
+    const strategyName = this.docStrategies.get(docId) ?? this.patches.defaultStrategy;
+    const strategy = this.patches.strategies[strategyName];
+    if (!strategy) {
+      throw new Error(`Strategy '${strategyName}' not found for doc ${docId}`);
+    }
+    return strategy;
   }
 
   /**
@@ -160,7 +183,12 @@ export class PatchesSync {
     this.updateState({ syncing: 'updating' });
 
     try {
-      const tracked = await this.store.listDocs(true); // Include deleted docs
+      // Get tracked docs from the default strategy (primary store)
+      const defaultStrategy = this.patches.strategies[this.patches.defaultStrategy];
+      if (!defaultStrategy) {
+        throw new Error('Default strategy not found');
+      }
+      const tracked = await defaultStrategy.listDocs(true); // Include deleted docs
       const activeDocs = tracked.filter(t => !t.deleted);
       const deletedDocs = tracked.filter(t => t.deleted);
 
@@ -191,7 +219,8 @@ export class PatchesSync {
           console.info(`Attempting server delete for tombstoned doc: ${docId}`);
           await this.ws.deleteDoc(docId);
           // If server delete succeeds, remove tombstone and all data locally
-          await this.store.confirmDeleteDoc(docId);
+          const strategy = this._getStrategy(docId);
+          await strategy.confirmDeleteDoc(docId);
           console.info(`Successfully deleted and untracked doc: ${docId}`);
         } catch (err) {
           // If server delete fails (e.g., offline, already deleted), keep tombstone for retry
@@ -220,31 +249,40 @@ export class PatchesSync {
     if (!this.state.connected) return;
 
     const doc = this.patches.getOpenDoc(docId);
-    if (doc) {
-      doc.updateSyncing('updating');
+    const strategy = this._getStrategy(docId);
+
+    // Cast to BaseDoc for internal methods (updateSyncing, import)
+    const baseDoc = doc as BaseDoc | undefined;
+
+    if (baseDoc) {
+      baseDoc.updateSyncing('updating');
     }
     try {
-      const pending = await this.store.getPendingChanges(docId);
+      // Use strategy to get pending changes to send
+      const pending = await strategy.getPendingToSend(docId);
 
-      if (pending.length > 0) {
+      if (pending && pending.length > 0) {
         await this.flushDoc(docId, pending);
       } else {
-        const committedRev = await this.store.getCommittedRev(docId);
+        const committedRev = await strategy.getCommittedRev(docId);
         if (committedRev) {
           const serverChanges = await this.ws.getChangesSince(docId, committedRev);
           if (serverChanges.length > 0) {
             await this._applyServerChangesToDoc(docId, serverChanges);
           }
         } else {
+          // No committed rev means this is a new doc - fetch from server
           const snapshot = await this.ws.getDoc(docId);
-          await this.store.saveDoc(docId, snapshot);
-          if (doc) {
-            doc.import({ ...snapshot, changes: [] });
+          // Save via strategy's store
+          await strategy.store.saveDoc(docId, snapshot);
+          // Import into doc if open (use BaseDoc.import)
+          if (baseDoc) {
+            baseDoc.import({ ...snapshot, changes: [] });
           }
         }
       }
-      if (doc) {
-        doc.updateSyncing(null);
+      if (baseDoc) {
+        baseDoc.updateSyncing(null);
       }
     } catch (err) {
       // Handle DOC_DELETED error (document was deleted while we were offline)
@@ -254,8 +292,8 @@ export class PatchesSync {
       }
       console.error(`Error syncing doc ${docId}:`, err);
       this.onError.emit(err as Error, { docId });
-      if (doc) {
-        doc.updateSyncing(err instanceof Error ? err : new Error(String(err)));
+      if (baseDoc) {
+        baseDoc.updateSyncing(err instanceof Error ? err : new Error(String(err)));
       }
     }
   }
@@ -273,22 +311,14 @@ export class PatchesSync {
       throw new Error('Not connected to server');
     }
 
+    const strategy = this._getStrategy(docId);
+
     try {
-      if (!pending) pending = await this.store.getPendingChanges(docId);
+      if (!pending) {
+        pending = (await strategy.getPendingToSend(docId)) ?? [];
+      }
       if (!pending.length) {
         return; // Nothing to flush
-      }
-
-      // Collapse redundant pending changes before sending to reduce network traffic.
-      // Only collapse if the store supports submission bookmarking - without it, we can't
-      // safely protect partially-submitted changes from being collapsed.
-      if (this.store.getLastAttemptedSubmissionRev && this.store.setLastAttemptedSubmissionRev) {
-        const afterRev = await this.store.getLastAttemptedSubmissionRev(docId);
-        pending = collapsePendingChanges(pending, afterRev);
-
-        if (!pending.length) {
-          return; // All changes were collapsed away (unlikely but possible)
-        }
       }
 
       const batches = breakChangesIntoBatches(pending, {
@@ -302,19 +332,16 @@ export class PatchesSync {
           throw new Error('Disconnected during flush');
         }
 
-        // Mark the last rev in this batch as attempted before sending (if store supports it)
-        if (this.store.setLastAttemptedSubmissionRev) {
-          const lastRevInBatch = batch[batch.length - 1].rev;
-          await this.store.setLastAttemptedSubmissionRev(docId, lastRevInBatch);
-        }
-
         const committed = await this.ws.commitChanges(docId, batch);
 
-        // Apply the committed changes using the sync algorithm
+        // Apply the committed changes via strategy
         await this._applyServerChangesToDoc(docId, committed);
 
+        // Confirm the sent changes
+        await strategy.confirmSent(docId, batch);
+
         // Fetch remaining pending for next batch or check completion
-        pending = await this.store.getPendingChanges(docId);
+        pending = (await strategy.getPendingToSend(docId)) ?? [];
       }
     } catch (err) {
       if (this._isDocDeletedError(err)) {
@@ -343,43 +370,15 @@ export class PatchesSync {
   }
 
   /**
-   * Applies server changes to a document using the centralized sync algorithm.
-   * This ensures consistent OT behavior regardless of whether the doc is open in memory.
+   * Applies server changes to a document using the strategy.
+   * The strategy handles all algorithm-specific logic (OT rebasing, LWW merging, etc).
    */
-  protected async _applyServerChangesToDoc(docId: string, serverChanges: Change[]): Promise<Change[]> {
-    // 1. Get current document snapshot from store
-    const currentSnapshot = await this.store.getDoc(docId);
-    if (!currentSnapshot) {
-      console.warn(`Cannot apply server changes to non-existent doc: ${docId}`);
-      return [];
-    }
+  protected async _applyServerChangesToDoc(docId: string, serverChanges: Change[]): Promise<void> {
     const doc = this.patches.getOpenDoc(docId);
-    if (doc) {
-      // Ensure we have all the changes, stored and in-memory (newly created but not yet persisted)
-      const inMemoryPendingChanges = doc?.getPendingChanges();
-      const latestRev = currentSnapshot.changes[currentSnapshot.changes.length - 1]?.rev || currentSnapshot.rev;
-      const newChanges = inMemoryPendingChanges.filter(change => change.rev > latestRev);
-      currentSnapshot.changes.push(...newChanges);
-    }
+    const strategy = this._getStrategy(docId);
 
-    // 2. Use the pure algorithm to calculate the new state
-    const { state, rev, changes: rebasedPendingChanges } = applyCommittedChanges(currentSnapshot, serverChanges);
-
-    // 3. If the doc is open in memory, update it with the new state
-    if (doc) {
-      if (doc.committedRev === serverChanges[0].rev - 1) {
-        // We can update the doc's snapshot
-        doc.applyCommittedChanges(serverChanges, rebasedPendingChanges);
-      } else {
-        // We have to do a full state update
-        doc.import({ state, rev, changes: rebasedPendingChanges });
-      }
-    }
-
-    // 4. Save changes to store atomically
-    await this.store.applyServerChanges(docId, serverChanges, rebasedPendingChanges);
-
-    return rebasedPendingChanges;
+    // Delegate to strategy - it handles store updates and doc updates
+    await strategy.applyServerChanges(docId, serverChanges, doc);
   }
 
   /**
@@ -390,8 +389,9 @@ export class PatchesSync {
     // Attempt server delete if online
     if (this.state.connected) {
       try {
+        const strategy = this._getStrategy(docId);
         await this.ws.deleteDoc(docId);
-        await this.store.confirmDeleteDoc(docId);
+        await strategy.confirmDeleteDoc(docId);
       } catch (err) {
         console.error(`Server delete failed for doc ${docId}, will retry on reconnect/resync.`, err);
         this.onError.emit(err as Error, { docId });
@@ -463,7 +463,7 @@ export class PatchesSync {
     }
   }
 
-  protected async _handleDocChange(docId: string, _changes: Change[]): Promise<void> {
+  protected async _handleDocChange(docId: string): Promise<void> {
     if (!this.state.connected) return;
     if (!this.trackedDocs.has(docId)) return;
     await this.flushDoc(docId);
@@ -474,8 +474,10 @@ export class PatchesSync {
    * Cleans up local state and notifies the application with any pending changes that were lost.
    */
   protected async _handleRemoteDocDeleted(docId: string): Promise<void> {
+    const strategy = this._getStrategy(docId);
+
     // Get pending changes before cleanup so app can handle them
-    const pendingChanges = await this.store.getPendingChanges(docId);
+    const pendingChanges = (await strategy.getPendingToSend(docId)) ?? [];
 
     // Close doc if open
     const doc = this.patches.getOpenDoc(docId);
@@ -485,7 +487,7 @@ export class PatchesSync {
 
     // Clean up tracking and local storage
     this.trackedDocs.delete(docId);
-    await this.store.confirmDeleteDoc(docId);
+    await strategy.confirmDeleteDoc(docId);
 
     // Notify application (with any pending changes that were lost)
     await this.onRemoteDocDeleted.emit(docId, pendingChanges);

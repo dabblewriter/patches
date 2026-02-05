@@ -73,18 +73,8 @@ describe('OTServer', () => {
 
       const result = await server.getDoc('doc1');
 
-      expect(getStateAtRevision).toHaveBeenCalledWith(mockStore, 'doc1', undefined);
+      expect(getStateAtRevision).toHaveBeenCalledWith(mockStore, 'doc1');
       expect(result).toEqual({ state: mockState, rev: 5 });
-    });
-
-    it('should get document state at specific revision', async () => {
-      const mockState = { content: 'test' };
-      vi.mocked(getStateAtRevision).mockResolvedValue({ state: mockState, rev: 3 });
-
-      const result = await server.getDoc('doc1', 3);
-
-      expect(getStateAtRevision).toHaveBeenCalledWith(mockStore, 'doc1', 3);
-      expect(result).toEqual({ state: mockState, rev: 3 });
     });
   });
 

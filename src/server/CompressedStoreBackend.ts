@@ -8,7 +8,12 @@ import type {
   ListVersionsOptions,
   VersionMetadata,
 } from '../types.js';
-import type { PatchesStoreBackend } from './types.js';
+import type { OTStoreBackend, TombstoneStoreBackend } from './types.js';
+
+/**
+ * Store backend type that supports OT operations and optionally tombstones.
+ */
+type CompressibleStore = OTStoreBackend & Partial<TombstoneStoreBackend>;
 
 /**
  * A Change object where ops may be compressed.
@@ -28,9 +33,9 @@ interface StoredChange extends Omit<Change, 'ops'> {
  * import { base64Compressor } from '@dabble/patches/compression';
  * const backend = new CompressedStoreBackend(myStore, base64Compressor);
  */
-export class CompressedStoreBackend implements PatchesStoreBackend {
+export class CompressedStoreBackend implements OTStoreBackend, Partial<TombstoneStoreBackend> {
   constructor(
-    private readonly store: PatchesStoreBackend,
+    private readonly store: CompressibleStore,
     private readonly compressor: OpsCompressor
   ) {}
 
@@ -103,14 +108,6 @@ export class CompressedStoreBackend implements PatchesStoreBackend {
 
   // === Pass-through Operations (no compression needed) ===
 
-  get loadLastVersionState(): PatchesStoreBackend['loadLastVersionState'] {
-    return this.store.loadLastVersionState?.bind(this.store);
-  }
-
-  get saveLastVersionState(): PatchesStoreBackend['saveLastVersionState'] {
-    return this.store.saveLastVersionState?.bind(this.store);
-  }
-
   async updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void> {
     return this.store.updateVersion(docId, versionId, metadata);
   }
@@ -128,14 +125,14 @@ export class CompressedStoreBackend implements PatchesStoreBackend {
   }
 
   async createTombstone(tombstone: DocumentTombstone): Promise<void> {
-    return this.store.createTombstone(tombstone);
+    return this.store.createTombstone?.(tombstone);
   }
 
   async getTombstone(docId: string): Promise<DocumentTombstone | undefined> {
-    return this.store.getTombstone(docId);
+    return this.store.getTombstone?.(docId);
   }
 
   async removeTombstone(docId: string): Promise<void> {
-    return this.store.removeTombstone(docId);
+    return this.store.removeTombstone?.(docId);
   }
 }

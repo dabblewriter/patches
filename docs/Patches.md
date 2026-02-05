@@ -14,14 +14,17 @@ Meet `Patches` - the brains of your collaborative app operation! This class is w
 
 ## What Is It?
 
-`Patches` is like the conductor of your collaborative symphony. After the refactor, it's focused on coordination rather than doing the heavy lifting itself. It:
+`Patches` is like the conductor of your collaborative symphony. It's focused on coordination rather than doing the heavy lifting itself. It:
 
 - **Document Management**: Opens, tracks, and closes your collaborative docs
 - **Event Coordination**: Listens to document events and re-emits them for your app
-- **Storage Interface**: Manages persistence through your chosen PatchesStore
+- **Storage Interface**: Manages persistence through your chosen store
+- **Strategy Support**: Works with OT (default) or LWW sync strategies
 - **Public API**: Provides the clean interface your app uses
 
 Here's the key: You create **one** `Patches` instance for your whole app, then use it to open as many documents as you need. Think of it as your document orchestrator and public API.
+
+**Quick note on strategies:** By default, Patches uses OT (Operational Transformation) which is perfect for collaborative editing. If you're building something simpler like user settings or preferences, LWW (Last-Write-Wins) might be a better fit. Check out [persist.md](./persist.md) for the full scoop on when to use which.
 
 ## Getting Started
 
@@ -292,7 +295,7 @@ The `Patches` class is just one piece of the puzzle. Check out these related com
 
 - [`PatchesDoc`](./PatchesDoc.md) - Individual document instances that `Patches` creates for you
 - [`PatchesSync`](./PatchesSync.md) - Real-time synchronization coordinator with a server
-- [`PatchesStore`](./persist.md) - The interface for document persistence
+- [`PatchesStore`](./persist.md) - The interface for document persistence (OT and LWW stores)
 - [`OTServer`](./OTServer.md) - The server-side component that handles collaboration
 - [`Algorithms`](./algorithms.md) - The pure functions that handle OT and change processing
 

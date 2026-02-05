@@ -7,7 +7,6 @@ import type {
   PatchesState,
 } from '../types.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
-import type { PatchesStoreBackend } from './types.js';
 
 /**
  * Result of committing changes to a document.
@@ -29,16 +28,12 @@ export interface CommitResult {
  * and receives the document ID as the first parameter.
  */
 export interface PatchesServer {
-  /** The underlying store backend. */
-  readonly store: PatchesStoreBackend;
-
   /**
    * Get the current state of a document.
    * @param docId - The document ID.
-   * @param atRev - Optional revision to get state at (for OT servers).
    * @returns The document state and revision, or `{ state: {}, rev: 0 }` if not found.
    */
-  getDoc(docId: string, atRev?: number): Promise<PatchesState>;
+  getDoc(docId: string): Promise<PatchesState>;
 
   /**
    * Get changes that occurred after a specific revision.

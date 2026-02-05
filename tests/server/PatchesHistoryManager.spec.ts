@@ -36,11 +36,10 @@ describe('PatchesHistoryManager', () => {
     } as any;
 
     mockServer = {
-      store: mockStore,
       captureCurrentVersion: vi.fn(),
     } as any;
 
-    historyManager = new PatchesHistoryManager(mockServer);
+    historyManager = new PatchesHistoryManager(mockServer, mockStore);
 
     // Reset all mocks
     vi.clearAllMocks();

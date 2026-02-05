@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createRoot, type JSX } from 'solid-js';
 import { Patches } from '../../src/client/Patches.js';
-import { InMemoryStore } from '../../src/client/InMemoryStore.js';
+import { createOTPatches } from '../../src/client/factories.js';
 import { PatchesProvider, usePatchesContext } from '../../src/solid/context.js';
 
 describe('Solid Context', () => {
@@ -9,7 +9,7 @@ describe('Solid Context', () => {
   let mockSync: any;
 
   beforeEach(() => {
-    patches = new Patches({ store: new InMemoryStore() });
+    patches = createOTPatches();
     mockSync = { state: { connected: false, syncing: null, online: true } };
   });
 

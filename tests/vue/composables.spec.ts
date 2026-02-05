@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createApp, defineComponent, h, nextTick, ref } from 'vue';
 import { Patches } from '../../src/client/Patches.js';
-import { InMemoryStore } from '../../src/client/InMemoryStore.js';
+import { createOTPatches } from '../../src/client/factories.js';
 import { providePatchesContext } from '../../src/vue/provider.js';
 import { usePatchesDoc, usePatchesSync, providePatchesDoc, useCurrentDoc } from '../../src/vue/composables.js';
 import { getDocManager } from '../../src/vue/doc-manager.js';
@@ -10,7 +10,7 @@ describe('Vue Composables', () => {
   let patches: Patches;
 
   beforeEach(() => {
-    patches = new Patches({ store: new InMemoryStore() });
+    patches = createOTPatches();
   });
 
   afterEach(async () => {

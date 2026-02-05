@@ -17,7 +17,8 @@ import type {
   PatchesState,
 } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
-import type { PatchesStoreBackend } from './types.js';
+import type { OTStoreBackend } from './types.js';
+import { createTombstoneIfSupported, removeTombstoneIfExists } from './tombstone.js';
 import { assertVersionMetadata } from './utils.js';
 export type { CommitChangesOptions } from '../algorithms/server/commitChanges.js';
 
@@ -66,7 +67,7 @@ export class OTServer implements PatchesServer {
 
   private readonly sessionTimeoutMillis: number;
   private readonly maxStorageBytes?: number;
-  readonly store: PatchesStoreBackend;
+  readonly store: OTStoreBackend;
 
   /** Notifies listeners whenever a batch of changes is *successfully* committed. */
   public readonly onChangesCommitted = signal<(docId: string, changes: Change[], originClientId?: string) => void>();
@@ -74,20 +75,19 @@ export class OTServer implements PatchesServer {
   /** Notifies listeners when a document is deleted. */
   public readonly onDocDeleted = signal<(docId: string, options?: DeleteDocOptions, originClientId?: string) => void>();
 
-  constructor(store: PatchesStoreBackend, options: OTServerOptions = {}) {
+  constructor(store: OTStoreBackend, options: OTServerOptions = {}) {
     this.sessionTimeoutMillis = (options.sessionTimeoutMinutes ?? 30) * 60 * 1000;
     this.maxStorageBytes = options.maxStorageBytes;
     this.store = store;
   }
 
   /**
-   * Get the state of a document at a specific revision (or the latest state if no revision is provided).
+   * Get the current state of a document.
    * @param docId - The ID of the document.
-   * @param rev - The revision number.
-   * @returns The state of the document at the specified revision.
+   * @returns The current state of the document.
    */
-  async getDoc(docId: string, atRev?: number): Promise<PatchesState> {
-    return getStateAtRevision(this.store, docId, atRev);
+  async getDoc(docId: string): Promise<PatchesState> {
+    return getStateAtRevision(this.store, docId);
   }
 
   /**
@@ -171,18 +171,8 @@ export class OTServer implements PatchesServer {
    */
   async deleteDoc(docId: string, options?: DeleteDocOptions): Promise<void> {
     const clientId = getClientId();
-
-    // Create tombstone if store supports it (unless skipped)
-    if (this.store.createTombstone && !options?.skipTombstone) {
-      const { rev: lastRev } = await this.getDoc(docId);
-      await this.store.createTombstone({
-        docId,
-        deletedAt: Date.now(),
-        lastRev,
-        deletedByClientId: clientId,
-      });
-    }
-
+    const { rev } = await this.getDoc(docId);
+    await createTombstoneIfSupported(this.store, docId, rev, clientId, options?.skipTombstone);
     await this.store.deleteDoc(docId);
     await this.onDocDeleted.emit(docId, options, clientId);
   }
@@ -193,17 +183,7 @@ export class OTServer implements PatchesServer {
    * @returns True if tombstone was found and removed, false if no tombstone existed.
    */
   async undeleteDoc(docId: string): Promise<boolean> {
-    if (!this.store.removeTombstone) {
-      return false;
-    }
-
-    const tombstone = await this.store.getTombstone?.(docId);
-    if (!tombstone) {
-      return false;
-    }
-
-    await this.store.removeTombstone(docId);
-    return true;
+    return removeTombstoneIfExists(this.store, docId);
   }
 
   // === Version Operations ===

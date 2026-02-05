@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { IndexedDBStore } from '../../src/client/IndexedDBStore';
+import { OTIndexedDBStore } from '../../src/client/OTIndexedDBStore';
 import type { Change, PatchesState } from '../../src/types';
 
 // Mock the dependencies
@@ -36,8 +36,8 @@ const createMockIDBStore = () => {
   };
 };
 
-describe('IndexedDBStore', () => {
-  let store: IndexedDBStore;
+describe('OTIndexedDBStore', () => {
+  let store: OTIndexedDBStore;
   let mockStores: Map<string, any>;
 
   const createChange = (id: string, rev: number, baseRev = rev - 1): Change => ({
@@ -110,7 +110,7 @@ describe('IndexedDBStore', () => {
     );
 
     // Mock the transaction method to return our mocked stores
-    store = new IndexedDBStore('test-db');
+    store = new OTIndexedDBStore('test-db');
 
     // Override the private transaction method
     (store as any).transaction = vi.fn().mockImplementation((storeNames: string[]) => {
@@ -127,13 +127,13 @@ describe('IndexedDBStore', () => {
 
   describe('constructor and initialization', () => {
     it('should create store without database name', () => {
-      const emptyStore = new IndexedDBStore();
-      expect(emptyStore).toBeInstanceOf(IndexedDBStore);
+      const emptyStore = new OTIndexedDBStore();
+      expect(emptyStore).toBeInstanceOf(OTIndexedDBStore);
     });
 
     it('should create store with database name', () => {
-      const namedStore = new IndexedDBStore('test-db');
-      expect(namedStore).toBeInstanceOf(IndexedDBStore);
+      const namedStore = new OTIndexedDBStore('test-db');
+      expect(namedStore).toBeInstanceOf(OTIndexedDBStore);
     });
   });
 
@@ -174,7 +174,7 @@ describe('IndexedDBStore', () => {
     });
 
     it('should handle missing database name', async () => {
-      const emptyStore = new IndexedDBStore();
+      const emptyStore = new OTIndexedDBStore();
       await emptyStore.deleteDB();
       // Test passes if no errors thrown
     });

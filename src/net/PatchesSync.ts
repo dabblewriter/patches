@@ -3,7 +3,7 @@ import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/shar
 import { BaseDoc } from '../client/BaseDoc.js';
 import { Patches } from '../client/Patches.js';
 import type { TrackedDoc } from '../client/PatchesStore.js';
-import type { ClientStrategy, StrategyName } from '../client/ClientStrategy.js';
+import type { AlgorithmName, ClientAlgorithm } from '../client/ClientAlgorithm.js';
 import { signal } from '../event-signal.js';
 import type { Change, SyncingState } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
@@ -33,7 +33,7 @@ export interface PatchesSyncOptions {
  * Handles WebSocket connection, document subscriptions, and syncing logic between
  * the Patches instance and the server.
  *
- * PatchesSync is strategy-agnostic. It delegates to strategy methods for:
+ * PatchesSync is algorithm-agnostic. It delegates to algorithm methods for:
  * - Getting pending changes to send
  * - Applying server changes
  * - Confirming sent changes
@@ -45,8 +45,8 @@ export class PatchesSync {
   protected maxStorageBytes?: number;
   protected sizeCalculator?: SizeCalculator;
   protected trackedDocs: Set<string>;
-  /** Maps docId to the strategy name used for that doc */
-  protected docStrategies: Map<string, StrategyName> = new Map();
+  /** Maps docId to the algorithm name used for that doc */
+  protected docAlgorithms: Map<string, AlgorithmName> = new Map();
   protected _state: PatchesSyncState = { online: false, connected: false, syncing: null };
 
   /**
@@ -91,21 +91,21 @@ export class PatchesSync {
   }
 
   /**
-   * Gets the strategy for a document. Uses the open doc's strategy if available,
-   * otherwise falls back to the default strategy.
+   * Gets the algorithm for a document. Uses the open doc's algorithm if available,
+   * otherwise falls back to the default algorithm.
    */
-  protected _getStrategy(docId: string): ClientStrategy {
-    // First check if doc is open (Patches knows its strategy)
-    const docStrategy = this.patches.getDocStrategy(docId);
-    if (docStrategy) return docStrategy;
+  protected _getAlgorithm(docId: string): ClientAlgorithm {
+    // First check if doc is open (Patches knows its algorithm)
+    const docAlgorithm = this.patches.getDocAlgorithm(docId);
+    if (docAlgorithm) return docAlgorithm;
 
-    // Fall back to cached strategy name or default
-    const strategyName = this.docStrategies.get(docId) ?? this.patches.defaultStrategy;
-    const strategy = this.patches.strategies[strategyName];
-    if (!strategy) {
-      throw new Error(`Strategy '${strategyName}' not found for doc ${docId}`);
+    // Fall back to cached algorithm name or default
+    const algorithmName = this.docAlgorithms.get(docId) ?? this.patches.defaultAlgorithm;
+    const algorithm = this.patches.algorithms[algorithmName];
+    if (!algorithm) {
+      throw new Error(`Algorithm '${algorithmName}' not found for doc ${docId}`);
     }
-    return strategy;
+    return algorithm;
   }
 
   /**
@@ -183,12 +183,12 @@ export class PatchesSync {
     this.updateState({ syncing: 'updating' });
 
     try {
-      // Get tracked docs from the default strategy (primary store)
-      const defaultStrategy = this.patches.strategies[this.patches.defaultStrategy];
-      if (!defaultStrategy) {
-        throw new Error('Default strategy not found');
+      // Get tracked docs from the default algorithm (primary store)
+      const defaultAlgorithm = this.patches.algorithms[this.patches.defaultAlgorithm];
+      if (!defaultAlgorithm) {
+        throw new Error('Default algorithm not found');
       }
-      const tracked = await defaultStrategy.listDocs(true); // Include deleted docs
+      const tracked = await defaultAlgorithm.listDocs(true); // Include deleted docs
       const activeDocs = tracked.filter(t => !t.deleted);
       const deletedDocs = tracked.filter(t => t.deleted);
 
@@ -219,8 +219,8 @@ export class PatchesSync {
           console.info(`Attempting server delete for tombstoned doc: ${docId}`);
           await this.ws.deleteDoc(docId);
           // If server delete succeeds, remove tombstone and all data locally
-          const strategy = this._getStrategy(docId);
-          await strategy.confirmDeleteDoc(docId);
+          const algorithm = this._getAlgorithm(docId);
+          await algorithm.confirmDeleteDoc(docId);
           console.info(`Successfully deleted and untracked doc: ${docId}`);
         } catch (err) {
           // If server delete fails (e.g., offline, already deleted), keep tombstone for retry
@@ -249,7 +249,7 @@ export class PatchesSync {
     if (!this.state.connected) return;
 
     const doc = this.patches.getOpenDoc(docId);
-    const strategy = this._getStrategy(docId);
+    const algorithm = this._getAlgorithm(docId);
 
     // Cast to BaseDoc for internal methods (updateSyncing, import)
     const baseDoc = doc as BaseDoc | undefined;
@@ -258,13 +258,13 @@ export class PatchesSync {
       baseDoc.updateSyncing('updating');
     }
     try {
-      // Use strategy to get pending changes to send
-      const pending = await strategy.getPendingToSend(docId);
+      // Use algorithm to get pending changes to send
+      const pending = await algorithm.getPendingToSend(docId);
 
       if (pending && pending.length > 0) {
         await this.flushDoc(docId, pending);
       } else {
-        const committedRev = await strategy.getCommittedRev(docId);
+        const committedRev = await algorithm.getCommittedRev(docId);
         if (committedRev) {
           const serverChanges = await this.ws.getChangesSince(docId, committedRev);
           if (serverChanges.length > 0) {
@@ -273,8 +273,8 @@ export class PatchesSync {
         } else {
           // No committed rev means this is a new doc - fetch from server
           const snapshot = await this.ws.getDoc(docId);
-          // Save via strategy's store
-          await strategy.store.saveDoc(docId, snapshot);
+          // Save via algorithm's store
+          await algorithm.store.saveDoc(docId, snapshot);
           // Import into doc if open (use BaseDoc.import)
           if (baseDoc) {
             baseDoc.import({ ...snapshot, changes: [] });
@@ -311,11 +311,11 @@ export class PatchesSync {
       throw new Error('Not connected to server');
     }
 
-    const strategy = this._getStrategy(docId);
+    const algorithm = this._getAlgorithm(docId);
 
     try {
       if (!pending) {
-        pending = (await strategy.getPendingToSend(docId)) ?? [];
+        pending = (await algorithm.getPendingToSend(docId)) ?? [];
       }
       if (!pending.length) {
         return; // Nothing to flush
@@ -334,14 +334,14 @@ export class PatchesSync {
 
         const committed = await this.ws.commitChanges(docId, batch);
 
-        // Apply the committed changes via strategy
+        // Apply the committed changes via algorithm
         await this._applyServerChangesToDoc(docId, committed);
 
         // Confirm the sent changes
-        await strategy.confirmSent(docId, batch);
+        await algorithm.confirmSent(docId, batch);
 
         // Fetch remaining pending for next batch or check completion
-        pending = (await strategy.getPendingToSend(docId)) ?? [];
+        pending = (await algorithm.getPendingToSend(docId)) ?? [];
       }
     } catch (err) {
       if (this._isDocDeletedError(err)) {
@@ -370,15 +370,15 @@ export class PatchesSync {
   }
 
   /**
-   * Applies server changes to a document using the strategy.
-   * The strategy handles all algorithm-specific logic (OT rebasing, LWW merging, etc).
+   * Applies server changes to a document using the algorithm.
+   * The algorithm handles all algorithm-specific logic (OT rebasing, LWW merging, etc).
    */
   protected async _applyServerChangesToDoc(docId: string, serverChanges: Change[]): Promise<void> {
     const doc = this.patches.getOpenDoc(docId);
-    const strategy = this._getStrategy(docId);
+    const algorithm = this._getAlgorithm(docId);
 
-    // Delegate to strategy - it handles store updates and doc updates
-    await strategy.applyServerChanges(docId, serverChanges, doc);
+    // Delegate to algorithm - it handles store updates and doc updates
+    await algorithm.applyServerChanges(docId, serverChanges, doc);
   }
 
   /**
@@ -389,9 +389,9 @@ export class PatchesSync {
     // Attempt server delete if online
     if (this.state.connected) {
       try {
-        const strategy = this._getStrategy(docId);
+        const algorithm = this._getAlgorithm(docId);
         await this.ws.deleteDoc(docId);
-        await strategy.confirmDeleteDoc(docId);
+        await algorithm.confirmDeleteDoc(docId);
       } catch (err) {
         console.error(`Server delete failed for doc ${docId}, will retry on reconnect/resync.`, err);
         this.onError.emit(err as Error, { docId });
@@ -474,10 +474,10 @@ export class PatchesSync {
    * Cleans up local state and notifies the application with any pending changes that were lost.
    */
   protected async _handleRemoteDocDeleted(docId: string): Promise<void> {
-    const strategy = this._getStrategy(docId);
+    const algorithm = this._getAlgorithm(docId);
 
     // Get pending changes before cleanup so app can handle them
-    const pendingChanges = (await strategy.getPendingToSend(docId)) ?? [];
+    const pendingChanges = (await algorithm.getPendingToSend(docId)) ?? [];
 
     // Close doc if open
     const doc = this.patches.getOpenDoc(docId);
@@ -487,7 +487,7 @@ export class PatchesSync {
 
     // Clean up tracking and local storage
     this.trackedDocs.delete(docId);
-    await strategy.confirmDeleteDoc(docId);
+    await algorithm.confirmDeleteDoc(docId);
 
     // Notify application (with any pending changes that were lost)
     await this.onRemoteDocDeleted.emit(docId, pendingChanges);

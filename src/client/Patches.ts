@@ -2,18 +2,18 @@ import { type Unsubscriber, signal } from '../event-signal.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change } from '../types.js';
 import { singleInvocation } from '../utils/concurrency.js';
-import type { ClientStrategy, StrategyName } from './ClientStrategy.js';
+import type { AlgorithmName, ClientAlgorithm } from './ClientAlgorithm.js';
 import type { PatchesDoc, PatchesDocOptions } from './PatchesDoc.js';
 
 /**
  * Options for creating a Patches instance.
- * Provides strategies map and optional default strategy.
+ * Provides algorithms map and optional default algorithm.
  */
 export interface PatchesOptions {
-  /** Map of strategy name to strategy instance. Each strategy owns its store. */
-  strategies: Partial<Record<StrategyName, ClientStrategy>>;
-  /** Default strategy to use when opening docs. Must be a key in strategies map. */
-  defaultStrategy?: StrategyName;
+  /** Map of algorithm name to algorithm instance. Each algorithm owns its store. */
+  algorithms: Partial<Record<AlgorithmName, ClientAlgorithm>>;
+  /** Default algorithm to use when opening docs. Must be a key in algorithms map. */
+  defaultAlgorithm?: AlgorithmName;
   /** Initial metadata to attach to changes from this client (merged with per-doc metadata). */
   metadata?: Record<string, any>;
   /** Document-level options to pass to each PatchesDoc instance */
@@ -23,24 +23,24 @@ export interface PatchesOptions {
 // Internal doc management structure
 interface ManagedDoc<T extends object> {
   doc: PatchesDoc<T>;
-  strategy: ClientStrategy;
+  algorithm: ClientAlgorithm;
   unsubscribe: Unsubscriber;
 }
 
 /**
  * Main client-side entry point for the Patches library.
- * Manages document instances (`PatchesDoc`) and coordinates with strategies.
+ * Manages document instances (`PatchesDoc`) and coordinates with algorithms.
  * Can be used standalone or with PatchesSync for network synchronization.
  *
- * Patches owns docs. Strategies own their stores and algorithms.
+ * Patches owns docs. Algorithms own their stores.
  */
 export class Patches {
   protected options: PatchesOptions;
   protected docs: Map<string, ManagedDoc<any>> = new Map();
 
   readonly docOptions: PatchesDocOptions;
-  readonly strategies: Partial<Record<StrategyName, ClientStrategy>>;
-  readonly defaultStrategy: StrategyName;
+  readonly algorithms: Partial<Record<AlgorithmName, ClientAlgorithm>>;
+  readonly defaultAlgorithm: AlgorithmName;
   readonly trackedDocs = new Set<string>();
 
   // Public signals
@@ -54,22 +54,22 @@ export class Patches {
 
   constructor(opts: PatchesOptions) {
     this.options = opts;
-    this.strategies = opts.strategies;
+    this.algorithms = opts.algorithms;
 
-    // Determine default strategy
-    const strategyNames = Object.keys(opts.strategies) as StrategyName[];
-    if (strategyNames.length === 0) {
-      throw new Error('At least one strategy must be provided');
+    // Determine default algorithm
+    const algorithmNames = Object.keys(opts.algorithms) as AlgorithmName[];
+    if (algorithmNames.length === 0) {
+      throw new Error('At least one algorithm must be provided');
     }
-    this.defaultStrategy = opts.defaultStrategy ?? strategyNames[0];
-    if (!opts.strategies[this.defaultStrategy]) {
-      throw new Error(`Default strategy '${this.defaultStrategy}' not found in strategies map`);
+    this.defaultAlgorithm = opts.defaultAlgorithm ?? algorithmNames[0];
+    if (!opts.algorithms[this.defaultAlgorithm]) {
+      throw new Error(`Default algorithm '${this.defaultAlgorithm}' not found in algorithms map`);
     }
 
     this.docOptions = opts.docOptions ?? {};
 
-    // Load tracked docs from the default strategy's store
-    this._getStrategy(this.defaultStrategy)
+    // Load tracked docs from the default algorithm's store
+    this._getAlgorithm(this.defaultAlgorithm)
       .listDocs()
       .then(docs => {
         this.trackDocs(docs.map(({ docId }) => docId));
@@ -77,21 +77,21 @@ export class Patches {
   }
 
   /**
-   * Gets a strategy by name, throwing if not found.
+   * Gets an algorithm by name, throwing if not found.
    */
-  protected _getStrategy(name: StrategyName): ClientStrategy {
-    const strategy = this.strategies[name];
-    if (!strategy) {
-      throw new Error(`Strategy '${name}' not found`);
+  protected _getAlgorithm(name: AlgorithmName): ClientAlgorithm {
+    const algorithm = this.algorithms[name];
+    if (!algorithm) {
+      throw new Error(`Algorithm '${name}' not found`);
     }
-    return strategy;
+    return algorithm;
   }
 
   /**
-   * Gets the strategy for an open document.
+   * Gets the algorithm for an open document.
    */
-  getDocStrategy(docId: string): ClientStrategy | undefined {
-    return this.docs.get(docId)?.strategy;
+  getDocAlgorithm(docId: string): ClientAlgorithm | undefined {
+    return this.docs.get(docId)?.algorithm;
   }
 
   // --- Public API Methods ---
@@ -101,15 +101,15 @@ export class Patches {
    * Tracked docs are kept in sync with the server, even when not open locally.
    * This allows for background syncing and updates of unopened documents.
    * @param docIds - Array of document IDs to track.
-   * @param strategyName - Strategy to use for tracking (defaults to defaultStrategy).
+   * @param algorithmName - Algorithm to use for tracking (defaults to defaultAlgorithm).
    */
-  async trackDocs(docIds: string[], strategyName?: StrategyName): Promise<void> {
+  async trackDocs(docIds: string[], algorithmName?: AlgorithmName): Promise<void> {
     docIds = docIds.filter(id => !this.trackedDocs.has(id));
     if (!docIds.length) return;
     docIds.forEach(this.trackedDocs.add, this.trackedDocs);
     this.onTrackDocs.emit(docIds);
-    const strategy = this._getStrategy(strategyName ?? this.defaultStrategy);
-    await strategy.trackDocs(docIds);
+    const algorithm = this._getAlgorithm(algorithmName ?? this.defaultAlgorithm);
+    await algorithm.trackDocs(docIds);
   }
 
   /**
@@ -128,51 +128,51 @@ export class Patches {
     const closedPromises = docIds.filter(id => this.docs.has(id)).map(id => this.closeDoc(id)); // closeDoc removes from this.docs map
     await Promise.all(closedPromises);
 
-    // Untrack from each doc's strategy
-    // Group by strategy and untrack
-    const byStrategy = new Map<ClientStrategy, string[]>();
+    // Untrack from each doc's algorithm
+    // Group by algorithm and untrack
+    const byAlgorithm = new Map<ClientAlgorithm, string[]>();
     for (const docId of docIds) {
       const managed = this.docs.get(docId);
-      const strategy = managed?.strategy ?? this._getStrategy(this.defaultStrategy);
-      const list = byStrategy.get(strategy) ?? [];
+      const algorithm = managed?.algorithm ?? this._getAlgorithm(this.defaultAlgorithm);
+      const list = byAlgorithm.get(algorithm) ?? [];
       list.push(docId);
-      byStrategy.set(strategy, list);
+      byAlgorithm.set(algorithm, list);
     }
-    await Promise.all([...byStrategy.entries()].map(([strategy, ids]) => strategy.untrackDocs(ids)));
+    await Promise.all([...byAlgorithm.entries()].map(([algorithm, ids]) => algorithm.untrackDocs(ids)));
   }
 
   /**
    * Opens a document by ID, loading its state from the store and setting up change listeners.
    * If the doc is already open, returns the existing instance.
    * @param docId - The document ID to open.
-   * @param opts - Optional metadata and strategy override.
+   * @param opts - Optional metadata and algorithm override.
    * @returns The opened PatchesDoc instance.
    */
   @singleInvocation(true) // ensure a second call to openDoc with the same docId returns the same promise while opening
   async openDoc<T extends object>(
     docId: string,
-    opts: { metadata?: Record<string, any>; strategy?: StrategyName } = {}
+    opts: { metadata?: Record<string, any>; algorithm?: AlgorithmName } = {}
   ): Promise<PatchesDoc<T>> {
     const existing = this.docs.get(docId);
     if (existing) return existing.doc as PatchesDoc<T>;
 
-    // Get the strategy for this doc
-    const strategyName = opts.strategy ?? this.defaultStrategy;
-    const strategy = this._getStrategy(strategyName);
+    // Get the algorithm for this doc
+    const algorithmName = opts.algorithm ?? this.defaultAlgorithm;
+    const algorithm = this._getAlgorithm(algorithmName);
 
     // Ensure the doc is tracked before proceeding
-    await this.trackDocs([docId], strategyName);
+    await this.trackDocs([docId], algorithmName);
 
-    // Load initial state from store via strategy
-    const snapshot = await strategy.loadDoc(docId);
+    // Load initial state from store via algorithm
+    const snapshot = await algorithm.loadDoc(docId);
     const mergedMetadata = { ...this.options.metadata, ...opts.metadata };
 
-    // Create the appropriate doc type via strategy (now takes docId and snapshot)
-    const doc = strategy.createDoc<T>(docId, snapshot);
+    // Create the appropriate doc type via algorithm (now takes docId and snapshot)
+    const doc = algorithm.createDoc<T>(docId, snapshot);
 
-    // Set up local listener -> strategy handles packaging ops
-    const unsubscribe = doc.onChange(ops => this._handleDocChange(docId, ops, doc, strategy, mergedMetadata));
-    this.docs.set(docId, { doc: doc as PatchesDoc<any>, strategy, unsubscribe });
+    // Set up local listener -> algorithm handles packaging ops
+    const unsubscribe = doc.onChange(ops => this._handleDocChange(docId, ops, doc, algorithm, mergedMetadata));
+    this.docs.set(docId, { doc: doc as PatchesDoc<any>, algorithm, unsubscribe });
 
     return doc;
   }
@@ -199,9 +199,9 @@ export class Patches {
    * @param docId - The document ID to delete.
    */
   async deleteDoc(docId: string): Promise<void> {
-    // Get the strategy for this doc (or default)
+    // Get the algorithm for this doc (or default)
     const managed = this.docs.get(docId);
-    const strategy = managed?.strategy ?? this._getStrategy(this.defaultStrategy);
+    const algorithm = managed?.algorithm ?? this._getAlgorithm(this.defaultAlgorithm);
 
     // Close if open locally
     if (this.docs.has(docId)) {
@@ -212,7 +212,7 @@ export class Patches {
       await this.untrackDocs([docId]);
     }
     // Mark document as deleted in store (adds a tombstone until sync commits it)
-    await strategy.deleteDoc(docId);
+    await algorithm.deleteDoc(docId);
     await this.onDeleteDoc.emit(docId);
   }
 
@@ -235,8 +235,8 @@ export class Patches {
     this.docs.forEach(managed => managed.unsubscribe());
     this.docs.clear();
 
-    // Close all strategies (each closes its store)
-    await Promise.all(Object.values(this.strategies).map(s => s?.close()));
+    // Close all algorithms (each closes its store)
+    await Promise.all(Object.values(this.algorithms).map(s => s?.close()));
 
     this.onChange.clear();
     this.onDeleteDoc.clear();
@@ -248,18 +248,18 @@ export class Patches {
 
   /**
    * Internal handler for doc changes. Called when doc.onChange emits ops.
-   * Delegates to strategy for packaging and persisting.
+   * Delegates to algorithm for packaging and persisting.
    */
   protected async _handleDocChange<T extends object>(
     docId: string,
     ops: JSONPatchOp[],
     doc: PatchesDoc<T>,
-    strategy: ClientStrategy,
+    algorithm: ClientAlgorithm,
     metadata: Record<string, any>
   ): Promise<void> {
     try {
-      // Strategy packages ops, saves to store, and updates doc state
-      await strategy.handleDocChange(docId, ops, doc, metadata);
+      // Algorithm packages ops, saves to store, and updates doc state
+      await algorithm.handleDocChange(docId, ops, doc, metadata);
       // Notify listeners that this doc has pending changes
       this.onChange.emit(docId);
     } catch (err) {

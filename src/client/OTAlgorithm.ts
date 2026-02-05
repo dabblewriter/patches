@@ -3,20 +3,20 @@ import { breakChanges } from '../algorithms/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change, PatchesSnapshot } from '../types.js';
-import type { ClientStrategy } from './ClientStrategy.js';
+import type { ClientAlgorithm } from './ClientAlgorithm.js';
 import type { OTClientStore } from './OTClientStore.js';
 import { OTDoc } from './OTDoc.js';
 import type { PatchesDoc, PatchesDocOptions } from './PatchesDoc.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
 /**
- * OT (Operational Transformation) strategy implementation.
+ * OT (Operational Transformation) algorithm implementation.
  *
  * OT uses revision-based history and rebasing for concurrent edits.
- * This strategy owns an OT-compatible store and handles all OT-specific
- * algorithm logic.
+ * This algorithm owns an OT-compatible store and handles all OT-specific
+ * logic.
  */
-export class OTStrategy implements ClientStrategy {
+export class OTAlgorithm implements ClientAlgorithm {
   readonly name = 'ot';
   readonly store: OTClientStore;
 

@@ -15,7 +15,7 @@ interface LWWDocBuffers {
 }
 
 /**
- * In-memory implementation of LWWClientStore for LWW (Last-Write-Wins) sync strategy.
+ * In-memory implementation of LWWClientStore for LWW (Last-Write-Wins) sync algorithm.
  *
  * Uses field-level storage for LWW conflict resolution:
  * - committedFields: Server-confirmed field values

@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 // Client exports
 import {
   LWWDoc,
-  LWWStrategy,
+  LWWAlgorithm,
   LWWInMemoryStore,
   LWWIndexedDBStore,
   createLWWPatches,
@@ -29,7 +29,7 @@ import {
 } from '../../src/server/index.js';
 
 // Main entry point re-exports client
-import { LWWDoc as MainLWWDoc, LWWStrategy as MainLWWStrategy } from '../../src/index.js';
+import { LWWDoc as MainLWWDoc, LWWAlgorithm as MainLWWAlgorithm } from '../../src/index.js';
 
 describe('LWW exports', () => {
   describe('client exports (@dabble/patches/client)', () => {
@@ -42,14 +42,14 @@ describe('LWW exports', () => {
       expect(doc.state).toEqual({});
     });
 
-    it('exports LWWStrategy class', () => {
-      expect(LWWStrategy).toBeDefined();
-      expect(typeof LWWStrategy).toBe('function');
+    it('exports LWWAlgorithm class', () => {
+      expect(LWWAlgorithm).toBeDefined();
+      expect(typeof LWWAlgorithm).toBe('function');
 
       const store = new LWWInMemoryStore();
-      const strategy = new LWWStrategy(store);
-      expect(strategy.name).toBe('lww');
-      expect(strategy.store).toBe(store);
+      const algorithm = new LWWAlgorithm(store);
+      expect(algorithm.name).toBe('lww');
+      expect(algorithm.store).toBe(store);
     });
 
     it('exports LWWInMemoryStore class', () => {
@@ -138,7 +138,7 @@ describe('LWW exports', () => {
     it('re-exports client LWW classes', () => {
       // Main entry re-exports everything from client
       expect(MainLWWDoc).toBe(LWWDoc);
-      expect(MainLWWStrategy).toBe(LWWStrategy);
+      expect(MainLWWAlgorithm).toBe(LWWAlgorithm);
     });
   });
 });

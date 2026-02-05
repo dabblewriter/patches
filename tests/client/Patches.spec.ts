@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { PatchesStore } from '../../src/client/PatchesStore';
-import type { ClientStrategy } from '../../src/client/ClientStrategy';
+import type { ClientAlgorithm } from '../../src/client/ClientAlgorithm';
 import type { Change, PatchesSnapshot } from '../../src/types';
 
 // Mock dependencies completely before importing
@@ -60,7 +60,7 @@ const { OTDoc } = await import('../../src/client/OTDoc');
 describe('Patches', () => {
   let patches: InstanceType<typeof Patches>;
   let mockStore: PatchesStore;
-  let mockStrategy: ClientStrategy;
+  let mockAlgorithm: ClientAlgorithm;
   let mockDoc: any;
 
   const createChange = (id: string, rev: number): Change => ({
@@ -107,8 +107,8 @@ describe('Patches', () => {
       return mockDoc;
     });
 
-    // Mock strategy that wraps the store
-    mockStrategy = {
+    // Mock algorithm that wraps the store
+    mockAlgorithm = {
       name: 'ot',
       store: mockStore,
       createDoc: vi.fn().mockReturnValue(mockDoc),
@@ -126,7 +126,7 @@ describe('Patches', () => {
       close: vi.fn().mockImplementation(() => mockStore.close()),
     };
 
-    patches = new Patches({ strategies: { ot: mockStrategy }, defaultStrategy: 'ot' });
+    patches = new Patches({ algorithms: { ot: mockAlgorithm }, defaultAlgorithm: 'ot' });
 
     // Wait for initial listDocs call
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -137,21 +137,21 @@ describe('Patches', () => {
   });
 
   describe('constructor', () => {
-    it('should initialize with strategies and options', () => {
-      expect(patches.strategies.ot).toBe(mockStrategy);
-      expect(patches.defaultStrategy).toBe('ot');
+    it('should initialize with algorithms and options', () => {
+      expect(patches.algorithms.ot).toBe(mockAlgorithm);
+      expect(patches.defaultAlgorithm).toBe('ot');
       expect(patches.trackedDocs).toBeInstanceOf(Set);
-      expect(mockStrategy.listDocs).toHaveBeenCalled();
+      expect(mockAlgorithm.listDocs).toHaveBeenCalled();
     });
 
-    it('should track docs returned from strategy.listDocs', async () => {
+    it('should track docs returned from algorithm.listDocs', async () => {
       const docs = [
         { docId: 'doc1', committedRev: 0 },
         { docId: 'doc2', committedRev: 0 },
       ];
-      vi.mocked(mockStrategy.listDocs).mockResolvedValue(docs);
+      vi.mocked(mockAlgorithm.listDocs).mockResolvedValue(docs);
 
-      const patchesInstance = new Patches({ strategies: { ot: mockStrategy } });
+      const patchesInstance = new Patches({ algorithms: { ot: mockAlgorithm } });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       expect(patchesInstance.trackedDocs.has('doc1')).toBe(true);
@@ -161,20 +161,20 @@ describe('Patches', () => {
     it('should accept custom docOptions', () => {
       const customOptions = { maxStorageBytes: 100 };
       const patchesInstance = new Patches({
-        strategies: { ot: mockStrategy },
+        algorithms: { ot: mockAlgorithm },
         docOptions: customOptions,
       });
 
       expect(patchesInstance.docOptions).toEqual(customOptions);
     });
 
-    it('should throw if no strategies provided', () => {
-      expect(() => new Patches({ strategies: {} })).toThrow('At least one strategy must be provided');
+    it('should throw if no algorithms provided', () => {
+      expect(() => new Patches({ algorithms: {} })).toThrow('At least one algorithm must be provided');
     });
 
-    it('should throw if default strategy not found', () => {
-      expect(() => new Patches({ strategies: { ot: mockStrategy }, defaultStrategy: 'lww' })).toThrow(
-        "Default strategy 'lww' not found"
+    it('should throw if default algorithm not found', () => {
+      expect(() => new Patches({ algorithms: { ot: mockAlgorithm }, defaultAlgorithm: 'lww' })).toThrow(
+        "Default algorithm 'lww' not found"
       );
     });
   });
@@ -188,7 +188,7 @@ describe('Patches', () => {
 
       expect(patches.trackedDocs.has('doc1')).toBe(true);
       expect(patches.trackedDocs.has('doc2')).toBe(true);
-      expect(mockStrategy.trackDocs).toHaveBeenCalledWith(['doc1', 'doc2']);
+      expect(mockAlgorithm.trackDocs).toHaveBeenCalledWith(['doc1', 'doc2']);
       expect(onTrackSpy).toHaveBeenCalledWith(['doc1', 'doc2']);
     });
 
@@ -198,7 +198,7 @@ describe('Patches', () => {
 
       await patches.trackDocs(['doc1', 'doc2']);
 
-      expect(mockStrategy.trackDocs).toHaveBeenCalledWith(['doc2']);
+      expect(mockAlgorithm.trackDocs).toHaveBeenCalledWith(['doc2']);
     });
 
     it('should do nothing if no new documents to track', async () => {
@@ -207,7 +207,7 @@ describe('Patches', () => {
 
       await patches.trackDocs(['doc1']);
 
-      expect(mockStrategy.trackDocs).not.toHaveBeenCalled();
+      expect(mockAlgorithm.trackDocs).not.toHaveBeenCalled();
     });
   });
 
@@ -225,7 +225,7 @@ describe('Patches', () => {
 
       expect(patches.trackedDocs.has('doc1')).toBe(false);
       expect(patches.trackedDocs.has('doc2')).toBe(false);
-      expect(mockStrategy.untrackDocs).toHaveBeenCalled();
+      expect(mockAlgorithm.untrackDocs).toHaveBeenCalled();
       expect(onUntrackSpy).toHaveBeenCalledWith(['doc1', 'doc2']);
     });
 
@@ -235,27 +235,27 @@ describe('Patches', () => {
       await patches.untrackDocs(['doc1', 'doc2']);
 
       // Should only untrack doc1 since doc2 was never tracked
-      expect(mockStrategy.untrackDocs).toHaveBeenCalled();
+      expect(mockAlgorithm.untrackDocs).toHaveBeenCalled();
     });
 
     it('should do nothing if no tracked documents to untrack', async () => {
       await patches.untrackDocs(['doc1']);
 
-      expect(mockStrategy.untrackDocs).not.toHaveBeenCalled();
+      expect(mockAlgorithm.untrackDocs).not.toHaveBeenCalled();
     });
   });
 
   describe('openDoc', () => {
-    it('should open a new document via strategy', async () => {
+    it('should open a new document via algorithm', async () => {
       const snapshot: PatchesSnapshot = { state: { text: 'hello' }, rev: 5, changes: [] };
-      vi.mocked(mockStrategy.loadDoc).mockResolvedValue(snapshot);
+      vi.mocked(mockAlgorithm.loadDoc).mockResolvedValue(snapshot);
 
       const doc = await patches.openDoc('doc1');
 
       expect(patches.trackedDocs.has('doc1')).toBe(true);
-      expect(mockStrategy.loadDoc).toHaveBeenCalledWith('doc1');
+      expect(mockAlgorithm.loadDoc).toHaveBeenCalledWith('doc1');
       // New API: createDoc receives docId and snapshot
-      expect(mockStrategy.createDoc).toHaveBeenCalledWith('doc1', snapshot);
+      expect(mockAlgorithm.createDoc).toHaveBeenCalledWith('doc1', snapshot);
       expect(mockDoc.onChange).toHaveBeenCalled();
       expect(doc).toBe(mockDoc);
     });
@@ -265,16 +265,16 @@ describe('Patches', () => {
       const doc2 = await patches.openDoc('doc1');
 
       expect(doc1).toBe(doc2);
-      expect(mockStrategy.createDoc).toHaveBeenCalledTimes(1);
+      expect(mockAlgorithm.createDoc).toHaveBeenCalledTimes(1);
     });
 
     it('should handle document without snapshot', async () => {
-      vi.mocked(mockStrategy.loadDoc).mockResolvedValue(undefined);
+      vi.mocked(mockAlgorithm.loadDoc).mockResolvedValue(undefined);
 
       const doc = await patches.openDoc('doc1');
 
       // When no snapshot exists, createDoc is called with docId and undefined snapshot
-      expect(mockStrategy.createDoc).toHaveBeenCalledWith('doc1', undefined);
+      expect(mockAlgorithm.createDoc).toHaveBeenCalledWith('doc1', undefined);
       expect(doc).toBe(mockDoc);
     });
   });
@@ -296,7 +296,7 @@ describe('Patches', () => {
       await patches.closeDoc('doc1', { untrack: true });
 
       expect(patches.trackedDocs.has('doc1')).toBe(false);
-      expect(mockStrategy.untrackDocs).toHaveBeenCalled();
+      expect(mockAlgorithm.untrackDocs).toHaveBeenCalled();
     });
 
     it('should do nothing if document is not open', async () => {
@@ -315,7 +315,7 @@ describe('Patches', () => {
 
       expect(patches.getOpenDoc('doc1')).toBeUndefined();
       expect(patches.trackedDocs.has('doc1')).toBe(false);
-      expect(mockStrategy.deleteDoc).toHaveBeenCalledWith('doc1');
+      expect(mockAlgorithm.deleteDoc).toHaveBeenCalledWith('doc1');
       expect(onDeleteSpy).toHaveBeenCalledWith('doc1');
     });
 
@@ -324,13 +324,13 @@ describe('Patches', () => {
       await patches.deleteDoc('doc1');
 
       expect(patches.trackedDocs.has('doc1')).toBe(false);
-      expect(mockStrategy.deleteDoc).toHaveBeenCalledWith('doc1');
+      expect(mockAlgorithm.deleteDoc).toHaveBeenCalledWith('doc1');
     });
 
     it('should delete an untracked document', async () => {
       await patches.deleteDoc('doc1');
 
-      expect(mockStrategy.deleteDoc).toHaveBeenCalledWith('doc1');
+      expect(mockAlgorithm.deleteDoc).toHaveBeenCalledWith('doc1');
     });
   });
 
@@ -349,23 +349,23 @@ describe('Patches', () => {
     });
   });
 
-  describe('getDocStrategy', () => {
-    it('should return strategy for open document', async () => {
+  describe('getDocAlgorithm', () => {
+    it('should return algorithm for open document', async () => {
       await patches.openDoc('doc1');
-      const strategy = patches.getDocStrategy('doc1');
+      const algorithm = patches.getDocAlgorithm('doc1');
 
-      expect(strategy).toBe(mockStrategy);
+      expect(algorithm).toBe(mockAlgorithm);
     });
 
     it('should return undefined for non-open document', () => {
-      const strategy = patches.getDocStrategy('doc1');
+      const algorithm = patches.getDocAlgorithm('doc1');
 
-      expect(strategy).toBeUndefined();
+      expect(algorithm).toBeUndefined();
     });
   });
 
   describe('close', () => {
-    it('should close all documents and strategies', async () => {
+    it('should close all documents and algorithms', async () => {
       const unsubscribe1 = vi.fn();
       const unsubscribe2 = vi.fn();
       mockDoc.onChange.mockReturnValueOnce(unsubscribe1).mockReturnValueOnce(unsubscribe2);
@@ -377,21 +377,21 @@ describe('Patches', () => {
 
       expect(unsubscribe1).toHaveBeenCalled();
       expect(unsubscribe2).toHaveBeenCalled();
-      expect(mockStrategy.close).toHaveBeenCalled();
+      expect(mockAlgorithm.close).toHaveBeenCalled();
       expect(patches.getOpenDoc('doc1')).toBeUndefined();
       expect(patches.getOpenDoc('doc2')).toBeUndefined();
     });
   });
 
   describe('_handleDocChange', () => {
-    it('should delegate to strategy and emit onChange', async () => {
+    it('should delegate to algorithm and emit onChange', async () => {
       const onChangeSpy = vi.fn();
       patches.onChange(onChangeSpy);
 
       const ops = [{ op: 'add' as const, path: '/test', value: 'value' }];
-      await (patches as any)._handleDocChange('doc1', ops, mockDoc, mockStrategy, {});
+      await (patches as any)._handleDocChange('doc1', ops, mockDoc, mockAlgorithm, {});
 
-      expect(mockStrategy.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {});
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {});
       expect(onChangeSpy).toHaveBeenCalledWith('doc1');
     });
 
@@ -399,11 +399,11 @@ describe('Patches', () => {
       const onErrorSpy = vi.fn();
       patches.onError(onErrorSpy);
 
-      const error = new Error('Strategy failed');
-      vi.mocked(mockStrategy.handleDocChange).mockRejectedValue(error);
+      const error = new Error('Algorithm failed');
+      vi.mocked(mockAlgorithm.handleDocChange).mockRejectedValue(error);
 
       const ops = [{ op: 'add' as const, path: '/test', value: 'value' }];
-      await (patches as any)._handleDocChange('doc1', ops, mockDoc, mockStrategy, {});
+      await (patches as any)._handleDocChange('doc1', ops, mockDoc, mockAlgorithm, {});
 
       expect(onErrorSpy).toHaveBeenCalledWith(error, { docId: 'doc1' });
     });
@@ -467,7 +467,7 @@ describe('Patches', () => {
       const ops = [{ op: 'add' as const, path: '/test', value: 'value' }];
       await capturedChangeHandler(ops);
 
-      expect(mockStrategy.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {});
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {});
     });
   });
 });

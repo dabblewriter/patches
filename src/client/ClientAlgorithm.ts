@@ -4,32 +4,32 @@ import type { PatchesDoc } from './PatchesDoc.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
 /**
- * Strategy interface for client-side algorithms (OT or LWW).
+ * Algorithm interface for client-side sync algorithms (OT or LWW).
  *
- * The ClientStrategy owns its store and provides algorithm methods for:
+ * The ClientAlgorithm owns its store and provides methods for:
  * - Creating appropriate doc types
  * - Packaging ops for persistence
  * - Getting pending changes to send
  * - Applying server changes
  * - Confirming sent changes
  *
- * Patches owns docs and coordinates between doc/strategy/sync.
+ * Patches owns docs and coordinates between doc/algorithm/sync.
  *
- * This interface enables Worker-Tab architectures where a TabStrategy
- * can proxy to a WorkerStrategy that holds the real store and sync connection.
+ * This interface enables Worker-Tab architectures where a TabAlgorithm
+ * can proxy to a WorkerAlgorithm that holds the real store and sync connection.
  * Key design decisions for Worker-Tab support:
  * - `handleDocChange` and `applyServerChanges` return `Change[]` for broadcast
  * - `doc` parameter can be undefined (Worker has no docs)
  */
-export interface ClientStrategy {
-  /** Strategy identifier: 'ot' or 'lww' */
+export interface ClientAlgorithm {
+  /** Algorithm identifier: 'ot' or 'lww' */
   readonly name: string;
 
-  /** Strategy owns its store */
+  /** Algorithm owns its store */
   readonly store: PatchesStore;
 
   /**
-   * Creates a doc instance appropriate for this strategy.
+   * Creates a doc instance appropriate for this algorithm.
    * OT creates OTDoc, LWW creates LWWDoc.
    *
    * @param docId The unique identifier for the document.
@@ -44,7 +44,7 @@ export interface ClientStrategy {
   loadDoc(docId: string): Promise<PatchesSnapshot | undefined>;
 
   /**
-   * Packages ops from doc.onChange into strategy-specific format for persistence.
+   * Packages ops from doc.onChange into algorithm-specific format for persistence.
    * - OT: Creates a Change with baseRev, stores in pending
    * - LWW: Extracts fields with timestamps, merges into pendingFields
    *
@@ -114,9 +114,9 @@ export interface ClientStrategy {
   /** Confirms server-side deletion. */
   confirmDeleteDoc(docId: string): Promise<void>;
 
-  /** Closes the strategy and its store. */
+  /** Closes the algorithm and its store. */
   close(): Promise<void>;
 }
 
-/** Available strategy names */
-export type StrategyName = 'ot' | 'lww';
+/** Available algorithm names */
+export type AlgorithmName = 'ot' | 'lww';

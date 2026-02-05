@@ -2,10 +2,10 @@
  * OT Integration Tests
  *
  * End-to-end tests that verify the full OT flow works correctly:
- * Client changes → OTStrategy packages → Server transforms/commits → Client rebases
+ * Client changes → OTAlgorithm packages → Server transforms/commits → Client rebases
  *
  * These tests use real implementations (not mocks) for all core components:
- * - OTStrategy (client)
+ * - OTAlgorithm (client)
  * - InMemoryStore (client storage)
  * - OTServer (server)
  * - OTMemoryStoreBackend (server storage - test-only implementation)
@@ -13,7 +13,7 @@
  * Only the transport layer is simulated with direct function calls.
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { OTStrategy } from '../../src/client/OTStrategy.js';
+import { OTAlgorithm } from '../../src/client/OTAlgorithm.js';
 import { InMemoryStore } from '../../src/client/InMemoryStore.js';
 import { OTDoc } from '../../src/client/OTDoc.js';
 import { OTServer } from '../../src/server/OTServer.js';
@@ -160,7 +160,7 @@ class OTMemoryStoreBackend implements OTStoreBackend {
 class OTTestHarness {
   server: OTServer;
   serverStore: OTMemoryStoreBackend;
-  clients: Map<string, { strategy: OTStrategy; store: InMemoryStore; doc: OTDoc<TestDoc> }> = new Map();
+  clients: Map<string, { algorithm: OTAlgorithm; store: InMemoryStore; doc: OTDoc<TestDoc> }> = new Map();
   lastBroadcast: { docId: string; changes: Change[] } | null = null;
 
   constructor() {
@@ -182,8 +182,8 @@ class OTTestHarness {
    */
   createClient(clientId: string, docId: string, initialState: TestDoc = {}): OTDoc<TestDoc> {
     const store = new InMemoryStore();
-    const strategy = new OTStrategy(store);
-    const doc = strategy.createDoc<TestDoc>(docId, { state: initialState, rev: 0, changes: [] }) as OTDoc<TestDoc>;
+    const algorithm = new OTAlgorithm(store);
+    const doc = algorithm.createDoc<TestDoc>(docId, { state: initialState, rev: 0, changes: [] }) as OTDoc<TestDoc>;
 
     // First client for this doc initializes the server state
     if (!this.initializedDocs.has(docId)) {
@@ -191,7 +191,7 @@ class OTTestHarness {
       this.initializedDocs.add(docId);
     }
 
-    this.clients.set(clientId, { strategy, store, doc });
+    this.clients.set(clientId, { algorithm, store, doc });
     return doc;
   }
 
@@ -205,7 +205,7 @@ class OTTestHarness {
     const client = this.clients.get(clientId);
     if (!client) throw new Error(`Client ${clientId} not found`);
 
-    const { strategy, doc } = client;
+    const { algorithm, doc } = client;
     const docId = doc.id;
 
     // Capture ops emitted by doc.change()
@@ -222,8 +222,8 @@ class OTTestHarness {
       return { ops: [], changes: [] };
     }
 
-    // Process through strategy
-    const changes = await strategy.handleDocChange(docId, emittedOps, doc, {});
+    // Process through algorithm
+    const changes = await algorithm.handleDocChange(docId, emittedOps, doc, {});
     return { ops: emittedOps, changes };
   }
 
@@ -235,11 +235,11 @@ class OTTestHarness {
     const client = this.clients.get(clientId);
     if (!client) throw new Error(`Client ${clientId} not found`);
 
-    const { strategy, doc } = client;
+    const { algorithm, doc } = client;
     const docId = doc.id;
 
     // Get pending changes to send
-    const pendingChanges = await strategy.getPendingToSend(docId);
+    const pendingChanges = await algorithm.getPendingToSend(docId);
     if (!pendingChanges || pendingChanges.length === 0) {
       return [];
     }
@@ -251,7 +251,7 @@ class OTTestHarness {
     const responseChanges = await this.server.commitChanges(docId, pendingChanges);
 
     // Apply server response to sending client (includes catchup + committed changes)
-    await strategy.applyServerChanges(docId, responseChanges, doc);
+    await algorithm.applyServerChanges(docId, responseChanges, doc);
 
     // Return the broadcast change (contains the newly committed ops)
     // This is what should be sent to OTHER clients
@@ -265,8 +265,8 @@ class OTTestHarness {
     const client = this.clients.get(clientId);
     if (!client) throw new Error(`Client ${clientId} not found`);
 
-    const { strategy, doc } = client;
-    return strategy.applyServerChanges(doc.id, changes, doc);
+    const { algorithm, doc } = client;
+    return algorithm.applyServerChanges(doc.id, changes, doc);
   }
 
   /**

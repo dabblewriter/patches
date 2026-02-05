@@ -2,10 +2,10 @@
  * LWW Integration Tests
  *
  * End-to-end tests that verify the full LWW flow works correctly:
- * Client changes → LWWStrategy consolidates → Server commits → Client receives
+ * Client changes → LWWAlgorithm consolidates → Server commits → Client receives
  *
  * These tests use real implementations (not mocks) for all core components:
- * - LWWStrategy (client)
+ * - LWWAlgorithm (client)
  * - LWWInMemoryStore (client storage)
  * - LWWServer (server)
  * - LWWMemoryStoreBackend (server storage)
@@ -13,7 +13,7 @@
  * Only the transport layer is simulated with direct function calls.
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { LWWStrategy } from '../../src/client/LWWStrategy.js';
+import { LWWAlgorithm } from '../../src/client/LWWAlgorithm.js';
 import { LWWInMemoryStore } from '../../src/client/LWWInMemoryStore.js';
 import { LWWDoc } from '../../src/client/LWWDoc.js';
 import { LWWServer } from '../../src/server/LWWServer.js';
@@ -35,7 +35,7 @@ interface TestDoc {
 class LWWTestHarness {
   server: LWWServer;
   serverStore: LWWMemoryStoreBackend;
-  clients: Map<string, { strategy: LWWStrategy; store: LWWInMemoryStore; doc: LWWDoc<TestDoc> }> = new Map();
+  clients: Map<string, { algorithm: LWWAlgorithm; store: LWWInMemoryStore; doc: LWWDoc<TestDoc> }> = new Map();
   lastBroadcast: { docId: string; changes: Change[] } | null = null;
 
   constructor() {
@@ -53,20 +53,20 @@ class LWWTestHarness {
    */
   createClient(clientId: string, docId: string, initialState: TestDoc = {}): LWWDoc<TestDoc> {
     const store = new LWWInMemoryStore();
-    const strategy = new LWWStrategy(store);
-    const doc = strategy.createDoc<TestDoc>(docId, { state: initialState, rev: 0, changes: [] }) as LWWDoc<TestDoc>;
+    const algorithm = new LWWAlgorithm(store);
+    const doc = algorithm.createDoc<TestDoc>(docId, { state: initialState, rev: 0, changes: [] }) as LWWDoc<TestDoc>;
 
-    this.clients.set(clientId, { strategy, store, doc });
+    this.clients.set(clientId, { algorithm, store, doc });
     return doc;
   }
 
   /**
-   * Get client's strategy by client ID.
+   * Get client's algorithm by client ID.
    */
-  getStrategy(clientId: string): LWWStrategy {
+  getAlgorithm(clientId: string): LWWAlgorithm {
     const client = this.clients.get(clientId);
     if (!client) throw new Error(`Client ${clientId} not found`);
-    return client.strategy;
+    return client.algorithm;
   }
 
   /**
@@ -79,7 +79,7 @@ class LWWTestHarness {
   }
 
   /**
-   * Make a change on a client and process it through the strategy.
+   * Make a change on a client and process it through the algorithm.
    * Returns the uncommitted changes.
    */
   async makeChange(
@@ -89,7 +89,7 @@ class LWWTestHarness {
     const client = this.clients.get(clientId);
     if (!client) throw new Error(`Client ${clientId} not found`);
 
-    const { strategy, doc } = client;
+    const { algorithm, doc } = client;
     const docId = doc.id;
 
     // Capture ops emitted by doc.change()
@@ -106,8 +106,8 @@ class LWWTestHarness {
       return { ops: [], changes: [] };
     }
 
-    // Process through strategy
-    const changes = await strategy.handleDocChange(docId, emittedOps, doc, {});
+    // Process through algorithm
+    const changes = await algorithm.handleDocChange(docId, emittedOps, doc, {});
     return { ops: emittedOps, changes };
   }
 
@@ -119,11 +119,11 @@ class LWWTestHarness {
     const client = this.clients.get(clientId);
     if (!client) throw new Error(`Client ${clientId} not found`);
 
-    const { strategy, doc } = client;
+    const { algorithm, doc } = client;
     const docId = doc.id;
 
     // Get pending changes to send
-    const pendingChanges = await strategy.getPendingToSend(docId);
+    const pendingChanges = await algorithm.getPendingToSend(docId);
     if (!pendingChanges || pendingChanges.length === 0) {
       return [];
     }
@@ -135,10 +135,10 @@ class LWWTestHarness {
     const responseChanges = await this.server.commitChanges(docId, pendingChanges);
 
     // Confirm sent to client
-    await strategy.confirmSent(docId, responseChanges);
+    await algorithm.confirmSent(docId, responseChanges);
 
     // Apply server response to sending client (updates committedRev, applies catchup ops)
-    await strategy.applyServerChanges(docId, responseChanges, doc);
+    await algorithm.applyServerChanges(docId, responseChanges, doc);
 
     // Return the broadcast change (contains the actual committed ops)
     // This is what should be sent to OTHER clients
@@ -152,8 +152,8 @@ class LWWTestHarness {
     const client = this.clients.get(clientId);
     if (!client) throw new Error(`Client ${clientId} not found`);
 
-    const { strategy, doc } = client;
-    return strategy.applyServerChanges(doc.id, changes, doc);
+    const { algorithm, doc } = client;
+    return algorithm.applyServerChanges(doc.id, changes, doc);
   }
 
   /**

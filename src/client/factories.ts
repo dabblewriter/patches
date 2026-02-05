@@ -1,10 +1,10 @@
-import type { StrategyName } from './ClientStrategy.js';
+import type { AlgorithmName } from './ClientAlgorithm.js';
 import { InMemoryStore } from './InMemoryStore.js';
 import { LWWInMemoryStore } from './LWWInMemoryStore.js';
 import { LWWIndexedDBStore } from './LWWIndexedDBStore.js';
-import { LWWStrategy } from './LWWStrategy.js';
+import { LWWAlgorithm } from './LWWAlgorithm.js';
 import { OTIndexedDBStore } from './OTIndexedDBStore.js';
-import { OTStrategy } from './OTStrategy.js';
+import { OTAlgorithm } from './OTAlgorithm.js';
 import { Patches } from './Patches.js';
 import type { PatchesDocOptions } from './PatchesDoc.js';
 
@@ -19,11 +19,11 @@ export interface PatchesFactoryOptions {
 }
 
 /**
- * Options for factory functions with multiple strategies.
+ * Options for factory functions with multiple algorithms.
  */
-export interface MultiStrategyFactoryOptions extends PatchesFactoryOptions {
-  /** Default strategy to use when opening docs. */
-  defaultStrategy?: StrategyName;
+export interface MultiAlgorithmFactoryOptions extends PatchesFactoryOptions {
+  /** Default algorithm to use when opening docs. */
+  defaultAlgorithm?: AlgorithmName;
 }
 
 /**
@@ -35,9 +35,9 @@ export interface IndexedDBFactoryOptions extends PatchesFactoryOptions {
 }
 
 /**
- * Options for IndexedDB-based factory functions with multiple strategies.
+ * Options for IndexedDB-based factory functions with multiple algorithms.
  */
-export interface MultiStrategyIndexedDBFactoryOptions extends MultiStrategyFactoryOptions {
+export interface MultiAlgorithmIndexedDBFactoryOptions extends MultiAlgorithmFactoryOptions {
   /** Database name for IndexedDB storage. */
   dbName: string;
 }
@@ -45,32 +45,32 @@ export interface MultiStrategyIndexedDBFactoryOptions extends MultiStrategyFacto
 // --- OT-only factories ---
 
 /**
- * Creates a Patches instance with OT strategy and in-memory store.
+ * Creates a Patches instance with OT algorithm and in-memory store.
  * Useful for testing or when persistence isn't needed.
  */
 export function createOTPatches(options: PatchesFactoryOptions = {}): Patches {
   const store = new InMemoryStore();
-  const otStrategy = new OTStrategy(store, options.docOptions);
+  const otAlgorithm = new OTAlgorithm(store, options.docOptions);
 
   return new Patches({
-    strategies: { ot: otStrategy },
-    defaultStrategy: 'ot',
+    algorithms: { ot: otAlgorithm },
+    defaultAlgorithm: 'ot',
     metadata: options.metadata,
     docOptions: options.docOptions,
   });
 }
 
 /**
- * Creates a Patches instance with OT strategy and IndexedDB store.
+ * Creates a Patches instance with OT algorithm and IndexedDB store.
  * For persistent storage in browser environments.
  */
 export function createOTIndexedDBPatches(options: IndexedDBFactoryOptions): Patches {
   const store = new OTIndexedDBStore(options.dbName);
-  const otStrategy = new OTStrategy(store, options.docOptions);
+  const otAlgorithm = new OTAlgorithm(store, options.docOptions);
 
   return new Patches({
-    strategies: { ot: otStrategy },
-    defaultStrategy: 'ot',
+    algorithms: { ot: otAlgorithm },
+    defaultAlgorithm: 'ot',
     metadata: options.metadata,
     docOptions: options.docOptions,
   });
@@ -79,70 +79,70 @@ export function createOTIndexedDBPatches(options: IndexedDBFactoryOptions): Patc
 // --- LWW-only factories ---
 
 /**
- * Creates a Patches instance with LWW strategy and in-memory store.
+ * Creates a Patches instance with LWW algorithm and in-memory store.
  * Useful for testing or when persistence isn't needed.
  */
 export function createLWWPatches(options: PatchesFactoryOptions = {}): Patches {
   const store = new LWWInMemoryStore();
-  const lwwStrategy = new LWWStrategy(store);
+  const lwwAlgorithm = new LWWAlgorithm(store);
 
   return new Patches({
-    strategies: { lww: lwwStrategy },
-    defaultStrategy: 'lww',
+    algorithms: { lww: lwwAlgorithm },
+    defaultAlgorithm: 'lww',
     metadata: options.metadata,
     docOptions: options.docOptions,
   });
 }
 
 /**
- * Creates a Patches instance with LWW strategy and IndexedDB store.
+ * Creates a Patches instance with LWW algorithm and IndexedDB store.
  * For persistent storage in browser environments.
  */
 export function createLWWIndexedDBPatches(options: IndexedDBFactoryOptions): Patches {
   const store = new LWWIndexedDBStore(options.dbName);
-  const lwwStrategy = new LWWStrategy(store);
+  const lwwAlgorithm = new LWWAlgorithm(store);
 
   return new Patches({
-    strategies: { lww: lwwStrategy },
-    defaultStrategy: 'lww',
+    algorithms: { lww: lwwAlgorithm },
+    defaultAlgorithm: 'lww',
     metadata: options.metadata,
     docOptions: options.docOptions,
   });
 }
 
-// --- Multi-strategy factories ---
+// --- Multi-algorithm factories ---
 
 /**
- * Creates a Patches instance with both OT and LWW strategies using in-memory stores.
- * Useful for testing or applications that need both strategies without persistence.
+ * Creates a Patches instance with both OT and LWW algorithms using in-memory stores.
+ * Useful for testing or applications that need both algorithms without persistence.
  */
-export function createAllPatches(options: MultiStrategyFactoryOptions = {}): Patches {
+export function createAllPatches(options: MultiAlgorithmFactoryOptions = {}): Patches {
   const otStore = new InMemoryStore();
   const lwwStore = new LWWInMemoryStore();
-  const otStrategy = new OTStrategy(otStore, options.docOptions);
-  const lwwStrategy = new LWWStrategy(lwwStore);
+  const otAlgorithm = new OTAlgorithm(otStore, options.docOptions);
+  const lwwAlgorithm = new LWWAlgorithm(lwwStore);
 
   return new Patches({
-    strategies: { ot: otStrategy, lww: lwwStrategy },
-    defaultStrategy: options.defaultStrategy ?? 'ot',
+    algorithms: { ot: otAlgorithm, lww: lwwAlgorithm },
+    defaultAlgorithm: options.defaultAlgorithm ?? 'ot',
     metadata: options.metadata,
     docOptions: options.docOptions,
   });
 }
 
 /**
- * Creates a Patches instance with both OT and LWW strategies using IndexedDB stores.
- * For persistent storage in browser environments with support for both strategies.
+ * Creates a Patches instance with both OT and LWW algorithms using IndexedDB stores.
+ * For persistent storage in browser environments with support for both algorithms.
  */
-export function createAllIndexedDBPatches(options: MultiStrategyIndexedDBFactoryOptions): Patches {
+export function createAllIndexedDBPatches(options: MultiAlgorithmIndexedDBFactoryOptions): Patches {
   const otStore = new OTIndexedDBStore(options.dbName);
   const lwwStore = new LWWIndexedDBStore(`${options.dbName}-lww`);
-  const otStrategy = new OTStrategy(otStore, options.docOptions);
-  const lwwStrategy = new LWWStrategy(lwwStore);
+  const otAlgorithm = new OTAlgorithm(otStore, options.docOptions);
+  const lwwAlgorithm = new LWWAlgorithm(lwwStore);
 
   return new Patches({
-    strategies: { ot: otStrategy, lww: lwwStrategy },
-    defaultStrategy: options.defaultStrategy ?? 'ot',
+    algorithms: { ot: otAlgorithm, lww: lwwAlgorithm },
+    defaultAlgorithm: options.defaultAlgorithm ?? 'ot',
     metadata: options.metadata,
     docOptions: options.docOptions,
   });

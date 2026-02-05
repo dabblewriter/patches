@@ -3,18 +3,18 @@ import { mergeServerWithLocal } from '../algorithms/lww/mergeServerWithLocal.js'
 import { createChange } from '../data/change.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change, PatchesSnapshot } from '../types.js';
-import type { ClientStrategy } from './ClientStrategy.js';
+import type { ClientAlgorithm } from './ClientAlgorithm.js';
 import type { LWWClientStore } from './LWWClientStore.js';
 import { LWWDoc } from './LWWDoc.js';
 import type { PatchesDoc } from './PatchesDoc.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
 /**
- * LWW (Last-Write-Wins) strategy implementation.
+ * LWW (Last-Write-Wins) algorithm implementation.
  *
  * LWW uses timestamps for field-level conflict resolution.
- * This strategy owns an LWW-compatible store and handles all LWW-specific
- * algorithm logic including consolidation of ops.
+ * This algorithm owns an LWW-compatible store and handles all LWW-specific
+ * logic including consolidation of ops.
  *
  * Key differences from OT:
  * - Single pending change at a time (not a list)
@@ -22,7 +22,7 @@ import type { TrackedDoc } from './PatchesStore.js';
  * - No rebasing - timestamps determine winner
  * - Doc is very thin (just state, no committed/pending tracking)
  */
-export class LWWStrategy implements ClientStrategy {
+export class LWWAlgorithm implements ClientAlgorithm {
   readonly name = 'lww';
   readonly store: LWWClientStore;
 

@@ -362,7 +362,9 @@ describe('LWWInMemoryStore', () => {
       expect(result?.state.title).toBe('Server Title');
     });
 
-    it('should clear sending change', async () => {
+    it('should preserve sending change (not clear it)', async () => {
+      // Server changes are from other clients, not confirmation of our own change.
+      // Only confirmSendingChange should clear sendingChange.
       await store.saveDoc('doc1', createState({ count: 10 }, 5));
       const change = createChange('send1', 6, 5, [{ op: '@inc', path: '/count', value: 5, ts: Date.now() }]);
       await store.saveSendingChange('doc1', change);
@@ -372,7 +374,8 @@ describe('LWWInMemoryStore', () => {
       ]);
 
       const sendingChange = await store.getSendingChange('doc1');
-      expect(sendingChange).toBeNull();
+      expect(sendingChange).not.toBeNull();
+      expect(sendingChange?.id).toBe('send1');
     });
 
     it('should update committed rev', async () => {

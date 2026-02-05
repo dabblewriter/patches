@@ -543,7 +543,9 @@ describe('LWWIndexedDBStore', () => {
       );
     });
 
-    it('should clear sending changes', async () => {
+    it('should preserve sending changes (not clear them)', async () => {
+      // Server changes are from other clients, not confirmation of our own change.
+      // Only confirmSendingChange should clear sendingChange.
       const sendingStore = createMockIDBStore();
       sendingStore.data.set('"doc1"', { docId: 'doc1', change: createChange('s1', 6) });
       mockStores.set('sendingChanges', sendingStore);
@@ -551,7 +553,7 @@ describe('LWWIndexedDBStore', () => {
       const serverChanges = [createChange('c1', 6)];
       await store.applyServerChanges('doc1', serverChanges);
 
-      expect(sendingStore.delete).toHaveBeenCalledWith('doc1');
+      expect(sendingStore.delete).not.toHaveBeenCalled();
     });
   });
 

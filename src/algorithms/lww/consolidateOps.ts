@@ -4,15 +4,16 @@ import type { JSONPatchOp } from '../../json-patch/types.js';
 /**
  * Combiner for consolidating same-type ops on the same path.
  */
-type Combiner = {
+export type Combiner = {
   apply: (a: any, b: any) => any;
   combine: (a: any, b: any) => any;
 };
 
 /**
  * Combinable operations - ops that can be merged rather than replaced.
+ * Exported for use by mergeServerWithLocal.
  */
-const combinableOps: Record<string, Combiner> = {
+export const combinableOps: Record<string, Combiner> = {
   '@inc': {
     apply: (a: number, b: number) => a + b,
     combine: (a: number, b: number) => a + b,

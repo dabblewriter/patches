@@ -246,8 +246,8 @@ export class LWWInMemoryStore implements LWWClientStore {
       }
     }
 
-    // Clear sending change (it's now confirmed)
-    buf.sendingChange = null;
+    // Note: Don't clear sendingChange here - these are changes from other clients,
+    // not confirmation of our own change. Only confirmSendingChange should clear it.
 
     // Update committedRev
     const lastRev = serverChanges.at(-1)?.rev;

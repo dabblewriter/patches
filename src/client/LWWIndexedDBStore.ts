@@ -354,8 +354,8 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async applyServerChanges(docId: string, serverChanges: Change[]): Promise<void> {
-    const [tx, committedFields, sendingChanges, snapshots, docsStore] = await this.transaction(
-      ['committedFields', 'sendingChanges', 'snapshots', 'docs'],
+    const [tx, committedFields, snapshots, docsStore] = await this.transaction(
+      ['committedFields', 'snapshots', 'docs'],
       'readwrite'
     );
 
@@ -370,8 +370,8 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
       }
     }
 
-    // Clear sending change (it's now confirmed)
-    await sendingChanges.delete(docId);
+    // Note: Don't clear sendingChange here - these are changes from other clients,
+    // not confirmation of our own change. Only confirmSendingChange should clear it.
 
     // Update committedRev
     const lastCommittedRev = serverChanges.at(-1)?.rev;

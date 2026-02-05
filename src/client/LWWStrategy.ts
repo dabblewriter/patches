@@ -1,4 +1,5 @@
 import { consolidateOps } from '../algorithms/lww/consolidateOps.js';
+import { mergeServerWithLocal } from '../algorithms/lww/mergeServerWithLocal.js';
 import { createChange } from '../data/change.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change, PatchesSnapshot } from '../types.js';
@@ -102,16 +103,21 @@ export class LWWStrategy implements ClientStrategy {
   ): Promise<Change[]> {
     if (serverChanges.length === 0) return [];
 
-    // For LWW, we don't rebase - we just apply server changes
+    // Apply server changes to store (preserves sendingChange and pendingOps)
     await this.store.applyServerChanges(docId, serverChanges);
 
-    // Update doc state if open
+    // Compute merged changes
+    const sendingChange = await this.store.getSendingChange(docId);
+    const pendingOps = await this.store.getPendingOps(docId);
+    const localOps = [...(sendingChange?.ops ?? []), ...pendingOps];
+    const mergedChanges = mergeServerWithLocal(serverChanges, localOps);
+
     if (doc) {
-      (doc as LWWDoc<T>).applyChanges(serverChanges);
+      (doc as LWWDoc<T>).applyChanges(mergedChanges);
     }
 
-    // Return server changes for broadcast (no rebasing needed for LWW)
-    return serverChanges;
+    // Return mergedChanges changes for broadcast (no rebasing needed for LWW)
+    return mergedChanges;
   }
 
   async confirmSent(docId: string, _changes: Change[]): Promise<void> {

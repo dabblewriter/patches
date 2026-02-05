@@ -7,9 +7,7 @@ import type { Change } from '../../../src/types';
 describe('mergeServerWithLocal', () => {
   describe('delta ops on same path as server', () => {
     it('should merge server replace with local @inc', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/count', value: 123 }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/count', value: 123 }])];
       const localOps: JSONPatchOp[] = [{ op: '@inc', path: '/count', value: 2, ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
@@ -20,9 +18,7 @@ describe('mergeServerWithLocal', () => {
     });
 
     it('should merge server replace with local @max (server value higher)', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/score', value: 100 }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/score', value: 100 }])];
       const localOps: JSONPatchOp[] = [{ op: '@max', path: '/score', value: 50, ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
@@ -31,9 +27,7 @@ describe('mergeServerWithLocal', () => {
     });
 
     it('should merge server replace with local @max (local value higher)', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/score', value: 50 }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/score', value: 50 }])];
       const localOps: JSONPatchOp[] = [{ op: '@max', path: '/score', value: 100, ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
@@ -42,9 +36,7 @@ describe('mergeServerWithLocal', () => {
     });
 
     it('should merge server replace with local @min (server value lower)', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/price', value: 10 }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/price', value: 10 }])];
       const localOps: JSONPatchOp[] = [{ op: '@min', path: '/price', value: 50, ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
@@ -53,9 +45,7 @@ describe('mergeServerWithLocal', () => {
     });
 
     it('should merge server replace with local @min (local value lower)', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/price', value: 50 }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/price', value: 50 }])];
       const localOps: JSONPatchOp[] = [{ op: '@min', path: '/price', value: 10, ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
@@ -64,9 +54,7 @@ describe('mergeServerWithLocal', () => {
     });
 
     it('should merge server replace with local @bit', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/flags', value: 0b0001 }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/flags', value: 0b0001 }])];
       // Turn on bit 1 (value encodes which bit to toggle)
       const localOps: JSONPatchOp[] = [{ op: '@bit', path: '/flags', value: 0b0010, ts: 1000 }];
 
@@ -79,9 +67,7 @@ describe('mergeServerWithLocal', () => {
 
   describe('non-delta local ops', () => {
     it('should keep server value when local has replace on same path', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/name', value: 'Server' }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/name', value: 'Server' }])];
       const localOps: JSONPatchOp[] = [{ op: 'replace', path: '/name', value: 'Local', ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
@@ -91,9 +77,7 @@ describe('mergeServerWithLocal', () => {
     });
 
     it('should keep server value when local has remove on same path', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/field', value: 'value' }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/field', value: 'value' }])];
       const localOps: JSONPatchOp[] = [{ op: 'remove', path: '/field', ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
@@ -104,9 +88,7 @@ describe('mergeServerWithLocal', () => {
 
   describe('no local ops', () => {
     it('should return server changes unchanged when no local ops', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/count', value: 100 }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/count', value: 100 }])];
 
       const result = mergeServerWithLocal(serverChanges, []);
 
@@ -116,9 +98,7 @@ describe('mergeServerWithLocal', () => {
 
   describe('local ops on untouched paths', () => {
     it('should add local ops for paths server did not touch', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/serverPath', value: 'server' }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/serverPath', value: 'server' }])];
       const localOps: JSONPatchOp[] = [{ op: '@inc', path: '/localPath', value: 5, ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
@@ -131,9 +111,7 @@ describe('mergeServerWithLocal', () => {
     });
 
     it('should preserve non-delta local ops on untouched paths', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/a', value: 1 }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/a', value: 1 }])];
       const localOps: JSONPatchOp[] = [{ op: 'replace', path: '/b', value: 'local', ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
@@ -167,9 +145,7 @@ describe('mergeServerWithLocal', () => {
     });
 
     it('should handle sendingChange ops + pendingOps combined', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/count', value: 100 }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/count', value: 100 }])];
       // Simulating sendingChange.ops + pendingOps combined
       const localOps: JSONPatchOp[] = [
         { op: '@inc', path: '/count', value: 10, ts: 1000 }, // From sendingChange
@@ -208,9 +184,7 @@ describe('mergeServerWithLocal', () => {
 
   describe('edge cases', () => {
     it('should handle undefined server values', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/count', value: undefined }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/count', value: undefined }])];
       const localOps: JSONPatchOp[] = [{ op: '@inc', path: '/count', value: 5, ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
@@ -220,9 +194,7 @@ describe('mergeServerWithLocal', () => {
     });
 
     it('should handle undefined local values', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'replace', path: '/count', value: 100 }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/count', value: 100 }])];
       const localOps: JSONPatchOp[] = [{ op: '@inc', path: '/count', value: undefined, ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
@@ -250,9 +222,7 @@ describe('mergeServerWithLocal', () => {
     it('should convert server remove + local @inc to replace with delta value', () => {
       // Server removed the field, but client has a pending increment
       // Since @inc can work on undefined (starting from 0), the result should be a replace
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'remove', path: '/count' }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'remove', path: '/count' }])];
       const localOps: JSONPatchOp[] = [{ op: '@inc', path: '/count', value: 5, ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
@@ -264,9 +234,7 @@ describe('mergeServerWithLocal', () => {
     });
 
     it('should convert server remove + local @max to replace', () => {
-      const serverChanges: Change[] = [
-        createChange(5, 6, [{ op: 'remove', path: '/score' }]),
-      ];
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'remove', path: '/score' }])];
       const localOps: JSONPatchOp[] = [{ op: '@max', path: '/score', value: 100, ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);

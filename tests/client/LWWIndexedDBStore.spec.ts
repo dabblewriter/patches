@@ -179,7 +179,7 @@ describe('LWWIndexedDBStore', () => {
 
       mockStores.set('docs', docsStore);
       mockStores.set('snapshots', snapshotsStore);
-      mockStores.set('committedFields', createMockIDBStore());
+      mockStores.set('committedOps', createMockIDBStore());
       mockStores.set('pendingOps', createMockIDBStore());
       mockStores.set('sendingChanges', createMockIDBStore());
 
@@ -194,15 +194,15 @@ describe('LWWIndexedDBStore', () => {
     it('should apply committed fields to snapshot', async () => {
       const docsStore = createMockIDBStore();
       const snapshotsStore = createMockIDBStore();
-      const committedFieldsStore = createMockIDBStore();
+      const committedOpsStore = createMockIDBStore();
 
       docsStore.data.set('"doc1"', { docId: 'doc1', committedRev: 6 });
       snapshotsStore.data.set('"doc1"', { docId: 'doc1', state: { title: 'Hello' }, rev: 5 });
-      committedFieldsStore.data.set('["doc1","/name"]', { docId: 'doc1', path: '/name', value: 'World' });
+      committedOpsStore.data.set('["doc1","/name"]', { docId: 'doc1', op: 'replace', path: '/name', value: 'World' });
 
       mockStores.set('docs', docsStore);
       mockStores.set('snapshots', snapshotsStore);
-      mockStores.set('committedFields', committedFieldsStore);
+      mockStores.set('committedOps', committedOpsStore);
       mockStores.set('pendingOps', createMockIDBStore());
       mockStores.set('sendingChanges', createMockIDBStore());
 
@@ -232,7 +232,7 @@ describe('LWWIndexedDBStore', () => {
 
       mockStores.set('docs', docsStore);
       mockStores.set('snapshots', snapshotsStore);
-      mockStores.set('committedFields', createMockIDBStore());
+      mockStores.set('committedOps', createMockIDBStore());
       mockStores.set('pendingOps', createMockIDBStore());
       mockStores.set('sendingChanges', sendingChangesStore);
 
@@ -258,7 +258,7 @@ describe('LWWIndexedDBStore', () => {
 
       mockStores.set('docs', docsStore);
       mockStores.set('snapshots', snapshotsStore);
-      mockStores.set('committedFields', createMockIDBStore());
+      mockStores.set('committedOps', createMockIDBStore());
       mockStores.set('pendingOps', pendingOpsStore);
       mockStores.set('sendingChanges', createMockIDBStore());
 
@@ -429,7 +429,7 @@ describe('LWWIndexedDBStore', () => {
   describe('confirmSendingChange', () => {
     it('should do nothing if no sending change exists', async () => {
       mockStores.set('sendingChanges', createMockIDBStore());
-      mockStores.set('committedFields', createMockIDBStore());
+      mockStores.set('committedOps', createMockIDBStore());
       mockStores.set('docs', createMockIDBStore());
 
       await store.confirmSendingChange('doc1');
@@ -457,7 +457,7 @@ describe('LWWIndexedDBStore', () => {
       docsStore.data.set('"doc1"', { docId: 'doc1', committedRev: 5 });
 
       mockStores.set('sendingChanges', sendingStore);
-      mockStores.set('committedFields', committedStore);
+      mockStores.set('committedOps', committedStore);
       mockStores.set('docs', docsStore);
 
       await store.confirmSendingChange('doc1');
@@ -465,6 +465,7 @@ describe('LWWIndexedDBStore', () => {
       expect(committedStore.put).toHaveBeenCalledWith(
         expect.objectContaining({
           docId: 'doc1',
+          op: 'replace',
           path: '/title',
           value: 'Confirmed',
         })
@@ -489,7 +490,7 @@ describe('LWWIndexedDBStore', () => {
       docsStore.data.set('"doc1"', { docId: 'doc1', committedRev: 5 });
 
       mockStores.set('sendingChanges', sendingStore);
-      mockStores.set('committedFields', createMockIDBStore());
+      mockStores.set('committedOps', createMockIDBStore());
       mockStores.set('docs', docsStore);
 
       await store.confirmSendingChange('doc1');
@@ -517,7 +518,7 @@ describe('LWWIndexedDBStore', () => {
       });
 
       mockStores.set('sendingChanges', sendingStore);
-      mockStores.set('committedFields', createMockIDBStore());
+      mockStores.set('committedOps', createMockIDBStore());
       mockStores.set('docs', createMockIDBStore());
 
       await store.confirmSendingChange('doc1');
@@ -533,10 +534,11 @@ describe('LWWIndexedDBStore', () => {
       ];
       await store.applyServerChanges('doc1', serverChanges);
 
-      const committedStore = mockStores.get('committedFields');
+      const committedStore = mockStores.get('committedOps');
       expect(committedStore?.put).toHaveBeenCalledWith(
         expect.objectContaining({
           docId: 'doc1',
+          op: 'replace',
           path: '/title',
           value: 'Server Title',
         })
@@ -599,19 +601,20 @@ describe('LWWIndexedDBStore', () => {
     it('should handle nested paths correctly', async () => {
       const docsStore = createMockIDBStore();
       const snapshotsStore = createMockIDBStore();
-      const committedFieldsStore = createMockIDBStore();
+      const committedOpsStore = createMockIDBStore();
 
       docsStore.data.set('"doc1"', { docId: 'doc1', committedRev: 6 });
       snapshotsStore.data.set('"doc1"', { docId: 'doc1', state: { user: { name: 'Alice' } }, rev: 5 });
-      committedFieldsStore.data.set('["doc1","/user/email"]', {
+      committedOpsStore.data.set('["doc1","/user/email"]', {
         docId: 'doc1',
+        op: 'replace',
         path: '/user/email',
         value: 'alice@example.com',
       });
 
       mockStores.set('docs', docsStore);
       mockStores.set('snapshots', snapshotsStore);
-      mockStores.set('committedFields', committedFieldsStore);
+      mockStores.set('committedOps', committedOpsStore);
       mockStores.set('pendingOps', createMockIDBStore());
       mockStores.set('sendingChanges', createMockIDBStore());
 

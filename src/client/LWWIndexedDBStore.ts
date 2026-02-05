@@ -1,7 +1,7 @@
-import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
 import { createChange } from '../data/change.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
+import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
 import { IDBStoreWrapper, IndexedDBStore } from './IndexedDBStore.js';
 import type { LWWClientStore } from './LWWClientStore.js';
@@ -10,11 +10,9 @@ import type { TrackedDoc } from './PatchesStore.js';
 const DB_VERSION = 1;
 const SNAPSHOT_INTERVAL = 200;
 
-/** A committed field value stored after server confirmation */
-interface CommittedField {
+/** A committed op stored after server confirmation (JSONPatchOp fields with docId, without ts/rev) */
+interface CommittedOp extends JSONPatchOp {
   docId: string;
-  path: string;
-  value: any;
 }
 
 /** A pending operation waiting to be sent */
@@ -45,16 +43,16 @@ interface Snapshot {
  * Creates stores:
  * - docs<{ docId: string; committedRev: number; deleted?: boolean }> (primary key: docId) [shared with OT]
  * - snapshots<{ docId: string; rev: number; state: any }> (primary key: docId) [shared with OT]
- * - committedFields<{ docId: string; path: string; value: any }> (primary key: [docId, path])
+ * - committedOps<{ docId: string; op: string; path: string; from?: string; value?: any }> (primary key: [docId, path])
  * - pendingOps<{ docId: string; path: string; op: string; ts: number; value: any }> (primary key: [docId, path])
  * - sendingChanges<{ docId: string; change: Change }> (primary key: docId)
  *
  * This store manages field-level operations for LWW conflict resolution:
- * - Committed fields represent confirmed server state
+ * - Committed ops represent confirmed server state
  * - Pending ops are local changes waiting to be sent
  * - Sending changes are in-flight operations
  *
- * Every 200 revisions, committed fields are compacted into the snapshot.
+ * Every 200 ops, committed ops are compacted into the snapshot.
  */
 export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore {
   protected getDBVersion(): number {
@@ -63,8 +61,8 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
 
   protected onUpgrade(db: IDBDatabase, _oldVersion: number): void {
     // Create LWW-specific stores
-    if (!db.objectStoreNames.contains('committedFields')) {
-      db.createObjectStore('committedFields', { keyPath: ['docId', 'path'] });
+    if (!db.objectStoreNames.contains('committedOps')) {
+      db.createObjectStore('committedOps', { keyPath: ['docId', 'path'] });
     }
     if (!db.objectStoreNames.contains('pendingOps')) {
       db.createObjectStore('pendingOps', { keyPath: ['docId', 'path'] });
@@ -77,18 +75,18 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
   // ─── Document Operations ─────────────────────────────────────────────────
 
   /**
-   * Rebuilds a document state from snapshot + committed fields + sending + pending.
+   * Rebuilds a document state from snapshot + committed ops + sending + pending.
    *
    * 1. Load the snapshot (base state + rev)
-   * 2. Apply all committedFields for docId
+   * 2. Apply all committedOps for docId
    * 3. Check sendingChanges - if exists, apply its ops
    * 4. Apply all pendingOps
    * 5. Return reconstructed state
    */
   @blockable
   async getDoc(docId: string): Promise<PatchesSnapshot | undefined> {
-    const [tx, docsStore, snapshots, committedFields, pendingOps, sendingChanges] = await this.transaction(
-      ['docs', 'snapshots', 'committedFields', 'pendingOps', 'sendingChanges'],
+    const [tx, docsStore, snapshots, committedOps, pendingOps, sendingChanges] = await this.transaction(
+      ['docs', 'snapshots', 'committedOps', 'pendingOps', 'sendingChanges'],
       'readonly'
     );
 
@@ -99,7 +97,7 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
     }
 
     const snapshot = await snapshots.get<Snapshot>(docId);
-    const committed = await committedFields.getAll<CommittedField>([docId, ''], [docId, '\uffff']);
+    const committed = await committedOps.getAll<CommittedOp>([docId, ''], [docId, '\uffff']);
     const sending = await sendingChanges.get<SendingChange>(docId);
     const pending = await pendingOps.getAll<PendingOp>([docId, ''], [docId, '\uffff']);
 
@@ -111,14 +109,10 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
     // Start with snapshot state
     let state = snapshot?.state ? { ...snapshot.state } : {};
 
-    // Apply committed fields (these are resolved values stored as replace ops)
+    // Apply committed ops
     if (committed.length > 0) {
-      const committedOps: JSONPatchOp[] = committed.map(field => ({
-        op: 'replace',
-        path: field.path,
-        value: field.value,
-      }));
-      state = applyPatch(state, committedOps, { partial: true });
+      const ops: JSONPatchOp[] = committed.map(({ docId: _docId, ...op }) => op);
+      state = applyPatch(state, ops, { partial: true });
     }
 
     // Apply sending change ops (if in-flight)
@@ -154,8 +148,8 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
-    const [tx, snapshots, committedFields, pendingOps, sendingChanges, docsStore] = await this.transaction(
-      ['snapshots', 'committedFields', 'pendingOps', 'sendingChanges', 'docs'],
+    const [tx, snapshots, committedOps, pendingOps, sendingChanges, docsStore] = await this.transaction(
+      ['snapshots', 'committedOps', 'pendingOps', 'sendingChanges', 'docs'],
       'readwrite'
     );
 
@@ -164,7 +158,7 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
     await Promise.all([
       docsStore.put<TrackedDoc>({ docId, committedRev: rev }),
       snapshots.put<Snapshot>({ docId, state, rev }),
-      this.deleteFieldsForDoc(committedFields, docId),
+      this.deleteFieldsForDoc(committedOps, docId),
       this.deleteFieldsForDoc(pendingOps, docId),
       sendingChanges.delete(docId),
     ]);
@@ -177,8 +171,8 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async deleteDoc(docId: string): Promise<void> {
-    const [tx, snapshots, committedFields, pendingOps, sendingChanges, docsStore] = await this.transaction(
-      ['snapshots', 'committedFields', 'pendingOps', 'sendingChanges', 'docs'],
+    const [tx, snapshots, committedOps, pendingOps, sendingChanges, docsStore] = await this.transaction(
+      ['snapshots', 'committedOps', 'pendingOps', 'sendingChanges', 'docs'],
       'readwrite'
     );
 
@@ -187,7 +181,7 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
 
     await Promise.all([
       snapshots.delete(docId),
-      this.deleteFieldsForDoc(committedFields, docId),
+      this.deleteFieldsForDoc(committedOps, docId),
       this.deleteFieldsForDoc(pendingOps, docId),
       sendingChanges.delete(docId),
     ]);
@@ -199,8 +193,8 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    * Untracks documents by removing all their data.
    */
   async untrackDocs(docIds: string[]): Promise<void> {
-    const [tx, docsStore, snapshots, committedFields, pendingOps, sendingChanges] = await this.transaction(
-      ['docs', 'snapshots', 'committedFields', 'pendingOps', 'sendingChanges'],
+    const [tx, docsStore, snapshots, committedOps, pendingOps, sendingChanges] = await this.transaction(
+      ['docs', 'snapshots', 'committedOps', 'pendingOps', 'sendingChanges'],
       'readwrite'
     );
 
@@ -209,7 +203,7 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
         Promise.all([
           docsStore.delete(docId),
           snapshots.delete(docId),
-          this.deleteFieldsForDoc(committedFields, docId),
+          this.deleteFieldsForDoc(committedOps, docId),
           this.deleteFieldsForDoc(pendingOps, docId),
           sendingChanges.delete(docId),
         ])
@@ -319,8 +313,8 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async confirmSendingChange(docId: string): Promise<void> {
-    const [tx, sendingChanges, committedFields, docsStore] = await this.transaction(
-      ['sendingChanges', 'committedFields', 'docs'],
+    const [tx, sendingChanges, committedOps, docsStore] = await this.transaction(
+      ['sendingChanges', 'committedOps', 'docs'],
       'readwrite'
     );
 
@@ -330,13 +324,9 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
       return;
     }
 
-    // Move ops to committed fields (store the value directly)
+    // Move ops to committed (store op directly, strip ts/rev)
     for (const op of sending.change.ops) {
-      await committedFields.put<CommittedField>({
-        docId,
-        path: op.path,
-        value: op.value,
-      });
+      await committedOps.put<CommittedOp>({ docId, op: op.op, path: op.path, value: op.value });
     }
 
     // Update committed rev
@@ -354,19 +344,15 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async applyServerChanges(docId: string, serverChanges: Change[]): Promise<void> {
-    const [tx, committedFields, snapshots, docsStore] = await this.transaction(
-      ['committedFields', 'snapshots', 'docs'],
+    const [tx, committedOps, snapshots, docsStore] = await this.transaction(
+      ['committedOps', 'snapshots', 'docs'],
       'readwrite'
     );
 
-    // Convert server changes to committed fields (store values directly)
+    // Store server ops directly (strip ts/rev)
     for (const change of serverChanges) {
       for (const op of change.ops) {
-        await committedFields.put<CommittedField>({
-          docId,
-          path: op.path,
-          value: op.value,
-        });
+        await committedOps.put<CommittedOp>({ docId, op: op.op, path: op.path, value: op.value });
       }
     }
 
@@ -378,14 +364,14 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
     if (lastCommittedRev !== undefined) {
       const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
       if (lastCommittedRev > docMeta.committedRev) {
-        await docsStore.put({ ...docMeta, committedRev: lastCommittedRev, deleted: undefined });
+        await docsStore.put({ ...docMeta, committedRev: lastCommittedRev });
       }
     }
 
     // Check for compaction
-    const fieldCount = await committedFields.count([docId, ''], [docId, '\uffff']);
+    const fieldCount = await committedOps.count([docId, ''], [docId, '\uffff']);
     if (fieldCount >= SNAPSHOT_INTERVAL) {
-      await this.compactSnapshot(docId, snapshots, committedFields, docsStore);
+      await this.compactSnapshot(docId, snapshots, committedOps, docsStore);
     }
 
     await tx.complete();
@@ -412,45 +398,39 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
   }
 
   /**
-   * Deletes all fields for a document from a store.
+   * Deletes all entries for a document from a store.
    */
   private async deleteFieldsForDoc(store: IDBStoreWrapper, docId: string): Promise<void> {
-    // Get all fields for the document and delete them
-    const fields = await store.getAll<{ docId: string; path: string }>([docId, ''], [docId, '\uffff']);
-    await Promise.all(fields.map(f => store.delete([f.docId, f.path])));
+    const entries = await store.getAll<{ docId: string; path: string }>([docId, ''], [docId, '\uffff']);
+    await Promise.all(entries.map(e => store.delete([e.docId, e.path])));
   }
 
   /**
-   * Compacts committed fields into the snapshot.
+   * Compacts committed ops into the snapshot.
    */
   private async compactSnapshot(
     docId: string,
     snapshots: IDBStoreWrapper,
-    committedFields: IDBStoreWrapper,
+    committedOps: IDBStoreWrapper,
     docsStore: IDBStoreWrapper
   ): Promise<void> {
     const snapshot = await snapshots.get<Snapshot>(docId);
-    const fields = await committedFields.getAll<CommittedField>([docId, ''], [docId, '\uffff']);
+    const committed = await committedOps.getAll<CommittedOp>([docId, ''], [docId, '\uffff']);
 
-    if (fields.length === 0) {
+    if (committed.length === 0) {
       return;
     }
 
-    // Build new state from snapshot + fields
+    // Build new state from snapshot + committed ops
     let state = snapshot?.state ? { ...snapshot.state } : {};
-    const fieldOps: JSONPatchOp[] = fields.map(field => ({
-      op: 'replace',
-      path: field.path,
-      value: field.value,
-    }));
-    state = applyPatch(state, fieldOps, { partial: true });
+    state = applyPatch(state, committed, { partial: true });
 
     // Get current committed rev
     const docMeta = await docsStore.get<TrackedDoc>(docId);
     const rev = docMeta?.committedRev ?? snapshot?.rev ?? 0;
 
-    // Save new snapshot and clear committed fields
+    // Save new snapshot and clear committed ops
     await snapshots.put({ docId, state, rev });
-    await this.deleteFieldsForDoc(committedFields, docId);
+    await this.deleteFieldsForDoc(committedOps, docId);
   }
 }

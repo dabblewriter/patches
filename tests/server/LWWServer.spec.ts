@@ -1,25 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { JSONPatchOp } from '../../src/json-patch/types';
 import { clearAuthContext, setAuthContext } from '../../src/net/serverContext';
 import { LWWServer } from '../../src/server/LWWServer';
-import type { FieldMeta, LWWStoreBackend, LWWVersioningStoreBackend, ListFieldsOptions } from '../../src/server/types';
+import type { LWWStoreBackend, LWWVersioningStoreBackend, ListFieldsOptions } from '../../src/server/types';
 import type { ChangeInput, EditableVersionMetadata } from '../../src/types';
 
 /**
  * Creates a mock LWWStoreBackend for testing.
- * Uses in-memory storage for snapshots, fields, and revisions.
+ * Uses in-memory storage for snapshots, ops, and revisions.
  */
 function createMockStore(): LWWStoreBackend & {
   snapshots: Map<string, { state: any; rev: number }>;
-  fields: Map<string, FieldMeta>;
+  ops: Map<string, JSONPatchOp>;
   revs: Map<string, number>;
 } {
   const snapshots = new Map<string, { state: any; rev: number }>();
-  const fields = new Map<string, FieldMeta>(); // key = `${docId}:${path}`
+  const ops = new Map<string, JSONPatchOp>(); // key = `${docId}:${path}`
   const revs = new Map<string, number>();
 
   return {
     snapshots,
-    fields,
+    ops,
     revs,
 
     getSnapshot: vi.fn(async (docId: string) => {
@@ -30,36 +31,36 @@ function createMockStore(): LWWStoreBackend & {
       snapshots.set(docId, { state, rev });
     }),
 
-    listFields: vi.fn(async (docId: string, options?: ListFieldsOptions) => {
-      const result: FieldMeta[] = [];
+    listOps: vi.fn(async (docId: string, options?: ListFieldsOptions) => {
+      const result: JSONPatchOp[] = [];
 
       if (!options) {
-        // Return all fields for this doc
-        for (const [key, field] of fields.entries()) {
+        // Return all ops for this doc
+        for (const [key, op] of ops.entries()) {
           if (key.startsWith(`${docId}:`)) {
-            result.push(field);
+            result.push(op);
           }
         }
         return result;
       }
 
       if ('sinceRev' in options) {
-        // Return fields changed since rev
-        for (const [key, field] of fields.entries()) {
-          if (key.startsWith(`${docId}:`) && field.rev > options.sinceRev) {
-            result.push(field);
+        // Return ops changed since rev
+        for (const [key, op] of ops.entries()) {
+          if (key.startsWith(`${docId}:`) && (op.rev ?? 0) > options.sinceRev) {
+            result.push(op);
           }
         }
         return result;
       }
 
       if ('paths' in options) {
-        // Return fields at specific paths
+        // Return ops at specific paths
         for (const path of options.paths) {
           const key = `${docId}:${path}`;
-          const field = fields.get(key);
-          if (field) {
-            result.push(field);
+          const op = ops.get(key);
+          if (op) {
+            result.push(op);
           }
         }
         return result;
@@ -68,25 +69,32 @@ function createMockStore(): LWWStoreBackend & {
       return result;
     }),
 
-    saveFields: vi.fn(async (docId: string, newFields: FieldMeta[]) => {
+    saveOps: vi.fn(async (docId: string, newOps: JSONPatchOp[], pathsToDelete?: string[]) => {
       // Atomically increment revision
       const current = revs.get(docId) || 0;
       const newRev = current + 1;
       revs.set(docId, newRev);
 
-      for (const field of newFields) {
-        const key = `${docId}:${field.path}`;
+      // Delete specified paths
+      if (pathsToDelete) {
+        for (const path of pathsToDelete) {
+          ops.delete(`${docId}:${path}`);
+        }
+      }
+
+      for (const op of newOps) {
+        const key = `${docId}:${op.path}`;
 
         // Delete children (simulate atomic child deletion)
-        for (const [existingKey] of fields.entries()) {
+        for (const [existingKey] of ops.entries()) {
           if (existingKey.startsWith(`${key}/`)) {
-            fields.delete(existingKey);
+            ops.delete(existingKey);
           }
         }
 
-        // Set the rev on the field
-        field.rev = newRev;
-        fields.set(key, field);
+        // Set the rev on the op
+        op.rev = newRev;
+        ops.set(key, op);
       }
 
       return newRev;
@@ -95,9 +103,9 @@ function createMockStore(): LWWStoreBackend & {
     deleteDoc: vi.fn(async (docId: string) => {
       snapshots.delete(docId);
       revs.delete(docId);
-      for (const key of [...fields.keys()]) {
+      for (const key of [...ops.keys()]) {
         if (key.startsWith(`${docId}:`)) {
-          fields.delete(key);
+          ops.delete(key);
         }
       }
     }),
@@ -161,7 +169,7 @@ describe('LWWServer', () => {
 
     it('should reconstruct state from snapshot + fields', async () => {
       mockStore.snapshots.set('doc1', { state: { name: 'Alice' }, rev: 5 });
-      mockStore.fields.set('doc1:/age', { path: '/age', ts: 1000, rev: 6, value: 30 });
+      mockStore.ops.set('doc1:/age', { op: 'replace', path: '/age', ts: 1000, rev: 6, value: 30 });
 
       const result = await server.getDoc('doc1');
 
@@ -177,8 +185,8 @@ describe('LWWServer', () => {
     });
 
     it('should synthesize change from fields since rev', async () => {
-      mockStore.fields.set('doc1:/name', { path: '/name', ts: 1000, rev: 2, value: 'Alice' });
-      mockStore.fields.set('doc1:/age', { path: '/age', ts: 1500, rev: 3, value: 30 });
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 1000, rev: 2, value: 'Alice' });
+      mockStore.ops.set('doc1:/age', { op: 'replace', path: '/age', ts: 1500, rev: 3, value: 30 });
 
       const result = await server.getChangesSince('doc1', 1);
 
@@ -188,8 +196,8 @@ describe('LWWServer', () => {
     });
 
     it('should sort ops by timestamp', async () => {
-      mockStore.fields.set('doc1:/name', { path: '/name', ts: 2000, rev: 2, value: 'Alice' });
-      mockStore.fields.set('doc1:/age', { path: '/age', ts: 1000, rev: 3, value: 30 });
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 2000, rev: 2, value: 'Alice' });
+      mockStore.ops.set('doc1:/age', { op: 'replace', path: '/age', ts: 1000, rev: 3, value: 30 });
 
       const result = await server.getChangesSince('doc1', 0);
 
@@ -215,11 +223,11 @@ describe('LWWServer', () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].rev).toBe(1);
-      expect(mockStore.fields.get('doc1:/name')?.value).toBe('Alice');
+      expect(mockStore.ops.get('doc1:/name')?.value).toBe('Alice');
     });
 
     it('should apply write with higher timestamp', async () => {
-      mockStore.fields.set('doc1:/name', { path: '/name', ts: 1000, rev: 1, value: 'Alice' });
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 1000, rev: 1, value: 'Alice' });
       mockStore.revs.set('doc1', 1);
 
       const change: ChangeInput = {
@@ -230,11 +238,11 @@ describe('LWWServer', () => {
       const result = await server.commitChanges('doc1', [change]);
 
       expect(result).toHaveLength(1);
-      expect(mockStore.fields.get('doc1:/name')?.value).toBe('Bob');
+      expect(mockStore.ops.get('doc1:/name')?.value).toBe('Bob');
     });
 
     it('should reject write with lower timestamp', async () => {
-      mockStore.fields.set('doc1:/name', { path: '/name', ts: 2000, rev: 1, value: 'Bob' });
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 2000, rev: 1, value: 'Bob' });
       mockStore.revs.set('doc1', 1);
 
       const change: ChangeInput = {
@@ -248,11 +256,11 @@ describe('LWWServer', () => {
       // Rev should not change since no updates were made
       expect(result[0].rev).toBe(1);
       // State should remain unchanged
-      expect(mockStore.fields.get('doc1:/name')?.value).toBe('Bob');
+      expect(mockStore.ops.get('doc1:/name')?.value).toBe('Bob');
     });
 
     it('should apply write with equal timestamp (incoming wins on tie)', async () => {
-      mockStore.fields.set('doc1:/name', { path: '/name', ts: 1000, rev: 1, value: 'Alice' });
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 1000, rev: 1, value: 'Alice' });
       mockStore.revs.set('doc1', 1);
 
       const change: ChangeInput = {
@@ -263,7 +271,7 @@ describe('LWWServer', () => {
       const result = await server.commitChanges('doc1', [change]);
 
       expect(result).toHaveLength(1);
-      expect(mockStore.fields.get('doc1:/name')?.value).toBe('Bob');
+      expect(mockStore.ops.get('doc1:/name')?.value).toBe('Bob');
     });
 
     it('should use serverNow when op has no ts', async () => {
@@ -275,7 +283,7 @@ describe('LWWServer', () => {
 
       await server.commitChanges('doc1', [change]);
 
-      const field = mockStore.fields.get('doc1:/name');
+      const field = mockStore.ops.get('doc1:/name');
       expect(field?.ts).toBeGreaterThanOrEqual(now);
     });
   });
@@ -283,7 +291,7 @@ describe('LWWServer', () => {
   describe('commitChanges - special operations', () => {
     describe('@inc operations', () => {
       it('should always apply @inc regardless of timestamp', async () => {
-        mockStore.fields.set('doc1:/count', { path: '/count', ts: 2000, rev: 1, value: 10 });
+        mockStore.ops.set('doc1:/count', { op: 'replace', path: '/count', ts: 2000, rev: 1, value: 10 });
         mockStore.revs.set('doc1', 1);
 
         const change: ChangeInput = {
@@ -294,7 +302,7 @@ describe('LWWServer', () => {
         const result = await server.commitChanges('doc1', [change]);
 
         expect(result).toHaveLength(1);
-        expect(mockStore.fields.get('doc1:/count')?.value).toBe(15);
+        expect(mockStore.ops.get('doc1:/count')?.value).toBe(15);
       });
 
       it('should initialize to value if field does not exist', async () => {
@@ -305,13 +313,13 @@ describe('LWWServer', () => {
 
         await server.commitChanges('doc1', [change]);
 
-        expect(mockStore.fields.get('doc1:/count')?.value).toBe(5);
+        expect(mockStore.ops.get('doc1:/count')?.value).toBe(5);
       });
     });
 
     describe('@bit operations', () => {
       it('should always apply @bit regardless of timestamp', async () => {
-        mockStore.fields.set('doc1:/flags', { path: '/flags', ts: 2000, rev: 1, value: 0b0001 });
+        mockStore.ops.set('doc1:/flags', { op: 'replace', path: '/flags', ts: 2000, rev: 1, value: 0b0001 });
         mockStore.revs.set('doc1', 1);
 
         const change: ChangeInput = {
@@ -321,13 +329,13 @@ describe('LWWServer', () => {
 
         await server.commitChanges('doc1', [change]);
 
-        expect(mockStore.fields.get('doc1:/flags')?.value).toBe(0b0011);
+        expect(mockStore.ops.get('doc1:/flags')?.value).toBe(0b0011);
       });
     });
 
     describe('@max operations', () => {
       it('should update if value is greater', async () => {
-        mockStore.fields.set('doc1:/lastSeen', { path: '/lastSeen', ts: 1000, rev: 1, value: 100 });
+        mockStore.ops.set('doc1:/lastSeen', { op: 'replace', path: '/lastSeen', ts: 1000, rev: 1, value: 100 });
         mockStore.revs.set('doc1', 1);
 
         const change: ChangeInput = {
@@ -337,11 +345,11 @@ describe('LWWServer', () => {
 
         await server.commitChanges('doc1', [change]);
 
-        expect(mockStore.fields.get('doc1:/lastSeen')?.value).toBe(200);
+        expect(mockStore.ops.get('doc1:/lastSeen')?.value).toBe(200);
       });
 
       it('should not update if value is smaller', async () => {
-        mockStore.fields.set('doc1:/lastSeen', { path: '/lastSeen', ts: 1000, rev: 1, value: 200 });
+        mockStore.ops.set('doc1:/lastSeen', { op: 'replace', path: '/lastSeen', ts: 1000, rev: 1, value: 200 });
         mockStore.revs.set('doc1', 1);
 
         const change: ChangeInput = {
@@ -351,13 +359,13 @@ describe('LWWServer', () => {
 
         await server.commitChanges('doc1', [change]);
 
-        expect(mockStore.fields.get('doc1:/lastSeen')?.value).toBe(200);
+        expect(mockStore.ops.get('doc1:/lastSeen')?.value).toBe(200);
       });
     });
 
     describe('@min operations', () => {
       it('should update if value is smaller', async () => {
-        mockStore.fields.set('doc1:/minPrice', { path: '/minPrice', ts: 1000, rev: 1, value: 100 });
+        mockStore.ops.set('doc1:/minPrice', { op: 'replace', path: '/minPrice', ts: 1000, rev: 1, value: 100 });
         mockStore.revs.set('doc1', 1);
 
         const change: ChangeInput = {
@@ -367,14 +375,14 @@ describe('LWWServer', () => {
 
         await server.commitChanges('doc1', [change]);
 
-        expect(mockStore.fields.get('doc1:/minPrice')?.value).toBe(50);
+        expect(mockStore.ops.get('doc1:/minPrice')?.value).toBe(50);
       });
     });
   });
 
   describe('commitChanges - remove operations', () => {
     it('should store field with undefined value for remove', async () => {
-      mockStore.fields.set('doc1:/name', { path: '/name', ts: 1000, rev: 1, value: 'Alice' });
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 1000, rev: 1, value: 'Alice' });
       mockStore.revs.set('doc1', 1);
 
       const change: ChangeInput = {
@@ -384,14 +392,14 @@ describe('LWWServer', () => {
 
       await server.commitChanges('doc1', [change]);
 
-      expect(mockStore.fields.get('doc1:/name')?.value).toBeUndefined();
+      expect(mockStore.ops.get('doc1:/name')?.value).toBeUndefined();
     });
   });
 
   describe('commitChanges - hierarchy handling', () => {
     it('should delete children when setting parent', async () => {
-      mockStore.fields.set('doc1:/obj/name', { path: '/obj/name', ts: 1000, rev: 1, value: 'Alice' });
-      mockStore.fields.set('doc1:/obj/age', { path: '/obj/age', ts: 1000, rev: 1, value: 30 });
+      mockStore.ops.set('doc1:/obj/name', { op: 'replace', path: '/obj/name', ts: 1000, rev: 1, value: 'Alice' });
+      mockStore.ops.set('doc1:/obj/age', { op: 'replace', path: '/obj/age', ts: 1000, rev: 1, value: 30 });
       mockStore.revs.set('doc1', 1);
 
       const change: ChangeInput = {
@@ -402,14 +410,14 @@ describe('LWWServer', () => {
       await server.commitChanges('doc1', [change]);
 
       // Children should be deleted
-      expect(mockStore.fields.has('doc1:/obj/name')).toBe(false);
-      expect(mockStore.fields.has('doc1:/obj/age')).toBe(false);
+      expect(mockStore.ops.has('doc1:/obj/name')).toBe(false);
+      expect(mockStore.ops.has('doc1:/obj/age')).toBe(false);
       // Parent should have new value
-      expect(mockStore.fields.get('doc1:/obj')?.value).toEqual({ newProp: true });
+      expect(mockStore.ops.get('doc1:/obj')?.value).toEqual({ newProp: true });
     });
 
     it('should self-heal when setting child on primitive parent', async () => {
-      mockStore.fields.set('doc1:/obj', { path: '/obj', ts: 1000, rev: 1, value: 'primitive' });
+      mockStore.ops.set('doc1:/obj', { op: 'replace', path: '/obj', ts: 1000, rev: 1, value: 'primitive' });
       mockStore.revs.set('doc1', 1);
 
       const change: ChangeInput = {
@@ -427,8 +435,8 @@ describe('LWWServer', () => {
 
   describe('commitChanges - catchup', () => {
     it('should include fields since client rev in response', async () => {
-      mockStore.fields.set('doc1:/name', { path: '/name', ts: 1000, rev: 2, value: 'Alice' });
-      mockStore.fields.set('doc1:/age', { path: '/age', ts: 1500, rev: 3, value: 30 });
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 1000, rev: 2, value: 'Alice' });
+      mockStore.ops.set('doc1:/age', { op: 'replace', path: '/age', ts: 1500, rev: 3, value: 30 });
       mockStore.revs.set('doc1', 3);
 
       const change: ChangeInput = {
@@ -445,7 +453,7 @@ describe('LWWServer', () => {
     });
 
     it('should filter out paths client just sent', async () => {
-      mockStore.fields.set('doc1:/name', { path: '/name', ts: 1000, rev: 2, value: 'Alice' });
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 1000, rev: 2, value: 'Alice' });
       mockStore.revs.set('doc1', 2);
 
       const change: ChangeInput = {
@@ -461,7 +469,7 @@ describe('LWWServer', () => {
     });
 
     it('should filter out children of paths client sent', async () => {
-      mockStore.fields.set('doc1:/obj/child', { path: '/obj/child', ts: 1000, rev: 2, value: 'x' });
+      mockStore.ops.set('doc1:/obj/child', { op: 'replace', path: '/obj/child', ts: 1000, rev: 2, value: 'x' });
       mockStore.revs.set('doc1', 2);
 
       const change: ChangeInput = {
@@ -498,7 +506,7 @@ describe('LWWServer', () => {
 
     it('should handle notification errors gracefully', async () => {
       const emitSpy = vi.spyOn(server.onChangesCommitted, 'emit').mockRejectedValue(new Error('Emit failed'));
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => { });
 
       const change: ChangeInput = {
         id: 'signal2',
@@ -660,7 +668,7 @@ describe('LWWServer', () => {
       };
 
       await server.commitChanges('doc1', [changeA]);
-      expect(mockStore.fields.get('doc1:/name')?.value).toBe('Alice');
+      expect(mockStore.ops.get('doc1:/name')?.value).toBe('Alice');
 
       // Client B's change arrives second but has higher timestamp
       const changeB: ChangeInput = {
@@ -669,7 +677,7 @@ describe('LWWServer', () => {
       };
 
       await server.commitChanges('doc1', [changeB]);
-      expect(mockStore.fields.get('doc1:/name')?.value).toBe('Bob');
+      expect(mockStore.ops.get('doc1:/name')?.value).toBe('Bob');
     });
 
     it('should handle concurrent edits to different fields', async () => {
@@ -686,8 +694,8 @@ describe('LWWServer', () => {
       await server.commitChanges('doc1', [changeA]);
       await server.commitChanges('doc1', [changeB]);
 
-      expect(mockStore.fields.get('doc1:/name')?.value).toBe('Alice');
-      expect(mockStore.fields.get('doc1:/age')?.value).toBe(30);
+      expect(mockStore.ops.get('doc1:/name')?.value).toBe('Alice');
+      expect(mockStore.ops.get('doc1:/age')?.value).toBe(30);
     });
   });
 

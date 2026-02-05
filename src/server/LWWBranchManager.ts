@@ -37,7 +37,7 @@ export class LWWBranchManager implements BranchManager {
   constructor(
     private readonly store: LWWBranchStore,
     private readonly lwwServer: LWWServer
-  ) {}
+  ) { }
 
   /**
    * Lists all branches for a document.
@@ -65,7 +65,7 @@ export class LWWBranchManager implements BranchManager {
 
     // Get current state and all field metadata
     const doc = await this.lwwServer.getDoc(docId);
-    const fields = await this.store.listFields(docId);
+    const fields = await this.store.listOps(docId);
 
     // Generate branch document ID
     const branchDocId = await generateBranchId(this.store, docId);
@@ -75,7 +75,7 @@ export class LWWBranchManager implements BranchManager {
 
     // Copy field metadata to the branch document (preserving timestamps)
     if (fields.length > 0) {
-      await this.store.saveFields(branchDocId, fields);
+      await this.store.saveOps(branchDocId, fields);
     }
 
     // Create the branch metadata record

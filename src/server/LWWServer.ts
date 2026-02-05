@@ -1,6 +1,8 @@
 import { createId } from 'crypto-id';
+import { consolidateOps, convertDeltaOps } from '../algorithms/lww/consolidateOps.js';
+import { createChange } from '../data/change.js';
 import { signal } from '../event-signal.js';
-import type { JSONPatchOp } from '../json-patch/types.js';
+import { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import { getClientId } from '../net/serverContext.js';
 import type {
@@ -12,8 +14,8 @@ import type {
   PatchesState,
 } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
-import type { FieldMeta, LWWStoreBackend, LWWVersioningStoreBackend } from './types.js';
 import { createTombstoneIfSupported, removeTombstoneIfExists } from './tombstone.js';
+import type { LWWStoreBackend, LWWVersioningStoreBackend } from './types.js';
 import { assertVersionMetadata } from './utils.js';
 
 /**
@@ -26,8 +28,6 @@ export interface LWWServerOptions {
    */
   snapshotInterval?: number;
 }
-
-const SPECIAL_OPS = new Set(['@inc', '@bit', '@max', '@min']);
 
 /**
  * Last-Write-Wins (LWW) server implementation.
@@ -85,7 +85,7 @@ export class LWWServer implements PatchesServer {
 
   /**
    * Get the current state of a document.
-   * Reconstructs state from snapshot + fields changed since snapshot.
+   * Reconstructs state from snapshot + ops changed since snapshot.
    *
    * @param docId - The document ID.
    * @returns The document state and revision, or `{ state: {}, rev: 0 }` if not found.
@@ -95,57 +95,45 @@ export class LWWServer implements PatchesServer {
     const baseState = snapshot?.state ?? {};
     const baseRev = snapshot?.rev ?? 0;
 
-    const fields = await this.store.listFields(docId, { sinceRev: baseRev });
-    if (fields.length === 0) {
+    const ops = await this.store.listOps(docId, { sinceRev: baseRev });
+    if (ops.length === 0) {
       return { state: baseState, rev: baseRev };
     }
 
-    // Apply fields to reconstruct current state
-    const state = applyFields(baseState, fields);
-    const rev = Math.max(baseRev, ...fields.map((f: FieldMeta) => f.rev));
+    // Apply ops to reconstruct current state
+    const state = new JSONPatch(ops).apply(baseState);
+    const rev = Math.max(baseRev, ...ops.map(op => op.rev ?? 0));
     return { state, rev };
   }
 
   /**
    * Get changes that occurred after a specific revision.
-   * LWW doesn't store changes, so this synthesizes a change from fields.
+   * LWW doesn't store changes, so this synthesizes a change from ops.
    *
    * @param docId - The document ID.
    * @param rev - The revision number to get changes after.
    * @returns Array containing 0 or 1 synthesized changes.
    */
   async getChangesSince(docId: string, rev: number): Promise<Change[]> {
-    const fields = await this.store.listFields(docId, { sinceRev: rev });
-    if (fields.length === 0) {
+    const ops = await this.store.listOps(docId, { sinceRev: rev });
+    if (ops.length === 0) {
       return [];
     }
 
     // Sort by ts so older ops apply first
-    const sortedFields = [...fields].sort((a: FieldMeta, b: FieldMeta) => a.ts - b.ts);
-    const ops = sortedFields.map((f: FieldMeta) => fieldToOp(f));
-    const maxRev = Math.max(...fields.map((f: FieldMeta) => f.rev));
+    const sortedOps = [...ops].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+    const maxRev = Math.max(...ops.map(op => op.rev ?? 0));
 
-    // Synthesize a change from fields
-    return [
-      {
-        id: createId(8),
-        ops,
-        rev: maxRev,
-        baseRev: rev,
-        createdAt: Date.now(),
-        committedAt: Date.now(),
-      },
-    ];
+    return [createChange(rev, maxRev, sortedOps)];
   }
 
   /**
    * Commit changes to a document using LWW conflict resolution.
    *
-   * For each operation:
-   * 1. Check parent hierarchy (skip if parent is primitive)
-   * 2. Compare incoming timestamp with existing field timestamp
-   * 3. If incoming wins (ts >= existing.ts), update the field
-   * 4. Build catchup ops for fields changed since client's rev
+   * Uses the consolidateOps algorithm to:
+   * 1. Handle parent hierarchy validation (returns correction ops)
+   * 2. Consolidate incoming ops with existing ops using LWW rules
+   * 3. Convert delta ops (@inc, @bit, etc.) to concrete replace ops
    *
    * @param docId - The document ID.
    * @param changes - The changes to commit (always 1 for LWW).
@@ -158,65 +146,28 @@ export class LWWServer implements PatchesServer {
     }
 
     const change = changes[0]; // LWW always receives 1 change
-    const ops = change.ops;
     const serverNow = Date.now();
     const clientRev = change.rev; // Client's last known rev (for catchup)
 
-    // Collect all paths we need: op paths + all parent paths
-    const pathsToLoad = collectPathsWithParents(ops);
+    // Add timestamps to ops that don't have them
+    const newOps = change.ops.map(op => (op.ts ? op : { ...op, ts: serverNow }));
 
-    // Load existing fields as a Map for efficient lookup
-    const existingFieldsList = await this.store.listFields(docId, { paths: [...pathsToLoad] });
-    const existingFields = new Map(existingFieldsList.map((f: FieldMeta) => [f.path, f]));
+    // Load all existing ops for this doc
+    const existingOps = await this.store.listOps(docId);
 
-    // Process each op at field level
-    const updates: FieldMeta[] = [];
-    const correctionPaths = new Set<string>();
+    // Use the consolidateOps algorithm
+    const { opsToSave, pathsToDelete, opsToReturn } = consolidateOps(existingOps, newOps);
 
-    for (const op of ops) {
-      const incomingTs = op.ts ?? serverNow;
+    // Convert delta ops (@inc, @bit, etc.) to replace ops with concrete values
+    const opsToStore = convertDeltaOps(opsToSave);
 
-      // Check if parent is primitive (invalid hierarchy)
-      const primitiveParent = findPrimitiveParent(op.path, existingFields);
-      if (primitiveParent) {
-        correctionPaths.add(primitiveParent);
-        continue; // Skip this op, will send correction
-      }
-
-      const existing = existingFields.get(op.path);
-
-      // Determine if this op should be applied
-      let shouldApply = false;
-      let newValue: any;
-
-      if (SPECIAL_OPS.has(op.op)) {
-        // Special ops have custom handling
-        const result = computeSpecialOpValue(op, existing);
-        shouldApply = result.apply;
-        newValue = result.value;
-      } else if (!existing || incomingTs >= existing.ts) {
-        // LWW: incoming wins if ts >= existing.ts
-        shouldApply = true;
-        newValue = op.op === 'remove' ? undefined : op.value;
-      }
-
-      if (shouldApply) {
-        updates.push({
-          path: op.path,
-          ts: incomingTs,
-          rev: 0, // Will be set by saveFields
-          value: newValue,
-        });
-      }
-    }
-
-    // Get current rev for catchup comparison (derive from snapshot + fields)
+    // Get current rev before saving
     const { rev: currentRev } = await this.getDoc(docId);
     let newRev = currentRev;
 
-    // Save updates if any (saveFields atomically increments and returns new rev)
-    if (updates.length > 0) {
-      newRev = await this.store.saveFields(docId, updates);
+    // Save ops and delete paths atomically
+    if (opsToStore.length > 0 || pathsToDelete.length > 0) {
+      newRev = await this.store.saveOps(docId, opsToStore, pathsToDelete);
     }
 
     // Compact if needed (save snapshot every N revisions)
@@ -225,50 +176,26 @@ export class LWWServer implements PatchesServer {
       await this.store.saveSnapshot(docId, state, newRev);
     }
 
-    // Build catchup ops if client sent rev
-    let responseOps: JSONPatchOp[] = [];
+    // Build catchup ops - start with correction ops from opsToReturn
+    const responseOps = [...opsToReturn];
     if (clientRev !== undefined) {
-      const fieldsSince = await this.store.listFields(docId, { sinceRev: clientRev });
-      const sentPaths = new Set(ops.map(o => o.path));
+      const opsSince = await this.store.listOps(docId, { sinceRev: clientRev });
+      const sentPaths = new Set(change.ops.map(o => o.path));
 
-      // Filter out fields client just sent (and their children)
-      // Sort by ts so older ops apply first
-      responseOps = fieldsSince
-        .filter((f: FieldMeta) => !isPathOrChild(f.path, sentPaths))
-        .sort((a: FieldMeta, b: FieldMeta) => a.ts - b.ts)
-        .map((f: FieldMeta) => fieldToOp(f));
+      // Filter out ops client just sent (and their children), sort by ts
+      const catchupOps = opsSince
+        .filter(op => !isPathOrChild(op.path, sentPaths))
+        .sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+      responseOps.push(...catchupOps);
     }
 
-    // Add self-healing corrections for invalid hierarchy
-    for (const path of correctionPaths) {
-      const field = existingFields.get(path);
-      if (field) {
-        responseOps.push(fieldToOp(field));
-      }
-    }
-
-    // Build response change
-    const responseChange: Change = {
-      id: change.id,
-      ops: responseOps,
-      rev: newRev,
-      baseRev: clientRev ?? 0,
-      createdAt: Date.now(),
-      committedAt: Date.now(),
-    };
+    // Build response using createChange
+    const responseChange = createChange(clientRev ?? 0, newRev, responseOps, { id: change.id });
 
     // Emit notification for committed changes (if any updates were made)
-    if (updates.length > 0) {
+    if (opsToStore.length > 0) {
       try {
-        // Build a change with the updates for broadcasting
-        const broadcastChange: Change = {
-          id: change.id,
-          ops: updates.map((f: FieldMeta) => fieldToOp(f)),
-          rev: newRev,
-          baseRev: currentRev,
-          createdAt: Date.now(),
-          committedAt: Date.now(),
-        };
+        const broadcastChange = createChange(currentRev, newRev, opsToStore, { id: change.id });
         await this.onChangesCommitted.emit(docId, [broadcastChange], getClientId());
       } catch (error) {
         console.error(`Failed to notify clients about committed changes for doc ${docId}:`, error);
@@ -338,47 +265,6 @@ export class LWWServer implements PatchesServer {
 // === Helper Functions ===
 
 /**
- * Collect all paths from ops plus all their parent paths.
- * For example, /a/b/c -> [/a/b/c, /a/b, /a]
- */
-function collectPathsWithParents(ops: JSONPatchOp[]): Set<string> {
-  const paths = new Set<string>();
-  for (const op of ops) {
-    paths.add(op.path);
-    // Add parent paths
-    let parent = op.path;
-    while (parent.lastIndexOf('/') > 0) {
-      parent = parent.substring(0, parent.lastIndexOf('/'));
-      paths.add(parent);
-    }
-  }
-  return paths;
-}
-
-/**
- * Find if any parent of this path is a primitive value.
- * Returns the path of the primitive parent, or null if hierarchy is valid.
- */
-function findPrimitiveParent(path: string, fields: Map<string, FieldMeta>): string | null {
-  let parent = path;
-  while (parent.lastIndexOf('/') > 0) {
-    parent = parent.substring(0, parent.lastIndexOf('/'));
-    const field = fields.get(parent);
-    if (field && field.value !== undefined && !isObject(field.value)) {
-      return parent;
-    }
-  }
-  return null;
-}
-
-/**
- * Check if a value is an object (or array).
- */
-function isObject(value: any): boolean {
-  return value !== null && typeof value === 'object';
-}
-
-/**
  * Check if a path equals or is a child of any sent path.
  */
 function isPathOrChild(path: string, sentPaths: Set<string>): boolean {
@@ -388,97 +274,4 @@ function isPathOrChild(path: string, sentPaths: Set<string>): boolean {
     }
   }
   return false;
-}
-
-/**
- * Convert a FieldMeta to a JSON Patch op.
- */
-function fieldToOp(field: FieldMeta): JSONPatchOp {
-  if (field.value === undefined) {
-    return { op: 'remove', path: field.path };
-  }
-  return { op: 'replace', path: field.path, value: field.value, ts: field.ts };
-}
-
-/**
- * Apply fields to a base state to reconstruct current state.
- */
-function applyFields(baseState: any, fields: FieldMeta[]): any {
-  // Sort by ts so older values are applied first
-  const sorted = [...fields].sort((a, b) => a.ts - b.ts);
-
-  let state = baseState;
-  for (const field of sorted) {
-    state = setPath(state, field.path, field.value);
-  }
-  return state;
-}
-
-/**
- * Set a value at a path in an object, returning a new object.
- */
-function setPath(obj: any, path: string, value: any): any {
-  if (!path || path === '/') {
-    return value;
-  }
-
-  const keys = path.split('/').filter(Boolean);
-  const result = Array.isArray(obj) ? [...obj] : { ...obj };
-  let current: any = result;
-
-  for (let i = 0; i < keys.length - 1; i++) {
-    const key = keys[i];
-    if (current[key] === undefined || current[key] === null) {
-      // Create intermediate object
-      current[key] = {};
-    } else if (typeof current[key] === 'object') {
-      // Clone the intermediate object
-      current[key] = Array.isArray(current[key]) ? [...current[key]] : { ...current[key] };
-    }
-    current = current[key];
-  }
-
-  const lastKey = keys[keys.length - 1];
-  if (value === undefined) {
-    delete current[lastKey];
-  } else {
-    current[lastKey] = value;
-  }
-
-  return result;
-}
-
-/**
- * Compute the result of a special operation (@inc, @bit, @max, @min).
- */
-function computeSpecialOpValue(op: JSONPatchOp, existing: FieldMeta | undefined): { apply: boolean; value: any } {
-  const existingValue = existing?.value ?? 0;
-
-  switch (op.op) {
-    case '@inc':
-      // Increment: always applies (additive)
-      return { apply: true, value: (Number(existingValue) || 0) + (Number(op.value) || 0) };
-
-    case '@bit':
-      // Bitwise OR: always applies
-      return { apply: true, value: (Number(existingValue) || 0) | (Number(op.value) || 0) };
-
-    case '@max': {
-      // Max: apply if incoming is greater
-      const maxVal = Math.max(Number(existingValue) || 0, Number(op.value) || 0);
-      return { apply: maxVal !== existingValue, value: maxVal };
-    }
-
-    case '@min': {
-      // Min: apply if incoming is smaller
-      const minVal = Math.min(
-        existing === undefined ? Number(op.value) || 0 : Number(existingValue) || 0,
-        Number(op.value) || 0
-      );
-      return { apply: minVal !== existingValue || existing === undefined, value: minVal };
-    }
-
-    default:
-      return { apply: false, value: existingValue };
-  }
 }

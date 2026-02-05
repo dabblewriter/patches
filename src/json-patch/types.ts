@@ -49,6 +49,7 @@ export interface JSONPatchOp {
   value?: any;
   soft?: boolean; // extension to JSON Patch to prevent an operation from overwriting existing data
   ts?: number; // Unix timestamp (ms) for LWW operations
+  rev?: number; // Document revision number for LWW operations
 }
 
 export interface Root {

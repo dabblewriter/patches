@@ -1,6 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { LWWMemoryStoreBackend } from '../../src/server/LWWMemoryStoreBackend.js';
-import type { FieldMeta } from '../../src/server/types.js';
 import type { Branch } from '../../src/types.js';
 
 describe('LWWMemoryStoreBackend', () => {
@@ -31,18 +30,18 @@ describe('LWWMemoryStoreBackend', () => {
 
     it('removes fields up to snapshot rev after save', async () => {
       // Save some fields at different revs
-      await store.saveFields('doc1', [{ path: '/a', ts: 100, rev: 0, value: 1 }]);
-      await store.saveFields('doc1', [{ path: '/b', ts: 200, rev: 0, value: 2 }]);
-      await store.saveFields('doc1', [{ path: '/c', ts: 300, rev: 0, value: 3 }]);
+      await store.saveOps('doc1', [{ op: 'replace', path: '/a', ts: 100, rev: 0, value: 1 }]);
+      await store.saveOps('doc1', [{ op: 'replace', path: '/b', ts: 200, rev: 0, value: 2 }]);
+      await store.saveOps('doc1', [{ op: 'replace', path: '/c', ts: 300, rev: 0, value: 3 }]);
 
       // Now fields have revs 1, 2, 3
-      const allFields = await store.listFields('doc1');
+      const allFields = await store.listOps('doc1');
       expect(allFields).toHaveLength(3);
 
       // Save snapshot at rev 2 - should remove fields with rev <= 2
       await store.saveSnapshot('doc1', { a: 1, b: 2 }, 2);
 
-      const remainingFields = await store.listFields('doc1');
+      const remainingFields = await store.listOps('doc1');
       expect(remainingFields).toHaveLength(1);
       expect(remainingFields[0].path).toBe('/c');
     });
@@ -51,29 +50,29 @@ describe('LWWMemoryStoreBackend', () => {
   describe('fields', () => {
     describe('saveFields', () => {
       it('returns incremented revision', async () => {
-        const rev1 = await store.saveFields('doc1', [{ path: '/name', ts: 100, rev: 0, value: 'Alice' }]);
+        const rev1 = await store.saveOps('doc1', [{ op: 'replace', path: '/name', ts: 100, rev: 0, value: 'Alice' }]);
         expect(rev1).toBe(1);
 
-        const rev2 = await store.saveFields('doc1', [{ path: '/age', ts: 200, rev: 0, value: 30 }]);
+        const rev2 = await store.saveOps('doc1', [{ op: 'replace', path: '/age', ts: 200, rev: 0, value: 30 }]);
         expect(rev2).toBe(2);
       });
 
       it('sets rev on saved fields', async () => {
-        await store.saveFields('doc1', [
-          { path: '/name', ts: 100, rev: 0, value: 'Alice' },
-          { path: '/age', ts: 100, rev: 0, value: 30 },
+        await store.saveOps('doc1', [
+          { op: 'replace', path: '/name', ts: 100, rev: 0, value: 'Alice' },
+          { op: 'replace', path: '/age', ts: 100, rev: 0, value: 30 },
         ]);
 
-        const fields = await store.listFields('doc1');
+        const fields = await store.listOps('doc1');
         expect(fields).toHaveLength(2);
         expect(fields.every(f => f.rev === 1)).toBe(true);
       });
 
       it('deletes existing field at same path', async () => {
-        await store.saveFields('doc1', [{ path: '/name', ts: 100, rev: 0, value: 'Alice' }]);
-        await store.saveFields('doc1', [{ path: '/name', ts: 200, rev: 0, value: 'Bob' }]);
+        await store.saveOps('doc1', [{ op: 'replace', path: '/name', ts: 100, rev: 0, value: 'Alice' }]);
+        await store.saveOps('doc1', [{ op: 'replace', path: '/name', ts: 200, rev: 0, value: 'Bob' }]);
 
-        const fields = await store.listFields('doc1');
+        const fields = await store.listOps('doc1');
         expect(fields).toHaveLength(1);
         expect(fields[0].value).toBe('Bob');
         expect(fields[0].rev).toBe(2);
@@ -81,16 +80,16 @@ describe('LWWMemoryStoreBackend', () => {
 
       it('deletes children atomically when saving parent', async () => {
         // Set up nested fields
-        await store.saveFields('doc1', [
-          { path: '/obj/name', ts: 100, rev: 0, value: 'Alice' },
-          { path: '/obj/age', ts: 100, rev: 0, value: 30 },
-          { path: '/other', ts: 100, rev: 0, value: 'keep' },
+        await store.saveOps('doc1', [
+          { op: 'replace', path: '/obj/name', ts: 100, rev: 0, value: 'Alice' },
+          { op: 'replace', path: '/obj/age', ts: 100, rev: 0, value: 30 },
+          { op: 'replace', path: '/other', ts: 100, rev: 0, value: 'keep' },
         ]);
 
         // Overwrite parent
-        await store.saveFields('doc1', [{ path: '/obj', ts: 200, rev: 0, value: { replaced: true } }]);
+        await store.saveOps('doc1', [{ op: 'replace', path: '/obj', ts: 200, rev: 0, value: { replaced: true } }]);
 
-        const fields = await store.listFields('doc1');
+        const fields = await store.listOps('doc1');
         expect(fields).toHaveLength(2);
 
         const paths = fields.map(f => f.path).sort();
@@ -101,16 +100,16 @@ describe('LWWMemoryStoreBackend', () => {
       });
 
       it('handles deeply nested child deletion', async () => {
-        await store.saveFields('doc1', [
-          { path: '/a/b/c/d', ts: 100, rev: 0, value: 'deep' },
-          { path: '/a/b/c', ts: 100, rev: 0, value: { d: 'deep' } },
-          { path: '/a/b', ts: 100, rev: 0, value: { c: {} } },
+        await store.saveOps('doc1', [
+          { op: 'replace', path: '/a/b/c/d', ts: 100, rev: 0, value: 'deep' },
+          { op: 'replace', path: '/a/b/c', ts: 100, rev: 0, value: { d: 'deep' } },
+          { op: 'replace', path: '/a/b', ts: 100, rev: 0, value: { c: {} } },
         ]);
 
         // Overwrite /a - should delete all children
-        await store.saveFields('doc1', [{ path: '/a', ts: 200, rev: 0, value: 'replaced' }]);
+        await store.saveOps('doc1', [{ op: 'replace', path: '/a', ts: 200, rev: 0, value: 'replaced' }]);
 
-        const fields = await store.listFields('doc1');
+        const fields = await store.listOps('doc1');
         expect(fields).toHaveLength(1);
         expect(fields[0].path).toBe('/a');
         expect(fields[0].value).toBe('replaced');
@@ -120,23 +119,23 @@ describe('LWWMemoryStoreBackend', () => {
     describe('listFields', () => {
       beforeEach(async () => {
         // Set up test fields at different revs
-        await store.saveFields('doc1', [{ path: '/a', ts: 100, rev: 0, value: 1 }]);
-        await store.saveFields('doc1', [{ path: '/b', ts: 200, rev: 0, value: 2 }]);
-        await store.saveFields('doc1', [{ path: '/c', ts: 300, rev: 0, value: 3 }]);
+        await store.saveOps('doc1', [{ op: 'replace', path: '/a', ts: 100, rev: 0, value: 1 }]);
+        await store.saveOps('doc1', [{ op: 'replace', path: '/b', ts: 200, rev: 0, value: 2 }]);
+        await store.saveOps('doc1', [{ op: 'replace', path: '/c', ts: 300, rev: 0, value: 3 }]);
       });
 
       it('returns empty array for non-existent document', async () => {
-        const fields = await store.listFields('nonexistent');
+        const fields = await store.listOps('nonexistent');
         expect(fields).toEqual([]);
       });
 
       it('returns all fields when no options provided', async () => {
-        const fields = await store.listFields('doc1');
+        const fields = await store.listOps('doc1');
         expect(fields).toHaveLength(3);
       });
 
       it('filters by sinceRev', async () => {
-        const fields = await store.listFields('doc1', { sinceRev: 1 });
+        const fields = await store.listOps('doc1', { sinceRev: 1 });
         expect(fields).toHaveLength(2);
 
         const paths = fields.map(f => f.path).sort();
@@ -144,12 +143,12 @@ describe('LWWMemoryStoreBackend', () => {
       });
 
       it('returns empty when sinceRev is current rev', async () => {
-        const fields = await store.listFields('doc1', { sinceRev: 3 });
+        const fields = await store.listOps('doc1', { sinceRev: 3 });
         expect(fields).toEqual([]);
       });
 
       it('filters by paths', async () => {
-        const fields = await store.listFields('doc1', { paths: ['/a', '/c'] });
+        const fields = await store.listOps('doc1', { paths: ['/a', '/c'] });
         expect(fields).toHaveLength(2);
 
         const paths = fields.map(f => f.path).sort();
@@ -157,13 +156,13 @@ describe('LWWMemoryStoreBackend', () => {
       });
 
       it('returns empty for non-matching paths', async () => {
-        const fields = await store.listFields('doc1', { paths: ['/nonexistent'] });
+        const fields = await store.listOps('doc1', { paths: ['/nonexistent'] });
         expect(fields).toEqual([]);
       });
 
       it('returns copy of fields array (not reference)', async () => {
-        const fields1 = await store.listFields('doc1');
-        const fields2 = await store.listFields('doc1');
+        const fields1 = await store.listOps('doc1');
+        const fields2 = await store.listOps('doc1');
 
         expect(fields1).not.toBe(fields2);
         expect(fields1).toEqual(fields2);
@@ -173,13 +172,13 @@ describe('LWWMemoryStoreBackend', () => {
 
   describe('deleteDoc', () => {
     it('removes document data', async () => {
-      await store.saveFields('doc1', [{ path: '/name', ts: 100, rev: 0, value: 'Alice' }]);
+      await store.saveOps('doc1', [{ op: 'replace', path: '/name', ts: 100, rev: 0, value: 'Alice' }]);
       await store.saveSnapshot('doc1', { name: 'Alice' }, 1);
 
       await store.deleteDoc('doc1');
 
       const snapshot = await store.getSnapshot('doc1');
-      const fields = await store.listFields('doc1');
+      const fields = await store.listOps('doc1');
 
       expect(snapshot).toBeNull();
       expect(fields).toEqual([]);
@@ -235,7 +234,7 @@ describe('LWWMemoryStoreBackend', () => {
 
   describe('testing utilities', () => {
     it('clear() removes all data', async () => {
-      await store.saveFields('doc1', [{ path: '/a', ts: 100, rev: 0, value: 1 }]);
+      await store.saveOps('doc1', [{ op: 'replace', path: '/a', ts: 100, rev: 0, value: 1 }]);
       await store.createTombstone({
         docId: 'doc2',
         deletedAt: 1000,
@@ -244,7 +243,7 @@ describe('LWWMemoryStoreBackend', () => {
 
       store.clear();
 
-      const fields = await store.listFields('doc1');
+      const fields = await store.listOps('doc1');
       const tombstone = await store.getTombstone('doc2');
 
       expect(fields).toEqual([]);
@@ -252,12 +251,12 @@ describe('LWWMemoryStoreBackend', () => {
     });
 
     it('getDocData() returns raw doc data', async () => {
-      await store.saveFields('doc1', [{ path: '/name', ts: 100, rev: 0, value: 'Alice' }]);
+      await store.saveOps('doc1', [{ op: 'replace', path: '/name', ts: 100, rev: 0, value: 'Alice' }]);
 
       const data = store.getDocData('doc1');
       expect(data).toBeDefined();
       expect(data?.rev).toBe(1);
-      expect(data?.fields).toHaveLength(1);
+      expect(data?.ops).toHaveLength(1);
       expect(data?.snapshot).toBeNull();
     });
 
@@ -270,20 +269,20 @@ describe('LWWMemoryStoreBackend', () => {
   describe('integration with LWWServer patterns', () => {
     it('supports typical getDoc flow (snapshot + fields since)', async () => {
       // Build up some changes first (realistic flow)
-      await store.saveFields('doc1', [{ path: '/name', ts: 100, rev: 0, value: 'Alice' }]);
-      await store.saveFields('doc1', [{ path: '/email', ts: 150, rev: 0, value: 'alice@example.com' }]);
+      await store.saveOps('doc1', [{ op: 'replace', path: '/name', ts: 100, rev: 0, value: 'Alice' }]);
+      await store.saveOps('doc1', [{ op: 'replace', path: '/email', ts: 150, rev: 0, value: 'alice@example.com' }]);
 
       // Simulate compaction: save snapshot at current rev
       await store.saveSnapshot('doc1', { name: 'Alice', email: 'alice@example.com' }, 2);
 
       // New changes after snapshot
-      await store.saveFields('doc1', [{ path: '/age', ts: 200, rev: 0, value: 30 }]);
+      await store.saveOps('doc1', [{ op: 'replace', path: '/age', ts: 200, rev: 0, value: 30 }]);
 
       // getDoc flow: load snapshot, then fields since snapshot
       const snapshot = await store.getSnapshot('doc1');
       expect(snapshot).toEqual({ state: { name: 'Alice', email: 'alice@example.com' }, rev: 2 });
 
-      const fieldsSince = await store.listFields('doc1', { sinceRev: snapshot!.rev });
+      const fieldsSince = await store.listOps('doc1', { sinceRev: snapshot!.rev });
       expect(fieldsSince).toHaveLength(1);
       expect(fieldsSince[0].path).toBe('/age');
       expect(fieldsSince[0].rev).toBe(3);
@@ -291,22 +290,22 @@ describe('LWWMemoryStoreBackend', () => {
 
     it('supports typical commitChanges flow (load paths, save updates)', async () => {
       // Existing state
-      await store.saveFields('doc1', [
-        { path: '/name', ts: 100, rev: 0, value: 'Alice' },
-        { path: '/count', ts: 100, rev: 0, value: 5 },
+      await store.saveOps('doc1', [
+        { op: 'replace', path: '/name', ts: 100, rev: 0, value: 'Alice' },
+        { op: 'replace', path: '/count', ts: 100, rev: 0, value: 5 },
       ]);
 
       // commitChanges flow: load paths being modified
-      const existing = await store.listFields('doc1', { paths: ['/name', '/count'] });
+      const existing = await store.listOps('doc1', { paths: ['/name', '/count'] });
       expect(existing).toHaveLength(2);
 
       // Apply changes (simulating LWW resolution)
-      const newRev = await store.saveFields('doc1', [{ path: '/name', ts: 200, rev: 0, value: 'Bob' }]);
+      const newRev = await store.saveOps('doc1', [{ op: 'replace', path: '/name', ts: 200, rev: 0, value: 'Bob' }]);
 
       expect(newRev).toBe(2);
 
       // Verify state
-      const allFields = await store.listFields('doc1');
+      const allFields = await store.listOps('doc1');
       expect(allFields).toHaveLength(2);
 
       const nameField = allFields.find(f => f.path === '/name');
@@ -316,13 +315,13 @@ describe('LWWMemoryStoreBackend', () => {
 
     it('supports catchup flow (get fields since client rev)', async () => {
       // Build up history
-      await store.saveFields('doc1', [{ path: '/a', ts: 100, rev: 0, value: 1 }]);
-      await store.saveFields('doc1', [{ path: '/b', ts: 200, rev: 0, value: 2 }]);
-      await store.saveFields('doc1', [{ path: '/c', ts: 300, rev: 0, value: 3 }]);
-      await store.saveFields('doc1', [{ path: '/d', ts: 400, rev: 0, value: 4 }]);
+      await store.saveOps('doc1', [{ op: 'replace', path: '/a', ts: 100, rev: 0, value: 1 }]);
+      await store.saveOps('doc1', [{ op: 'replace', path: '/b', ts: 200, rev: 0, value: 2 }]);
+      await store.saveOps('doc1', [{ op: 'replace', path: '/c', ts: 300, rev: 0, value: 3 }]);
+      await store.saveOps('doc1', [{ op: 'replace', path: '/d', ts: 400, rev: 0, value: 4 }]);
 
       // Client is at rev 2, needs catchup
-      const catchupFields = await store.listFields('doc1', { sinceRev: 2 });
+      const catchupFields = await store.listOps('doc1', { sinceRev: 2 });
       expect(catchupFields).toHaveLength(2);
 
       const paths = catchupFields.map(f => f.path).sort();

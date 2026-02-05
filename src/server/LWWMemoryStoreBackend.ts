@@ -1,3 +1,4 @@
+import type { JSONPatchOp } from '../json-patch/types.js';
 import type {
   Branch,
   DocumentTombstone,
@@ -7,7 +8,6 @@ import type {
 } from '../types.js';
 import type {
   BranchingStoreBackend,
-  FieldMeta,
   ListFieldsOptions,
   LWWStoreBackend,
   LWWVersioningStoreBackend,
@@ -16,7 +16,7 @@ import type {
 
 interface DocData {
   snapshot: { state: any; rev: number } | null;
-  fields: FieldMeta[];
+  ops: JSONPatchOp[];
   rev: number;
 }
 
@@ -40,8 +40,7 @@ interface VersionData {
  * ```
  */
 export class LWWMemoryStoreBackend
-  implements LWWStoreBackend, LWWVersioningStoreBackend, TombstoneStoreBackend, BranchingStoreBackend
-{
+  implements LWWStoreBackend, LWWVersioningStoreBackend, TombstoneStoreBackend, BranchingStoreBackend {
   private docs = new Map<string, DocData>();
   private tombstones = new Map<string, DocumentTombstone>();
   private versions = new Map<string, VersionData[]>();
@@ -50,7 +49,7 @@ export class LWWMemoryStoreBackend
   private getOrCreateDoc(docId: string): DocData {
     let doc = this.docs.get(docId);
     if (!doc) {
-      doc = { snapshot: null, fields: [], rev: 0 };
+      doc = { snapshot: null, ops: [], rev: 0 };
       this.docs.set(docId, doc);
     }
     return doc;
@@ -65,51 +64,58 @@ export class LWWMemoryStoreBackend
   async saveSnapshot(docId: string, state: any, rev: number): Promise<void> {
     const doc = this.getOrCreateDoc(docId);
     doc.snapshot = { state, rev };
-    // Remove fields up to snapshot rev (they're baked into the snapshot)
-    doc.fields = doc.fields.filter(f => f.rev > rev);
+    // Remove ops up to snapshot rev (they're baked into the snapshot)
+    doc.ops = doc.ops.filter(op => (op.rev ?? 0) > rev);
   }
 
-  // === Fields ===
+  // === Ops ===
 
-  async saveFields(docId: string, fields: FieldMeta[]): Promise<number> {
+  async saveOps(docId: string, newOps: JSONPatchOp[], pathsToDelete?: string[]): Promise<number> {
     const doc = this.getOrCreateDoc(docId);
     const newRev = ++doc.rev;
 
-    for (const field of fields) {
-      // Set the rev on the field
-      field.rev = newRev;
+    // Delete specified paths
+    if (pathsToDelete) {
+      for (const path of pathsToDelete) {
+        doc.ops = doc.ops.filter(op => op.path !== path);
+      }
+    }
 
-      // Delete the existing field at this path and any children atomically
-      const childPrefix = field.path + '/';
-      doc.fields = doc.fields.filter(f => f.path !== field.path && !f.path.startsWith(childPrefix));
+    for (const op of newOps) {
+      // Set the rev on the op
+      op.rev = newRev;
 
-      // Add the new field
-      doc.fields.push(field);
+      // Delete the existing op at this path and any children atomically
+      const childPrefix = op.path + '/';
+      doc.ops = doc.ops.filter(existing => existing.path !== op.path && !existing.path.startsWith(childPrefix));
+
+      // Add the new op
+      doc.ops.push(op);
     }
 
     return newRev;
   }
 
-  async listFields(docId: string, options?: ListFieldsOptions): Promise<FieldMeta[]> {
+  async listOps(docId: string, options?: ListFieldsOptions): Promise<JSONPatchOp[]> {
     const doc = this.docs.get(docId);
     if (!doc) {
       return [];
     }
 
-    // No options: return all fields
+    // No options: return all ops
     if (!options) {
-      return [...doc.fields];
+      return [...doc.ops];
     }
 
     // Filter by sinceRev
     if ('sinceRev' in options) {
-      return doc.fields.filter(f => f.rev > options.sinceRev);
+      return doc.ops.filter(op => (op.rev ?? 0) > options.sinceRev);
     }
 
     // Filter by paths
     if ('paths' in options) {
       const pathSet = new Set(options.paths);
-      return doc.fields.filter(f => pathSet.has(f.path));
+      return doc.ops.filter(op => pathSet.has(op.path));
     }
 
     return [];

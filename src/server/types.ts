@@ -1,3 +1,4 @@
+import type { JSONPatchOp } from '../json-patch/types.js';
 import type {
   Branch,
   Change,
@@ -69,21 +70,6 @@ export interface OTStoreBackend extends ServerStoreBackend, VersioningStoreBacke
 }
 
 /**
- * Field metadata stored for LWW conflict resolution.
- * Each field tracks its path, timestamp, revision, and value.
- */
-export interface FieldMeta {
-  /** JSON Pointer path to the field. */
-  path: string;
-  /** Unix timestamp in milliseconds of the last write (for LWW comparison). */
-  ts: number;
-  /** Document revision when this field was set. */
-  rev: number;
-  /** The value that was written. Undefined means the field was removed. */
-  value?: any;
-}
-
-/**
  * Options for listing fields. Use either sinceRev OR paths, not both.
  */
 export type ListFieldsOptions = { sinceRev: number } | { paths: string[] };
@@ -120,7 +106,7 @@ export interface LWWStoreBackend extends ServerStoreBackend {
    * @param options - Optional filter options.
    * @returns Array of field metadata matching the criteria.
    */
-  listFields(docId: string, options?: ListFieldsOptions): Promise<FieldMeta[]>;
+  listOps(docId: string, options?: ListFieldsOptions): Promise<JSONPatchOp[]>;
 
   /**
    * Save field metadata and atomically increment the revision.
@@ -129,12 +115,14 @@ export interface LWWStoreBackend extends ServerStoreBackend {
    * - Atomically increment the document revision
    * - Set the rev on all saved fields to the new revision
    * - Delete children atomically when saving a parent (e.g., saving /obj deletes /obj/name)
+   * - Delete paths in pathsToDelete atomically with saving ops
    *
    * @param docId - The document ID.
-   * @param fields - Array of field metadata to save.
+   * @param ops - Array of ops to save.
+   * @param pathsToDelete - Optional paths to delete atomically.
    * @returns The new revision number.
    */
-  saveFields(docId: string, fields: FieldMeta[]): Promise<number>;
+  saveOps(docId: string, ops: JSONPatchOp[], pathsToDelete?: string[]): Promise<number>;
 }
 
 /**

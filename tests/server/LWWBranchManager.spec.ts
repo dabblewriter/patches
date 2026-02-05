@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LWWBranchManager } from '../../src/server/LWWBranchManager';
 import { LWWMemoryStoreBackend } from '../../src/server/LWWMemoryStoreBackend';
 import { LWWServer } from '../../src/server/LWWServer';
-import type { Branch } from '../../src/types';
 
 // Mock createId for predictable branch IDs
 vi.mock('crypto-id', () => ({
@@ -103,7 +102,7 @@ describe('LWWBranchManager', () => {
       const branchId = await branchManager.createBranch('doc1', 1);
 
       // Branch should have same field metadata
-      const branchFields = await store.listFields(branchId);
+      const branchFields = await store.listOps(branchId);
       expect(branchFields).toHaveLength(1);
       expect(branchFields[0].path).toBe('/name');
       expect(branchFields[0].value).toBe('Alice');

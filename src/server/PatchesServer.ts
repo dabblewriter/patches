@@ -1,6 +1,7 @@
 import type {
   Change,
   ChangeInput,
+  ChangeMutator,
   CommitChangesOptions,
   DeleteDocOptions,
   EditableVersionMetadata,
@@ -78,6 +79,19 @@ export interface PatchesServer {
    * @returns The ID of the created version, or null if no changes to capture.
    */
   captureCurrentVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string | null>;
+
+  /**
+   * Make a server-side change to a document.
+   * @param docId - The document ID.
+   * @param mutator - A function that receives a JSONPatch and PathProxy to define the changes.
+   * @param metadata - Optional metadata for the change.
+   * @returns The created change, or null if no operations were generated.
+   */
+  change<T = Record<string, any>>(
+    docId: string,
+    mutator: ChangeMutator<T>,
+    metadata?: Record<string, any>
+  ): Promise<Change | null>;
 }
 
 /**

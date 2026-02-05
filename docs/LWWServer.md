@@ -10,6 +10,7 @@ The central authority for your [LWW](last-write-wins.md) system.
 - [When to Use LWW vs OT](#when-to-use-lww-vs-ot)
 - [Initialization](#initialization)
 - [Core Method: `commitChanges()`](#core-method-commitchanges)
+- [Server-Side Changes with `change()`](#server-side-changes-with-change)
 - [State Retrieval](#state-retrieval)
 - [Document Lifecycle](#document-lifecycle)
 - [Versioning](#versioning)
@@ -199,6 +200,28 @@ These ops always combine regardless of timestamp:
 ```
 
 For more on these operations, see the [algorithms documentation](algorithms.md#lww-algorithms).
+
+## Server-Side Changes with `change()`
+
+Need to make changes from the server itself? Use the `change()` method:
+
+```typescript
+const change = await server.change<MyDoc>(
+  docId,
+  (patch, path) => {
+    patch.replace(path.status, 'approved');
+    patch.replace(path.approvedAt, Date.now());
+  },
+  { approvedBy: 'admin' }
+); // Optional metadata
+
+if (change) {
+  console.log('Change committed:', change.rev);
+}
+// Returns null if the mutation made no actual changes
+```
+
+This creates a proper change with server timestamps, applies it through `commitChanges()`, and triggers the `onChangesCommitted` event for broadcasting.
 
 ## State Retrieval
 

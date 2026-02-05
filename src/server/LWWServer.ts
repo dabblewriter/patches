@@ -2,12 +2,14 @@ import { createId } from 'crypto-id';
 import { consolidateOps, convertDeltaOps } from '../algorithms/lww/consolidateOps.js';
 import { createChange } from '../data/change.js';
 import { signal } from '../event-signal.js';
+import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import { getClientId } from '../net/serverContext.js';
 import type {
   Change,
   ChangeInput,
+  ChangeMutator,
   CommitChangesOptions,
   DeleteDocOptions,
   EditableVersionMetadata,
@@ -235,6 +237,37 @@ export class LWWServer implements PatchesServer {
    */
   async undeleteDoc(docId: string): Promise<boolean> {
     return removeTombstoneIfExists(this.store, docId);
+  }
+
+  /**
+   * Make a server-side change to a document.
+   * @param docId - The document ID.
+   * @param mutator - A function that receives a JSONPatch and PathProxy to define the changes.
+   * @param metadata - Optional metadata for the change.
+   * @returns The created change, or null if no operations were generated.
+   */
+  async change<T = Record<string, any>>(
+    docId: string,
+    mutator: ChangeMutator<T>,
+    metadata?: Record<string, any>
+  ): Promise<Change | null> {
+    const { state, rev } = await this.getDoc(docId);
+    const patch = createJSONPatch<T>(mutator);
+    if (patch.ops.length === 0) {
+      return null;
+    }
+
+    // Add timestamps to ops for LWW
+    const serverNow = Date.now();
+    const opsWithTs = patch.ops.map(op => ({ ...op, ts: serverNow }));
+
+    const change = createChange(rev, rev + 1, opsWithTs, metadata);
+
+    // Apply to local state to ensure no errors are thrown
+    patch.apply(state);
+
+    await this.commitChanges(docId, [change]);
+    return change;
   }
 
   /**

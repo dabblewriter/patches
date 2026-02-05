@@ -1,11 +1,11 @@
 // Core server implementations
-export { OTServer, type OTServerOptions, type CommitChangesOptions } from './OTServer.js';
 export { LWWServer, type LWWServerOptions } from './LWWServer.js';
+export { OTServer, type CommitChangesOptions, type OTServerOptions } from './OTServer.js';
 
 // Branch managers
 export type { BranchManager } from './BranchManager.js';
-export { OTBranchManager, PatchesBranchManager } from './OTBranchManager.js';
 export { LWWBranchManager } from './LWWBranchManager.js';
+export { OTBranchManager, PatchesBranchManager } from './OTBranchManager.js';
 
 // In-memory backends (for testing)
 export { LWWMemoryStoreBackend } from './LWWMemoryStoreBackend.js';
@@ -14,35 +14,34 @@ export { LWWMemoryStoreBackend } from './LWWMemoryStoreBackend.js';
 export { PatchesHistoryManager } from './PatchesHistoryManager.js';
 
 // Utilities
-export { CompressedStoreBackend } from './CompressedStoreBackend.js';
-export { assertVersionMetadata } from './utils.js';
-export { isTombstoneStore, createTombstoneIfSupported, removeTombstoneIfExists } from './tombstone.js';
 export {
-  branchManagerApi,
   assertBranchMetadata,
-  generateBranchId,
-  createBranchRecord,
-  assertNotABranch,
   assertBranchOpenForMerge,
+  assertNotABranch,
+  branchManagerApi,
+  createBranchRecord,
+  generateBranchId,
   wrapMergeCommit,
   type BranchIdGenerator,
   type BranchLoader,
 } from './branchUtils.js';
+export { CompressedStoreBackend } from './CompressedStoreBackend.js';
+export { createTombstoneIfSupported, isTombstoneStore, removeTombstoneIfExists } from './tombstone.js';
+export { assertVersionMetadata } from './utils.js';
 
 // Interfaces
+export type { DeleteDocOptions } from '../types.js';
 export type { PatchesServer } from './PatchesServer.js';
 export type {
-  ServerStoreBackend,
-  OTStoreBackend,
-  VersioningStoreBackend,
-  TombstoneStoreBackend,
   BranchingStoreBackend,
   // LWW store interfaces
-  FieldMeta,
   ListFieldsOptions,
   LWWStoreBackend,
   LWWVersioningStoreBackend,
+  OTStoreBackend,
   // Deprecated alias for backwards compatibility
   PatchesStoreBackend,
+  ServerStoreBackend,
+  TombstoneStoreBackend,
+  VersioningStoreBackend,
 } from './types.js';
-export type { DeleteDocOptions } from '../types.js';

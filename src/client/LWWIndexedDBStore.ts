@@ -453,5 +453,4 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
     await snapshots.put({ docId, state, rev });
     await this.deleteFieldsForDoc(committedFields, docId);
   }
-
 }

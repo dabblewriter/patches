@@ -506,7 +506,7 @@ describe('LWWServer', () => {
 
     it('should handle notification errors gracefully', async () => {
       const emitSpy = vi.spyOn(server.onChangesCommitted, 'emit').mockRejectedValue(new Error('Emit failed'));
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => { });
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       const change: ChangeInput = {
         id: 'signal2',

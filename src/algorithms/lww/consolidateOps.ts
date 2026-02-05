@@ -60,9 +60,10 @@ export function consolidateFieldOp(existing: JSONPatchOp, incoming: JSONPatchOp)
   // If incoming is combinable AND existing has same op type, combine
   if (combiner) {
     const op = existing.op === incoming.op ? incoming.op : existing.op;
-    const value = existing.op === incoming.op
-      ? combiner.combine(existing.value ?? 0, incoming.value ?? 0) :
-      combiner.apply(existing.value ?? 0, incoming.value ?? 0);
+    const value =
+      existing.op === incoming.op
+        ? combiner.combine(existing.value ?? 0, incoming.value ?? 0)
+        : combiner.apply(existing.value ?? 0, incoming.value ?? 0);
     if (value === existing.value) {
       return null;
     }

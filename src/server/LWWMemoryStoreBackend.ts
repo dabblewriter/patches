@@ -40,7 +40,8 @@ interface VersionData {
  * ```
  */
 export class LWWMemoryStoreBackend
-  implements LWWStoreBackend, LWWVersioningStoreBackend, TombstoneStoreBackend, BranchingStoreBackend {
+  implements LWWStoreBackend, LWWVersioningStoreBackend, TombstoneStoreBackend, BranchingStoreBackend
+{
   private docs = new Map<string, DocData>();
   private tombstones = new Map<string, DocumentTombstone>();
   private versions = new Map<string, VersionData[]>();

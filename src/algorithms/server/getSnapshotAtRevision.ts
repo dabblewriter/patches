@@ -1,4 +1,4 @@
-import type { PatchesStoreBackend } from '../../server/types.js';
+import type { OTStoreBackend } from '../../server/types.js';
 import type { PatchesSnapshot } from '../../types.js';
 
 /**
@@ -9,7 +9,7 @@ import type { PatchesSnapshot } from '../../types.js';
  * @returns The document state at the last version before the revision, its revision number, and all changes up to the specified revision (or all changes if no revision is provided).
  */
 export async function getSnapshotAtRevision(
-  store: PatchesStoreBackend,
+  store: OTStoreBackend,
   docId: string,
   rev?: number
 ): Promise<PatchesSnapshot> {

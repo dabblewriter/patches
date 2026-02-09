@@ -115,7 +115,7 @@ In-memory implementation of `LWWStoreBackend` for testing.
 Interfaces implemented:
 
 - `LWWStoreBackend` - Core field storage (getSnapshot, saveSnapshot, listFields, saveFields, deleteDoc)
-- `LWWVersioningStoreBackend` - Version snapshots
+- `VersioningStoreBackend` - Version snapshots (shared with OT)
 - `TombstoneStoreBackend` - Soft delete support
 - `BranchingStoreBackend` - Branch metadata storage
 

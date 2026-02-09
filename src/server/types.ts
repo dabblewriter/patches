@@ -38,6 +38,22 @@ export interface VersioningStoreBackend {
 
   /** Update a version's metadata. */
   updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void>;
+
+  /** Loads the original Change objects associated with a specific version ID. */
+  loadVersionChanges?(docId: string, versionId: string): Promise<Change[]>;
+
+  /**
+   * Appends changes to an existing version, updating its state snapshot, endedAt, and endRev.
+   * Used when a session spans multiple batch submissions.
+   */
+  appendVersionChanges?(
+    docId: string,
+    versionId: string,
+    changes: Change[],
+    newEndedAt: number,
+    newEndRev: number,
+    newState: any
+  ): Promise<void>;
 }
 
 /**
@@ -51,22 +67,6 @@ export interface OTStoreBackend extends ServerStoreBackend, VersioningStoreBacke
 
   /** Lists committed server changes based on revision numbers. */
   listChanges(docId: string, options: ListChangesOptions): Promise<Change[]>;
-
-  /** Loads the original Change objects associated with a specific version ID. */
-  loadVersionChanges(docId: string, versionId: string): Promise<Change[]>;
-
-  /**
-   * Appends changes to an existing version, updating its state snapshot, endedAt, and endRev.
-   * Used when a session spans multiple batch submissions.
-   */
-  appendVersionChanges(
-    docId: string,
-    versionId: string,
-    changes: Change[],
-    newEndedAt: number,
-    newEndRev: number,
-    newState: any
-  ): Promise<void>;
 }
 
 /**
@@ -134,28 +134,6 @@ export interface LWWStoreBackend extends ServerStoreBackend {
 }
 
 /**
- * Extended storage interface for LWWServer with versioning support.
- * Versioning is optional - not all LWW docs need it.
- */
-export interface LWWVersioningStoreBackend extends LWWStoreBackend {
-  /**
-   * Creates a new version snapshot.
-   * @param docId - The document ID.
-   * @param versionId - The version ID.
-   * @param state - The document state snapshot.
-   * @param rev - The revision number.
-   * @param metadata - Optional version metadata.
-   */
-  createVersion(
-    docId: string,
-    versionId: string,
-    state: any,
-    rev: number,
-    metadata?: EditableVersionMetadata
-  ): Promise<void>;
-}
-
-/**
  * Interface for tombstone storage, providing soft-delete capabilities.
  * Optional add-on for servers that need to track deleted documents.
  */
@@ -200,9 +178,3 @@ export interface BranchingStoreBackend {
    */
   closeBranch(branchId: string): Promise<void>;
 }
-
-/**
- * @deprecated Use OTStoreBackend instead.
- * Alias for backwards compatibility.
- */
-export type PatchesStoreBackend = OTStoreBackend;

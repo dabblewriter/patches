@@ -21,7 +21,7 @@ Patches is an unrelease project, in stealth mode, being iterated on until it is 
 - **OTServer:** Server-side OT authority (implements PatchesServer interface), applies/commits changes, manages versions and persistence.
 - **PatchesHistoryManager:** Query document versions and change history.
 - **PatchesBranchManager:** Supports branching/merging workflows.
-- **Backend Store:** You must implement a storage backend (see `PatchesStoreBackend`/`BranchingStoreBackend` interfaces).
+- **Backend Store:** You must implement a storage backend (see `OTStoreBackend`/`LWWStoreBackend`/`BranchingStoreBackend` interfaces).
 
 ## Directory Structure
 

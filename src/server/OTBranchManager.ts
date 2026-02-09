@@ -151,7 +151,7 @@ export class OTBranchManager implements BranchManager {
         parentId: lastVersionId,
       });
       const state = await this.store.loadVersionState(branchId, v.id);
-      const changes = await this.store.loadVersionChanges(branchId, v.id);
+      const changes = await this.store.loadVersionChanges?.(branchId, v.id);
       await this.store.createVersion(sourceDocId, newVersionMetadata, state, changes);
       lastVersionId = newVersionMetadata.id;
     }

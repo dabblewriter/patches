@@ -24,7 +24,7 @@ interface StoredChange extends Omit<Change, 'ops'> {
 }
 
 /**
- * Wraps a PatchesStoreBackend to transparently compress/decompress the ops field of Changes.
+ * Wraps an OTStoreBackend to transparently compress/decompress the ops field of Changes.
  * Compression happens before save and decompression happens after load.
  *
  * This allows backends with row-size limits to store larger changes by compressing the payload.
@@ -77,8 +77,8 @@ export class CompressedStoreBackend implements OTStoreBackend, Partial<Tombstone
 
   // === Version Operations (compress changes and state ops) ===
 
-  async createVersion(docId: string, metadata: VersionMetadata, state: any, changes: Change[]): Promise<void> {
-    const compressedChanges = changes.map(c => this.compressChange(c));
+  async createVersion(docId: string, metadata: VersionMetadata, state: any, changes?: Change[]): Promise<void> {
+    const compressedChanges = changes?.map(c => this.compressChange(c));
     return this.store.createVersion(docId, metadata, state, compressedChanges as unknown as Change[]);
   }
 
@@ -91,7 +91,7 @@ export class CompressedStoreBackend implements OTStoreBackend, Partial<Tombstone
     newState: any
   ): Promise<void> {
     const compressedChanges = changes.map(c => this.compressChange(c));
-    return this.store.appendVersionChanges(
+    return this.store.appendVersionChanges?.(
       docId,
       versionId,
       compressedChanges as unknown as Change[],
@@ -102,8 +102,8 @@ export class CompressedStoreBackend implements OTStoreBackend, Partial<Tombstone
   }
 
   async loadVersionChanges(docId: string, versionId: string): Promise<Change[]> {
-    const stored = (await this.store.loadVersionChanges(docId, versionId)) as unknown as StoredChange[];
-    return stored.map(s => this.decompressChange(s));
+    const stored = (await this.store.loadVersionChanges?.(docId, versionId)) as unknown as StoredChange[] | undefined;
+    return stored?.map(s => this.decompressChange(s)) ?? [];
   }
 
   // === Pass-through Operations (no compression needed) ===

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createVersion } from '../../../src/algorithms/server/createVersion';
 import { createChange } from '../../../src/data/change';
 import * as versionModule from '../../../src/data/version';
-import type { PatchesStoreBackend } from '../../../src/server/types';
+import type { OTStoreBackend } from '../../../src/server/types';
 
 // Mock the createVersionMetadata function
 vi.mock('../../../src/data/version');
@@ -10,7 +10,7 @@ const main = 'main' as const;
 
 describe('createVersion', () => {
   const mockCreateVersionMetadata = vi.mocked(versionModule.createVersionMetadata);
-  let mockStore: PatchesStoreBackend;
+  let mockStore: OTStoreBackend;
 
   beforeEach(() => {
     vi.clearAllMocks();

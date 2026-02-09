@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JSONPatchOp } from '../../src/json-patch/types';
 import { clearAuthContext, setAuthContext } from '../../src/net/serverContext';
 import { LWWServer } from '../../src/server/LWWServer';
-import type { LWWStoreBackend, LWWVersioningStoreBackend, ListFieldsOptions } from '../../src/server/types';
+import type { LWWStoreBackend, ListFieldsOptions, VersioningStoreBackend } from '../../src/server/types';
 import type { ChangeInput, EditableVersionMetadata } from '../../src/types';
 
 /**
@@ -617,18 +617,21 @@ describe('LWWServer', () => {
   describe('captureCurrentVersion', () => {
     it('should throw error when store does not support versioning', async () => {
       await expect(server.captureCurrentVersion('doc1')).rejects.toThrow(
-        'LWW versioning requires a store that implements LWWVersioningStoreBackend'
+        'LWW versioning requires a store that implements VersioningStoreBackend'
       );
     });
 
     describe('with versioning store', () => {
-      let versioningStore: LWWVersioningStoreBackend;
+      let versioningStore: LWWStoreBackend & VersioningStoreBackend;
       let versioningServer: LWWServer;
 
       beforeEach(() => {
         versioningStore = {
           ...mockStore,
           createVersion: vi.fn(),
+          listVersions: vi.fn(),
+          loadVersionState: vi.fn(),
+          updateVersion: vi.fn(),
         };
         versioningServer = new LWWServer(versioningStore);
       });
@@ -644,7 +647,11 @@ describe('LWWServer', () => {
         const versionId = await versioningServer.captureCurrentVersion('doc1');
 
         expect(versionId).toBeDefined();
-        expect(versioningStore.createVersion).toHaveBeenCalledWith('doc1', versionId, { name: 'Alice' }, 2, undefined);
+        expect(versioningStore.createVersion).toHaveBeenCalledWith(
+          'doc1',
+          expect.objectContaining({ id: versionId, origin: 'main', startRev: 2, endRev: 2 }),
+          { name: 'Alice' },
+        );
       });
 
       it('should accept optional metadata', async () => {
@@ -655,10 +662,8 @@ describe('LWWServer', () => {
 
         expect(versioningStore.createVersion).toHaveBeenCalledWith(
           'doc1',
-          expect.any(String),
+          expect.objectContaining({ origin: 'main', name: 'My Version' }),
           expect.any(Object),
-          expect.any(Number),
-          metadata
         );
       });
     });

@@ -1,6 +1,6 @@
 import { createId } from 'crypto-id';
 import type { CommitResult } from '../../server/PatchesServer.js';
-import type { PatchesStoreBackend } from '../../server/types.js';
+import type { OTStoreBackend } from '../../server/types.js';
 import type { Change, ChangeInput, CommitChangesOptions } from '../../types.js';
 import { filterSoftWritesAgainstState } from '../../json-patch/utils/softWrites.js';
 import { applyChanges } from '../shared/applyChanges.js';
@@ -44,7 +44,7 @@ export type { CommitResult } from '../../server/PatchesServer.js';
  *   - newChanges: The client's changes after transformation
  */
 export async function commitChanges(
-  store: PatchesStoreBackend,
+  store: OTStoreBackend,
   docId: string,
   changes: ChangeInput[],
   sessionTimeoutMillis: number,

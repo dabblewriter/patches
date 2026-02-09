@@ -1,4 +1,4 @@
-import { createId } from 'crypto-id';
+import { createVersionMetadata } from '../data/version.js';
 import { consolidateOps, convertDeltaOps } from '../algorithms/lww/consolidateOps.js';
 import { createChange } from '../data/change.js';
 import { signal } from '../event-signal.js';
@@ -17,7 +17,7 @@ import type {
 } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
 import { createTombstoneIfSupported, removeTombstoneIfExists } from './tombstone.js';
-import type { LWWStoreBackend, LWWVersioningStoreBackend } from './types.js';
+import type { LWWStoreBackend, VersioningStoreBackend } from './types.js';
 import { assertVersionMetadata } from './utils.js';
 
 /**
@@ -272,7 +272,7 @@ export class LWWServer implements PatchesServer {
 
   /**
    * Captures the current state of a document as a new version.
-   * Only works if store implements LWWVersioningStoreBackend.
+   * Only works if store implements VersioningStoreBackend.
    *
    * @param docId - The document ID.
    * @param metadata - Optional metadata for the version.
@@ -282,7 +282,7 @@ export class LWWServer implements PatchesServer {
     assertVersionMetadata(metadata);
 
     if (!this.isVersioningStore(this.store)) {
-      throw new Error('LWW versioning requires a store that implements LWWVersioningStoreBackend');
+      throw new Error('LWW versioning requires a store that implements VersioningStoreBackend');
     }
 
     const { state, rev } = await this.getDoc(docId);
@@ -290,15 +290,23 @@ export class LWWServer implements PatchesServer {
       return null; // No document to version
     }
 
-    const versionId = createId(8);
-    await this.store.createVersion(docId, versionId, state, rev, metadata);
-    return versionId;
+    const versionMetadata = createVersionMetadata({
+      origin: 'main',
+      startedAt: Date.now(),
+      endedAt: Date.now(),
+      startRev: rev,
+      endRev: rev,
+      ...metadata,
+    });
+
+    await this.store.createVersion(docId, versionMetadata, state);
+    return versionMetadata.id;
   }
 
   /**
    * Type guard to check if the store supports versioning.
    */
-  private isVersioningStore(store: LWWStoreBackend): store is LWWVersioningStoreBackend {
+  private isVersioningStore(store: LWWStoreBackend): store is LWWStoreBackend & VersioningStoreBackend {
     return 'createVersion' in store;
   }
 }

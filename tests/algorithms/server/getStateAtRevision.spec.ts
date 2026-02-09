@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { getStateAtRevision } from '../../../src/algorithms/server/getStateAtRevision';
-import type { PatchesStoreBackend } from '../../../src/server';
+import type { OTStoreBackend } from '../../../src/server';
 import * as getSnapshotAtRevisionModule from '../../../src/algorithms/server/getSnapshotAtRevision';
 import * as applyChangesModule from '../../../src/algorithms/shared/applyChanges';
 
@@ -11,7 +11,7 @@ vi.mock('../../../src/algorithms/shared/applyChanges');
 describe('getStateAtRevision', () => {
   const mockGetSnapshotAtRevision = vi.mocked(getSnapshotAtRevisionModule.getSnapshotAtRevision);
   const mockApplyChanges = vi.mocked(applyChangesModule.applyChanges);
-  let mockStore: PatchesStoreBackend;
+  let mockStore: OTStoreBackend;
 
   beforeEach(() => {
     vi.clearAllMocks();

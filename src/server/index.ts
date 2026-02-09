@@ -23,7 +23,7 @@ export {
   generateBranchId,
   wrapMergeCommit,
   type BranchIdGenerator,
-  type BranchLoader,
+  type BranchLoader
 } from './branchUtils.js';
 export { CompressedStoreBackend } from './CompressedStoreBackend.js';
 export { createTombstoneIfSupported, isTombstoneStore, removeTombstoneIfExists } from './tombstone.js';
@@ -34,14 +34,11 @@ export type { DeleteDocOptions } from '../types.js';
 export type { PatchesServer } from './PatchesServer.js';
 export type {
   BranchingStoreBackend,
-  // LWW store interfaces
   ListFieldsOptions,
   LWWStoreBackend,
-  LWWVersioningStoreBackend,
   OTStoreBackend,
-  // Deprecated alias for backwards compatibility
-  PatchesStoreBackend,
   ServerStoreBackend,
   TombstoneStoreBackend,
-  VersioningStoreBackend,
+  VersioningStoreBackend
 } from './types.js';
+

@@ -2,20 +2,19 @@ import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import type {
   Change,
   EditableVersionMetadata,
-  ListChangesOptions,
   ListVersionsOptions,
-  VersionMetadata,
+  VersionMetadata
 } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
+import type { VersioningStoreBackend } from './types.js';
 import { assertVersionMetadata } from './utils.js';
-import type { PatchesStoreBackend } from './types.js';
 
 /**
  * Helps retrieve historical information (versions, changes) for a document
  * using the versioning model based on IDs and metadata.
  *
  * Works with any PatchesServer that implements captureCurrentVersion
- * (both OTServer and LWWServer with LWWVersioningStoreBackend).
+ * (both OTServer and LWWServer with VersioningStoreBackend).
  */
 export class PatchesHistoryManager {
   static api: ApiDefinition = {
@@ -24,14 +23,13 @@ export class PatchesHistoryManager {
     updateVersion: 'write',
     getVersionState: 'read',
     getVersionChanges: 'read',
-    listServerChanges: 'read',
   } as const;
 
-  private readonly store: PatchesStoreBackend;
+  protected readonly store: VersioningStoreBackend;
 
   constructor(
-    private readonly patches: PatchesServer,
-    store: PatchesStoreBackend
+    protected readonly patches: PatchesServer,
+    store: VersioningStoreBackend
   ) {
     this.store = store;
   }
@@ -97,22 +95,11 @@ export class PatchesHistoryManager {
    */
   async getChangesForVersion(docId: string, versionId: string): Promise<Change[]> {
     try {
-      return await this.store.loadVersionChanges(docId, versionId);
+      return await this.store.loadVersionChanges?.(docId, versionId) ?? [];
     } catch (error) {
       console.error(`Failed to load changes for version ${versionId} of doc ${docId}.`, error);
       throw new Error(`Could not load changes for version ${versionId}.`);
     }
-  }
-
-  /**
-   * Lists committed server changes for the document, typically used for server-side processing
-   * or deep history analysis based on raw revisions.
-   * @param docId - The ID of the document.
-   * @param options - Options like start/end revision, limit.
-   * @returns The list of committed Change objects.
-   */
-  async listServerChanges(docId: string, options: ListChangesOptions = {}): Promise<Change[]> {
-    return await this.store.listChanges(docId, options);
   }
 
   // ---------------------------------------------------------------------------

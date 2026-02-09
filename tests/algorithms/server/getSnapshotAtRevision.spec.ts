@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { getSnapshotAtRevision } from '../../../src/algorithms/server/getSnapshotAtRevision';
-import type { PatchesStoreBackend } from '../../../src/server';
+import type { OTStoreBackend } from '../../../src/server';
 
 describe('getSnapshotAtRevision', () => {
-  let mockStore: PatchesStoreBackend;
+  let mockStore: OTStoreBackend;
 
   beforeEach(() => {
     vi.clearAllMocks();

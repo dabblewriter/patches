@@ -12,7 +12,6 @@ Server-side document history access. If you need to build version history browse
   - [updateVersion](#updateversion)
   - [getStateAtVersion](#getstateatversion)
   - [getChangesForVersion](#getchangesforversion)
-  - [listServerChanges](#listserverchanges)
 - [Version vs Change: Know the Difference](#version-vs-change-know-the-difference)
 - [Example: Building a History Explorer](#example-building-a-history-explorer)
 - [Related Documentation](#related-documentation)
@@ -26,7 +25,6 @@ Server-side document history access. If you need to build version history browse
 - **Updating versions** - Modify version metadata (name, description, tags)
 - **Loading version state** - Get the exact document state at any version
 - **Loading version changes** - See what operations were included in a version
-- **Listing raw changes** - Query committed server changes by revision range
 
 This is separate from [PatchesHistoryClient](PatchesHistoryClient.md), which is the client-side counterpart for exploring history from the browser.
 
@@ -41,7 +39,7 @@ const server = new OTServer(store);
 const historyManager = new PatchesHistoryManager(server, store);
 ```
 
-The history manager needs both a [PatchesServer](OTServer.md) instance and a `PatchesStoreBackend`. The server handles version creation logic; the store handles persistence.
+The history manager needs both a [PatchesServer](OTServer.md) instance and a `VersioningStoreBackend`. The server handles version creation logic; the store handles persistence.
 
 Note: `PatchesHistoryManager` works with both [OTServer](OTServer.md) and [LWWServer](LWWServer.md) - any server that implements `captureCurrentVersion`.
 
@@ -125,43 +123,13 @@ console.log(`This version contains ${changes.length} changes`);
 
 Each change includes `id`, `rev`, `baseRev`, `ops`, `createdAt`, `committedAt`, and `metadata`. See [JSON Patch](json-patch.md) for details on the `ops` format.
 
-### listServerChanges
-
-Lists committed server changes by revision range. This bypasses the version abstraction and queries raw changes directly.
-
-```typescript
-const changes = await historyManager.listServerChanges('doc-123', {
-  startAfter: 50, // Changes after revision 50
-  endBefore: 75, // Changes before revision 75
-  limit: 20,
-  reverse: true, // Latest first
-});
-```
-
-**Options:**
-
-| Option           | Type      | Description                         |
-| ---------------- | --------- | ----------------------------------- |
-| `startAfter`     | `number`  | Changes after this revision         |
-| `endBefore`      | `number`  | Changes before this revision        |
-| `limit`          | `number`  | Maximum changes to return           |
-| `reverse`        | `boolean` | Descending revision order when true |
-| `withoutBatchId` | `string`  | Exclude changes with this batch ID  |
-
-Useful for:
-
-- Syncing specific revision ranges
-- Auditing who made which edits
-- Debugging sync issues
-- Building custom history UIs that work at the change level
-
 ## Version vs Change: Know the Difference
 
 A **version** groups multiple changes together. Versions are created automatically (after periods of inactivity) or manually (via `createVersion`). Versions have metadata like names and descriptions.
 
 A **change** is a single atomic edit - one call to `doc.change()`. Changes have revision numbers and [JSON Patch operations](json-patch.md).
 
-Use `listVersions` + `getChangesForVersion` when you want the user-facing version history with nice labels. Use `listServerChanges` when you need raw revision-level access.
+Use `listVersions` + `getChangesForVersion` when you want the user-facing version history with nice labels. For raw revision-level access, query the store's `listChanges` method directly (OT only).
 
 ## Example: Building a History Explorer
 
@@ -210,20 +178,6 @@ class DocumentHistoryExplorer {
     });
   }
 
-  async getChangeDetails(startRev: number, endRev: number) {
-    const changes = await this.historyManager.listServerChanges(this.docId, {
-      startAfter: startRev - 1,
-      endBefore: endRev + 1,
-    });
-
-    return changes.map(change => ({
-      id: change.id,
-      rev: change.rev,
-      date: new Date(change.createdAt),
-      operationCount: change.ops.length,
-      author: change.metadata?.user?.name || 'Unknown',
-    }));
-  }
 }
 
 // Usage

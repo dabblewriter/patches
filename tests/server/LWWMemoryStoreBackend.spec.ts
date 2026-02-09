@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { LWWMemoryStoreBackend } from '../../src/server/LWWMemoryStoreBackend.js';
-import type { Branch } from '../../src/types.js';
+import type { Branch, VersionMetadata } from '../../src/types.js';
+
+function versionMetadata(id: string, rev: number, extra?: Record<string, any>): VersionMetadata {
+  return { id, origin: 'main', startedAt: Date.now(), endedAt: Date.now(), startRev: rev, endRev: rev, ...extra };
+}
 
 describe('LWWMemoryStoreBackend', () => {
   let store: LWWMemoryStoreBackend;
@@ -332,7 +336,7 @@ describe('LWWMemoryStoreBackend', () => {
   describe('versioning', () => {
     describe('createVersion', () => {
       it('stores version metadata and state', async () => {
-        await store.createVersion('doc1', 'v1', { name: 'Alice' }, 5);
+        await store.createVersion('doc1', versionMetadata('v1', 5), { name: 'Alice' });
 
         const versions = store.getVersions('doc1');
         expect(versions).toHaveLength(1);
@@ -342,15 +346,15 @@ describe('LWWMemoryStoreBackend', () => {
       });
 
       it('stores multiple versions', async () => {
-        await store.createVersion('doc1', 'v1', { name: 'Alice' }, 5);
-        await store.createVersion('doc1', 'v2', { name: 'Bob' }, 10);
+        await store.createVersion('doc1', versionMetadata('v1', 5), { name: 'Alice' });
+        await store.createVersion('doc1', versionMetadata('v2', 10), { name: 'Bob' });
 
         const versions = store.getVersions('doc1');
         expect(versions).toHaveLength(2);
       });
 
       it('accepts optional metadata', async () => {
-        await store.createVersion('doc1', 'v1', { name: 'Alice' }, 5, { name: 'My Version' });
+        await store.createVersion('doc1', versionMetadata('v1', 5, { name: 'My Version' }), { name: 'Alice' });
 
         const versions = store.getVersions('doc1');
         expect(versions![0].metadata.name).toBe('My Version');
@@ -360,9 +364,9 @@ describe('LWWMemoryStoreBackend', () => {
     describe('listVersions', () => {
       beforeEach(async () => {
         // Create versions at different revs
-        await store.createVersion('doc1', 'v1', { v: 1 }, 5, { name: 'Version 1' });
-        await store.createVersion('doc1', 'v2', { v: 2 }, 10, { name: 'Version 2' });
-        await store.createVersion('doc1', 'v3', { v: 3 }, 15, { name: 'Version 3' });
+        await store.createVersion('doc1', versionMetadata('v1', 5, { name: 'Version 1' }), { v: 1 });
+        await store.createVersion('doc1', versionMetadata('v2', 10, { name: 'Version 2' }), { v: 2 });
+        await store.createVersion('doc1', versionMetadata('v3', 15, { name: 'Version 3' }), { v: 3 });
       });
 
       it('returns all versions for a document', async () => {
@@ -437,7 +441,7 @@ describe('LWWMemoryStoreBackend', () => {
 
     describe('loadVersionState', () => {
       it('returns state for existing version', async () => {
-        await store.createVersion('doc1', 'v1', { name: 'Alice' }, 5);
+        await store.createVersion('doc1', versionMetadata('v1', 5), { name: 'Alice' });
 
         const state = await store.loadVersionState('doc1', 'v1');
         expect(state).toEqual({ name: 'Alice' });
@@ -456,7 +460,7 @@ describe('LWWMemoryStoreBackend', () => {
 
     describe('updateVersion', () => {
       it('modifies version metadata', async () => {
-        await store.createVersion('doc1', 'v1', { name: 'Alice' }, 5);
+        await store.createVersion('doc1', versionMetadata('v1', 5), { name: 'Alice' });
 
         await store.updateVersion('doc1', 'v1', { name: 'Updated Name' });
 
@@ -562,7 +566,7 @@ describe('LWWMemoryStoreBackend', () => {
 
   describe('testing utilities (extended)', () => {
     it('clear() also removes versions and branches', async () => {
-      await store.createVersion('doc1', 'v1', { name: 'Alice' }, 5);
+      await store.createVersion('doc1', versionMetadata('v1', 5), { name: 'Alice' });
       await store.createBranch({
         id: 'branch1',
         docId: 'doc1',
@@ -581,7 +585,7 @@ describe('LWWMemoryStoreBackend', () => {
     });
 
     it('getVersions() returns versions for inspection', async () => {
-      await store.createVersion('doc1', 'v1', { name: 'Alice' }, 5);
+      await store.createVersion('doc1', versionMetadata('v1', 5), { name: 'Alice' });
 
       const versions = store.getVersions('doc1');
       expect(versions).toHaveLength(1);

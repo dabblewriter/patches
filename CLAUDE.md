@@ -73,8 +73,8 @@ The codebase is divided into client-side and server-side components:
 2. **LWWServer**: Server-side LWW authority
    - Field-based storage with timestamp comparison
    - No change history, just current field values
-3. **PatchesStoreBackend**: Server-side storage interface
-   - `LWWStoreBackend`: LWW-specific storage (fields, snapshots)
+3. **OTStoreBackend / LWWStoreBackend**: Server-side storage interfaces
+   - `VersioningStoreBackend`: Shared versioning interface (optional for LWW)
 4. **PatchesHistoryManager**: Handles document history and versioning
 5. **OTBranchManager / LWWBranchManager**: Manages branching and merging workflows
 

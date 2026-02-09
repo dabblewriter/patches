@@ -4,7 +4,7 @@ import { JSONPatch } from '../../src/json-patch/JSONPatch';
 import { clearAuthContext, setAuthContext } from '../../src/net/serverContext';
 import { OTServer } from '../../src/server/OTServer';
 import { assertVersionMetadata } from '../../src/server/utils';
-import type { PatchesStoreBackend } from '../../src/server/types';
+import type { OTStoreBackend } from '../../src/server/types';
 import type { Change, EditableVersionMetadata } from '../../src/types';
 
 // Mock the algorithm modules
@@ -29,7 +29,7 @@ import { transformPatch } from '../../src/json-patch/transformPatch';
 
 describe('OTServer', () => {
   let server: OTServer;
-  let mockStore: PatchesStoreBackend;
+  let mockStore: OTStoreBackend;
 
   beforeEach(() => {
     mockStore = {

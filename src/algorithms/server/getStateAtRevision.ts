@@ -1,4 +1,4 @@
-import type { PatchesStoreBackend } from '../../server/types.js';
+import type { OTStoreBackend } from '../../server/types.js';
 import type { PatchesState } from '../../types.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { getSnapshotAtRevision } from './getSnapshotAtRevision.js';
@@ -10,7 +10,7 @@ import { getSnapshotAtRevision } from './getSnapshotAtRevision.js';
  * @returns The state at the specified revision *and* its revision number.
  */
 export async function getStateAtRevision(
-  store: PatchesStoreBackend,
+  store: OTStoreBackend,
   docId: string,
   rev?: number
 ): Promise<PatchesState> {

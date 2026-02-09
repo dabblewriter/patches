@@ -276,7 +276,7 @@ This is a recovery mechanism, not an undo. The document data is gone - you're ju
 
 ## Versioning
 
-LWW versioning is **optional** - not all LWW documents need user-visible version history. If you do need it, your store must implement [`LWWVersioningStoreBackend`](#lwwversioningstorebackend-optional).
+LWW versioning is **optional** - not all LWW documents need user-visible version history. If you do need it, your store must implement [`VersioningStoreBackend`](#versioningstorebackend-optional).
 
 This is different from OT, where versioning is baked in via [PatchesHistoryManager](PatchesHistoryManager.md). LWW keeps it simple by default.
 
@@ -285,7 +285,7 @@ This is different from OT, where versioning is baked in via [PatchesHistoryManag
 Manually capture a snapshot of the current document state as a named version.
 
 ```typescript
-// Only works if store implements LWWVersioningStoreBackend
+// Only works if store implements VersioningStoreBackend
 const versionId = await server.captureCurrentVersion('doc-123', {
   name: 'Before migration',
 });
@@ -295,7 +295,7 @@ const versionId = await server.captureCurrentVersion('doc-123', {
 Throws an error if the store doesn't support versioning:
 
 ```typescript
-// Error: LWW versioning requires a store that implements LWWVersioningStoreBackend
+// Error: LWW versioning requires a store that implements VersioningStoreBackend
 ```
 
 ### Automatic Compaction
@@ -391,19 +391,16 @@ This is the most critical method to get right. Your implementation must:
 
 If you can't do all of this atomically, you risk inconsistent state.
 
-### `LWWVersioningStoreBackend` (Optional)
+### `VersioningStoreBackend` (Optional)
 
-Extends `LWWStoreBackend` with version creation:
+The same `VersioningStoreBackend` interface used by OT. This means a single store backend can handle both OT and LWW versioning:
 
 ```typescript
-interface LWWVersioningStoreBackend extends LWWStoreBackend {
-  createVersion(
-    docId: string,
-    versionId: string,
-    state: any,
-    rev: number,
-    metadata?: EditableVersionMetadata
-  ): Promise<void>;
+interface VersioningStoreBackend {
+  createVersion(docId: string, metadata: VersionMetadata, state: any, changes?: Change[]): Promise<void>;
+  listVersions(docId: string, options: ListVersionsOptions): Promise<VersionMetadata[]>;
+  loadVersionState(docId: string, versionId: string): Promise<any | undefined>;
+  updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void>;
 }
 ```
 

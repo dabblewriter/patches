@@ -532,19 +532,16 @@ type ListFieldsOptions = { sinceRev: number } | { paths: string[] };
 - Delete child paths when saving parent (e.g., saving `/obj` deletes `/obj/name`)
 - Delete paths in `pathsToDelete` atomically
 
-### LWWVersioningStoreBackend
+### VersioningStoreBackend
 
-Optional extension for user-visible versioning:
+Optional extension for user-visible versioning. This is the same interface used by OT, so a single store backend can handle both:
 
 ```typescript
-interface LWWVersioningStoreBackend extends LWWStoreBackend {
-  createVersion(
-    docId: string,
-    versionId: string,
-    state: any,
-    rev: number,
-    metadata?: EditableVersionMetadata
-  ): Promise<void>;
+interface VersioningStoreBackend {
+  createVersion(docId: string, metadata: VersionMetadata, state: any, changes?: Change[]): Promise<void>;
+  listVersions(docId: string, options: ListVersionsOptions): Promise<VersionMetadata[]>;
+  loadVersionState(docId: string, versionId: string): Promise<any | undefined>;
+  updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void>;
 }
 ```
 

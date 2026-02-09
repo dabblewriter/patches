@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { handleOfflineSessionsAndBatches } from '../../../src/algorithms/server/handleOfflineSessionsAndBatches';
-import type { PatchesStoreBackend } from '../../../src/server/types';
+import type { OTStoreBackend } from '../../../src/server/types';
 import type { Change } from '../../../src/types';
 
 // Mock the dependencies
@@ -10,7 +10,7 @@ vi.mock('../../../src/algorithms/shared/applyChanges');
 vi.mock('../../../src/algorithms/server/getStateAtRevision');
 
 describe('handleOfflineSessionsAndBatches', () => {
-  let mockStore: PatchesStoreBackend;
+  let mockStore: OTStoreBackend;
   const sessionTimeoutMillis = 300000; // 5 minutes
 
   const createChange = (id: string, rev: number, createdAtMs: number): Change => ({

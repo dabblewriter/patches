@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { commitChanges } from '../../../src/algorithms/server/commitChanges';
-import type { PatchesStoreBackend } from '../../../src/server/types';
+import type { OTStoreBackend } from '../../../src/server/types';
 import type { Change } from '../../../src/types';
 
 // Mock the dependencies
@@ -12,7 +12,7 @@ vi.mock('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
 vi.mock('../../../src/algorithms/server/transformIncomingChanges');
 
 describe('commitChanges', () => {
-  let mockStore: PatchesStoreBackend;
+  let mockStore: OTStoreBackend;
   const sessionTimeoutMillis = 300000; // 5 minutes
 
   /** Creates a timestamp offset by the given milliseconds from now */

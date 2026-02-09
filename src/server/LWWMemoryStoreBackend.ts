@@ -1,6 +1,7 @@
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type {
   Branch,
+  Change,
   DocumentTombstone,
   EditableVersionMetadata,
   ListVersionsOptions,
@@ -10,8 +11,8 @@ import type {
   BranchingStoreBackend,
   ListFieldsOptions,
   LWWStoreBackend,
-  LWWVersioningStoreBackend,
   TombstoneStoreBackend,
+  VersioningStoreBackend,
 } from './types.js';
 
 interface DocData {
@@ -27,7 +28,7 @@ interface VersionData {
 
 /**
  * In-memory implementation of LWWStoreBackend for testing.
- * Also implements TombstoneStoreBackend, LWWVersioningStoreBackend, and BranchingStoreBackend
+ * Also implements TombstoneStoreBackend, VersioningStoreBackend, and BranchingStoreBackend
  * for comprehensive testing of all LWW functionality.
  *
  * @example
@@ -40,7 +41,7 @@ interface VersionData {
  * ```
  */
 export class LWWMemoryStoreBackend
-  implements LWWStoreBackend, LWWVersioningStoreBackend, TombstoneStoreBackend, BranchingStoreBackend
+  implements LWWStoreBackend, VersioningStoreBackend, TombstoneStoreBackend, BranchingStoreBackend
 {
   private docs = new Map<string, DocData>();
   private tombstones = new Map<string, DocumentTombstone>();
@@ -150,27 +151,9 @@ export class LWWMemoryStoreBackend
 
   // === Versioning ===
 
-  async createVersion(
-    docId: string,
-    versionId: string,
-    state: any,
-    rev: number,
-    metadata?: EditableVersionMetadata
-  ): Promise<void> {
+  async createVersion(docId: string, metadata: VersionMetadata, state: any, _changes?: Change[]): Promise<void> {
     const versions = this.versions.get(docId) || [];
-
-    // Build full VersionMetadata
-    const versionMetadata: VersionMetadata = {
-      id: versionId,
-      origin: 'main',
-      startedAt: Date.now(),
-      endedAt: Date.now(),
-      startRev: rev,
-      endRev: rev,
-      ...metadata,
-    };
-
-    versions.push({ metadata: versionMetadata, state });
+    versions.push({ metadata, state });
     this.versions.set(docId, versions);
   }
 

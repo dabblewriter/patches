@@ -1,4 +1,4 @@
-import type { PatchesStoreBackend, TombstoneStoreBackend } from '../../server/types.js';
+import type { ServerStoreBackend, TombstoneStoreBackend } from '../../server/types.js';
 import { ErrorCodes, StatusError } from '../error.js';
 
 /**
@@ -91,7 +91,7 @@ export const denyAll: AuthorizationProvider = {
  * };
  */
 export async function assertNotDeleted(
-  store: PatchesStoreBackend & Partial<TombstoneStoreBackend>,
+  store: ServerStoreBackend & Partial<TombstoneStoreBackend>,
   docId: string
 ): Promise<void> {
   const tombstone = await store.getTombstone?.(docId);

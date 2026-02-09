@@ -1,5 +1,5 @@
 import { createVersionMetadata } from '../../data/version.js';
-import type { PatchesStoreBackend } from '../../server/types.js';
+import type { OTStoreBackend } from '../../server/types.js';
 import type { Change, EditableVersionMetadata, VersionMetadata } from '../../types.js';
 
 /**
@@ -12,7 +12,7 @@ import type { Change, EditableVersionMetadata, VersionMetadata } from '../../typ
  * @returns The created version metadata, or undefined if no changes provided.
  */
 export async function createVersion(
-  store: PatchesStoreBackend,
+  store: OTStoreBackend,
   docId: string,
   state: any,
   changes: Change[],

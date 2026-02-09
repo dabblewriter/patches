@@ -114,7 +114,6 @@ Registered by [PatchesHistoryManager](PatchesHistoryManager.md) (requires versio
 | `updateVersion`     | `write` | `docId`, `versionId`, `metadata` | `void`              |
 | `getVersionState`   | `read`  | `docId`, `versionId`             | State snapshot      |
 | `getVersionChanges` | `read`  | `docId`, `versionId`             | `Change[]`          |
-| `listServerChanges` | `read`  | `docId`, `options?`              | `Change[]`          |
 
 ### Branch Operations
 

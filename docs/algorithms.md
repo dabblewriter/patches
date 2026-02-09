@@ -229,7 +229,7 @@ Server-side state management. Used by [OTServer](OTServer.md).
 
 ```typescript
 function commitChanges(
-  store: PatchesStoreBackend,
+  store: OTStoreBackend,
   docId: string,
   changes: Change[],
   sessionTimeoutMillis: number,
@@ -253,7 +253,7 @@ This is the brain behind `OTServer.commitChanges()`.
 
 ```typescript
 function createVersion(
-  store: PatchesStoreBackend,
+  store: OTStoreBackend,
   docId: string,
   state: any,
   changes: Change[],

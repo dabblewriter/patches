@@ -1,5 +1,5 @@
 import { createVersionMetadata } from '../../data/version.js';
-import type { PatchesStoreBackend } from '../../server/types.js';
+import type { OTStoreBackend } from '../../server/types.js';
 import type { Change } from '../../types.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { breakChanges } from '../shared/changeBatching.js';
@@ -18,7 +18,7 @@ import { getStateAtRevision } from './getStateAtRevision.js';
  * @returns The changes (collapsed into one if divergent, unchanged if fast-forward)
  */
 export async function handleOfflineSessionsAndBatches(
-  store: PatchesStoreBackend,
+  store: OTStoreBackend,
   sessionTimeoutMillis: number,
   docId: string,
   changes: Change[],
@@ -65,7 +65,7 @@ export async function handleOfflineSessionsAndBatches(
         const isContinuation =
           !!lastVersion && sessionChanges[0].createdAt - lastVersion.endedAt <= sessionTimeoutMillis;
 
-        if (isContinuation) {
+        if (isContinuation && store.appendVersionChanges) {
           // Append to the existing version
           const mergedState = applyChanges(offlineBaseState, sessionChanges);
           const newEndedAt = sessionChanges[sessionChanges.length - 1].createdAt;

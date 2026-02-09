@@ -25,7 +25,7 @@ import {
   LWWMemoryStoreBackend,
   type LWWServerOptions,
   type LWWStoreBackend,
-  type LWWVersioningStoreBackend,
+  type VersioningStoreBackend,
 } from '../../src/server/index.js';
 
 // Main entry point re-exports client
@@ -127,9 +127,9 @@ describe('LWW exports', () => {
       expect(_typeCheck).toBeDefined();
     });
 
-    it('exports LWWVersioningStoreBackend type', () => {
+    it('exports VersioningStoreBackend type', () => {
       // Type-only export - verify it compiles (LWWMemoryStoreBackend implements this)
-      const _typeCheck: LWWVersioningStoreBackend = new LWWMemoryStoreBackend();
+      const _typeCheck: VersioningStoreBackend = new LWWMemoryStoreBackend();
       expect(_typeCheck).toBeDefined();
     });
   });

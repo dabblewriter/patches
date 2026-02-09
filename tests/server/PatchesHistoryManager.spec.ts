@@ -1,11 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PatchesHistoryManager } from '../../src/server/PatchesHistoryManager';
 import type { PatchesServer } from '../../src/server/PatchesServer';
-import type { PatchesStoreBackend } from '../../src/server/types';
+import type { VersioningStoreBackend } from '../../src/server/types';
 import type {
   Change,
   EditableVersionMetadata,
-  ListChangesOptions,
   ListVersionsOptions,
   VersionMetadata,
 } from '../../src/types';
@@ -24,15 +23,15 @@ import { assertVersionMetadata } from '../../src/server/utils';
 describe('PatchesHistoryManager', () => {
   let historyManager: PatchesHistoryManager;
   let mockServer: PatchesServer;
-  let mockStore: PatchesStoreBackend;
+  let mockStore: VersioningStoreBackend;
 
   beforeEach(() => {
     mockStore = {
+      createVersion: vi.fn(),
       listVersions: vi.fn(),
       updateVersion: vi.fn(),
       loadVersionState: vi.fn(),
       loadVersionChanges: vi.fn(),
-      listChanges: vi.fn(),
     } as any;
 
     mockServer = {
@@ -294,69 +293,6 @@ describe('PatchesHistoryManager', () => {
       );
 
       consoleSpy.mockRestore();
-    });
-  });
-
-  describe('listServerChanges', () => {
-    const mockChanges: Change[] = [
-      {
-        id: 'server-change1',
-        rev: 1,
-        baseRev: 0,
-        ops: [{ op: 'add', path: '', value: { title: 'New Doc' } }],
-        createdAt: Date.now(),
-        committedAt: Date.now(),
-        metadata: {},
-      },
-      {
-        id: 'server-change2',
-        rev: 2,
-        baseRev: 1,
-        ops: [{ op: 'replace', path: '/title', value: 'Updated Doc' }],
-        createdAt: Date.now(),
-        committedAt: Date.now(),
-        metadata: {},
-      },
-    ];
-
-    it('should list server changes with default options', async () => {
-      vi.mocked(mockStore.listChanges).mockResolvedValue(mockChanges);
-
-      const result = await historyManager.listServerChanges('doc1');
-
-      expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', {});
-      expect(result).toEqual(mockChanges);
-    });
-
-    it('should list server changes with custom options', async () => {
-      const options: ListChangesOptions = {
-        startAfter: 5,
-        endBefore: 10,
-        limit: 20,
-        withoutBatchId: 'batch-exclude',
-      };
-
-      vi.mocked(mockStore.listChanges).mockResolvedValue(mockChanges);
-
-      const result = await historyManager.listServerChanges('doc1', options);
-
-      expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', options);
-      expect(result).toEqual(mockChanges);
-    });
-
-    it('should propagate store errors', async () => {
-      const error = new Error('Database connection failed');
-      vi.mocked(mockStore.listChanges).mockRejectedValue(error);
-
-      await expect(historyManager.listServerChanges('doc1')).rejects.toThrow('Database connection failed');
-    });
-
-    it('should handle empty results', async () => {
-      vi.mocked(mockStore.listChanges).mockResolvedValue([]);
-
-      const result = await historyManager.listServerChanges('doc1');
-
-      expect(result).toEqual([]);
     });
   });
 

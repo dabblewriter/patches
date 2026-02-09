@@ -28,7 +28,7 @@ import {
   compressToUint8Array,
   decompressFromBase64,
   decompressFromUint8Array,
-} from '../algorithms/shared/lz.js';
+} from './lz.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 
 // ============================================================================

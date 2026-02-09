@@ -1,4 +1,4 @@
-import { applyChanges } from '../algorithms/shared/applyChanges.js';
+import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
 import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
 import { IndexedDBStore } from './IndexedDBStore.js';

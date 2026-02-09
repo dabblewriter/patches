@@ -3,7 +3,7 @@ import { InMemoryStore } from '../../src/client/InMemoryStore';
 import type { Change, PatchesState } from '../../src/types';
 
 // Mock the dependencies
-vi.mock('../../src/algorithms/shared/applyChanges');
+vi.mock('../../src/algorithms/ot/shared/applyChanges');
 
 describe('InMemoryStore', () => {
   let store: InMemoryStore;
@@ -27,7 +27,7 @@ describe('InMemoryStore', () => {
     store = new InMemoryStore();
 
     // Mock applyChanges
-    const { applyChanges } = await import('../../src/algorithms/shared/applyChanges');
+    const { applyChanges } = await import('../../src/algorithms/ot/shared/applyChanges');
     vi.mocked(applyChanges).mockImplementation((state: any, changes: any) => ({
       ...(state || {}),
       appliedChanges: changes.length,

@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getStateAtRevision } from '../../../src/algorithms/server/getStateAtRevision';
-import type { OTStoreBackend } from '../../../src/server';
-import * as getSnapshotAtRevisionModule from '../../../src/algorithms/server/getSnapshotAtRevision';
-import * as applyChangesModule from '../../../src/algorithms/shared/applyChanges';
+import { getStateAtRevision } from '../../../../src/algorithms/ot/server/getStateAtRevision';
+import type { OTStoreBackend } from '../../../../src/server';
+import * as getSnapshotAtRevisionModule from '../../../../src/algorithms/ot/server/getSnapshotAtRevision';
+import * as applyChangesModule from '../../../../src/algorithms/ot/shared/applyChanges';
 
 // Mock the dependencies
-vi.mock('../../../src/algorithms/server/getSnapshotAtRevision');
-vi.mock('../../../src/algorithms/shared/applyChanges');
+vi.mock('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
+vi.mock('../../../../src/algorithms/ot/shared/applyChanges');
 
 describe('getStateAtRevision', () => {
   const mockGetSnapshotAtRevision = vi.mocked(getSnapshotAtRevisionModule.getSnapshotAtRevision);

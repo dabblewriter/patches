@@ -1,8 +1,8 @@
 import { createId } from 'crypto-id';
-import type { CommitResult } from '../../server/PatchesServer.js';
-import type { OTStoreBackend } from '../../server/types.js';
-import type { Change, ChangeInput, CommitChangesOptions } from '../../types.js';
-import { filterSoftWritesAgainstState } from '../../json-patch/utils/softWrites.js';
+import type { CommitResult } from '../../../server/PatchesServer.js';
+import type { OTStoreBackend } from '../../../server/types.js';
+import type { Change, ChangeInput, CommitChangesOptions } from '../../../types.js';
+import { filterSoftWritesAgainstState } from '../../../json-patch/utils/softWrites.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { createVersion } from './createVersion.js';
 import { getSnapshotAtRevision } from './getSnapshotAtRevision.js';
@@ -11,8 +11,8 @@ import { handleOfflineSessionsAndBatches } from './handleOfflineSessionsAndBatch
 import { transformIncomingChanges } from './transformIncomingChanges.js';
 
 // Re-export for backwards compatibility
-export type { CommitChangesOptions } from '../../types.js';
-export type { CommitResult } from '../../server/PatchesServer.js';
+export type { CommitChangesOptions } from '../../../types.js';
+export type { CommitResult } from '../../../server/PatchesServer.js';
 
 /**
  * Commits a set of changes to a document, applying operational transformation as needed.

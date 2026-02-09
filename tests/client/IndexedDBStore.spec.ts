@@ -3,7 +3,7 @@ import { OTIndexedDBStore } from '../../src/client/OTIndexedDBStore';
 import type { Change, PatchesState } from '../../src/types';
 
 // Mock the dependencies
-vi.mock('../../src/algorithms/shared/applyChanges');
+vi.mock('../../src/algorithms/ot/shared/applyChanges');
 vi.mock('../../src/json-patch/transformPatch');
 vi.mock('../../src/utils/concurrency');
 
@@ -95,7 +95,7 @@ describe('OTIndexedDBStore', () => {
     };
 
     // Mock dependencies
-    const { applyChanges } = await import('../../src/algorithms/shared/applyChanges');
+    const { applyChanges } = await import('../../src/algorithms/ot/shared/applyChanges');
     vi.mocked(applyChanges).mockImplementation((state: any, changes: any) => ({
       ...(state || {}),
       appliedChanges: changes?.length || 0,

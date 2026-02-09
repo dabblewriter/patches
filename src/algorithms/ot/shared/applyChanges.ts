@@ -1,5 +1,5 @@
-import { applyPatch } from '../../json-patch/applyPatch.js';
-import type { Change } from '../../types.js';
+import { applyPatch } from '../../../json-patch/applyPatch.js';
+import type { Change } from '../../../types.js';
 
 /**
  * Applies a sequence of changes to a state object.

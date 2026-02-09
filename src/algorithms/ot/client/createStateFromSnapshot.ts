@@ -1,4 +1,4 @@
-import type { PatchesSnapshot } from '../../types.js';
+import type { PatchesSnapshot } from '../../../types.js';
 import { applyChanges } from '../shared/applyChanges.js';
 
 /**

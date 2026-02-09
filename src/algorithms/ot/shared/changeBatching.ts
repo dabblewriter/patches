@@ -1,7 +1,7 @@
 import { createId } from 'crypto-id';
-import { createChange } from '../../data/change.js';
-import type { JSONPatchOp } from '../../json-patch/types.js';
-import type { Change } from '../../types.js';
+import { createChange } from '../../../data/change.js';
+import type { JSONPatchOp } from '../../../json-patch/types.js';
+import type { Change } from '../../../types.js';
 
 /**
  * Function that calculates the storage size of data.

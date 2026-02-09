@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { handleOfflineSessionsAndBatches } from '../../../src/algorithms/server/handleOfflineSessionsAndBatches';
-import type { OTStoreBackend } from '../../../src/server/types';
-import type { Change } from '../../../src/types';
+import { handleOfflineSessionsAndBatches } from '../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches';
+import type { OTStoreBackend } from '../../../../src/server/types';
+import type { Change } from '../../../../src/types';
 
 // Mock the dependencies
 vi.mock('crypto-id');
-vi.mock('../../../src/data/version');
-vi.mock('../../../src/algorithms/shared/applyChanges');
-vi.mock('../../../src/algorithms/server/getStateAtRevision');
+vi.mock('../../../../src/data/version');
+vi.mock('../../../../src/algorithms/ot/shared/applyChanges');
+vi.mock('../../../../src/algorithms/ot/server/getStateAtRevision');
 
 describe('handleOfflineSessionsAndBatches', () => {
   let mockStore: OTStoreBackend;
@@ -30,7 +30,7 @@ describe('handleOfflineSessionsAndBatches', () => {
     vi.mocked(createSortableId).mockReturnValue('generated-group-id');
 
     // Mock createVersion
-    const { createVersionMetadata: createVersion } = await import('../../../src/data/version');
+    const { createVersionMetadata: createVersion } = await import('../../../../src/data/version');
     vi.mocked(createVersion).mockImplementation((data: any) => ({
       id: 'version-id',
       origin: 'offline-branch' as const,
@@ -42,14 +42,14 @@ describe('handleOfflineSessionsAndBatches', () => {
     }));
 
     // Mock applyChanges
-    const { applyChanges } = await import('../../../src/algorithms/shared/applyChanges');
+    const { applyChanges } = await import('../../../../src/algorithms/ot/shared/applyChanges');
     vi.mocked(applyChanges).mockImplementation((state: any, changes: any) => ({
       ...(state || {}),
       appliedChanges: changes.length,
     }));
 
     // Mock getStateAtRevision
-    const { getStateAtRevision } = await import('../../../src/algorithms/server/getStateAtRevision');
+    const { getStateAtRevision } = await import('../../../../src/algorithms/ot/server/getStateAtRevision');
     vi.mocked(getStateAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 5,
@@ -200,7 +200,7 @@ describe('handleOfflineSessionsAndBatches', () => {
 
     await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
 
-    const { getStateAtRevision } = await import('../../../src/algorithms/server/getStateAtRevision');
+    const { getStateAtRevision } = await import('../../../../src/algorithms/ot/server/getStateAtRevision');
     expect(getStateAtRevision).toHaveBeenCalledWith(mockStore, 'doc1', 5);
   });
 
@@ -211,7 +211,7 @@ describe('handleOfflineSessionsAndBatches', () => {
 
     await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
 
-    const { createVersionMetadata: createVersion } = await import('../../../src/data/version');
+    const { createVersionMetadata: createVersion } = await import('../../../../src/data/version');
     expect(createVersion).toHaveBeenCalledWith({
       parentId: undefined,
       groupId: undefined,

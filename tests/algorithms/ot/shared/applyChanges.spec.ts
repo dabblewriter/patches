@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { applyChanges } from '../../../src/algorithms/shared/applyChanges';
-import type { Change } from '../../../src/types';
-import * as applyPatchModule from '../../../src/json-patch/applyPatch';
+import { applyChanges } from '../../../../src/algorithms/ot/shared/applyChanges';
+import type { Change } from '../../../../src/types';
+import * as applyPatchModule from '../../../../src/json-patch/applyPatch';
 
 // Mock the dependencies
-vi.mock('../../../src/json-patch/applyPatch');
+vi.mock('../../../../src/json-patch/applyPatch');
 
 describe('applyChanges', () => {
   const mockApplyPatch = vi.mocked(applyPatchModule.applyPatch);

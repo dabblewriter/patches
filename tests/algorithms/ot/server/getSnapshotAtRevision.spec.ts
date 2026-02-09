@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getSnapshotAtRevision } from '../../../src/algorithms/server/getSnapshotAtRevision';
-import type { OTStoreBackend } from '../../../src/server';
+import { getSnapshotAtRevision } from '../../../../src/algorithms/ot/server/getSnapshotAtRevision';
+import type { OTStoreBackend } from '../../../../src/server';
 
 describe('getSnapshotAtRevision', () => {
   let mockStore: OTStoreBackend;

@@ -8,21 +8,21 @@ import type { OTStoreBackend } from '../../src/server/types';
 import type { Change, EditableVersionMetadata } from '../../src/types';
 
 // Mock the algorithm modules
-vi.mock('../../src/algorithms/server/getSnapshotAtRevision');
-vi.mock('../../src/algorithms/server/getStateAtRevision');
-vi.mock('../../src/algorithms/server/handleOfflineSessionsAndBatches');
-vi.mock('../../src/algorithms/server/createVersion');
-vi.mock('../../src/algorithms/shared/applyChanges');
+vi.mock('../../src/algorithms/ot/server/getSnapshotAtRevision');
+vi.mock('../../src/algorithms/ot/server/getStateAtRevision');
+vi.mock('../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
+vi.mock('../../src/algorithms/ot/server/createVersion');
+vi.mock('../../src/algorithms/ot/shared/applyChanges');
 vi.mock('../../src/data/change');
 vi.mock('../../src/json-patch/applyPatch');
 vi.mock('../../src/json-patch/createJSONPatch');
 vi.mock('../../src/json-patch/transformPatch');
 
-import { createVersion as createVersionAlgorithm } from '../../src/algorithms/server/createVersion';
-import { getSnapshotAtRevision } from '../../src/algorithms/server/getSnapshotAtRevision';
-import { getStateAtRevision } from '../../src/algorithms/server/getStateAtRevision';
-import { handleOfflineSessionsAndBatches } from '../../src/algorithms/server/handleOfflineSessionsAndBatches';
-import { applyChanges } from '../../src/algorithms/shared/applyChanges';
+import { createVersion as createVersionAlgorithm } from '../../src/algorithms/ot/server/createVersion';
+import { getSnapshotAtRevision } from '../../src/algorithms/ot/server/getSnapshotAtRevision';
+import { getStateAtRevision } from '../../src/algorithms/ot/server/getStateAtRevision';
+import { handleOfflineSessionsAndBatches } from '../../src/algorithms/ot/server/handleOfflineSessionsAndBatches';
+import { applyChanges } from '../../src/algorithms/ot/shared/applyChanges';
 import { applyPatch } from '../../src/json-patch/applyPatch';
 import { createJSONPatch } from '../../src/json-patch/createJSONPatch';
 import { transformPatch } from '../../src/json-patch/transformPatch';

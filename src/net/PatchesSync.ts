@@ -1,5 +1,5 @@
 import { isEqual } from '@dabble/delta';
-import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/shared/changeBatching.js';
+import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/ot/shared/changeBatching.js';
 import { BaseDoc } from '../client/BaseDoc.js';
 import { Patches } from '../client/Patches.js';
 import type { TrackedDoc } from '../client/PatchesStore.js';

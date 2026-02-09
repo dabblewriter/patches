@@ -1,6 +1,6 @@
-import { createVersionMetadata } from '../../data/version.js';
-import type { OTStoreBackend } from '../../server/types.js';
-import type { Change, EditableVersionMetadata, VersionMetadata } from '../../types.js';
+import { createVersionMetadata } from '../../../data/version.js';
+import type { OTStoreBackend } from '../../../server/types.js';
+import type { Change, EditableVersionMetadata, VersionMetadata } from '../../../types.js';
 
 /**
  * Creates a new version snapshot of a document's state from changes.

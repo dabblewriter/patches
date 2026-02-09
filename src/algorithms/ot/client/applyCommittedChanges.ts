@@ -1,4 +1,4 @@
-import type { Change, PatchesSnapshot } from '../../types.js';
+import type { Change, PatchesSnapshot } from '../../../types.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { rebaseChanges } from '../shared/rebaseChanges.js';
 

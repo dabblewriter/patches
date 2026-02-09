@@ -13,14 +13,14 @@ vi.mock('../../src/net/websocket/onlineState');
 vi.mock('@dabble/delta', () => ({
   isEqual: vi.fn((a, b) => JSON.stringify(a) === JSON.stringify(b)),
 }));
-vi.mock('../../src/algorithms/client/applyCommittedChanges', () => ({
+vi.mock('../../src/algorithms/ot/client/applyCommittedChanges', () => ({
   applyCommittedChanges: vi.fn(() => ({
     state: { content: 'updated' },
     rev: 6,
     changes: [],
   })),
 }));
-vi.mock('../../src/algorithms/shared/changeBatching', () => ({
+vi.mock('../../src/algorithms/ot/shared/changeBatching', () => ({
   breakChangesIntoBatches: vi.fn(changes => [changes]),
 }));
 

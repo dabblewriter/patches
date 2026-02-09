@@ -1,5 +1,5 @@
-import { JSONPatch } from '../../json-patch/JSONPatch.js';
-import type { Change } from '../../types.js';
+import { JSONPatch } from '../../../json-patch/JSONPatch.js';
+import type { Change } from '../../../types.js';
 
 /**
  * Rebases local changes against server changes using operational transformation.

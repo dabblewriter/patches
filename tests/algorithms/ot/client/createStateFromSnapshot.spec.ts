@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createStateFromSnapshot } from '../../../src/algorithms/client/createStateFromSnapshot';
-import type { PatchesSnapshot, Change } from '../../../src/types';
-import * as applyChangesModule from '../../../src/algorithms/shared/applyChanges';
+import { createStateFromSnapshot } from '../../../../src/algorithms/ot/client/createStateFromSnapshot';
+import type { PatchesSnapshot, Change } from '../../../../src/types';
+import * as applyChangesModule from '../../../../src/algorithms/ot/shared/applyChanges';
 
 // Mock the dependencies
-vi.mock('../../../src/algorithms/shared/applyChanges');
+vi.mock('../../../../src/algorithms/ot/shared/applyChanges');
 
 describe('createStateFromSnapshot', () => {
   const mockApplyChanges = vi.mocked(applyChangesModule.applyChanges);

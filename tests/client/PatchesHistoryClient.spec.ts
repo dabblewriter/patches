@@ -3,7 +3,7 @@ import type { PatchesAPI } from '../../src/net/protocol/types';
 import type { Change, EditableVersionMetadata, VersionMetadata } from '../../src/types';
 
 // Mock dependencies completely before importing
-vi.mock('../../src/algorithms/shared/applyChanges', () => ({
+vi.mock('../../src/algorithms/ot/shared/applyChanges', () => ({
   applyChanges: vi.fn().mockImplementation((state, changes) => ({
     ...state,
     appliedChanges: changes?.length || 0,
@@ -30,7 +30,7 @@ vi.mock('../../src/event-signal', () => ({
 
 // Now import after mocking
 const { PatchesHistoryClient } = await import('../../src/client/PatchesHistoryClient');
-const { applyChanges } = await import('../../src/algorithms/shared/applyChanges');
+const { applyChanges } = await import('../../src/algorithms/ot/shared/applyChanges');
 
 describe('PatchesHistoryClient', () => {
   let client: InstanceType<typeof PatchesHistoryClient>;

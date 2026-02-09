@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { applyCommittedChanges } from '../../../src/algorithms/client/applyCommittedChanges';
-import type { Change, PatchesSnapshot } from '../../../src/types';
+import { applyCommittedChanges } from '../../../../src/algorithms/ot/client/applyCommittedChanges';
+import type { Change, PatchesSnapshot } from '../../../../src/types';
 
 describe('applyCommittedChanges', () => {
   const createChange = (rev: number, ops: any[] = []): Change => ({

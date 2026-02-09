@@ -1,6 +1,6 @@
-import { createVersionMetadata } from '../../data/version.js';
-import type { OTStoreBackend } from '../../server/types.js';
-import type { Change } from '../../types.js';
+import { createVersionMetadata } from '../../../data/version.js';
+import type { OTStoreBackend } from '../../../server/types.js';
+import type { Change } from '../../../types.js';
 import { applyChanges } from '../shared/applyChanges.js';
 import { breakChanges } from '../shared/changeBatching.js';
 import { getStateAtRevision } from './getStateAtRevision.js';

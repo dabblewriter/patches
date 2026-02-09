@@ -1,5 +1,5 @@
-import { createStateFromSnapshot } from '../algorithms/client/createStateFromSnapshot.js';
-import { applyChanges as applyChangesToState } from '../algorithms/shared/applyChanges.js';
+import { createStateFromSnapshot } from '../algorithms/ot/client/createStateFromSnapshot.js';
+import { applyChanges as applyChangesToState } from '../algorithms/ot/shared/applyChanges.js';
 import type { Change, PatchesSnapshot } from '../types.js';
 import { BaseDoc } from './BaseDoc.js';
 

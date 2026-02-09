@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { commitChanges } from '../../../src/algorithms/server/commitChanges';
-import type { OTStoreBackend } from '../../../src/server/types';
-import type { Change } from '../../../src/types';
+import { commitChanges } from '../../../../src/algorithms/ot/server/commitChanges';
+import type { OTStoreBackend } from '../../../../src/server/types';
+import type { Change } from '../../../../src/types';
 
 // Mock the dependencies
-vi.mock('../../../src/algorithms/shared/applyChanges');
-vi.mock('../../../src/algorithms/server/createVersion');
-vi.mock('../../../src/algorithms/server/getSnapshotAtRevision');
-vi.mock('../../../src/algorithms/server/getStateAtRevision');
-vi.mock('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
-vi.mock('../../../src/algorithms/server/transformIncomingChanges');
+vi.mock('../../../../src/algorithms/ot/shared/applyChanges');
+vi.mock('../../../../src/algorithms/ot/server/createVersion');
+vi.mock('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
+vi.mock('../../../../src/algorithms/ot/server/getStateAtRevision');
+vi.mock('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
+vi.mock('../../../../src/algorithms/ot/server/transformIncomingChanges');
 
 describe('commitChanges', () => {
   let mockStore: OTStoreBackend;
@@ -33,18 +33,18 @@ describe('commitChanges', () => {
     vi.clearAllMocks();
 
     // Mock applyChanges
-    const { applyChanges } = await import('../../../src/algorithms/shared/applyChanges');
+    const { applyChanges } = await import('../../../../src/algorithms/ot/shared/applyChanges');
     vi.mocked(applyChanges).mockImplementation((state: any, changes: any) => ({
       ...(state || {}),
       appliedChanges: changes.length,
     }));
 
     // Mock createVersion
-    const { createVersion } = await import('../../../src/algorithms/server/createVersion');
+    const { createVersion } = await import('../../../../src/algorithms/ot/server/createVersion');
     vi.mocked(createVersion).mockResolvedValue(undefined);
 
     // Mock getSnapshotAtRevision
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 0,
@@ -52,7 +52,7 @@ describe('commitChanges', () => {
     });
 
     // Mock getStateAtRevision
-    const { getStateAtRevision } = await import('../../../src/algorithms/server/getStateAtRevision');
+    const { getStateAtRevision } = await import('../../../../src/algorithms/ot/server/getStateAtRevision');
     vi.mocked(getStateAtRevision).mockResolvedValue({
       state: { stateAtBaseRev: true },
       rev: 0,
@@ -60,11 +60,11 @@ describe('commitChanges', () => {
 
     // Mock handleOfflineSessionsAndBatches
     const { handleOfflineSessionsAndBatches } =
-      await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
+      await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
     vi.mocked(handleOfflineSessionsAndBatches).mockImplementation(async (store, timeout, docId, changes) => changes);
 
     // Mock transformIncomingChanges
-    const { transformIncomingChanges } = await import('../../../src/algorithms/server/transformIncomingChanges');
+    const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
     vi.mocked(transformIncomingChanges).mockImplementation((changes, state, committed, currentRev) => {
       return changes.map((change, index) => ({
         ...change,
@@ -87,7 +87,7 @@ describe('commitChanges', () => {
   });
 
   it('should fill in baseRev when missing (apply to latest)', async () => {
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 0,
@@ -107,7 +107,7 @@ describe('commitChanges', () => {
   });
 
   it('should fill in baseRev for multiple changes when all omit it', async () => {
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 0,
@@ -142,7 +142,7 @@ describe('commitChanges', () => {
   });
 
   it('should throw error when baseRev is ahead of server', async () => {
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 0,
@@ -157,7 +157,7 @@ describe('commitChanges', () => {
   });
 
   it('should throw error when trying to create document that already exists', async () => {
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 0,
@@ -173,7 +173,7 @@ describe('commitChanges', () => {
   });
 
   it('should allow root creation when part of initial batch', async () => {
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 0,
@@ -192,8 +192,8 @@ describe('commitChanges', () => {
   });
 
   it('should rebase baseRev:0 granular changes to head on existing docs', async () => {
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
-    const { getStateAtRevision } = await import('../../../src/algorithms/server/getStateAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
+    const { getStateAtRevision } = await import('../../../../src/algorithms/ot/server/getStateAtRevision');
 
     // Document exists with 5 revisions
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
@@ -234,7 +234,7 @@ describe('commitChanges', () => {
   });
 
   it('should still throw error for root replace with baseRev:0 on existing docs', async () => {
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 0,
@@ -251,7 +251,7 @@ describe('commitChanges', () => {
   });
 
   it('should assign correct rev numbers to rebased changes', async () => {
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 0,
@@ -276,8 +276,8 @@ describe('commitChanges', () => {
   });
 
   it('should filter soft empty container adds when rebasing baseRev:0 on existing docs', async () => {
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
-    const { applyChanges } = await import('../../../src/algorithms/shared/applyChanges');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
+    const { applyChanges } = await import('../../../../src/algorithms/ot/shared/applyChanges');
 
     // Mock state that has data at /settings
     vi.mocked(applyChanges).mockReturnValue({ settings: { theme: 'dark' } });
@@ -312,8 +312,8 @@ describe('commitChanges', () => {
   });
 
   it('should filter explicit soft ops when rebasing baseRev:0 on existing docs', async () => {
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
-    const { applyChanges } = await import('../../../src/algorithms/shared/applyChanges');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
+    const { applyChanges } = await import('../../../../src/algorithms/ot/shared/applyChanges');
 
     // Mock state that has data at /config
     vi.mocked(applyChanges).mockReturnValue({ config: 'existing' });
@@ -347,8 +347,8 @@ describe('commitChanges', () => {
   });
 
   it('should keep soft writes to non-existent paths when rebasing baseRev:0', async () => {
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
-    const { applyChanges } = await import('../../../src/algorithms/shared/applyChanges');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
+    const { applyChanges } = await import('../../../../src/algorithms/ot/shared/applyChanges');
 
     // Mock state without the target paths
     vi.mocked(applyChanges).mockReturnValue({ existingData: true });
@@ -381,8 +381,8 @@ describe('commitChanges', () => {
   });
 
   it('should remove changes with no ops after soft write filtering', async () => {
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
-    const { applyChanges } = await import('../../../src/algorithms/shared/applyChanges');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
+    const { applyChanges } = await import('../../../../src/algorithms/ot/shared/applyChanges');
 
     // Mock state that has data at the target path
     vi.mocked(applyChanges).mockReturnValue({ settings: {} });
@@ -434,7 +434,7 @@ describe('commitChanges', () => {
     const oldTime = createTimestamp(-sessionTimeoutMillis - 1000);
     const lastChange = createChange('old', 1, 0, oldTime);
 
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 0,
@@ -446,7 +446,7 @@ describe('commitChanges', () => {
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    const { createVersion } = await import('../../../src/algorithms/server/createVersion');
+    const { createVersion } = await import('../../../../src/algorithms/ot/server/createVersion');
     expect(createVersion).toHaveBeenCalledWith(mockStore, 'doc1', expect.objectContaining({ appliedChanges: 1 }), [
       lastChange,
     ]);
@@ -459,7 +459,7 @@ describe('commitChanges', () => {
     const changes = [existingChange, newChange];
 
     // Mock server state to have existing changes up to rev 2
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 0,
@@ -480,7 +480,7 @@ describe('commitChanges', () => {
     const changes = [existingChange];
 
     // Mock server state to have existing changes up to rev 2
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 0,
@@ -506,7 +506,7 @@ describe('commitChanges', () => {
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
     const { handleOfflineSessionsAndBatches } =
-      await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
+      await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
     expect(handleOfflineSessionsAndBatches).toHaveBeenCalledWith(
       mockStore,
       sessionTimeoutMillis,
@@ -531,7 +531,7 @@ describe('commitChanges', () => {
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
     const { handleOfflineSessionsAndBatches } =
-      await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
+      await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
     expect(handleOfflineSessionsAndBatches).toHaveBeenCalledWith(
       mockStore,
       sessionTimeoutMillis,
@@ -555,7 +555,7 @@ describe('commitChanges', () => {
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
     const { handleOfflineSessionsAndBatches } =
-      await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
+      await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
     expect(handleOfflineSessionsAndBatches).toHaveBeenCalledWith(
       mockStore,
       sessionTimeoutMillis,
@@ -580,7 +580,7 @@ describe('commitChanges', () => {
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
     const { handleOfflineSessionsAndBatches } =
-      await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
+      await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
     expect(handleOfflineSessionsAndBatches).toHaveBeenCalledWith(
       mockStore,
       sessionTimeoutMillis,
@@ -600,7 +600,7 @@ describe('commitChanges', () => {
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
 
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 0,
@@ -609,7 +609,7 @@ describe('commitChanges', () => {
 
     await commitChanges(mockStore, 'doc1', incomingChanges, sessionTimeoutMillis);
 
-    const { transformIncomingChanges } = await import('../../../src/algorithms/server/transformIncomingChanges');
+    const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
     expect(transformIncomingChanges).toHaveBeenCalledWith(
       incomingChanges,
       expect.objectContaining({ stateAtBaseRev: true }),
@@ -625,7 +625,7 @@ describe('commitChanges', () => {
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis, { forceCommit: true });
 
-    const { transformIncomingChanges } = await import('../../../src/algorithms/server/transformIncomingChanges');
+    const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
     expect(transformIncomingChanges).toHaveBeenCalledWith(changes, expect.any(Object), [], 0, true);
   });
 
@@ -635,7 +635,7 @@ describe('commitChanges', () => {
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
-    const { transformIncomingChanges } = await import('../../../src/algorithms/server/transformIncomingChanges');
+    const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
     vi.mocked(transformIncomingChanges).mockReturnValue(transformedChanges);
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
@@ -648,7 +648,7 @@ describe('commitChanges', () => {
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
-    const { transformIncomingChanges } = await import('../../../src/algorithms/server/transformIncomingChanges');
+    const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
     vi.mocked(transformIncomingChanges).mockReturnValue([]);
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
@@ -663,7 +663,7 @@ describe('commitChanges', () => {
 
     vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
 
-    const { transformIncomingChanges } = await import('../../../src/algorithms/server/transformIncomingChanges');
+    const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
     vi.mocked(transformIncomingChanges).mockReturnValue([transformedChange]);
 
     const result = await commitChanges(mockStore, 'doc1', [incomingChange], sessionTimeoutMillis);
@@ -698,7 +698,7 @@ describe('commitChanges', () => {
     const processedChanges = [createChange('processed', 3, 2, oldTime)];
     const transformedChanges = [{ ...processedChanges[0], rev: 3 }];
 
-    const { getSnapshotAtRevision } = await import('../../../src/algorithms/server/getSnapshotAtRevision');
+    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
     vi.mocked(getSnapshotAtRevision).mockResolvedValue({
       state: { baseState: true },
       rev: 0,
@@ -708,10 +708,10 @@ describe('commitChanges', () => {
     vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
 
     const { handleOfflineSessionsAndBatches } =
-      await import('../../../src/algorithms/server/handleOfflineSessionsAndBatches');
+      await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
     vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue(processedChanges);
 
-    const { transformIncomingChanges } = await import('../../../src/algorithms/server/transformIncomingChanges');
+    const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
     vi.mocked(transformIncomingChanges).mockReturnValue(transformedChanges);
 
     const result = await commitChanges(mockStore, 'doc1', incomingChanges, sessionTimeoutMillis);

@@ -80,23 +80,24 @@ The codebase is divided into client-side and server-side components:
 
 ### Algorithm Layer
 
-1. **Client Algorithms**: Pure functions for client-side operations
-   - `makeChange`: Creates change objects from mutations
+Algorithms are organized under `src/algorithms/` with symmetric `ot/` and `lww/` top-level directories:
+
+1. **OT Client Algorithms** (`ot/client/`): Pure functions for client-side OT operations
    - `applyCommittedChanges`: Merges server updates with local state
    - `createStateFromSnapshot`: Builds current state from snapshots
 
-2. **LWW Algorithms**: LWW-specific operations
-   - `makeLWWChange`: Creates LWW change objects with timestamps
-   - `applyLWWChange`: Applies LWW changes with timestamp comparison
-
-3. **Shared Algorithms**: Core OT logic used by both client and server
+2. **OT Shared Algorithms** (`ot/shared/`): Core OT logic used by both client and server
    - `applyChanges`: Applies change sequences to states
    - `rebaseChanges`: Core operational transformation logic
    - `breakChanges`, `breakChangesIntoBatches`: Handles large change splitting for network transmission
 
-4. **Server Algorithms**: Server-specific state management
+3. **OT Server Algorithms** (`ot/server/`): Server-specific state management
    - `getStateAtRevision`, `getSnapshotAtRevision`: Historical state retrieval
    - `handleOfflineSessionsAndBatches`: Offline sync processing
+
+4. **LWW Algorithms** (`lww/`): LWW-specific operations
+   - `consolidateOps`: Consolidates LWW operations
+   - `mergeServerWithLocal`: Merges server state with local state
 
 **Note**: Strategies invoke algorithm functions; stores are "dumb storage" that persist data without algorithm logic.
 
@@ -132,9 +133,9 @@ Both strategies use pure algorithm functions, making them easy to test and reuse
   - Servers: `OTServer`, `LWWServer`
   - Branch managers: `OTBranchManager`, `LWWBranchManager`
 - `/src/algorithms`: Pure algorithm functions for sync operations
-  - `/client`: Client-specific algorithms
-  - `/server`: Server-specific algorithms
-  - `/shared`: Common algorithms used by both client and server
+  - `/ot/client`: OT client-specific algorithms
+  - `/ot/server`: OT server-specific algorithms
+  - `/ot/shared`: Common OT algorithms used by both client and server
   - `/lww`: LWW-specific algorithms
 - `/src/net`: Networking and transport layer
 - `/src/json-patch`: JSON Patch operations and transformations
@@ -143,7 +144,7 @@ Both strategies use pure algorithm functions, making them easy to test and reuse
 ## Important Implementation Details
 
 1. **Change Processing Flow**:
-   - Client calls `doc.change()` → `makeChange` algorithm creates change objects
+   - Client calls `doc.change()` → change objects are created from mutations
    - Change applied locally (optimistic update)
    - `PatchesSync` batches and sends changes to server
    - Server transforms against concurrent changes, assigns new revision

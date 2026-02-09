@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { transformIncomingChanges } from '../../../src/algorithms/server/transformIncomingChanges';
-import { createChange } from '../../../src/data/change';
-import * as transformPatchModule from '../../../src/json-patch/transformPatch';
-import * as applyPatchModule from '../../../src/json-patch/applyPatch';
+import { transformIncomingChanges } from '../../../../src/algorithms/ot/server/transformIncomingChanges';
+import { createChange } from '../../../../src/data/change';
+import * as transformPatchModule from '../../../../src/json-patch/transformPatch';
+import * as applyPatchModule from '../../../../src/json-patch/applyPatch';
 
 // Mock the dependencies
-vi.mock('../../../src/json-patch/transformPatch');
-vi.mock('../../../src/json-patch/applyPatch');
+vi.mock('../../../../src/json-patch/transformPatch');
+vi.mock('../../../../src/json-patch/applyPatch');
 
 describe('transformIncomingChanges', () => {
   const mockTransformPatch = vi.mocked(transformPatchModule.transformPatch);

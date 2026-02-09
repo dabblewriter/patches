@@ -1,8 +1,8 @@
-import { commitChanges, type CommitChangesOptions } from '../algorithms/server/commitChanges.js';
-import { createVersion } from '../algorithms/server/createVersion.js';
-import { getSnapshotAtRevision } from '../algorithms/server/getSnapshotAtRevision.js';
-import { getStateAtRevision } from '../algorithms/server/getStateAtRevision.js';
-import { applyChanges } from '../algorithms/shared/applyChanges.js';
+import { commitChanges, type CommitChangesOptions } from '../algorithms/ot/server/commitChanges.js';
+import { createVersion } from '../algorithms/ot/server/createVersion.js';
+import { getSnapshotAtRevision } from '../algorithms/ot/server/getSnapshotAtRevision.js';
+import { getStateAtRevision } from '../algorithms/ot/server/getStateAtRevision.js';
+import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
 import { createChange } from '../data/change.js';
 import { signal } from '../event-signal.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
@@ -20,7 +20,7 @@ import type { PatchesServer } from './PatchesServer.js';
 import type { OTStoreBackend } from './types.js';
 import { createTombstoneIfSupported, removeTombstoneIfExists } from './tombstone.js';
 import { assertVersionMetadata } from './utils.js';
-export type { CommitChangesOptions } from '../algorithms/server/commitChanges.js';
+export type { CommitChangesOptions } from '../algorithms/ot/server/commitChanges.js';
 
 /**
  * Configuration options for the OTServer.

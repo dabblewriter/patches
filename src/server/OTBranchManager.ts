@@ -1,5 +1,5 @@
-import { getStateAtRevision } from '../algorithms/server/getStateAtRevision.js';
-import { breakChanges } from '../algorithms/shared/changeBatching.js';
+import { getStateAtRevision } from '../algorithms/ot/server/getStateAtRevision.js';
+import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import { createVersionMetadata } from '../data/version.js';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata } from '../types.js';

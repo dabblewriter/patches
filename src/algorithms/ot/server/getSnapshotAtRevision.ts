@@ -1,5 +1,5 @@
-import type { OTStoreBackend } from '../../server/types.js';
-import type { PatchesSnapshot } from '../../types.js';
+import type { OTStoreBackend } from '../../../server/types.js';
+import type { PatchesSnapshot } from '../../../types.js';
 
 /**
  * Retrieves the document state of the version before the given revision and changes after up to that revision or all

@@ -1,5 +1,5 @@
-import { applyCommittedChanges } from '../algorithms/client/applyCommittedChanges.js';
-import { breakChanges } from '../algorithms/shared/changeBatching.js';
+import { applyCommittedChanges } from '../algorithms/ot/client/applyCommittedChanges.js';
+import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change, PatchesSnapshot } from '../types.js';

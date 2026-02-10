@@ -75,7 +75,8 @@ export class LWWServer implements PatchesServer {
   private readonly snapshotInterval: number;
 
   /** Notifies listeners whenever a batch of changes is successfully committed. */
-  public readonly onChangesCommitted = signal<(docId: string, changes: Change[], originClientId?: string) => void>();
+  public readonly onChangesCommitted =
+    signal<(docId: string, changes: Change[], options?: CommitChangesOptions, originClientId?: string) => void>();
 
   /** Notifies listeners when a document is deleted. */
   public readonly onDocDeleted = signal<(docId: string, options?: DeleteDocOptions, originClientId?: string) => void>();
@@ -141,10 +142,10 @@ export class LWWServer implements PatchesServer {
    *
    * @param docId - The document ID.
    * @param changes - The changes to commit (always 1 for LWW).
-   * @param _options - Optional commit options (ignored for LWW).
+   * @param options - Optional commit options (ignored for LWW).
    * @returns Array containing 0-1 changes with catchup ops and new rev.
    */
-  async commitChanges(docId: string, changes: ChangeInput[], _options?: CommitChangesOptions): Promise<Change[]> {
+  async commitChanges(docId: string, changes: ChangeInput[], options?: CommitChangesOptions): Promise<Change[]> {
     if (changes.length === 0) {
       return [];
     }
@@ -206,7 +207,7 @@ export class LWWServer implements PatchesServer {
           id: change.id,
           committedAt: serverNow,
         });
-        await this.onChangesCommitted.emit(docId, [broadcastChange], getClientId());
+        await this.onChangesCommitted.emit(docId, [broadcastChange], options, getClientId());
       } catch (error) {
         console.error(`Failed to notify clients about committed changes for doc ${docId}:`, error);
       }

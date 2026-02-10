@@ -252,7 +252,7 @@ For querying version history, use [PatchesHistoryManager](PatchesHistoryManager.
 Fires when changes are successfully committed. Use this to broadcast updates to other clients:
 
 ```typescript
-server.onChangesCommitted((docId, changes, originClientId) => {
+server.onChangesCommitted((docId, changes, options, originClientId) => {
   // Broadcast to all clients except the sender
   broadcastToClients(docId, changes, { exclude: originClientId });
 });

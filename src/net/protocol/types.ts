@@ -177,6 +177,7 @@ export interface PatchesAPI {
 export interface PatchesNotificationParams {
   docId: string;
   changes: Change[];
+  options?: CommitChangesOptions;
 }
 
 export interface AwarenessUpdateNotificationParams {

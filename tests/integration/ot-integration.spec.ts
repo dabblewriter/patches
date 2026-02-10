@@ -179,7 +179,7 @@ class OTTestHarness {
     this.server = new OTServer(this.serverStore);
 
     // Capture broadcast changes for distribution to other clients
-    this.server.onChangesCommitted((docId, changes) => {
+    this.server.onChangesCommitted((docId, changes, options) => {
       this.lastBroadcast = { docId, changes };
     });
   }

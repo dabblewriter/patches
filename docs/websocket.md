@@ -38,7 +38,7 @@ await ws.connect();
 await ws.subscribe(['doc-1', 'doc-2']);
 
 // Listen for changes from other clients
-ws.onChangesCommitted((docId, changes) => {
+ws.onChangesCommitted((docId, changes, options) => {
   console.log(`Received ${changes.length} changes for ${docId}`);
 });
 
@@ -185,8 +185,8 @@ const wsServer = new WebSocketServer({
 });
 
 // 5. Wire up the commit notification to broadcast changes
-otServer.onChangesCommitted((docId, changes, originClientId) => {
-  rpc.notify('changesCommitted', { docId, changes }, originClientId);
+otServer.onChangesCommitted((docId, changes, options, originClientId) => {
+  rpc.notify('changesCommitted', { docId, changes, options }, originClientId);
 });
 ```
 

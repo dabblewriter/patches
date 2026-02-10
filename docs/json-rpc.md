@@ -73,7 +73,7 @@ server.registerMethod('echo', async message => {
 server.register(otServer);
 
 // Send notifications to clients
-server.notify('changesCommitted', { docId, changes });
+server.notify('changesCommitted', { docId, changes, options });
 ```
 
 The server processes incoming messages via `processMessage(raw, ctx)`, which parses the JSON-RPC frame, dispatches to the registered handler, and returns the response (or `undefined` for notifications).
@@ -145,7 +145,7 @@ Here is what happens when a client commits changes:
 2. JSONRPCClient wraps this as `{ jsonrpc: '2.0', id: 1, method: 'commitChanges', params: [docId, changes] }`
 3. Server's JSONRPCServer parses the message, checks authorization, dispatches to the handler
 4. Server returns `{ jsonrpc: '2.0', id: 1, result: [...committedChanges] }`
-5. Server also fires `server.notify('changesCommitted', { docId, changes })` to other subscribers
+5. Server also fires `server.notify('changesCommitted', { docId, changes, options })` to other subscribers
 6. Other clients receive the notification via their `rpc.on('changesCommitted', ...)` handlers
 
 ## Error Handling

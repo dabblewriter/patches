@@ -55,7 +55,7 @@ export class LWWBatcher<T extends object = object> {
     }
     // Add timestamps if not present
     const timestamp = Date.now();
-    const timedOps = newOps.map((op) => (op.ts ? op : { ...op, ts: timestamp }));
+    const timedOps = newOps.map(op => (op.ts ? op : { ...op, ts: timestamp }));
 
     // Get existing ops that might need consolidation
     const existingOps = Array.from(this.ops.values());

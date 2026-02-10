@@ -281,7 +281,7 @@ describe('OTServer', () => {
       setAuthContext({ clientId: 'client1', metadata: {} });
       try {
         await server.commitChanges('doc1', [mockChange]);
-        expect(emitSpy).toHaveBeenCalledWith('doc1', expect.any(Array), 'client1');
+        expect(emitSpy).toHaveBeenCalledWith('doc1', expect.any(Array), undefined, 'client1');
       } finally {
         clearAuthContext();
       }

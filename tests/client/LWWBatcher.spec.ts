@@ -146,8 +146,8 @@ describe('LWWBatcher', () => {
 
       const result = batcher.flush();
       // Parent write should delete child path
-      expect(result.ops.some((op) => op.path === '/nested/value')).toBe(false);
-      expect(result.ops.some((op) => op.path === '/nested')).toBe(true);
+      expect(result.ops.some(op => op.path === '/nested/value')).toBe(false);
+      expect(result.ops.some(op => op.path === '/nested')).toBe(true);
     });
   });
 
@@ -402,14 +402,14 @@ describe('LWWBatcher', () => {
       // flags: @bit(0b0010)
       expect(result.ops).toHaveLength(3);
 
-      const nameOp = result.ops.find((op) => op.path === '/name');
+      const nameOp = result.ops.find(op => op.path === '/name');
       expect(nameOp?.value).toBe('Bob');
 
-      const counterOp = result.ops.find((op) => op.path === '/counter');
+      const counterOp = result.ops.find(op => op.path === '/counter');
       expect(counterOp?.op).toBe('@inc');
       expect(counterOp?.value).toBe(6);
 
-      const flagsOp = result.ops.find((op) => op.path === '/flags');
+      const flagsOp = result.ops.find(op => op.path === '/flags');
       expect(flagsOp?.op).toBe('@bit');
     });
   });

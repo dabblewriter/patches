@@ -70,7 +70,8 @@ export class OTServer implements PatchesServer {
   readonly store: OTStoreBackend;
 
   /** Notifies listeners whenever a batch of changes is *successfully* committed. */
-  public readonly onChangesCommitted = signal<(docId: string, changes: Change[], originClientId?: string) => void>();
+  public readonly onChangesCommitted =
+    signal<(docId: string, changes: Change[], options?: CommitChangesOptions, originClientId?: string) => void>();
 
   /** Notifies listeners when a document is deleted. */
   public readonly onDocDeleted = signal<(docId: string, options?: DeleteDocOptions, originClientId?: string) => void>();
@@ -127,7 +128,7 @@ export class OTServer implements PatchesServer {
       try {
         // Fire event for realtime transports (WebSocket, etc.)
         // Use clientId from request context for broadcast filtering
-        await this.onChangesCommitted.emit(docId, newChanges, getClientId());
+        await this.onChangesCommitted.emit(docId, newChanges, options, getClientId());
       } catch (error) {
         // If notification fails after saving, log error but don't fail the operation
         // The changes are already committed to storage, so we can't roll back

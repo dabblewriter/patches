@@ -126,10 +126,11 @@ describe('PatchesWebSocket', () => {
       const mockParams = {
         docId: 'doc1',
         changes: [{ id: 'change1', op: [] }],
+        options: undefined,
       };
       handler(mockParams);
 
-      expect(mockListener).toHaveBeenCalledWith('doc1', mockParams.changes);
+      expect(mockListener).toHaveBeenCalledWith('doc1', mockParams.changes, mockParams.options);
     });
   });
 });

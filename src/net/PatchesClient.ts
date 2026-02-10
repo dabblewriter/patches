@@ -25,7 +25,8 @@ export class PatchesClient implements PatchesAPI {
   // --- Public Signals ---
 
   /** Signal emitted when the server pushes document changes. */
-  public readonly onChangesCommitted = signal<(docId: string, changes: Change[]) => void>();
+  public readonly onChangesCommitted =
+    signal<(docId: string, changes: Change[], options?: CommitChangesOptions) => void>();
 
   /** Signal emitted when a document is deleted (either by another client or discovered on subscribe). */
   public readonly onDocDeleted = signal<(docId: string) => void>();
@@ -42,8 +43,8 @@ export class PatchesClient implements PatchesAPI {
     // Register handlers for server-sent notifications
     // Note: Type assertions might be needed if rpc.on doesn't infer strongly enough
     this.rpc.on('changesCommitted', (params: PatchesNotificationParams) => {
-      const { docId, changes } = params;
-      this.onChangesCommitted.emit(docId, changes);
+      const { docId, changes, options } = params;
+      this.onChangesCommitted.emit(docId, changes, options);
     });
 
     this.rpc.on('docDeleted', (params: { docId: string }) => {

@@ -346,7 +346,7 @@ class LWWServer implements PatchesServer {
   async deleteDoc(docId): Promise<void>;
 
   // Signals for real-time broadcast
-  onChangesCommitted: Signal<(docId, changes, originClientId?) => void>;
+  onChangesCommitted: Signal<(docId, changes, options?, originClientId?) => void>;
   onDocDeleted: Signal<(docId, options?, originClientId?) => void>;
 }
 ```

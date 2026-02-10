@@ -502,7 +502,7 @@ describe('LWWServer', () => {
 
         await server.commitChanges('doc1', [change]);
 
-        expect(emitSpy).toHaveBeenCalledWith('doc1', expect.any(Array), 'client1');
+        expect(emitSpy).toHaveBeenCalledWith('doc1', expect.any(Array), undefined, 'client1');
       } finally {
         clearAuthContext();
       }
@@ -750,9 +750,11 @@ describe('LWWServer', () => {
       const before = Date.now();
       let broadcastedChange: any;
 
-      const emitSpy = vi.spyOn(server.onChangesCommitted, 'emit').mockImplementation(async (_docId, changes) => {
-        broadcastedChange = changes[0];
-      });
+      const emitSpy = vi
+        .spyOn(server.onChangesCommitted, 'emit')
+        .mockImplementation(async (_docId, changes, _options) => {
+          broadcastedChange = changes[0];
+        });
 
       const change: ChangeInput = {
         id: 'broadcast1',

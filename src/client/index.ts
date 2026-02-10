@@ -7,6 +7,7 @@ export * from './InMemoryStore.js';
 export * from './LWWInMemoryStore.js';
 export * from './LWWDoc.js';
 export * from './LWWAlgorithm.js';
+export * from './LWWBatcher.js';
 export * from './OTDoc.js';
 export * from './OTAlgorithm.js';
 export * from './Patches.js';

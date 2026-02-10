@@ -10,6 +10,7 @@ Most collaborative apps don't need the complexity of Operational Transformation.
 - [The Architecture](#the-architecture)
 - [Client-Server Flow](#client-server-flow)
 - [The Key Players](#the-key-players)
+- [Batching Operations with LWWBatcher](#batching-operations-with-lwwbatcher)
 - [Algorithm Functions](#algorithm-functions)
 - [Backend Store Interface](#backend-store-interface)
 - [Using LWW and OT Together](#using-lww-and-ot-together)
@@ -404,6 +405,198 @@ interface JSONPatchOp {
   rev?: number; // Revision (set by server)
 }
 ```
+
+## Batching Operations with LWWBatcher
+
+When you need to accumulate many operations before sending them to the server—like in migration scripts or bulk import tools—creating individual Change objects for each operation is wasteful. That's where `LWWBatcher` comes in.
+
+### What It Does
+
+`LWWBatcher` accumulates operations and consolidates them using the same LWW rules the server uses. When you're ready to send, it produces a single `ChangeInput` object with all operations efficiently merged.
+
+**Key features:**
+
+- **Automatic consolidation**: `@inc` operations merge, `replace` operations follow last-write-wins, delta ops combine
+- **Two APIs**: Add raw operations or use the familiar `change(mutator)` function
+- **Memory efficient**: Stores one operation per path, not a history of changes
+- **Type-safe**: Full TypeScript support with path inference
+
+### Basic Usage
+
+```typescript
+import { LWWBatcher } from '@dabble/patches/client';
+
+const batcher = new LWWBatcher<MyDocType>();
+
+// Option 1: Add operations directly
+batcher.add([
+  { op: '@inc', path: '/pageViews', value: 1 },
+  { op: '@inc', path: '/pageViews', value: 1 },
+  { op: 'replace', path: '/lastViewed', value: Date.now() },
+]);
+
+// Option 2: Use the change() API
+batcher.change((patch, doc) => {
+  patch.increment(doc.visitCount, 1);
+  patch.replace(doc.status, 'active');
+  patch.max(doc.highScore, 150);
+});
+
+// Get consolidated change
+const changeInput = batcher.flush();
+// Returns: {
+//   id: '...',
+//   ops: [
+//     { op: '@inc', path: '/pageViews', value: 2, ts: ... },
+//     { op: 'replace', path: '/lastViewed', value: ..., ts: ... },
+//     { op: '@inc', path: '/visitCount', value: 1, ts: ... },
+//     { op: 'replace', path: '/status', value: 'active', ts: ... },
+//     { op: '@max', path: '/highScore', value: 150, ts: ... }
+//   ],
+//   createdAt: ...
+// }
+```
+
+### Migration Script Example
+
+Here's a real-world migration scenario where you're converting legacy data:
+
+```typescript
+import { LWWBatcher } from '@dabble/patches/client';
+import { LWWServer } from '@dabble/patches/server';
+
+async function migrateUserStats(users: LegacyUser[], server: LWWServer) {
+  for (const user of users) {
+    const batcher = new LWWBatcher<UserStatsDoc>();
+
+    // Accumulate all field updates
+    batcher.change((patch, doc) => {
+      patch.replace(doc.userId, user.id);
+      patch.replace(doc.displayName, user.name);
+      patch.replace(doc.email, user.email);
+      patch.increment(doc.loginCount, user.totalLogins);
+      patch.max(doc.lastLoginAt, user.lastActiveTimestamp);
+
+      // Convert legacy flags to bitmask
+      if (user.isPremium) patch.bit(doc.flags, 0, true);
+      if (user.emailVerified) patch.bit(doc.flags, 1, true);
+      if (user.darkMode) patch.bit(doc.flags, 2, true);
+    });
+
+    // Send consolidated change to server
+    const change = batcher.flush({
+      batchId: 'migration-2025-02',
+      source: 'legacy-import',
+    });
+
+    await server.commitChanges(`user-stats-${user.id}`, [change]);
+  }
+}
+```
+
+Without `LWWBatcher`, you'd either:
+
+1. Create a separate Change for each field (network overhead, storage bloat)
+2. Manually track operations and consolidate them yourself (error-prone, duplicates server logic)
+
+### How Consolidation Works
+
+The batcher uses the same `consolidateOps` algorithm the server uses. Operations on the same path consolidate according to their type:
+
+**Delta operations combine:**
+
+```typescript
+batcher.add([
+  { op: '@inc', path: '/counter', value: 5 },
+  { op: '@inc', path: '/counter', value: 3 },
+  { op: '@inc', path: '/counter', value: 2 },
+]);
+
+const result = batcher.flush();
+// Result: { op: '@inc', path: '/counter', value: 10 }
+```
+
+**Replace operations follow last-write-wins:**
+
+```typescript
+batcher.add([
+  { op: 'replace', path: '/status', value: 'pending', ts: 1000 },
+  { op: 'replace', path: '/status', value: 'active', ts: 2000 },
+]);
+
+const result = batcher.flush();
+// Result: { op: 'replace', path: '/status', value: 'active', ts: 2000 }
+```
+
+**Delta ops apply to replace ops:**
+
+```typescript
+batcher.add([
+  { op: 'replace', path: '/score', value: 100 },
+  { op: '@inc', path: '/score', value: 5 },
+]);
+
+const result = batcher.flush();
+// Result: { op: 'replace', path: '/score', value: 105 }
+```
+
+### API Reference
+
+```typescript
+class LWWBatcher<T extends object = object> {
+  // Add operations (raw ops or JSONPatch object)
+  add(newOps: JSONPatchOp[] | JSONPatch): void;
+
+  // Use change() API like LWWDoc
+  change(mutator: ChangeMutator<T>): void;
+
+  // Get consolidated change and clear batch
+  flush(metadata?: Record<string, any>): ChangeInput;
+
+  // Clear without creating a change
+  clear(): void;
+
+  // Check if empty
+  isEmpty(): boolean;
+
+  // Number of pending operations (by path)
+  get size(): number;
+}
+```
+
+### When to Use It
+
+**Use `LWWBatcher` when:**
+
+- Writing migration scripts that convert legacy data
+- Bulk importing records from external sources
+- Building batch processing tools
+- Pre-computing operations before network availability
+- Testing scenarios with many accumulated changes
+
+**Don't use it for:**
+
+- Normal real-time collaboration (use `LWWDoc` instead)
+- Single operations (just send them directly)
+- When you need the full `Change` object with `rev`/`baseRev` (use `createChange` from `@dabble/patches`)
+
+### Timestamps and IDs
+
+The batcher automatically adds timestamps to operations that don't have them. All operations in a single `add()` call get the same timestamp. Operations from different `add()` calls get different timestamps.
+
+```typescript
+batcher.add([
+  { op: 'replace', path: '/a', value: 1 }, // Gets ts: 1000
+  { op: 'replace', path: '/b', value: 2 }, // Gets ts: 1000
+]);
+
+// Later...
+batcher.add([
+  { op: 'replace', path: '/c', value: 3 }, // Gets ts: 1005
+]);
+```
+
+The `flush()` method generates a unique ID using the same algorithm as `createChange`, so the resulting `ChangeInput` is ready to send to the server.
 
 ## Algorithm Functions
 

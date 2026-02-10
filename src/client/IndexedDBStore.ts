@@ -99,7 +99,7 @@ export abstract class IndexedDBStore implements PatchesStore {
       this.db.close();
       this.db = null;
       this.dbPromise = deferred();
-      this.dbPromise.resolve(null as any);
+      this.dbPromise.reject(new Error('Store has been closed'));
     }
   }
 

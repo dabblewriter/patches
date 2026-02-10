@@ -68,9 +68,9 @@ export class LWWAlgorithm implements ClientAlgorithm {
     const committedRev = doc?.committedRev ?? (await this.store.getCommittedRev(docId));
     const changes = [createChange(committedRev, committedRev + 1, timedOps, metadata)];
 
-    // Apply changes to doc if provided
+    // Apply changes to doc if provided (local change always means pending)
     if (doc) {
-      (doc as LWWDoc<T>).applyChanges(changes);
+      (doc as LWWDoc<T>).applyChanges(changes, true);
     }
 
     return changes;
@@ -116,7 +116,8 @@ export class LWWAlgorithm implements ClientAlgorithm {
     const mergedChanges = mergeServerWithLocal(serverChanges, localOps);
 
     if (doc) {
-      (doc as LWWDoc<T>).applyChanges(mergedChanges);
+      const hasPending = localOps.length > 0;
+      (doc as LWWDoc<T>).applyChanges(mergedChanges, hasPending);
     }
 
     // Return mergedChanges changes for broadcast (no rebasing needed for LWW)

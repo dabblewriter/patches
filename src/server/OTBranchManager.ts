@@ -141,6 +141,11 @@ export class OTBranchManager implements BranchManager {
     // Use 'main' origin if fast-forward, 'branch' if divergent
     const versionOrigin = canFastForward ? 'main' : 'branch';
     let lastVersionId: string | undefined;
+
+    // Note: if version creation succeeds but commit fails, orphaned versions
+    // may remain in the store. The store interface does not currently expose a
+    // deleteVersion method, so cleanup is not possible. These orphaned versions
+    // are harmless (they reference a groupId that was never fully merged).
     for (const v of branchVersions) {
       const newVersionMetadata = createVersionMetadata({
         ...v,

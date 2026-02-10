@@ -155,7 +155,7 @@ export class OTServer implements PatchesServer {
       return null;
     }
 
-    // It's the baseRev that matters for sending.
+    // Provide rev like a client would; commitChanges handles conflicts
     const change = createChange(rev, rev + 1, patch.ops, metadata);
 
     // Apply to local state to ensure no errors are thrown
@@ -197,8 +197,7 @@ export class OTServer implements PatchesServer {
   async captureCurrentVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string | null> {
     assertVersionMetadata(metadata);
     const { state: initialState, changes } = await getSnapshotAtRevision(this.store, docId);
-    let state = initialState;
-    state = applyChanges(state, changes);
+    const state = applyChanges(initialState, changes);
     const version = await createVersion(this.store, docId, state, changes, metadata);
     if (!version) {
       return null;

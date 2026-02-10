@@ -85,8 +85,10 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
    * - `committedAt === 0`: Pending local change (marks hasPending = true)
    *
    * @param changes Array of changes to apply
+   * @param hasPending If provided, overrides the inferred pending state.
+   *   Used by LWWAlgorithm which knows the true pending state from the store.
    */
-  applyChanges(changes: Change[]): void {
+  override applyChanges(changes: Change[], hasPending?: boolean): void {
     if (changes.length === 0) return;
 
     // Apply all ops from all changes
@@ -110,7 +112,7 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
     }
 
     this._committedRev = lastCommittedRev;
-    this._hasPending = hasPendingChanges;
+    this._hasPending = hasPending ?? hasPendingChanges;
 
     this.onUpdate.emit(this._state);
   }

@@ -72,7 +72,7 @@ export function createManagedDocs<TDoc extends object, TData>(
   paths: Accessor<string[] | null>,
   initialData: TData,
   reducer: (data: TData, path: string, state: TDoc | null) => TData,
-  options?: CreateManagedDocsOptions,
+  options?: CreateManagedDocsOptions
 ): CreateManagedDocsReturn<TData> {
   const { patches } = usePatchesContext();
   const { idProp } = options ?? {};
@@ -124,9 +124,9 @@ export function createManagedDocs<TDoc extends object, TData>(
       docs.set(path, doc);
 
       // Apply initial state immediately
-      const initialState = doc.state;
+      let initialState = doc.state;
       if (idProp && initialState) {
-        (initialState as Record<string, unknown>)[idProp] = doc.id;
+        initialState = { ...initialState, [idProp]: doc.id } as TDoc;
       }
       setData(prev => reducer(prev, path, initialState));
 
@@ -136,11 +136,11 @@ export function createManagedDocs<TDoc extends object, TData>(
         doc.subscribe(newState => {
           if (currentPaths.has(path)) {
             if (idProp && newState) {
-              (newState as Record<string, unknown>)[idProp] = doc.id;
+              newState = { ...newState, [idProp]: doc.id } as TDoc;
             }
             setData(prev => reducer(prev, path, newState));
           }
-        }),
+        })
       );
     } catch (error) {
       console.error(`Failed to open doc at path: ${path}`, error);

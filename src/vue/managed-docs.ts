@@ -75,7 +75,7 @@ export function useManagedDocs<TDoc extends object, TData>(
   pathsRef: Readonly<Ref<string[] | null>>,
   initialData: TData,
   reducer: (data: TData, path: string, state: TDoc | null) => TData,
-  options?: UseManagedDocsOptions,
+  options?: UseManagedDocsOptions
 ): UseManagedDocsReturn<TData> {
   const { patches } = usePatchesContext();
   const { idProp } = options ?? {};
@@ -100,70 +100,78 @@ export function useManagedDocs<TDoc extends object, TData>(
     const toClose = new Set([...oldPaths].filter(path => !newPaths.has(path)));
 
     // Open new docs
-    toOpen.forEach(async path => {
-      try {
-        const doc = await patches.openDoc<TDoc>(path);
-
-        // Race check: path may have been removed while we were opening
-        if (currentPaths.has(path)) {
-          docs.set(path, doc);
-
-          // Apply initial state immediately
-          const initialState = doc.state;
-          if (idProp && initialState) {
-            (initialState as Record<string, unknown>)[idProp] = doc.id;
-          }
-          data.value = reducer(data.value, path, initialState);
-
-          // Subscribe for future updates
-          unsubscribes.set(
-            path,
-            doc.subscribe(newState => {
-              if (currentPaths.has(path)) {
-                if (idProp && newState) {
-                  (newState as Record<string, unknown>)[idProp] = doc.id;
-                }
-                data.value = reducer(data.value, path, newState);
-              }
-            }),
-          );
-        } else {
-          // Path was removed while opening — close immediately
-          await patches.closeDoc(path);
-        }
-      } catch (error) {
-        console.error(`Failed to open doc at path: ${path}`, error);
-      }
-    });
+    for (const path of toOpen) {
+      openPath(path);
+    }
 
     // Close old docs
-    toClose.forEach(async path => {
-      const unsub = unsubscribes.get(path);
-      if (unsub) {
-        unsub();
-        unsubscribes.delete(path);
-      }
+    for (const path of toClose) {
+      closePath(path);
+    }
+  });
 
-      const doc = docs.get(path);
-      if (doc) {
-        try {
-          await patches.closeDoc(path);
-        } catch (error) {
-          console.error(`Failed to close doc at path: ${path}`, error);
-        } finally {
-          docs.delete(path);
-          data.value = reducer(data.value, path, null);
+  async function openPath(path: string) {
+    try {
+      const doc = await patches.openDoc<TDoc>(path);
+
+      // Race check: path may have been removed while we were opening
+      if (currentPaths.has(path)) {
+        docs.set(path, doc);
+
+        // Apply initial state immediately
+        let initialState = doc.state;
+        if (idProp && initialState) {
+          initialState = { ...initialState, [idProp]: doc.id } as TDoc;
         }
+        data.value = reducer(data.value, path, initialState);
+
+        // Subscribe for future updates
+        unsubscribes.set(
+          path,
+          doc.subscribe(newState => {
+            if (currentPaths.has(path)) {
+              if (idProp && newState) {
+                newState = { ...newState, [idProp]: doc.id } as TDoc;
+              }
+              data.value = reducer(data.value, path, newState);
+            }
+          })
+        );
       } else {
+        // Path was removed while opening — close immediately
+        await patches.closeDoc(path);
+      }
+    } catch (error) {
+      console.error(`Failed to open doc at path: ${path}`, error);
+    }
+  }
+
+  async function closePath(path: string) {
+    const unsub = unsubscribes.get(path);
+    if (unsub) {
+      unsub();
+      unsubscribes.delete(path);
+    }
+
+    const doc = docs.get(path);
+    if (doc) {
+      try {
+        await patches.closeDoc(path);
+      } catch (error) {
+        console.error(`Failed to close doc at path: ${path}`, error);
+      } finally {
+        docs.delete(path);
         data.value = reducer(data.value, path, null);
       }
-    });
-  });
+    } else {
+      data.value = reducer(data.value, path, null);
+    }
+  }
 
   function close() {
     watchStopper();
-    const allPaths = new Set(docs.keys());
-    allPaths.forEach(async path => {
+    const allPaths = [...docs.keys()];
+    for (const path of allPaths) {
       const unsub = unsubscribes.get(path);
       if (unsub) {
         unsub();
@@ -171,15 +179,12 @@ export function useManagedDocs<TDoc extends object, TData>(
       }
       const doc = docs.get(path);
       if (doc) {
-        try {
-          await patches.closeDoc(path);
-        } catch (error) {
+        patches.closeDoc(path).catch(error => {
           console.error(`Failed to close doc during cleanup at path: ${path}`, error);
-        } finally {
-          docs.delete(path);
-        }
+        });
+        docs.delete(path);
       }
-    });
+    }
     currentPaths.clear();
     data.value = initialData;
   }

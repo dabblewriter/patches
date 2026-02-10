@@ -68,12 +68,25 @@ export class Patches {
 
     this.docOptions = opts.docOptions ?? {};
 
-    // Load tracked docs from the default algorithm's store
-    this._getAlgorithm(this.defaultAlgorithm)
-      .listDocs()
-      .then(docs => {
-        this.trackDocs(docs.map(({ docId }) => docId));
-      });
+    // Load tracked docs from all algorithm stores
+    this.init();
+  }
+
+  /**
+   * Loads tracked docs from all registered algorithm stores.
+   * Extracted as a protected method so subclasses can override initialization behavior.
+   */
+  protected init(): void {
+    const algorithms = Object.values(this.algorithms).filter(Boolean) as ClientAlgorithm[];
+    Promise.all(
+      algorithms.map(algorithm =>
+        algorithm.listDocs().then(docs => {
+          this.trackDocs(docs.map(({ docId }) => docId));
+        })
+      )
+    ).catch(err => {
+      console.error('Failed to load tracked docs during initialization:', err);
+    });
   }
 
   /**

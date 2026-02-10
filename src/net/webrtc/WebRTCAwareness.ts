@@ -87,9 +87,8 @@ export class WebRTCAwareness<T extends AwarenessState = AwarenessState> {
    * @param value - The new local awareness state to set and broadcast
    */
   set localState(value: T) {
-    (value as any).id = this.myId!;
-    this._localState = value;
-    this.transport.send(JSON.stringify(value));
+    this._localState = { ...value, id: this.myId! } as T;
+    this.transport.send(JSON.stringify(this._localState));
   }
 
   /**

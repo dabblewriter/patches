@@ -2,12 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PatchesHistoryManager } from '../../src/server/PatchesHistoryManager';
 import type { PatchesServer } from '../../src/server/PatchesServer';
 import type { VersioningStoreBackend } from '../../src/server/types';
-import type {
-  Change,
-  EditableVersionMetadata,
-  ListVersionsOptions,
-  VersionMetadata,
-} from '../../src/types';
+import type { Change, EditableVersionMetadata, ListVersionsOptions, VersionMetadata } from '../../src/types';
 
 // Mock the utils module
 vi.mock('../../src/server/utils', async () => {
@@ -260,7 +255,7 @@ describe('PatchesHistoryManager', () => {
     ];
 
     it('should load changes for valid version', async () => {
-      vi.mocked(mockStore.loadVersionChanges).mockResolvedValue(mockChanges);
+      vi.mocked(mockStore.loadVersionChanges!).mockResolvedValue(mockChanges);
 
       const result = await historyManager.getChangesForVersion('doc1', 'version1');
 
@@ -270,7 +265,7 @@ describe('PatchesHistoryManager', () => {
 
     it('should handle store errors gracefully', async () => {
       const storeError = new Error('Changes not found');
-      vi.mocked(mockStore.loadVersionChanges).mockRejectedValue(storeError);
+      vi.mocked(mockStore.loadVersionChanges!).mockRejectedValue(storeError);
 
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -284,7 +279,7 @@ describe('PatchesHistoryManager', () => {
     });
 
     it('should throw descriptive error for failed changes loading', async () => {
-      vi.mocked(mockStore.loadVersionChanges).mockRejectedValue(new Error('Database error'));
+      vi.mocked(mockStore.loadVersionChanges!).mockRejectedValue(new Error('Database error'));
 
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -349,7 +344,7 @@ describe('PatchesHistoryManager', () => {
       ];
 
       vi.mocked(mockStore.loadVersionState).mockResolvedValue(mockState);
-      vi.mocked(mockStore.loadVersionChanges).mockResolvedValue(mockChanges);
+      vi.mocked(mockStore.loadVersionChanges!).mockResolvedValue(mockChanges);
 
       const [state, changes] = await Promise.all([
         historyManager.getStateAtVersion('doc1', 'version1'),

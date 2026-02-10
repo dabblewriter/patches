@@ -237,9 +237,12 @@ export class WebSocketTransport implements ClientTransport {
     if (!this.onlineUnsubscriber) {
       this.onlineUnsubscriber = onlineState.onOnlineChange(isOnline => {
         if (isOnline && this.shouldBeConnected && !this.connecting && this.state !== 'connected') {
-          const { resolve, reject } = this.connectionDeferred!;
+          const oldDeferred = this.connectionDeferred;
           this.connectionDeferred = null;
-          this.connect().then(resolve, reject);
+          const connectPromise = this.connect();
+          if (oldDeferred) {
+            connectPromise.then(oldDeferred.resolve, oldDeferred.reject);
+          }
         } else if (!isOnline && this.ws) {
           this.ws.close();
         }

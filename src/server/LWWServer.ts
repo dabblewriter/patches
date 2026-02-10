@@ -261,6 +261,7 @@ export class LWWServer implements PatchesServer {
     const serverNow = Date.now();
     const opsWithTs = patch.ops.map(op => ({ ...op, ts: serverNow }));
 
+    // Provide rev like a client would; commitChanges handles conflicts
     const change = createChange(rev, rev + 1, opsWithTs, metadata);
 
     // Apply to local state to ensure no errors are thrown

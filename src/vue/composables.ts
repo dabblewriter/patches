@@ -167,13 +167,8 @@ export interface UsePatchesDocLazyReturn<T extends object> extends UsePatchesDoc
  * await close()
  * ```
  */
-export function usePatchesDoc<T extends object>(
-  docId: string,
-  options?: UsePatchesDocOptions
-): UsePatchesDocReturn<T>;
-export function usePatchesDoc<T extends object>(
-  options?: UsePatchesDocLazyOptions
-): UsePatchesDocLazyReturn<T>;
+export function usePatchesDoc<T extends object>(docId: string, options?: UsePatchesDocOptions): UsePatchesDocReturn<T>;
+export function usePatchesDoc<T extends object>(options?: UsePatchesDocLazyOptions): UsePatchesDocLazyReturn<T>;
 export function usePatchesDoc<T extends object>(
   docIdOrOptions?: string | UsePatchesDocLazyOptions,
   options?: UsePatchesDocOptions
@@ -188,10 +183,7 @@ export function usePatchesDoc<T extends object>(
 /**
  * Eager mode implementation — the original behavior.
  */
-function _usePatchesDocEager<T extends object>(
-  docId: string,
-  options: UsePatchesDocOptions
-): UsePatchesDocReturn<T> {
+function _usePatchesDocEager<T extends object>(docId: string, options: UsePatchesDocOptions): UsePatchesDocReturn<T> {
   const { patches } = usePatchesContext();
   const { autoClose = false } = options;
   const shouldUntrack = autoClose === 'untrack';
@@ -294,9 +286,7 @@ function _usePatchesDocEager<T extends object>(
  * Lazy mode implementation — deferred loading for Pinia stores and similar.
  * No onBeforeUnmount. Caller manages lifecycle via load()/close().
  */
-function _usePatchesDocLazy<T extends object>(
-  options: UsePatchesDocLazyOptions
-): UsePatchesDocLazyReturn<T> {
+function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions): UsePatchesDocLazyReturn<T> {
   const { patches } = usePatchesContext();
   const { idProp } = options;
 
@@ -317,7 +307,7 @@ function _usePatchesDocLazy<T extends object>(
 
     unsubscribe = patchesDoc.subscribe(state => {
       if (state && idProp && currentDoc) {
-        (state as Record<string, unknown>)[idProp] = currentDoc.id;
+        state = { ...state, [idProp]: currentDoc.id } as T;
       }
       data.value = state;
       rev.value = patchesDoc.committedRev;

@@ -6,7 +6,6 @@ export * from './protocol/JSONRPCServer.js';
 export { getAuthContext, getClientId } from './serverContext.js';
 export type * from './protocol/types.js';
 export * from './protocol/utils.js';
-export type * from './types.js';
 export * from './websocket/AuthorizationProvider.js';
 export * from './websocket/onlineState.js';
 export * from './websocket/PatchesWebSocket.js';

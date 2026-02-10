@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createApp, defineComponent, h, ref, nextTick } from 'vue';
+import { createApp, defineComponent, h, ref, nextTick, type Ref } from 'vue';
 import { Patches } from '../../src/client/Patches.js';
 import { createOTPatches } from '../../src/client/factories.js';
 import { providePatchesContext } from '../../src/vue/provider.js';
@@ -17,10 +17,10 @@ describe('useManagedDocs', () => {
   });
 
   function mountWithManagedDocs<TDoc extends object, TData>(
-    pathsRef: ReturnType<typeof ref<string[] | null>>,
+    pathsRef: Readonly<Ref<string[] | null>>,
     initialData: TData,
     reducer: (data: TData, path: string, state: TDoc | null) => TData,
-    options?: { idProp?: string },
+    options?: { idProp?: string }
   ) {
     let result: ReturnType<typeof useManagedDocs<TDoc, TData>>;
 
@@ -42,15 +42,11 @@ describe('useManagedDocs', () => {
 
   it('should start with initial data', () => {
     const paths = ref<string[] | null>(null);
-    const { app, result } = mountWithManagedDocs<any, Record<string, any>>(
-      paths,
-      {},
-      (data, path, state) => {
-        data = { ...data };
-        state ? (data[path] = state) : delete data[path];
-        return data;
-      },
-    );
+    const { app, result } = mountWithManagedDocs<any, Record<string, any>>(paths, {}, (data, path, state) => {
+      data = { ...data };
+      state ? (data[path] = state) : delete data[path];
+      return data;
+    });
 
     expect(result.data.value).toEqual({});
     app.unmount();
@@ -65,7 +61,7 @@ describe('useManagedDocs', () => {
         data = { ...data };
         state ? (data[path] = state) : delete data[path];
         return data;
-      },
+      }
     );
 
     // Add paths
@@ -86,15 +82,11 @@ describe('useManagedDocs', () => {
 
   it('should close docs when paths are removed', async () => {
     const paths = ref<string[] | null>(['doc-1', 'doc-2']);
-    const { app, result } = mountWithManagedDocs<any, Record<string, any>>(
-      paths,
-      {},
-      (data, path, state) => {
-        data = { ...data };
-        state ? (data[path] = state) : delete data[path];
-        return data;
-      },
-    );
+    const { app, result } = mountWithManagedDocs<any, Record<string, any>>(paths, {}, (data, path, state) => {
+      data = { ...data };
+      state ? (data[path] = state) : delete data[path];
+      return data;
+    });
 
     await nextTick();
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -154,7 +146,7 @@ describe('useManagedDocs', () => {
         data = { ...data };
         state ? (data[path] = state) : delete data[path];
         return data;
-      },
+      }
     );
 
     await nextTick();
@@ -184,7 +176,7 @@ describe('useManagedDocs', () => {
         state ? (data[path] = state) : delete data[path];
         return data;
       },
-      { idProp: 'id' },
+      { idProp: 'id' }
     );
 
     await nextTick();
@@ -197,15 +189,11 @@ describe('useManagedDocs', () => {
 
   it('should close all docs and stop watching on close()', async () => {
     const paths = ref<string[] | null>(['doc-1', 'doc-2']);
-    const { app, result } = mountWithManagedDocs<any, Record<string, any>>(
-      paths,
-      {},
-      (data, path, state) => {
-        data = { ...data };
-        state ? (data[path] = state) : delete data[path];
-        return data;
-      },
-    );
+    const { app, result } = mountWithManagedDocs<any, Record<string, any>>(paths, {}, (data, path, state) => {
+      data = { ...data };
+      state ? (data[path] = state) : delete data[path];
+      return data;
+    });
 
     await nextTick();
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -226,15 +214,11 @@ describe('useManagedDocs', () => {
 
   it('should handle null paths', () => {
     const paths = ref<string[] | null>(null);
-    const { app, result } = mountWithManagedDocs<any, Record<string, any>>(
-      paths,
-      {},
-      (data, path, state) => {
-        data = { ...data };
-        state ? (data[path] = state) : delete data[path];
-        return data;
-      },
-    );
+    const { app, result } = mountWithManagedDocs<any, Record<string, any>>(paths, {}, (data, path, state) => {
+      data = { ...data };
+      state ? (data[path] = state) : delete data[path];
+      return data;
+    });
 
     expect(result.data.value).toEqual({});
     app.unmount();
@@ -242,15 +226,11 @@ describe('useManagedDocs', () => {
 
   it('should handle empty paths array', async () => {
     const paths = ref<string[] | null>([]);
-    const { app, result } = mountWithManagedDocs<any, Record<string, any>>(
-      paths,
-      {},
-      (data, path, state) => {
-        data = { ...data };
-        state ? (data[path] = state) : delete data[path];
-        return data;
-      },
-    );
+    const { app, result } = mountWithManagedDocs<any, Record<string, any>>(paths, {}, (data, path, state) => {
+      data = { ...data };
+      state ? (data[path] = state) : delete data[path];
+      return data;
+    });
 
     await nextTick();
     expect(result.data.value).toEqual({});
@@ -261,15 +241,11 @@ describe('useManagedDocs', () => {
     const openDocSpy = vi.spyOn(patches, 'openDoc');
 
     const paths = ref<string[] | null>(['doc-1']);
-    const { app } = mountWithManagedDocs<any, Record<string, any>>(
-      paths,
-      {},
-      (data, path, state) => {
-        data = { ...data };
-        state ? (data[path] = state) : delete data[path];
-        return data;
-      },
-    );
+    const { app } = mountWithManagedDocs<any, Record<string, any>>(paths, {}, (data, path, state) => {
+      data = { ...data };
+      state ? (data[path] = state) : delete data[path];
+      return data;
+    });
 
     await nextTick();
     await new Promise(resolve => setTimeout(resolve, 50));

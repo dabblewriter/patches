@@ -234,8 +234,10 @@ export class JSONRPCServer {
 
     // Make ctx available synchronously via getAuthContext() during handler execution
     setAuthContext(ctx);
-    const response = handler(...args);
-    clearAuthContext();
-    return response;
+    try {
+      return await handler(...args);
+    } finally {
+      clearAuthContext();
+    }
   }
 }

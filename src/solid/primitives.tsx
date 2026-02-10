@@ -166,9 +166,7 @@ export function usePatchesDoc<T extends object>(
   docId: MaybeAccessor<string>,
   options?: UsePatchesDocOptions
 ): UsePatchesDocReturn<T>;
-export function usePatchesDoc<T extends object>(
-  options?: UsePatchesDocLazyOptions
-): UsePatchesDocLazyReturn<T>;
+export function usePatchesDoc<T extends object>(options?: UsePatchesDocLazyOptions): UsePatchesDocLazyReturn<T>;
 export function usePatchesDoc<T extends object>(
   docIdOrOptions?: MaybeAccessor<string> | UsePatchesDocLazyOptions,
   options?: UsePatchesDocOptions
@@ -300,9 +298,7 @@ function _usePatchesDocEager<T extends object>(
  * Lazy mode implementation — deferred loading without onCleanup.
  * Caller manages lifecycle via load()/close().
  */
-function _usePatchesDocLazy<T extends object>(
-  options: UsePatchesDocLazyOptions
-): UsePatchesDocLazyReturn<T> {
+function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions): UsePatchesDocLazyReturn<T> {
   const { patches } = usePatchesContext();
   const { idProp } = options;
 
@@ -323,7 +319,7 @@ function _usePatchesDocLazy<T extends object>(
 
     unsubscribe = patchesDoc.subscribe(state => {
       if (state && idProp && currentDoc) {
-        (state as Record<string, unknown>)[idProp] = currentDoc.id;
+        state = { ...state, [idProp]: currentDoc.id } as T;
       }
       setData(() => state as T);
       setRev(patchesDoc.committedRev);

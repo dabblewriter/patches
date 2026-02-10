@@ -247,6 +247,29 @@ describe('LWWDoc', () => {
       expect(doc.hasPending).toBe(false);
     });
 
+    it('should use hasPending override when provided as true', () => {
+      const committedChange = createChange('c1', 1, [{ op: 'replace', path: '/text', value: 'world' }]);
+      doc.applyChanges([committedChange], true);
+
+      // Even though the change is committed, hasPending override says true
+      expect(doc.hasPending).toBe(true);
+    });
+
+    it('should use hasPending override when provided as false', () => {
+      const uncommittedChange = createChange('p1', 1, [{ op: 'replace', path: '/text', value: 'world' }], false);
+      doc.applyChanges([uncommittedChange], false);
+
+      // Even though the change is uncommitted, hasPending override says false
+      expect(doc.hasPending).toBe(false);
+    });
+
+    it('should infer hasPending from changes when override is not provided', () => {
+      const uncommittedChange = createChange('p1', 1, [{ op: 'replace', path: '/text', value: 'world' }], false);
+      doc.applyChanges([uncommittedChange]);
+
+      expect(doc.hasPending).toBe(true);
+    });
+
     it('should emit onUpdate after applying changes', () => {
       const change = createChange('c1', 1, [{ op: 'replace', path: '/text', value: 'world' }]);
       doc.applyChanges([change]);

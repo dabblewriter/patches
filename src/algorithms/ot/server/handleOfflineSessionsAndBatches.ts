@@ -55,13 +55,11 @@ export async function handleOfflineSessionsAndBatches(
     const isLastChange = i === changes.length;
     const timeDiff = isLastChange ? Infinity : changes[i].createdAt - changes[i - 1].createdAt;
 
-    // TODO check the logic of this
-    // Session ends if timeout exceeded OR it's the last change in the batch
+    // Session boundary: gap exceeds timeout or we've processed all changes
     if (timeDiff > sessionTimeoutMillis || isLastChange) {
       const sessionChanges = changes.slice(sessionStartIndex, i);
       if (sessionChanges.length > 0) {
-        // TODO check the logic of this
-        // Check if this is a continuation of the previous session (merge/extend)
+        // Continuation: first change in this session is within timeout of the last version's end
         const isContinuation =
           !!lastVersion && sessionChanges[0].createdAt - lastVersion.endedAt <= sessionTimeoutMillis;
 

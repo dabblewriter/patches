@@ -334,7 +334,7 @@ describe('OTBranchManager', () => {
       vi.mocked(mockStore.listChanges).mockResolvedValue(mockBranchChanges);
       vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
       vi.mocked(mockStore.loadVersionState).mockResolvedValue({ title: 'New Title', section: 'New Section' });
-      vi.mocked(mockStore.loadVersionChanges).mockResolvedValue(mockBranchChanges);
+      vi.mocked(mockStore.loadVersionChanges!).mockResolvedValue(mockBranchChanges);
       vi.mocked(mockStore.createVersion).mockResolvedValue();
       vi.mocked(mockStore.updateBranch).mockResolvedValue();
     });

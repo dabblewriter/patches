@@ -278,17 +278,31 @@ describe('LWWServer', () => {
       expect(mockStore.ops.get('doc1:/name')?.value).toBe('Bob');
     });
 
-    it('should use serverNow when op has no ts', async () => {
-      const now = Date.now();
+    it('should use change.createdAt when op has no ts', async () => {
       const change: ChangeInput = {
         id: 'change5',
+        createdAt: 5000, // Explicit createdAt
         ops: [{ op: 'replace', path: '/name', value: 'Alice' }], // No ts on op
       };
 
       await server.commitChanges('doc1', [change]);
 
       const field = mockStore.ops.get('doc1:/name');
-      expect(field?.ts).toBeGreaterThanOrEqual(now);
+      expect(field?.ts).toBe(5000); // Should use change.createdAt
+    });
+
+    it('should use serverNow when op and change both lack ts', async () => {
+      const now = Date.now();
+      const change: ChangeInput = {
+        id: 'change6',
+        // No createdAt on change
+        ops: [{ op: 'replace', path: '/name', value: 'Alice' }], // No ts on op
+      };
+
+      await server.commitChanges('doc1', [change]);
+
+      const field = mockStore.ops.get('doc1:/name');
+      expect(field?.ts).toBeGreaterThanOrEqual(now); // Should fallback to Date.now()
     });
   });
 

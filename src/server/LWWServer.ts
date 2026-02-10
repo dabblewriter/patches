@@ -155,7 +155,8 @@ export class LWWServer implements PatchesServer {
     const clientRev = change.rev; // Client's last known rev (for catchup)
 
     // Add timestamps to ops that don't have them
-    const newOps = change.ops.map(op => (op.ts ? op : { ...op, ts: serverNow }));
+    // Prefer change.createdAt if available, fallback to server time
+    const newOps = change.ops.map(op => (op.ts ? op : { ...op, ts: change.createdAt ?? serverNow }));
 
     // Load all existing ops for this doc
     const existingOps = await this.store.listOps(docId);

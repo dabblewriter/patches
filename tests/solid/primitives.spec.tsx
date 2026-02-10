@@ -233,7 +233,9 @@ describe('Solid Primitives', () => {
       });
     });
 
-    it('should close document on unmount', async () => {
+    it('should close document on unmount without untracking', async () => {
+      const closeDocSpy = vi.spyOn(patches, 'closeDoc');
+
       await createRoot(async dispose => {
         const TestComponent = () => {
           usePatchesDoc<any>(() => 'doc-1', { autoClose: true });
@@ -260,7 +262,47 @@ describe('Solid Primitives', () => {
         await new Promise(resolve => setTimeout(resolve, 10));
 
         expect(patches.getOpenDoc('doc-1')).toBeUndefined();
+        // Should close WITHOUT untracking (new default behavior)
+        expect(closeDocSpy).toHaveBeenCalledWith('doc-1', { untrack: false });
       });
+
+      closeDocSpy.mockRestore();
+    });
+
+    it('should close and untrack with autoClose: "untrack"', async () => {
+      const closeDocSpy = vi.spyOn(patches, 'closeDoc');
+
+      await createRoot(async dispose => {
+        const TestComponent = () => {
+          usePatchesDoc<any>(() => 'doc-1', { autoClose: 'untrack' });
+          return null;
+        };
+
+        const App = () =>
+          (
+            <PatchesProvider patches={patches}>
+              <TestComponent />
+            </PatchesProvider>
+          ) as JSX.Element;
+
+        App();
+
+        // Wait for async open
+        await new Promise(resolve => setTimeout(resolve, 10));
+
+        expect(patches.getOpenDoc('doc-1')).toBeDefined();
+
+        dispose();
+
+        // Wait for cleanup
+        await new Promise(resolve => setTimeout(resolve, 10));
+
+        expect(patches.getOpenDoc('doc-1')).toBeUndefined();
+        // Should close WITH untracking
+        expect(closeDocSpy).toHaveBeenCalledWith('doc-1', { untrack: true });
+      });
+
+      closeDocSpy.mockRestore();
     });
 
     it('should use reference counting for multiple components', async () => {
@@ -368,6 +410,261 @@ describe('Solid Primitives', () => {
         process.off('unhandledRejection', handler);
         spy.mockRestore();
       }
+    });
+  });
+
+  describe('usePatchesDoc - lazy mode', () => {
+    it('should start with no doc loaded', async () => {
+      await createRoot(async dispose => {
+        let data: any;
+        let loading: any;
+        let path: any;
+        let doc: any;
+
+        const TestComponent = () => {
+          const docState = usePatchesDoc<{ title?: string }>();
+          data = docState.data;
+          loading = docState.loading;
+          path = docState.path;
+          doc = docState.doc;
+          return null;
+        };
+
+        const App = () =>
+          (
+            <PatchesProvider patches={patches}>
+              <TestComponent />
+            </PatchesProvider>
+          ) as JSX.Element;
+
+        App();
+
+        await tick();
+
+        expect(data()).toBeUndefined();
+        expect(loading()).toBe(false);
+        expect(path()).toBeNull();
+        expect(doc()).toBeUndefined();
+
+        dispose();
+      });
+    });
+
+    it('should load a document', async () => {
+      await createRoot(async dispose => {
+        let data: any;
+        let path: any;
+        let doc: any;
+        let load: any;
+
+        const TestComponent = () => {
+          const docState = usePatchesDoc<{ title?: string }>();
+          data = docState.data;
+          path = docState.path;
+          doc = docState.doc;
+          load = docState.load;
+          return null;
+        };
+
+        const App = () =>
+          (
+            <PatchesProvider patches={patches}>
+              <TestComponent />
+            </PatchesProvider>
+          ) as JSX.Element;
+
+        App();
+
+        await tick();
+
+        await load('doc-1');
+
+        expect(path()).toBe('doc-1');
+        expect(doc()).toBeDefined();
+        expect(data()).toBeDefined();
+
+        dispose();
+
+        // Clean up — lazy mode doesn't auto-close
+        await patches.closeDoc('doc-1');
+      });
+    });
+
+    it('should close previous doc when loading a new one', async () => {
+      await createRoot(async dispose => {
+        let path: any;
+        let load: any;
+
+        const TestComponent = () => {
+          const docState = usePatchesDoc<any>();
+          path = docState.path;
+          load = docState.load;
+          return null;
+        };
+
+        const App = () =>
+          (
+            <PatchesProvider patches={patches}>
+              <TestComponent />
+            </PatchesProvider>
+          ) as JSX.Element;
+
+        App();
+
+        await tick();
+
+        await load('doc-1');
+        expect(path()).toBe('doc-1');
+        expect(patches.getOpenDoc('doc-1')).toBeDefined();
+
+        await load('doc-2');
+        expect(path()).toBe('doc-2');
+        expect(patches.getOpenDoc('doc-2')).toBeDefined();
+        expect(patches.getOpenDoc('doc-1')).toBeUndefined();
+
+        dispose();
+        await patches.closeDoc('doc-2');
+      });
+    });
+
+    it('should close and reset state', async () => {
+      await createRoot(async dispose => {
+        let data: any;
+        let path: any;
+        let doc: any;
+        let load: any;
+        let closeFn: any;
+
+        const TestComponent = () => {
+          const docState = usePatchesDoc<any>();
+          data = docState.data;
+          path = docState.path;
+          doc = docState.doc;
+          load = docState.load;
+          closeFn = docState.close;
+          return null;
+        };
+
+        const App = () =>
+          (
+            <PatchesProvider patches={patches}>
+              <TestComponent />
+            </PatchesProvider>
+          ) as JSX.Element;
+
+        App();
+
+        await tick();
+
+        await load('doc-1');
+        expect(path()).toBe('doc-1');
+
+        await closeFn();
+        expect(path()).toBeNull();
+        expect(doc()).toBeUndefined();
+        expect(data()).toBeUndefined();
+        expect(patches.getOpenDoc('doc-1')).toBeUndefined();
+
+        dispose();
+      });
+    });
+
+    it('should silently no-op change before load', async () => {
+      await createRoot(async dispose => {
+        let change: any;
+
+        const TestComponent = () => {
+          const docState = usePatchesDoc<{ count?: number }>();
+          change = docState.change;
+          return null;
+        };
+
+        const App = () =>
+          (
+            <PatchesProvider patches={patches}>
+              <TestComponent />
+            </PatchesProvider>
+          ) as JSX.Element;
+
+        App();
+
+        await tick();
+
+        // Should not throw
+        expect(() => {
+          change((patch: any, root: any) => {
+            patch.replace(root.count!, 42);
+          });
+        }).not.toThrow();
+
+        dispose();
+      });
+    });
+
+    it('should create a document (one-shot)', async () => {
+      await createRoot(async dispose => {
+        let create: any;
+        let path: any;
+
+        const TestComponent = () => {
+          const docState = usePatchesDoc<{ title?: string }>();
+          create = docState.create;
+          path = docState.path;
+          return null;
+        };
+
+        const App = () =>
+          (
+            <PatchesProvider patches={patches}>
+              <TestComponent />
+            </PatchesProvider>
+          ) as JSX.Element;
+
+        App();
+
+        await tick();
+
+        await create('new-doc', { title: 'Created!' });
+
+        // Doc should not be loaded into this handle after create
+        expect(path()).toBeNull();
+        expect(patches.getOpenDoc('new-doc')).toBeUndefined();
+
+        dispose();
+      });
+    });
+
+    it('should inject idProp into state', async () => {
+      await createRoot(async dispose => {
+        let data: any;
+        let load: any;
+
+        const TestComponent = () => {
+          const docState = usePatchesDoc<{ id?: string; title?: string }>({ idProp: 'id' });
+          data = docState.data;
+          load = docState.load;
+          return null;
+        };
+
+        const App = () =>
+          (
+            <PatchesProvider patches={patches}>
+              <TestComponent />
+            </PatchesProvider>
+          ) as JSX.Element;
+
+        App();
+
+        await tick();
+
+        await load('my-doc-path');
+
+        expect(data()).toBeDefined();
+        expect(data()?.id).toBe('my-doc-path');
+
+        dispose();
+        await patches.closeDoc('my-doc-path');
+      });
     });
   });
 
@@ -615,6 +912,43 @@ describe('Solid Primitives', () => {
 
         expect(patches.getOpenDoc('doc-1')).toBeUndefined();
       });
+    });
+
+    it('should support autoClose: "untrack" option', async () => {
+      const { Provider, useDoc } = createPatchesDoc<any>('test-untrack');
+      const closeDocSpy = vi.spyOn(patches, 'closeDoc');
+
+      await createRoot(async dispose => {
+        const ChildComponent = () => {
+          useDoc();
+          return null;
+        };
+
+        const App = () =>
+          (
+            <PatchesProvider patches={patches}>
+              <Provider docId="doc-1" autoClose="untrack">
+                <ChildComponent />
+              </Provider>
+            </PatchesProvider>
+          ) as JSX.Element;
+
+        App();
+
+        // Wait for async open
+        await new Promise(resolve => setTimeout(resolve, 10));
+
+        expect(patches.getOpenDoc('doc-1')).toBeDefined();
+
+        dispose();
+
+        // Wait for cleanup
+        await new Promise(resolve => setTimeout(resolve, 10));
+
+        expect(closeDocSpy).toHaveBeenCalledWith('doc-1', { untrack: true });
+      });
+
+      closeDocSpy.mockRestore();
     });
   });
 });

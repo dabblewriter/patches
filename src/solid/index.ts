@@ -44,10 +44,23 @@ export {
   usePatchesSync,
   createPatchesDoc,
   type UsePatchesDocOptions,
+  type UsePatchesDocLazyOptions,
   type UsePatchesDocReturn,
+  type UsePatchesDocLazyReturn,
   type UsePatchesSyncReturn,
+  type PatchesDocProviderProps,
   type MaybeAccessor,
 } from './primitives.js'; // .js extension works for both .ts and .tsx
+
+// Managed docs primitive
+export {
+  createManagedDocs,
+  type CreateManagedDocsOptions,
+  type CreateManagedDocsReturn,
+} from './managed-docs.js';
+
+// Utilities
+export { fillPath } from './utils.js';
 
 // Doc Manager (for advanced use cases)
 export { getDocManager, DocManager } from './doc-manager.js';

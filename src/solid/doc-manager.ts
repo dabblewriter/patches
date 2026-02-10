@@ -72,8 +72,9 @@ export class DocManager {
    *
    * @param patches - Patches instance
    * @param docId - Document ID to close
+   * @param untrack - Whether to also untrack the doc when closing (default: false)
    */
-  async closeDoc(patches: Patches, docId: string): Promise<void> {
+  async closeDoc(patches: Patches, docId: string, untrack = false): Promise<void> {
     const currentCount = this.refCounts.get(docId) || 0;
 
     if (currentCount === 0) {
@@ -84,7 +85,7 @@ export class DocManager {
     if (currentCount === 1) {
       // Last reference - actually close the doc
       this.refCounts.delete(docId);
-      await patches.closeDoc(docId, { untrack: true });
+      await patches.closeDoc(docId, { untrack });
     } else {
       // Still have other references - just decrement
       this.refCounts.set(docId, currentCount - 1);

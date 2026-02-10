@@ -118,6 +118,155 @@ function DocumentViewer(props: { documentId: string }) {
 }
 ```
 
+## `autoClose` Behavior
+
+The `autoClose` option controls what happens when the component unmounts:
+
+| Value | On Unmount | Use For |
+|-------|-----------|---------|
+| `false` (default) | Nothing — you manage lifecycle | Documents you open/close manually |
+| `true` | Closes document (ref-counted) | Most auto-managed documents |
+| `'untrack'` | Closes AND untracks (removes from sync) | Temporary documents you don't need tracked |
+
+The key difference between `true` and `'untrack'`: with `true`, the document stays in the Patches tracking list even after closing (so it can be re-synced later). With `'untrack'`, it's fully removed.
+
+```tsx
+// Closes on unmount, doc stays tracked for future re-sync
+usePatchesDoc(() => props.docId, { autoClose: true });
+
+// Closes AND untracks on unmount — gone for good
+usePatchesDoc(() => props.docId, { autoClose: 'untrack' });
+```
+
+## Lazy Mode
+
+When you don't know the document path at creation time — like in a reactive store or a component that loads documents on demand — call `usePatchesDoc()` without a docId:
+
+```tsx
+import { usePatchesDoc } from '@dabble/patches/solid';
+
+// In a store or component setup
+const { data, loading, load, close, create, change, path } =
+  usePatchesDoc<ProjectContent>();
+
+// Later, when user navigates to a project:
+await load('projects/abc/content');
+
+// data() is now reactive, change() works
+change((patch, root) => {
+  patch.replace(root.title!, 'Updated');
+});
+
+// When leaving:
+await close();
+```
+
+### Lazy Mode Returns
+
+Everything from eager mode, plus:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `path` | `Accessor<string \| null>` | Current document path, `null` when unloaded |
+| `load(path)` | `(path: string) => Promise<void>` | Open a document. Closes any previous doc first |
+| `close()` | `() => Promise<void>` | Close current doc and reset all state |
+| `create(path, state)` | `(path: string, state: T \| JSONPatch) => Promise<void>` | One-shot: create doc with initial state, then close it |
+
+### Key Differences from Eager Mode
+
+- `data()` starts as `undefined`, `loading()` starts as `false`
+- `change()` silently no-ops when no doc is loaded (instead of throwing)
+- No `onCleanup` registered — you manage lifecycle via `load()` / `close()`
+- Calling `load()` again automatically closes the previous document
+
+### `idProp` — Injecting Document IDs
+
+When your document path contains the document ID but your state doesn't, use `idProp` to inject it:
+
+```tsx
+const { data, load } = usePatchesDoc<{ id?: string; name?: string }>({
+  idProp: 'id',
+});
+
+await load('projects/abc');
+console.log(data()?.id); // 'projects/abc'
+```
+
+The ID is injected on every state update and stripped from `create()` payloads automatically.
+
+### `create()` — One-Shot Document Creation
+
+`create()` opens a document, applies initial state, and closes it immediately. It doesn't bind the document to this handle:
+
+```tsx
+const { create, path } = usePatchesDoc<{ title: string }>();
+
+await create('new-project', { title: 'My Project' });
+// path() is still null — doc was created but not loaded
+```
+
+## Managed Docs
+
+`createManagedDocs` reactively manages multiple documents based on a signal of paths. It opens docs as paths appear, closes them as paths disappear, and aggregates state through a reducer.
+
+```tsx
+import { createSignal } from 'solid-js';
+import { createManagedDocs } from '@dabble/patches/solid';
+
+interface ProjectMeta {
+  id?: string;
+  name?: string;
+}
+
+type ProjectMetas = Record<string, ProjectMeta>;
+
+function useProjectMetas() {
+  // This could come from another document's state
+  const [projectPaths, setProjectPaths] = createSignal<string[] | null>(
+    ['projects/abc', 'projects/def']
+  );
+
+  const { data: metas, close } = createManagedDocs<ProjectMeta, ProjectMetas>(
+    projectPaths,
+    {} as ProjectMetas,
+    (data, path, state) => {
+      const id = path.split('/').pop()!;
+      data = { ...data };
+      state ? (data[id] = state) : delete data[id];
+      return data;
+    },
+    { idProp: 'id' },
+  );
+
+  return { metas, close, setProjectPaths };
+}
+```
+
+### How It Works
+
+1. Pass a signal returning `string[] | null` as the paths source
+2. Provide a reducer that accumulates document states into your data shape
+3. The reducer receives `null` as state when a document is removed
+4. `createManagedDocs` registers `onCleanup` — it auto-cleans up when the owner scope disposes
+5. You can also call `close()` manually to stop tracking and close all docs
+
+### Race Condition Safety
+
+If a path is removed while its document is still opening, the document gets closed immediately after opening completes. No stale subscriptions.
+
+## `fillPath` Utility
+
+For path templates with parameters:
+
+```tsx
+import { fillPath } from '@dabble/patches/solid';
+
+const path = fillPath('projects/:projectId/content', { projectId: 'abc' });
+// => 'projects/abc/content'
+```
+
+Throws if a required parameter is missing.
+
 ## Critical: Don't Destructure Props!
 
 This is a Solid-specific gotcha. Props in Solid are reactive getters, and destructuring breaks reactivity.
@@ -182,13 +331,13 @@ Gets the injected Patches context. Throws if context hasn't been provided.
 
 ### `usePatchesDoc<T>(docId, options?)`
 
-Creates reactive bindings for a Patches document.
+Creates reactive bindings for a Patches document (eager mode).
 
 **Parameters:**
 
 - `docId`: Document ID - string or accessor function (e.g., `'doc-123'` or `() => props.docId`)
 - `options?`:
-  - `autoClose`: boolean (default: `false`) - If true, automatically opens/closes doc with ref counting
+  - `autoClose`: `boolean | 'untrack'` (default: `false`)
 
 **Returns:**
 
@@ -204,7 +353,90 @@ Creates reactive bindings for a Patches document.
 }
 ```
 
-**Remember:** All return values are **accessor functions** - call them to get the value:
+### `usePatchesDoc<T>(options?)`
+
+Creates a lazy/deferred document handle (lazy mode).
+
+**Parameters:**
+
+- `options?`:
+  - `idProp`: string — inject doc.id into state under this key
+
+**Returns:** Everything from eager mode, plus `path`, `load`, `close`, `create`.
+
+### `createManagedDocs<TDoc, TData>(paths, initialData, reducer, options?)`
+
+Reactively manages multiple documents.
+
+**Parameters:**
+
+- `paths`: `Accessor<string[] | null>` — reactive list of document paths
+- `initialData`: `TData` — initial aggregated data
+- `reducer`: `(data: TData, path: string, state: TDoc | null) => TData`
+- `options?`:
+  - `idProp`: string — inject doc.id into each document's state
+
+**Returns:**
+
+```typescript
+{
+  data: Accessor<TData>  // Aggregated data from all managed docs
+  close: () => void      // Stop tracking, close all docs
+}
+```
+
+### `usePatchesSync()`
+
+Gets reactive sync state. Throws if PatchesSync wasn't provided to context.
+
+**Returns:**
+
+```typescript
+{
+  connected: Accessor<boolean>; // WebSocket connected
+  syncing: Accessor<boolean>;   // Currently syncing documents
+  online: Accessor<boolean>;    // Client has network connectivity
+}
+```
+
+### `createPatchesDoc<T>(name)`
+
+Creates a named document context for sharing documents across components without prop drilling.
+
+**Parameters:**
+
+- `name`: Unique identifier for this document context (e.g., 'whiteboard', 'user')
+
+**Returns:**
+
+```typescript
+{
+  Provider: Component; // Provider component
+  useDoc: () => UsePatchesDocReturn<T>; // Hook to access the doc
+}
+```
+
+The Provider accepts:
+
+```tsx
+<Provider
+  docId="static-doc-id"     // or () => someSignal() for reactive
+  autoClose={true}           // or 'untrack'
+>
+  {children}
+</Provider>
+```
+
+### `fillPath(template, params)`
+
+Resolves a path template by replacing `:param` placeholders.
+
+```typescript
+fillPath('projects/:projectId/content', { projectId: 'abc' })
+// => 'projects/abc/content'
+```
+
+**Remember:** All return values are **accessor functions** — call them to get the value:
 
 ```tsx
 const { data, loading } = usePatchesDoc<MyType>(() => props.docId);
@@ -240,100 +472,6 @@ change((patch, root) => {
   // Text operations (Delta)
   patch.text(root.content!, new Delta().retain(5).insert(' world'));
 });
-```
-
-### `usePatchesSync()`
-
-Gets reactive sync state. Throws if PatchesSync wasn't provided to context.
-
-**Returns:**
-
-```typescript
-{
-  connected: Accessor<boolean>; // WebSocket connected
-  syncing: Accessor<boolean>; // Currently syncing documents
-  online: Accessor<boolean>; // Client has network connectivity
-}
-```
-
-**Usage:**
-
-```tsx
-import { Show } from 'solid-js';
-import { usePatchesSync } from '@dabble/patches/solid';
-
-function SyncIndicator() {
-  const { connected, syncing } = usePatchesSync();
-
-  return (
-    <>
-      <Show when={!connected()}>
-        <div class="offline-banner">You are offline</div>
-      </Show>
-      <Show when={syncing()}>
-        <div class="syncing-indicator">Syncing...</div>
-      </Show>
-    </>
-  );
-}
-```
-
-### `createPatchesDoc<T>(name)`
-
-Creates a named document context for sharing documents across components without prop drilling.
-
-**Parameters:**
-
-- `name`: Unique identifier for this document context (e.g., 'whiteboard', 'user')
-
-**Returns:**
-
-```typescript
-{
-  Provider: Component; // Provider component
-  useDoc: () => UsePatchesDocReturn<T>; // Hook to access the doc
-}
-```
-
-**Usage:**
-
-```tsx
-// Create the context (typically in a shared file)
-const { Provider: WhiteboardProvider, useDoc: useWhiteboard } = createPatchesDoc<WhiteboardDoc>('whiteboard');
-
-// Parent component: provide the document
-function WhiteboardPage() {
-  const [boardId] = createSignal('board-123');
-
-  return (
-    <WhiteboardProvider docId={boardId} autoClose>
-      <Canvas />
-      <Toolbar />
-    </WhiteboardProvider>
-  );
-}
-
-// Child components: consume without prop drilling
-function Canvas() {
-  const { data, change } = useWhiteboard();
-  // Use data() and change...
-}
-
-function Toolbar() {
-  const { data } = useWhiteboard();
-  // Use data()...
-}
-```
-
-The Provider accepts the same options as `usePatchesDoc`:
-
-```tsx
-<Provider
-  docId="static-doc-id" // or () => someSignal() for reactive
-  autoClose={true} // optional
->
-  {children}
-</Provider>
 ```
 
 ## Important: Universal Reference Counting
@@ -493,7 +631,7 @@ function MyComponent(props) {
 
 ### Synchronous Reactivity
 
-Solid's reactivity is synchronous - updates happen immediately:
+Solid's reactivity is synchronous — updates happen immediately:
 
 ```tsx
 const { data, change } = usePatchesDoc<MyType>(() => 'doc-1');
@@ -539,7 +677,7 @@ manager.incrementRefCount('doc-1');
 manager.decrementRefCount('doc-1');
 ```
 
-Normally you won't need this - the primitives handle it automatically.
+Normally you won't need this — the primitives handle it automatically.
 
 ## Troubleshooting
 
@@ -550,7 +688,7 @@ Normally you won't need this - the primitives handle it automatically.
 
 **Props not updating reactively**
 
-- Don't destructure props - use `props.propName` directly
+- Don't destructure props — use `props.propName` directly
 - Pass props to primitives as accessor functions: `() => props.docId`
 
 **"usePatchesContext must be called within a PatchesProvider"**
@@ -561,3 +699,5 @@ Normally you won't need this - the primitives handle it automatically.
 
 - Check that all components using the doc participate in ref counting
 - Both explicit and auto modes track usage to prevent premature closes
+- If you want docs to persist after unmount, use `autoClose: false` (the default)
+- If you explicitly want to untrack, use `autoClose: 'untrack'`

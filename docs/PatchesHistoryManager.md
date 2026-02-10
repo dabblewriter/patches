@@ -177,7 +177,6 @@ class DocumentHistoryExplorer {
       description,
     });
   }
-
 }
 
 // Usage

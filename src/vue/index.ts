@@ -63,11 +63,7 @@ export {
 } from './composables.js';
 
 // Managed docs composable
-export {
-  useManagedDocs,
-  type UseManagedDocsOptions,
-  type UseManagedDocsReturn,
-} from './managed-docs.js';
+export { useManagedDocs, type UseManagedDocsOptions, type UseManagedDocsReturn } from './managed-docs.js';
 
 // Utilities
 export { fillPath } from './utils.js';

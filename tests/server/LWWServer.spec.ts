@@ -650,7 +650,7 @@ describe('LWWServer', () => {
         expect(versioningStore.createVersion).toHaveBeenCalledWith(
           'doc1',
           expect.objectContaining({ id: versionId, origin: 'main', startRev: 2, endRev: 2 }),
-          { name: 'Alice' },
+          { name: 'Alice' }
         );
       });
 
@@ -663,7 +663,7 @@ describe('LWWServer', () => {
         expect(versioningStore.createVersion).toHaveBeenCalledWith(
           'doc1',
           expect.objectContaining({ origin: 'main', name: 'My Version' }),
-          expect.any(Object),
+          expect.any(Object)
         );
       });
     });

@@ -23,7 +23,7 @@ describe('createManagedDocs', () => {
     pathsAccessor: () => string[] | null,
     initialData: TData,
     reducer: (data: TData, path: string, state: TDoc | null) => TData,
-    options?: { idProp?: string },
+    options?: { idProp?: string }
   ) {
     let result: ReturnType<typeof createManagedDocs<TDoc, TData>>;
 
@@ -46,15 +46,11 @@ describe('createManagedDocs', () => {
     const [paths] = createSignal<string[] | null>(null);
 
     await createRoot(async dispose => {
-      const { App, getResult } = setupManagedDocs<any, Record<string, any>>(
-        paths,
-        {},
-        (data, path, state) => {
-          data = { ...data };
-          state ? (data[path] = state) : delete data[path];
-          return data;
-        },
-      );
+      const { App, getResult } = setupManagedDocs<any, Record<string, any>>(paths, {}, (data, path, state) => {
+        data = { ...data };
+        state ? (data[path] = state) : delete data[path];
+        return data;
+      });
 
       App();
       await wait(0);
@@ -75,7 +71,7 @@ describe('createManagedDocs', () => {
           data = { ...data };
           state ? (data[path] = state) : delete data[path];
           return data;
-        },
+        }
       );
 
       App();
@@ -100,15 +96,11 @@ describe('createManagedDocs', () => {
     const [paths, setPaths] = createSignal<string[] | null>(['doc-1', 'doc-2']);
 
     await createRoot(async dispose => {
-      const { App, getResult } = setupManagedDocs<any, Record<string, any>>(
-        paths,
-        {},
-        (data, path, state) => {
-          data = { ...data };
-          state ? (data[path] = state) : delete data[path];
-          return data;
-        },
-      );
+      const { App, getResult } = setupManagedDocs<any, Record<string, any>>(paths, {}, (data, path, state) => {
+        data = { ...data };
+        state ? (data[path] = state) : delete data[path];
+        return data;
+      });
 
       App();
       await wait();
@@ -170,7 +162,7 @@ describe('createManagedDocs', () => {
           data = { ...data };
           state ? (data[path] = state) : delete data[path];
           return data;
-        },
+        }
       );
 
       App();
@@ -202,7 +194,7 @@ describe('createManagedDocs', () => {
           state ? (data[path] = state) : delete data[path];
           return data;
         },
-        { idProp: 'id' },
+        { idProp: 'id' }
       );
 
       App();
@@ -218,15 +210,11 @@ describe('createManagedDocs', () => {
     const [paths] = createSignal<string[] | null>(['doc-1', 'doc-2']);
 
     await createRoot(async dispose => {
-      const { App, getResult } = setupManagedDocs<any, Record<string, any>>(
-        paths,
-        {},
-        (data, path, state) => {
-          data = { ...data };
-          state ? (data[path] = state) : delete data[path];
-          return data;
-        },
-      );
+      const { App, getResult } = setupManagedDocs<any, Record<string, any>>(paths, {}, (data, path, state) => {
+        data = { ...data };
+        state ? (data[path] = state) : delete data[path];
+        return data;
+      });
 
       App();
       await wait();
@@ -249,15 +237,11 @@ describe('createManagedDocs', () => {
     const [paths] = createSignal<string[] | null>(null);
 
     await createRoot(async dispose => {
-      const { App, getResult } = setupManagedDocs<any, Record<string, any>>(
-        paths,
-        {},
-        (data, path, state) => {
-          data = { ...data };
-          state ? (data[path] = state) : delete data[path];
-          return data;
-        },
-      );
+      const { App, getResult } = setupManagedDocs<any, Record<string, any>>(paths, {}, (data, path, state) => {
+        data = { ...data };
+        state ? (data[path] = state) : delete data[path];
+        return data;
+      });
 
       App();
       await wait(0);
@@ -272,15 +256,11 @@ describe('createManagedDocs', () => {
     const [paths] = createSignal<string[] | null>([]);
 
     await createRoot(async dispose => {
-      const { App, getResult } = setupManagedDocs<any, Record<string, any>>(
-        paths,
-        {},
-        (data, path, state) => {
-          data = { ...data };
-          state ? (data[path] = state) : delete data[path];
-          return data;
-        },
-      );
+      const { App, getResult } = setupManagedDocs<any, Record<string, any>>(paths, {}, (data, path, state) => {
+        data = { ...data };
+        state ? (data[path] = state) : delete data[path];
+        return data;
+      });
 
       App();
       await wait(0);
@@ -296,15 +276,11 @@ describe('createManagedDocs', () => {
     const [paths, setPaths] = createSignal<string[] | null>(['doc-1']);
 
     await createRoot(async dispose => {
-      const { App } = setupManagedDocs<any, Record<string, any>>(
-        paths,
-        {},
-        (data, path, state) => {
-          data = { ...data };
-          state ? (data[path] = state) : delete data[path];
-          return data;
-        },
-      );
+      const { App } = setupManagedDocs<any, Record<string, any>>(paths, {}, (data, path, state) => {
+        data = { ...data };
+        state ? (data[path] = state) : delete data[path];
+        return data;
+      });
 
       App();
       await wait();
@@ -327,15 +303,11 @@ describe('createManagedDocs', () => {
     const [paths] = createSignal<string[] | null>(['doc-1']);
 
     await createRoot(async dispose => {
-      const { App } = setupManagedDocs<any, Record<string, any>>(
-        paths,
-        {},
-        (data, path, state) => {
-          data = { ...data };
-          state ? (data[path] = state) : delete data[path];
-          return data;
-        },
-      );
+      const { App } = setupManagedDocs<any, Record<string, any>>(paths, {}, (data, path, state) => {
+        data = { ...data };
+        state ? (data[path] = state) : delete data[path];
+        return data;
+      });
 
       App();
       await wait();

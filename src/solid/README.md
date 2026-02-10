@@ -122,11 +122,11 @@ function DocumentViewer(props: { documentId: string }) {
 
 The `autoClose` option controls what happens when the component unmounts:
 
-| Value | On Unmount | Use For |
-|-------|-----------|---------|
-| `false` (default) | Nothing — you manage lifecycle | Documents you open/close manually |
-| `true` | Closes document (ref-counted) | Most auto-managed documents |
-| `'untrack'` | Closes AND untracks (removes from sync) | Temporary documents you don't need tracked |
+| Value             | On Unmount                              | Use For                                    |
+| ----------------- | --------------------------------------- | ------------------------------------------ |
+| `false` (default) | Nothing — you manage lifecycle          | Documents you open/close manually          |
+| `true`            | Closes document (ref-counted)           | Most auto-managed documents                |
+| `'untrack'`       | Closes AND untracks (removes from sync) | Temporary documents you don't need tracked |
 
 The key difference between `true` and `'untrack'`: with `true`, the document stays in the Patches tracking list even after closing (so it can be re-synced later). With `'untrack'`, it's fully removed.
 
@@ -146,8 +146,7 @@ When you don't know the document path at creation time — like in a reactive st
 import { usePatchesDoc } from '@dabble/patches/solid';
 
 // In a store or component setup
-const { data, loading, load, close, create, change, path } =
-  usePatchesDoc<ProjectContent>();
+const { data, loading, load, close, create, change, path } = usePatchesDoc<ProjectContent>();
 
 // Later, when user navigates to a project:
 await load('projects/abc/content');
@@ -165,11 +164,11 @@ await close();
 
 Everything from eager mode, plus:
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `path` | `Accessor<string \| null>` | Current document path, `null` when unloaded |
-| `load(path)` | `(path: string) => Promise<void>` | Open a document. Closes any previous doc first |
-| `close()` | `() => Promise<void>` | Close current doc and reset all state |
+| Property              | Type                                                     | Description                                            |
+| --------------------- | -------------------------------------------------------- | ------------------------------------------------------ |
+| `path`                | `Accessor<string \| null>`                               | Current document path, `null` when unloaded            |
+| `load(path)`          | `(path: string) => Promise<void>`                        | Open a document. Closes any previous doc first         |
+| `close()`             | `() => Promise<void>`                                    | Close current doc and reset all state                  |
 | `create(path, state)` | `(path: string, state: T \| JSONPatch) => Promise<void>` | One-shot: create doc with initial state, then close it |
 
 ### Key Differences from Eager Mode
@@ -222,9 +221,7 @@ type ProjectMetas = Record<string, ProjectMeta>;
 
 function useProjectMetas() {
   // This could come from another document's state
-  const [projectPaths, setProjectPaths] = createSignal<string[] | null>(
-    ['projects/abc', 'projects/def']
-  );
+  const [projectPaths, setProjectPaths] = createSignal<string[] | null>(['projects/abc', 'projects/def']);
 
   const { data: metas, close } = createManagedDocs<ProjectMeta, ProjectMetas>(
     projectPaths,
@@ -235,7 +232,7 @@ function useProjectMetas() {
       state ? (data[id] = state) : delete data[id];
       return data;
     },
-    { idProp: 'id' },
+    { idProp: 'id' }
   );
 
   return { metas, close, setProjectPaths };
@@ -394,8 +391,8 @@ Gets reactive sync state. Throws if PatchesSync wasn't provided to context.
 ```typescript
 {
   connected: Accessor<boolean>; // WebSocket connected
-  syncing: Accessor<boolean>;   // Currently syncing documents
-  online: Accessor<boolean>;    // Client has network connectivity
+  syncing: Accessor<boolean>; // Currently syncing documents
+  online: Accessor<boolean>; // Client has network connectivity
 }
 ```
 
@@ -420,8 +417,8 @@ The Provider accepts:
 
 ```tsx
 <Provider
-  docId="static-doc-id"     // or () => someSignal() for reactive
-  autoClose={true}           // or 'untrack'
+  docId="static-doc-id" // or () => someSignal() for reactive
+  autoClose={true} // or 'untrack'
 >
   {children}
 </Provider>
@@ -432,7 +429,7 @@ The Provider accepts:
 Resolves a path template by replacing `:param` placeholders.
 
 ```typescript
-fillPath('projects/:projectId/content', { projectId: 'abc' })
+fillPath('projects/:projectId/content', { projectId: 'abc' });
 // => 'projects/abc/content'
 ```
 

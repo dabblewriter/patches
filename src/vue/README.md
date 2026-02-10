@@ -166,14 +166,15 @@ Does NOT use `onBeforeUnmount` — you manage lifecycle via `load()` and `close(
 
 ```typescript
 {
-  path: Ref<string | null>                    // Current document path (null = not loaded)
-  load: (docPath: string) => Promise<void>    // Open a document (closes previous first)
-  close: () => Promise<void>                  // Close current document and reset state
-  create: (docPath: string, initialState: T | JSONPatch) => Promise<void>  // One-shot create
+  path: Ref<string | null>; // Current document path (null = not loaded)
+  load: (docPath: string) => Promise<void>; // Open a document (closes previous first)
+  close: () => Promise<void>; // Close current document and reset state
+  create: (docPath: string, initialState: T | JSONPatch) => Promise<void>; // One-shot create
 }
 ```
 
 **Key behaviors:**
+
 - `data` starts as `undefined`, `loading` starts as `false`
 - Calling `load()` again first closes the previous doc, then opens the new one
 - `close()` calls `patches.closeDoc()` without untracking — tracking is managed separately
@@ -188,13 +189,11 @@ import { defineStore } from 'pinia';
 import { usePatchesDoc, fillPath } from '@dabble/patches/vue';
 
 export const useProjectStore = defineStore('project', () => {
-  const { data: project, load, close, change, create } =
-    usePatchesDoc<Project>({ idProp: 'id' });
+  const { data: project, load, close, change, create } = usePatchesDoc<Project>({ idProp: 'id' });
 
   return {
     project,
-    load: (projectId: string) =>
-      load(fillPath('projects/:projectId/content', { projectId })),
+    load: (projectId: string) => load(fillPath('projects/:projectId/content', { projectId })),
     close,
     change,
     create: (projectId: string, patch: JSONPatch) =>
@@ -258,13 +257,14 @@ import { defineStore } from 'pinia';
 import { computed } from 'vue';
 import { useManagedDocs } from '@dabble/patches/vue';
 
-interface ProjectMeta { id?: string; title: string; }
+interface ProjectMeta {
+  id?: string;
+  title: string;
+}
 type ProjectMetas = Record<string, ProjectMeta>;
 
 export const useProjectMetasStore = defineStore('projectMetas', () => {
-  const projectPaths = computed(() =>
-    Object.keys(workspace?.projects || {}).map(id => `projects/${id}`)
-  );
+  const projectPaths = computed(() => Object.keys(workspace?.projects || {}).map(id => `projects/${id}`));
 
   const { data: projectMetas, close } = useManagedDocs<ProjectMeta, ProjectMetas>(
     projectPaths,
@@ -275,7 +275,7 @@ export const useProjectMetasStore = defineStore('projectMetas', () => {
       state ? (data[id] = state) : delete data[id];
       return data;
     },
-    { idProp: 'id' },
+    { idProp: 'id' }
   );
 
   return { projectMetas, close };
@@ -289,10 +289,10 @@ Resolves a path template by replacing `:param` placeholders with values. Not Vue
 ```typescript
 import { fillPath } from '@dabble/patches/vue';
 
-fillPath('projects/:projectId/content', { projectId: 'abc' })
+fillPath('projects/:projectId/content', { projectId: 'abc' });
 // => 'projects/abc/content'
 
-fillPath('users/:userId/settings', { userId: '123' })
+fillPath('users/:userId/settings', { userId: '123' });
 // => 'users/123/settings'
 ```
 
@@ -625,8 +625,7 @@ interface Project {
 }
 
 export const useProjectStore = defineStore('project', () => {
-  const { data: project, load, close, change, create } =
-    usePatchesDoc<Project>({ idProp: 'id' });
+  const { data: project, load, close, change, create } = usePatchesDoc<Project>({ idProp: 'id' });
 
   const title = computed(() => project.value?.title ?? '');
 
@@ -639,8 +638,7 @@ export const useProjectStore = defineStore('project', () => {
   return {
     project,
     title,
-    load: (projectId: string) =>
-      load(fillPath('projects/:projectId/content', { projectId })),
+    load: (projectId: string) => load(fillPath('projects/:projectId/content', { projectId })),
     close,
     setTitle,
     create: (projectId: string, initialState: Project) =>
@@ -659,13 +657,14 @@ import { defineStore } from 'pinia';
 import { computed } from 'vue';
 import { useManagedDocs } from '@dabble/patches/vue';
 
-interface ProjectMeta { id?: string; title: string; }
+interface ProjectMeta {
+  id?: string;
+  title: string;
+}
 
 export const useProjectMetasStore = defineStore('projectMetas', () => {
   // This reactive list drives which docs are open
-  const projectPaths = computed(() =>
-    Object.keys(workspace?.projects || {}).map(id => `projects/${id}`)
-  );
+  const projectPaths = computed(() => Object.keys(workspace?.projects || {}).map(id => `projects/${id}`));
 
   const { data: metas, close } = useManagedDocs<ProjectMeta, Record<string, ProjectMeta>>(
     projectPaths,
@@ -676,7 +675,7 @@ export const useProjectMetasStore = defineStore('projectMetas', () => {
       state ? (data[id] = state) : delete data[id];
       return data;
     },
-    { idProp: 'id' },
+    { idProp: 'id' }
   );
 
   return { metas, close };

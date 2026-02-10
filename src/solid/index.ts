@@ -53,11 +53,7 @@ export {
 } from './primitives.js'; // .js extension works for both .ts and .tsx
 
 // Managed docs primitive
-export {
-  createManagedDocs,
-  type CreateManagedDocsOptions,
-  type CreateManagedDocsReturn,
-} from './managed-docs.js';
+export { createManagedDocs, type CreateManagedDocsOptions, type CreateManagedDocsReturn } from './managed-docs.js';
 
 // Utilities
 export { fillPath } from './utils.js';

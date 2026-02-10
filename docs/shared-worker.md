@@ -364,7 +364,7 @@ import type { SyncingState } from '@dabble/patches';
 
 const baseDoc = doc as BaseDoc;
 baseDoc.applyChanges(changes);
-baseDoc.updateSyncing(null);  // SyncingState: null = synced, 'updating' = syncing, 'initial' = first sync, Error = failed
+baseDoc.updateSyncing(null); // SyncingState: null = synced, 'updating' = syncing, 'initial' = first sync, Error = failed
 baseDoc.import(snapshot);
 ```
 

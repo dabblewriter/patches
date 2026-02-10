@@ -37,7 +37,7 @@ export class LWWBranchManager implements BranchManager {
   constructor(
     private readonly store: LWWBranchStore,
     private readonly lwwServer: LWWServer
-  ) { }
+  ) {}
 
   /**
    * Lists all branches for a document.

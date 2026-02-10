@@ -1,10 +1,5 @@
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
-import type {
-  Change,
-  EditableVersionMetadata,
-  ListVersionsOptions,
-  VersionMetadata
-} from '../types.js';
+import type { Change, EditableVersionMetadata, ListVersionsOptions, VersionMetadata } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
 import type { VersioningStoreBackend } from './types.js';
 import { assertVersionMetadata } from './utils.js';
@@ -95,7 +90,7 @@ export class PatchesHistoryManager {
    */
   async getChangesForVersion(docId: string, versionId: string): Promise<Change[]> {
     try {
-      return await this.store.loadVersionChanges?.(docId, versionId) ?? [];
+      return (await this.store.loadVersionChanges?.(docId, versionId)) ?? [];
     } catch (error) {
       console.error(`Failed to load changes for version ${versionId} of doc ${docId}.`, error);
       throw new Error(`Could not load changes for version ${versionId}.`);

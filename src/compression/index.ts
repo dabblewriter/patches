@@ -23,12 +23,7 @@
  * ```
  */
 
-import {
-  compressToBase64,
-  compressToUint8Array,
-  decompressFromBase64,
-  decompressFromUint8Array,
-} from './lz.js';
+import { compressToBase64, compressToUint8Array, decompressFromBase64, decompressFromUint8Array } from './lz.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 
 // ============================================================================

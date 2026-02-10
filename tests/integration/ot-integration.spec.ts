@@ -18,7 +18,13 @@ import { InMemoryStore } from '../../src/client/InMemoryStore.js';
 import { OTDoc } from '../../src/client/OTDoc.js';
 import { OTServer } from '../../src/server/OTServer.js';
 import type { OTStoreBackend } from '../../src/server/types.js';
-import type { Change, VersionMetadata, EditableVersionMetadata, ListVersionsOptions, ListChangesOptions } from '../../src/types.js';
+import type {
+  Change,
+  VersionMetadata,
+  EditableVersionMetadata,
+  ListVersionsOptions,
+  ListChangesOptions,
+} from '../../src/types.js';
 import type { JSONPatchOp } from '../../src/json-patch/types.js';
 
 interface TestDoc {

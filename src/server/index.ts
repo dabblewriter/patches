@@ -23,7 +23,7 @@ export {
   generateBranchId,
   wrapMergeCommit,
   type BranchIdGenerator,
-  type BranchLoader
+  type BranchLoader,
 } from './branchUtils.js';
 export { CompressedStoreBackend } from './CompressedStoreBackend.js';
 export { createTombstoneIfSupported, isTombstoneStore, removeTombstoneIfExists } from './tombstone.js';
@@ -39,6 +39,5 @@ export type {
   OTStoreBackend,
   ServerStoreBackend,
   TombstoneStoreBackend,
-  VersioningStoreBackend
+  VersioningStoreBackend,
 } from './types.js';
-

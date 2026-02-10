@@ -320,6 +320,322 @@ describe('Vue Composables', () => {
     });
   });
 
+  describe('usePatchesDoc - lazy mode', () => {
+    it('should return deferred handle with initial state', () => {
+      let capturedData: any;
+      let capturedLoading: any;
+      let capturedPath: any;
+
+      const TestComponent = defineComponent({
+        setup() {
+          const result = usePatchesDoc<any>();
+          capturedData = result.data;
+          capturedLoading = result.loading;
+          capturedPath = result.path;
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      expect(capturedData.value).toBeUndefined();
+      expect(capturedLoading.value).toBe(false);
+      expect(capturedPath.value).toBeNull();
+
+      app.unmount();
+    });
+
+    it('should load a document on demand', async () => {
+      let capturedResult: any;
+
+      const TestComponent = defineComponent({
+        setup() {
+          capturedResult = usePatchesDoc<{ title?: string }>();
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      // Load a document
+      await capturedResult.load('doc-1');
+
+      expect(capturedResult.path.value).toBe('doc-1');
+      expect(capturedResult.doc.value).toBeDefined();
+      expect(patches.getOpenDoc('doc-1')).toBeDefined();
+
+      app.unmount();
+      // Clean up
+      await patches.closeDoc('doc-1');
+    });
+
+    it('should close and reset state', async () => {
+      let capturedResult: any;
+
+      const TestComponent = defineComponent({
+        setup() {
+          capturedResult = usePatchesDoc<any>();
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      await capturedResult.load('doc-1');
+      expect(capturedResult.path.value).toBe('doc-1');
+
+      await capturedResult.close();
+
+      expect(capturedResult.path.value).toBeNull();
+      expect(capturedResult.data.value).toBeUndefined();
+      expect(capturedResult.doc.value).toBeUndefined();
+      expect(patches.getOpenDoc('doc-1')).toBeUndefined();
+
+      app.unmount();
+    });
+
+    it('should replace previous document on subsequent load', async () => {
+      let capturedResult: any;
+
+      const TestComponent = defineComponent({
+        setup() {
+          capturedResult = usePatchesDoc<any>();
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      await capturedResult.load('doc-1');
+      expect(capturedResult.path.value).toBe('doc-1');
+
+      await capturedResult.load('doc-2');
+      expect(capturedResult.path.value).toBe('doc-2');
+
+      // doc-1 should be closed, doc-2 open
+      expect(patches.getOpenDoc('doc-1')).toBeUndefined();
+      expect(patches.getOpenDoc('doc-2')).toBeDefined();
+
+      app.unmount();
+      await patches.closeDoc('doc-2');
+    });
+
+    it('should silently no-op change when no doc is loaded', () => {
+      let capturedResult: any;
+
+      const TestComponent = defineComponent({
+        setup() {
+          capturedResult = usePatchesDoc<any>();
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      // Should not throw
+      expect(() => {
+        capturedResult.change((patch: any, root: any) => {
+          patch.replace(root.title!, 'test');
+        });
+      }).not.toThrow();
+
+      app.unmount();
+    });
+
+    it('should make changes to loaded document', async () => {
+      let capturedResult: any;
+
+      const TestComponent = defineComponent({
+        setup() {
+          capturedResult = usePatchesDoc<{ title?: string }>();
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      await capturedResult.load('doc-1');
+
+      capturedResult.change((patch: any, root: any) => {
+        patch.replace(root.title!, 'Hello');
+      });
+
+      await nextTick();
+      expect(capturedResult.data.value.title).toBe('Hello');
+
+      app.unmount();
+      await patches.closeDoc('doc-1');
+    });
+
+    it('should create a document without binding to handle', async () => {
+      let capturedResult: any;
+
+      const TestComponent = defineComponent({
+        setup() {
+          capturedResult = usePatchesDoc<{ title?: string }>();
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      // Create a doc — one-shot operation
+      await capturedResult.create('new-doc', { title: 'Created' });
+
+      // Handle should NOT be bound to the created doc
+      expect(capturedResult.path.value).toBeNull();
+      expect(capturedResult.doc.value).toBeUndefined();
+
+      // But the doc should have been created with the state
+      const doc = await patches.openDoc<{ title?: string }>('new-doc');
+      expect(doc.state.title).toBe('Created');
+
+      app.unmount();
+      await patches.closeDoc('new-doc');
+    });
+
+    it('should inject idProp into state on subscribe', async () => {
+      let capturedResult: any;
+
+      const TestComponent = defineComponent({
+        setup() {
+          capturedResult = usePatchesDoc<{ id?: string; name?: string }>({ idProp: 'id' });
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      await capturedResult.load('my-doc');
+
+      // Make a change to trigger subscriber
+      capturedResult.change((patch: any, root: any) => {
+        patch.replace(root.name!, 'Test');
+      });
+
+      await nextTick();
+
+      expect(capturedResult.data.value.id).toBe('my-doc');
+      expect(capturedResult.data.value.name).toBe('Test');
+
+      app.unmount();
+      await patches.closeDoc('my-doc');
+    });
+
+    it('should strip idProp from initial state on create', async () => {
+      let capturedResult: any;
+
+      const TestComponent = defineComponent({
+        setup() {
+          capturedResult = usePatchesDoc<{ id?: string; name?: string }>({ idProp: 'id' });
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      // Create with id in state — should be stripped
+      await capturedResult.create('new-doc-2', { id: 'should-be-removed', name: 'Test' });
+
+      const doc = await patches.openDoc<{ id?: string; name?: string }>('new-doc-2');
+      expect(doc.state.name).toBe('Test');
+      expect(doc.state.id).toBeUndefined();
+
+      app.unmount();
+      await patches.closeDoc('new-doc-2');
+    });
+  });
+
+  describe('usePatchesDoc - autoClose untrack option', () => {
+    it('should not untrack on close with autoClose: true', async () => {
+      const TestComponent = defineComponent({
+        setup() {
+          usePatchesDoc<any>('doc-1', { autoClose: true });
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const manager = getDocManager(patches);
+      const closeDocSpy = vi.spyOn(manager, 'closeDoc');
+
+      app.unmount();
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(closeDocSpy).toHaveBeenCalledWith(patches, 'doc-1', false);
+    });
+
+    it('should untrack on close with autoClose: "untrack"', async () => {
+      const TestComponent = defineComponent({
+        setup() {
+          usePatchesDoc<any>('doc-1', { autoClose: 'untrack' });
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const manager = getDocManager(patches);
+      const closeDocSpy = vi.spyOn(manager, 'closeDoc');
+
+      app.unmount();
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(closeDocSpy).toHaveBeenCalledWith(patches, 'doc-1', true);
+    });
+  });
+
   describe('usePatchesSync', () => {
     it('should throw error if sync not provided', () => {
       const TestComponent = defineComponent({

@@ -124,15 +124,18 @@ Gets the injected Patches context. Throws if context hasn't been provided.
 }
 ```
 
-### `usePatchesDoc<T>(docId, options?)`
+### `usePatchesDoc<T>(docId, options?)` — Eager Mode
 
-Creates reactive bindings for a Patches document.
+Creates reactive bindings for a Patches document when you know the docId at call time.
 
 **Parameters:**
 
 - `docId`: Document ID string
 - `options?`:
-  - `autoClose`: boolean (default: `false`) - If true, automatically opens/closes doc with ref counting
+  - `autoClose`: `boolean | 'untrack'` (default: `false`)
+    - `false`: Explicit mode. Assumes doc is already open. Throws if not.
+    - `true`: Opens doc on mount with ref counting, closes on unmount. Doc stays tracked for background sync.
+    - `'untrack'`: Opens doc on mount, closes AND untracks on unmount. Removes from background sync entirely.
 
 **Returns:**
 
@@ -146,6 +149,58 @@ Creates reactive bindings for a Patches document.
   change: (mutator) => void         // Make changes to document
   doc: Ref<PatchesDoc<T>>           // Raw PatchesDoc instance
 }
+```
+
+### `usePatchesDoc<T>(options?)` — Lazy Mode
+
+Returns a deferred handle for documents where the path isn't known at creation time. Ideal for Pinia stores where the user navigates between documents.
+
+Does NOT use `onBeforeUnmount` — you manage lifecycle via `load()` and `close()`.
+
+**Parameters:**
+
+- `options?`:
+  - `idProp?`: string — Injects `doc.id` into state under this key on every update
+
+**Returns:** Everything from eager mode, plus:
+
+```typescript
+{
+  path: Ref<string | null>                    // Current document path (null = not loaded)
+  load: (docPath: string) => Promise<void>    // Open a document (closes previous first)
+  close: () => Promise<void>                  // Close current document and reset state
+  create: (docPath: string, initialState: T | JSONPatch) => Promise<void>  // One-shot create
+}
+```
+
+**Key behaviors:**
+- `data` starts as `undefined`, `loading` starts as `false`
+- Calling `load()` again first closes the previous doc, then opens the new one
+- `close()` calls `patches.closeDoc()` without untracking — tracking is managed separately
+- `create()` opens a doc, applies initial state, closes it. Doesn't bind to the handle.
+- `change()` silently no-ops if no doc is loaded
+
+**Example:**
+
+```typescript
+// In a Pinia store
+import { defineStore } from 'pinia';
+import { usePatchesDoc, fillPath } from '@dabble/patches/vue';
+
+export const useProjectStore = defineStore('project', () => {
+  const { data: project, load, close, change, create } =
+    usePatchesDoc<Project>({ idProp: 'id' });
+
+  return {
+    project,
+    load: (projectId: string) =>
+      load(fillPath('projects/:projectId/content', { projectId })),
+    close,
+    change,
+    create: (projectId: string, patch: JSONPatch) =>
+      create(fillPath('projects/:projectId/content', { projectId }), patch),
+  };
+});
 ```
 
 #### Making Changes
@@ -172,6 +227,76 @@ change((patch, root) => {
   patch.text(root.content!, new Delta().retain(5).insert(' world'));
 });
 ```
+
+### `useManagedDocs<TDoc, TData>(pathsRef, initialData, reducer, options?)`
+
+Reactively manages multiple documents based on a reactive list of paths. Opens documents as paths appear, closes them as paths disappear, and aggregates all state through a reducer function.
+
+Uses `inject()` and `watchEffect` internally, so it works in both components and Pinia stores.
+
+**Parameters:**
+
+- `pathsRef`: `Ref<string[] | null>` — Reactive list of document paths to manage
+- `initialData`: `TData` — Initial aggregated data value
+- `reducer`: `(data: TData, path: string, state: TDoc | null) => TData` — Called when a doc updates (`state`) or is removed (`null`)
+- `options?`:
+  - `idProp?`: string — Injects `doc.id` into each document's state
+
+**Returns:**
+
+```typescript
+{
+  data: ShallowRef<TData>  // Reactive aggregated data
+  close: () => void         // Stop watching and close all docs
+}
+```
+
+**Example:**
+
+```typescript
+import { defineStore } from 'pinia';
+import { computed } from 'vue';
+import { useManagedDocs } from '@dabble/patches/vue';
+
+interface ProjectMeta { id?: string; title: string; }
+type ProjectMetas = Record<string, ProjectMeta>;
+
+export const useProjectMetasStore = defineStore('projectMetas', () => {
+  const projectPaths = computed(() =>
+    Object.keys(workspace?.projects || {}).map(id => `projects/${id}`)
+  );
+
+  const { data: projectMetas, close } = useManagedDocs<ProjectMeta, ProjectMetas>(
+    projectPaths,
+    {} as ProjectMetas,
+    (data, path, state) => {
+      const id = path.split('/').pop()!;
+      data = { ...data };
+      state ? (data[id] = state) : delete data[id];
+      return data;
+    },
+    { idProp: 'id' },
+  );
+
+  return { projectMetas, close };
+});
+```
+
+### `fillPath(template, params)`
+
+Resolves a path template by replacing `:param` placeholders with values. Not Vue-specific, but handy for building document paths.
+
+```typescript
+import { fillPath } from '@dabble/patches/vue';
+
+fillPath('projects/:projectId/content', { projectId: 'abc' })
+// => 'projects/abc/content'
+
+fillPath('users/:userId/settings', { userId: '123' })
+// => 'users/123/settings'
+```
+
+Throws if a parameter is missing from the params object.
 
 ### `usePatchesSync()`
 
@@ -381,7 +506,7 @@ If you still experience this:
 
 ### "onBeforeUnmount is called without current active component instance"
 
-`usePatchesDoc` must be called during component setup:
+Eager mode (`usePatchesDoc(docId)`) uses `onBeforeUnmount` and must be called during component setup:
 
 ```typescript
 // ✅ Correct - called during setup
@@ -391,22 +516,23 @@ const MyComponent = defineComponent({
     return { data };
   },
 });
+```
 
-// ❌ Wrong - called outside component context
-const { data } = usePatchesDoc('doc-1'); // Error!
-const MyComponent = defineComponent({
-  setup() {
-    return { data };
-  },
+**For Pinia stores**, use lazy mode instead — it doesn't rely on `onBeforeUnmount`:
+
+```typescript
+// ✅ Correct for Pinia stores
+export const useMyStore = defineStore('my-store', () => {
+  const { data, load, close } = usePatchesDoc<MyType>(); // lazy mode
+  return { data, load, close };
 });
 ```
 
-If you need to use Patches outside components, access the raw `Patches` instance directly:
+If you need to use Patches outside components or stores, access the raw `Patches` instance directly:
 
 ```typescript
 import { patches } from './my-patches-instance';
 
-// Outside component - use raw API
 const doc = await patches.openDoc('doc-1');
 doc.subscribe(state => console.log(state));
 ```
@@ -478,71 +604,88 @@ function toggleTodo(index: number) {
 
 ## Advanced Patterns
 
-### Pinia Store for Global Documents
+### Pinia Store with Lazy Mode (Recommended)
 
-For global documents like user settings or preferences, wrap a Patches document in a Pinia store to add domain-specific getters and actions.
+For Pinia stores where the document path depends on navigation or user state, use lazy mode. This is the cleanest pattern because:
 
-**Option A: Explicit lifecycle** (more control)
+- The store controls its own lifecycle via `load()` / `close()`
+- No `onBeforeUnmount` (which doesn't work reliably in Pinia stores)
+- `inject()` and `watchEffect` work correctly in Pinia stores via `effectScope`
 
 ```typescript
-// stores/user.ts
+// stores/project.ts
 import { defineStore } from 'pinia';
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
-import { usePatchesContext, usePatchesDoc } from '@dabble/patches/vue';
+import { computed } from 'vue';
+import { usePatchesDoc, fillPath } from '@dabble/patches/vue';
 
-interface UserSettings {
-  theme: 'light' | 'dark';
-  language: string;
-  notifications: boolean;
+interface Project {
+  id?: string;
+  title: string;
+  description: string;
 }
 
-export const useUserStore = defineStore('user', () => {
-  const { patches } = usePatchesContext();
-  const docId = 'user-settings';
+export const useProjectStore = defineStore('project', () => {
+  const { data: project, load, close, change, create } =
+    usePatchesDoc<Project>({ idProp: 'id' });
 
-  // Open document once when store is initialized
-  onMounted(() => patches.openDoc(docId));
-  onBeforeUnmount(() => patches.closeDoc(docId));
+  const title = computed(() => project.value?.title ?? '');
 
-  // Get reactive document state
-  const { data, loading, change } = usePatchesDoc<UserSettings>(docId);
-
-  // Domain-specific getters
-  const isDarkMode = computed(() => data.value?.theme === 'dark');
-  const isNotificationsEnabled = computed(() => data.value?.notifications ?? true);
-
-  // Domain-specific actions
-  function setTheme(theme: 'light' | 'dark') {
+  function setTitle(newTitle: string) {
     change((patch, root) => {
-      patch.replace(root.theme!, theme);
-    });
-  }
-
-  function toggleNotifications() {
-    change((patch, root) => {
-      patch.replace(root.notifications!, !root.notifications);
-    });
-  }
-
-  function setLanguage(language: string) {
-    change((patch, root) => {
-      patch.replace(root.language!, language);
+      patch.replace(root.title!, newTitle);
     });
   }
 
   return {
-    data,
-    loading,
-    isDarkMode,
-    isNotificationsEnabled,
-    setTheme,
-    toggleNotifications,
-    setLanguage,
+    project,
+    title,
+    load: (projectId: string) =>
+      load(fillPath('projects/:projectId/content', { projectId })),
+    close,
+    setTitle,
+    create: (projectId: string, initialState: Project) =>
+      create(fillPath('projects/:projectId/content', { projectId }), initialState),
   };
 });
 ```
 
-**Option B: Auto lifecycle** (simpler)
+#### Managing Multiple Documents Reactively
+
+When your store needs to track many documents that come and go (like project metadata for all projects in a workspace), use `useManagedDocs`:
+
+```typescript
+// stores/projectMetas.ts
+import { defineStore } from 'pinia';
+import { computed } from 'vue';
+import { useManagedDocs } from '@dabble/patches/vue';
+
+interface ProjectMeta { id?: string; title: string; }
+
+export const useProjectMetasStore = defineStore('projectMetas', () => {
+  // This reactive list drives which docs are open
+  const projectPaths = computed(() =>
+    Object.keys(workspace?.projects || {}).map(id => `projects/${id}`)
+  );
+
+  const { data: metas, close } = useManagedDocs<ProjectMeta, Record<string, ProjectMeta>>(
+    projectPaths,
+    {},
+    (data, path, state) => {
+      const id = path.split('/').pop()!;
+      data = { ...data };
+      state ? (data[id] = state) : delete data[id];
+      return data;
+    },
+    { idProp: 'id' },
+  );
+
+  return { metas, close };
+});
+```
+
+### Pinia Store with Eager Mode
+
+For stores where the document ID is known upfront and never changes, use eager mode with `autoClose`:
 
 ```typescript
 // stores/user.ts
@@ -553,19 +696,15 @@ import { usePatchesDoc } from '@dabble/patches/vue';
 interface UserSettings {
   theme: 'light' | 'dark';
   language: string;
-  notifications: boolean;
 }
 
 export const useUserStore = defineStore('user', () => {
-  // Auto-manages lifecycle with ref counting
   const { data, loading, change } = usePatchesDoc<UserSettings>('user-settings', {
     autoClose: true,
   });
 
-  // Domain-specific getters
   const isDarkMode = computed(() => data.value?.theme === 'dark');
 
-  // Domain-specific actions
   function setTheme(theme: 'light' | 'dark') {
     change((patch, root) => {
       patch.replace(root.theme!, theme);
@@ -575,11 +714,6 @@ export const useUserStore = defineStore('user', () => {
   return { data, loading, isDarkMode, setTheme };
 });
 ```
-
-**When to use each approach:**
-
-- **Explicit mode**: When you want precise control over document lifecycle, or when the document should stay open even if no component is currently using the store
-- **Auto mode**: Simpler and sufficient for most cases, document automatically closes when all components using the store unmount
 
 ### Document Context Provider
 
@@ -767,40 +901,7 @@ const { data: workspace } = useCurrentDoc<WorkspaceDoc>('workspace');
 
 ### Multi-Document Management
 
-For managing multiple related documents with `autoClose`, create a composable:
-
-```typescript
-// composables/useDocuments.ts
-import { ref } from 'vue';
-import { usePatchesContext, usePatchesDoc } from '@dabble/patches/vue';
-
-export function useDocuments() {
-  const { patches } = usePatchesContext();
-  const openDocIds = ref<string[]>([]);
-
-  function openDocument(docId: string) {
-    if (!openDocIds.value.includes(docId)) {
-      openDocIds.value.push(docId);
-    }
-  }
-
-  function closeDocument(docId: string) {
-    openDocIds.value = openDocIds.value.filter(id => id !== docId);
-  }
-
-  // Each document uses autoClose to manage lifecycle
-  function useDocument<T extends object>(docId: string) {
-    return usePatchesDoc<T>(docId, { autoClose: true });
-  }
-
-  return {
-    openDocIds,
-    openDocument,
-    closeDocument,
-    useDocument,
-  };
-}
-```
+Use `useManagedDocs` to reactively open and close documents based on a reactive list of paths. See the [Pinia Store with Lazy Mode](#pinia-store-with-lazy-mode-recommended) section above for a full example.
 
 ## Learn More
 

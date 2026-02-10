@@ -100,6 +100,24 @@ describe('DocManager', () => {
       expect(patches.getOpenDoc('doc-1')).toBeUndefined();
     });
 
+    it('should close without untracking by default', async () => {
+      await manager.openDoc(patches, 'doc-1');
+      const closeDocSpy = vi.spyOn(patches, 'closeDoc');
+
+      await manager.closeDoc(patches, 'doc-1');
+
+      expect(closeDocSpy).toHaveBeenCalledWith('doc-1', { untrack: false });
+    });
+
+    it('should close with untrack when specified', async () => {
+      await manager.openDoc(patches, 'doc-1');
+      const closeDocSpy = vi.spyOn(patches, 'closeDoc');
+
+      await manager.closeDoc(patches, 'doc-1', true);
+
+      expect(closeDocSpy).toHaveBeenCalledWith('doc-1', { untrack: true });
+    });
+
     it('should not close doc while other references exist', async () => {
       await manager.openDoc(patches, 'doc-1');
       await manager.openDoc(patches, 'doc-1');

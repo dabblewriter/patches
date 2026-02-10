@@ -56,9 +56,21 @@ export {
   providePatchesDoc,
   useCurrentDoc,
   type UsePatchesDocOptions,
+  type UsePatchesDocLazyOptions,
   type UsePatchesDocReturn,
+  type UsePatchesDocLazyReturn,
   type UsePatchesSyncReturn,
 } from './composables.js';
+
+// Managed docs composable
+export {
+  useManagedDocs,
+  type UseManagedDocsOptions,
+  type UseManagedDocsReturn,
+} from './managed-docs.js';
+
+// Utilities
+export { fillPath } from './utils.js';
 
 // Doc manager (for advanced use cases)
 export { DocManager, getDocManager } from './doc-manager.js';

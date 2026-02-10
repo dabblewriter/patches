@@ -46,22 +46,23 @@ export class LWWBatcher<T extends object = object> {
    *
    * @param newOps Array of JSON Patch operations to add (timestamps optional)
    */
-  add(newOps: JSONPatchOp[] | JSONPatch): void {
+  add(newOps: JSONPatchOp[] | JSONPatch, timestamp = Date.now()): void {
     if (!Array.isArray(newOps)) {
       newOps = newOps.ops;
     }
     if (newOps.length === 0) {
       return;
     }
-    // Add timestamps if not present
-    const timestamp = Date.now();
-    const timedOps = newOps.map(op => (op.ts ? op : { ...op, ts: timestamp }));
+    // Add timestamps if provided
+    if (timestamp) {
+      newOps = newOps.map(op => (op.ts ? op : { ...op, ts: timestamp }));
+    }
 
     // Get existing ops that might need consolidation
     const existingOps = Array.from(this.ops.values());
 
     // Consolidate
-    const { opsToSave, pathsToDelete } = consolidateOps(existingOps, timedOps);
+    const { opsToSave, pathsToDelete } = consolidateOps(existingOps, newOps);
 
     // Remove deleted paths
     for (const path of pathsToDelete) {
@@ -89,10 +90,10 @@ export class LWWBatcher<T extends object = object> {
    * });
    * ```
    */
-  change(mutator: ChangeMutator<T>): void {
+  change(mutator: ChangeMutator<T>, timestamp?: number): void {
     const patch = createJSONPatch(mutator);
     if (patch.ops.length > 0) {
-      this.add(patch.ops);
+      this.add(patch.ops, timestamp);
     }
   }
 

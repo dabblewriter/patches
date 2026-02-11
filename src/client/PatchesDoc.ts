@@ -27,7 +27,7 @@ export interface PatchesDocOptions {
  * Interface for a document synchronized using JSON patches.
  *
  * This is the app-facing interface. The doc captures user changes as JSON Patch
- * ops and emits them via onChange. The strategy handles packaging ops into Changes,
+ * ops and emits them via onChange. The algorithm handles packaging ops into Changes,
  * persisting them, and updating the doc's state.
  *
  * This interface is implemented by both OTDoc (Operational Transformation)
@@ -54,7 +54,7 @@ export interface PatchesDoc<T extends object = object> {
   /**
    * Subscribe to be notified when the user makes local changes.
    * Emits the JSON Patch ops captured from the change() call.
-   * The strategy handles packaging these into Changes.
+   * The algorithm handles packaging these into Changes.
    */
   readonly onChange: Signal<(ops: JSONPatchOp[]) => void>;
 
@@ -69,7 +69,7 @@ export interface PatchesDoc<T extends object = object> {
 
   /**
    * Captures an update to the document, emitting JSON Patch ops via onChange.
-   * Does NOT apply locally - the strategy handles state updates.
+   * Does NOT apply locally - the algorithm handles state updates.
    * @param mutator Function that uses JSONPatch methods with type-safe paths.
    */
   change(mutator: ChangeMutator<T>): void;

@@ -18,7 +18,7 @@ interface StoredChange extends Change {
 }
 
 /**
- * IndexedDB store implementation for Operational Transformation (OT) sync strategy.
+ * IndexedDB store implementation for Operational Transformation (OT) sync algorithm.
  *
  * Creates stores:
  * - snapshots<{ docId: string; rev: number; state: any }> (primary key: docId) [shared]

@@ -9,11 +9,11 @@ import type { PatchesDoc } from './PatchesDoc.js';
  * Contains shared state and methods used by both OTDoc and LWWDoc.
  *
  * The `change()` method captures ops and emits them via `onChange` - it does NOT
- * apply locally. The strategy handles packaging ops, persisting them, and updating
+ * apply locally. The algorithm handles packaging ops, persisting them, and updating
  * the doc's state via `applyChanges()`.
  *
  * Internal methods (updateSyncing, applyChanges, import) are on this class but not
- * on the PatchesDoc interface, as they're only used by Strategy and PatchesSync.
+ * on the PatchesDoc interface, as they're only used by Algorithm and PatchesSync.
  */
 export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T> {
   protected _id: string;
@@ -23,7 +23,7 @@ export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T
   /**
    * Subscribe to be notified when the user makes local changes.
    * Emits the JSON Patch ops captured from the change() call.
-   * The strategy handles packaging these into Changes.
+   * The algorithm handles packaging these into Changes.
    */
   readonly onChange = signal<(ops: JSONPatchOp[]) => void>();
 
@@ -73,7 +73,7 @@ export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T
 
   /**
    * Captures an update to the document, emitting JSON Patch ops via onChange.
-   * Does NOT apply locally - the strategy handles state updates via applyChanges.
+   * Does NOT apply locally - the algorithm handles state updates via applyChanges.
    * @param mutator Function that uses JSONPatch methods with type-safe paths.
    */
   change(mutator: ChangeMutator<T>): void {
@@ -98,7 +98,7 @@ export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T
 
   /**
    * Applies changes to the document state.
-   * Called by Strategy for local changes and broadcasts - not part of PatchesDoc interface.
+   * Called by Algorithm for local changes and broadcasts - not part of PatchesDoc interface.
    *
    * For OT: Distinguishes committed (committedAt > 0) vs pending (committedAt === 0) changes.
    * For LWW: Applies all ops from changes and updates metadata.

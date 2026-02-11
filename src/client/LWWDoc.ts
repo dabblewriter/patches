@@ -6,13 +6,13 @@ import { BaseDoc } from './BaseDoc.js';
  * LWW (Last-Write-Wins) document implementation.
  *
  * The `change()` method (inherited from BaseDoc) captures ops and emits them
- * via `onChange` - it does NOT apply locally. The LWWStrategy handles:
+ * via `onChange` - it does NOT apply locally. The LWWAlgorithm handles:
  * - Packaging ops with timestamps
  * - Merging with pending fields
  * - Updating the doc's state via `applyChanges()`
  *
  * Unlike OTDoc, LWWDoc doesn't need to track committed vs pending state
- * separately - the strategy handles all conflict resolution by timestamp.
+ * separately - the algorithm handles all conflict resolution by timestamp.
  *
  * ## Wire Efficiency
  * For Worker-Tab communication, `applyChanges()` sends only changes over the wire,

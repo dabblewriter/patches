@@ -9,7 +9,7 @@ import { BaseDoc } from './BaseDoc.js';
  * for handling concurrent edits.
  *
  * The `change()` method (inherited from BaseDoc) captures ops and emits them
- * via `onChange` - it does NOT apply locally. The OTStrategy handles packaging
+ * via `onChange` - it does NOT apply locally. The OTAlgorithm handles packaging
  * ops into Changes, persisting them, and calling `applyChanges()` to update state.
  *
  * ## State Model

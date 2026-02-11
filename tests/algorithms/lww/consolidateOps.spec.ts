@@ -288,6 +288,45 @@ describe('consolidateFieldOp', () => {
     });
   });
 
+  describe('soft ops', () => {
+    it('should not overwrite existing when incoming has explicit soft flag', () => {
+      const existing: JSONPatchOp = { op: 'replace', path: '/name', value: 'Alice', ts: 1000 };
+      const incoming: JSONPatchOp = { op: 'replace', path: '/name', value: 'Bob', ts: 2000, soft: true };
+
+      const result = consolidateFieldOp(existing, incoming);
+
+      expect(result).toBeNull();
+    });
+
+    it('should not overwrite existing when incoming is empty container add (implicit soft)', () => {
+      const existing: JSONPatchOp = { op: 'replace', path: '/users', value: { '1': 'Alice' }, ts: 1000 };
+      const incoming: JSONPatchOp = { op: 'add', path: '/users', value: {}, ts: 2000 };
+
+      const result = consolidateFieldOp(existing, incoming);
+
+      expect(result).toBeNull();
+    });
+
+    it('should not overwrite existing when incoming is empty array add (implicit soft)', () => {
+      const existing: JSONPatchOp = { op: 'replace', path: '/items', value: ['a'], ts: 1000 };
+      const incoming: JSONPatchOp = { op: 'add', path: '/items', value: [], ts: 2000 };
+
+      const result = consolidateFieldOp(existing, incoming);
+
+      expect(result).toBeNull();
+    });
+
+    it('should still allow non-soft add with value to overwrite', () => {
+      const existing: JSONPatchOp = { op: 'replace', path: '/name', value: 'Alice', ts: 1000 };
+      const incoming: JSONPatchOp = { op: 'add', path: '/name', value: 'Bob', ts: 2000 };
+
+      const result = consolidateFieldOp(existing, incoming);
+
+      expect(result).not.toBeNull();
+      expect(result!.value).toBe('Bob');
+    });
+  });
+
   describe('non-combinable ops use timestamp', () => {
     it('should return null when existing replace has newer timestamp', () => {
       const existing: JSONPatchOp = { op: 'replace', path: '/name', value: 'Alice', ts: 3000 };
@@ -423,6 +462,116 @@ describe('consolidatePendingOps', () => {
 
     expect(result.opsToSave).toHaveLength(1);
     expect(result.opsToSave[0].op).toBe('remove');
+  });
+
+  describe('soft ops', () => {
+    it('should save soft op when no existing data at path', () => {
+      const existingOps: JSONPatchOp[] = [];
+      const newOps: JSONPatchOp[] = [{ op: 'add', path: '/users', value: {}, ts: 1000 }];
+
+      const result = consolidateOps(existingOps, newOps);
+
+      expect(result.opsToSave).toHaveLength(1);
+      expect(result.opsToSave[0].path).toBe('/users');
+    });
+
+    it('should skip soft op when existing op at same path', () => {
+      const existingOps: JSONPatchOp[] = [{ op: 'replace', path: '/users', value: { '1': 'Alice' }, ts: 1000 }];
+      const newOps: JSONPatchOp[] = [{ op: 'replace', path: '/users', value: {}, ts: 2000, soft: true }];
+
+      const result = consolidateOps(existingOps, newOps);
+
+      expect(result.opsToSave).toHaveLength(0);
+    });
+
+    it('should skip empty container add when child paths exist', () => {
+      const existingOps: JSONPatchOp[] = [
+        { op: 'replace', path: '/users/1', value: 'Alice', ts: 1000 },
+        { op: 'replace', path: '/users/2', value: 'Bob', ts: 1000 },
+      ];
+      const newOps: JSONPatchOp[] = [{ op: 'add', path: '/users', value: {}, ts: 2000 }];
+
+      const result = consolidateOps(existingOps, newOps);
+
+      expect(result.opsToSave).toHaveLength(0);
+      expect(result.pathsToDelete).toHaveLength(0);
+    });
+
+    it('should skip explicit soft op when child paths exist', () => {
+      const existingOps: JSONPatchOp[] = [
+        { op: 'replace', path: '/config/theme', value: 'dark', ts: 1000 },
+      ];
+      const newOps: JSONPatchOp[] = [{ op: 'replace', path: '/config', value: {}, ts: 2000, soft: true }];
+
+      const result = consolidateOps(existingOps, newOps);
+
+      expect(result.opsToSave).toHaveLength(0);
+      expect(result.pathsToDelete).toHaveLength(0);
+    });
+
+    it('should still allow non-soft parent write to delete children', () => {
+      const existingOps: JSONPatchOp[] = [
+        { op: 'replace', path: '/users/1', value: 'Alice', ts: 1000 },
+        { op: 'replace', path: '/users/2', value: 'Bob', ts: 1000 },
+      ];
+      const newOps: JSONPatchOp[] = [{ op: 'replace', path: '/users', value: { '3': 'Charlie' }, ts: 2000 }];
+
+      const result = consolidateOps(existingOps, newOps);
+
+      expect(result.opsToSave).toHaveLength(1);
+      expect(result.opsToSave[0].path).toBe('/users');
+      expect(result.pathsToDelete).toContain('/users/1');
+      expect(result.pathsToDelete).toContain('/users/2');
+    });
+
+    it('should skip soft op when parent op value contains data at that path', () => {
+      const existingOps: JSONPatchOp[] = [
+        { op: 'replace', path: '/person', value: { name: { first: 'Bob', last: 'Jones' } }, ts: 1000 },
+      ];
+      const newOps: JSONPatchOp[] = [{ op: 'add', path: '/person/name', value: {}, ts: 2000 }];
+
+      const result = consolidateOps(existingOps, newOps);
+
+      expect(result.opsToSave).toHaveLength(0);
+      expect(result.pathsToDelete).toHaveLength(0);
+    });
+
+    it('should skip soft op when deeply nested parent op covers the path', () => {
+      const existingOps: JSONPatchOp[] = [
+        { op: 'replace', path: '/some/deep', value: { obj: { person: { name: 'Bob' } } }, ts: 1000 },
+      ];
+      const newOps: JSONPatchOp[] = [{ op: 'add', path: '/some/deep/obj/person', value: {}, ts: 2000 }];
+
+      const result = consolidateOps(existingOps, newOps);
+
+      expect(result.opsToSave).toHaveLength(0);
+    });
+
+    it('should allow soft op when parent op value does not contain that subpath', () => {
+      const existingOps: JSONPatchOp[] = [
+        { op: 'replace', path: '/person', value: { age: 30 }, ts: 1000 },
+      ];
+      const newOps: JSONPatchOp[] = [{ op: 'add', path: '/person/name', value: {}, ts: 2000 }];
+
+      const result = consolidateOps(existingOps, newOps);
+
+      expect(result.opsToSave).toHaveLength(1);
+      expect(result.opsToSave[0].path).toBe('/person/name');
+    });
+
+    it('should handle soft container add alongside non-soft child writes', () => {
+      const existingOps: JSONPatchOp[] = [];
+      const newOps: JSONPatchOp[] = [
+        { op: 'add', path: '/users', value: {}, ts: 1000 },
+        { op: 'replace', path: '/users/1', value: 'Alice', ts: 1000 },
+      ];
+
+      const result = consolidateOps(existingOps, newOps);
+
+      expect(result.opsToSave).toHaveLength(2);
+      expect(result.opsToSave[0].path).toBe('/users');
+      expect(result.opsToSave[1].path).toBe('/users/1');
+    });
   });
 });
 

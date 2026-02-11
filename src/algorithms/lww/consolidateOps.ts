@@ -1,5 +1,6 @@
 import { applyBitmask, combineBitmasks } from '../../json-patch/ops/bitmask.js';
 import type { JSONPatchOp } from '../../json-patch/types.js';
+import { isEmptyContainer } from '../../json-patch/utils/softWrites.js';
 
 /**
  * Combiner for consolidating same-type ops on the same path.
@@ -71,6 +72,11 @@ export function consolidateFieldOp(existing: JSONPatchOp, incoming: JSONPatchOp)
     return { ...incoming, op, value };
   }
 
+  // Soft ops never overwrite existing data
+  if (isSoftOp(incoming)) {
+    return null;
+  }
+
   // For non-combinable ops: existing wins if newer
   if (isExistingNewer(existing.ts, incoming.ts)) {
     return null;
@@ -111,6 +117,23 @@ export function consolidateOps(
       }
       // If null, existing wins - no change needed
     } else {
+      // Soft ops should not overwrite when data already exists at this path
+      if (isSoftOp(newOp)) {
+        // Check if child paths exist in the map
+        let dataExists = false;
+        for (const existingPath of existingByPath.keys()) {
+          if (existingPath.startsWith(newOp.path + '/')) {
+            dataExists = true;
+            break;
+          }
+        }
+        // Check if a parent op's nested value covers this path
+        if (!dataExists) {
+          dataExists = pathExistsInParentOp(newOp.path, existingByPath);
+        }
+        if (dataExists) continue;
+      }
+
       // Check if this op overwrites child paths (parent write deletes children)
       for (const existingPath of existingByPath.keys()) {
         if (existingPath.startsWith(newOp.path + '/')) {
@@ -155,6 +178,42 @@ function parentFixes(path: string, existing: Map<string, JSONPatchOp>): JSONPatc
     }
   }
   return pathsToDelete;
+}
+
+/**
+ * Walk up the path hierarchy checking if any parent op's nested value
+ * contains data at the given path. For example, if path is '/person/name'
+ * and there's an op at '/person' with value { name: { first: 'Bob' } },
+ * this returns true because '/name' exists within that value.
+ */
+function pathExistsInParentOp(path: string, existingByPath: Map<string, JSONPatchOp>): boolean {
+  let parent = path;
+  while (parent.lastIndexOf('/') > 0) {
+    parent = parent.substring(0, parent.lastIndexOf('/'));
+    const parentOp = existingByPath.get(parent);
+    if (parentOp && isObject(parentOp.value)) {
+      const remainingKeys = path.substring(parent.length + 1).split('/');
+      let current: any = parentOp.value;
+      let found = true;
+      for (const key of remainingKeys) {
+        if (!isObject(current) || !(key in current)) {
+          found = false;
+          break;
+        }
+        current = current[key];
+      }
+      if (found) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Check if an op is a soft write (explicit soft flag or implicit empty container add).
+ * Soft ops should not overwrite existing data.
+ */
+function isSoftOp(op: JSONPatchOp): boolean {
+  return op.soft === true || (op.op === 'add' && isEmptyContainer(op.value));
 }
 
 /**

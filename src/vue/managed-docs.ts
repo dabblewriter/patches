@@ -1,4 +1,5 @@
 import { shallowRef, watchEffect, type Ref, type ShallowRef } from 'vue';
+import type { OpenDocOptions } from '../client/Patches.js';
 import type { PatchesDoc } from '../client/PatchesDoc.js';
 import type { Unsubscriber } from '../event-signal.js';
 import { usePatchesContext } from './provider.js';
@@ -7,7 +8,7 @@ import { areSetsEqual } from './utils.js';
 /**
  * Options for useManagedDocs composable.
  */
-export interface UseManagedDocsOptions {
+export interface UseManagedDocsOptions extends OpenDocOptions {
   /**
    * Inject doc.id into state under this key on every state update.
    * Useful when the document ID is derived from the path but needed in the data.
@@ -78,7 +79,8 @@ export function useManagedDocs<TDoc extends object, TData>(
   options?: UseManagedDocsOptions
 ): UseManagedDocsReturn<TData> {
   const { patches } = usePatchesContext();
-  const { idProp } = options ?? {};
+  const { idProp, algorithm, metadata } = options ?? {};
+  const openDocOpts: OpenDocOptions = { algorithm, metadata };
 
   const data = shallowRef<TData>(initialData) as ShallowRef<TData>;
   const docs = new Map<string, PatchesDoc<TDoc>>();
@@ -112,7 +114,7 @@ export function useManagedDocs<TDoc extends object, TData>(
 
   async function openPath(path: string) {
     try {
-      const doc = await patches.openDoc<TDoc>(path);
+      const doc = await patches.openDoc<TDoc>(path, openDocOpts);
 
       // Race check: path may have been removed while we were opening
       if (currentPaths.has(path)) {

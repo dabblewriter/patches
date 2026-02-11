@@ -1,4 +1,4 @@
-import type { Patches } from '../client/Patches.js';
+import type { OpenDocOptions, Patches } from '../client/Patches.js';
 import type { PatchesDoc } from '../client/PatchesDoc.js';
 
 /**
@@ -25,7 +25,7 @@ export class DocManager {
    * @param docId - Document ID to open
    * @returns Promise resolving to PatchesDoc instance
    */
-  async openDoc<T extends object>(patches: Patches, docId: string): Promise<PatchesDoc<T>> {
+  async openDoc<T extends object>(patches: Patches, docId: string, opts?: OpenDocOptions): Promise<PatchesDoc<T>> {
     const currentCount = this.refCounts.get(docId) || 0;
 
     // If there's already a pending open operation, wait for it
@@ -47,7 +47,7 @@ export class DocManager {
     }
 
     // First reference - actually open the doc
-    const openPromise = patches.openDoc<T>(docId);
+    const openPromise = patches.openDoc<T>(docId, opts);
     this.pendingOps.set(docId, openPromise);
 
     try {

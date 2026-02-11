@@ -11,6 +11,7 @@ import {
   type MaybeRef,
   type InjectionKey,
 } from 'vue';
+import type { OpenDocOptions } from '../client/Patches.js';
 import type { PatchesDoc } from '../client/PatchesDoc.js';
 import { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { SyncingState, ChangeMutator } from '../types.js';
@@ -22,7 +23,7 @@ import { getDocManager } from './doc-manager.js';
 /**
  * Options for usePatchesDoc composable (eager mode with docId).
  */
-export interface UsePatchesDocOptions {
+export interface UsePatchesDocOptions extends OpenDocOptions {
   /**
    * Controls document lifecycle management on component unmount.
    *
@@ -112,8 +113,9 @@ export interface UsePatchesDocLazyReturn<T extends object> extends UsePatchesDoc
    * Open a document by path. Closes any previously loaded document first.
    *
    * @param docPath - The document path to open
+   * @param options - Optional algorithm and metadata overrides
    */
-  load: (docPath: string) => Promise<void>;
+  load: (docPath: string, options?: OpenDocOptions) => Promise<void>;
 
   /**
    * Close the current document, unsubscribe, and reset all state.
@@ -127,8 +129,9 @@ export interface UsePatchesDocLazyReturn<T extends object> extends UsePatchesDoc
    *
    * @param docPath - The document path to create
    * @param initialState - Initial state object or JSONPatch to apply
+   * @param options - Optional algorithm and metadata overrides
    */
-  create: (docPath: string, initialState: T | JSONPatch) => Promise<void>;
+  create: (docPath: string, initialState: T | JSONPatch, options?: OpenDocOptions) => Promise<void>;
 }
 
 // --- Shared reactive state factory ---
@@ -266,8 +269,9 @@ export function usePatchesDoc<T extends object>(
  */
 function _usePatchesDocEager<T extends object>(docId: string, options: UsePatchesDocOptions): UsePatchesDocReturn<T> {
   const { patches } = usePatchesContext();
-  const { autoClose = false } = options;
+  const { autoClose = false, algorithm, metadata } = options;
   const shouldUntrack = autoClose === 'untrack';
+  const openDocOpts: OpenDocOptions = { algorithm, metadata };
   const manager = getDocManager(patches);
 
   const { setupDoc, baseReturn } = createDocReactiveState<T>({ changeBehavior: 'throw' });
@@ -276,7 +280,7 @@ function _usePatchesDocEager<T extends object>(docId: string, options: UsePatche
 
   if (autoClose) {
     manager
-      .openDoc<T>(patches, docId)
+      .openDoc<T>(patches, docId, openDocOpts)
       .then(patchesDoc => {
         unsubscribe = setupDoc(patchesDoc);
       })
@@ -335,7 +339,7 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
     resetRefs();
   }
 
-  async function load(docPath: string) {
+  async function load(docPath: string, options?: OpenDocOptions) {
     if (path.value) {
       const prevPath = path.value;
       teardown();
@@ -345,7 +349,7 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
     path.value = docPath;
 
     try {
-      const patchesDoc = await patches.openDoc<T>(docPath);
+      const patchesDoc = await patches.openDoc<T>(docPath, options);
       unsubscribe = setupDoc(patchesDoc);
     } catch (err) {
       baseReturn.error.value = err as Error;
@@ -362,8 +366,8 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
     }
   }
 
-  async function create(docPath: string, initialState: T | JSONPatch) {
-    const newDoc = await patches.openDoc<T>(docPath);
+  async function create(docPath: string, initialState: T | JSONPatch, options?: OpenDocOptions) {
+    const newDoc = await patches.openDoc<T>(docPath, options);
     newDoc.change((patch, root) => {
       if (initialState instanceof JSONPatch) {
         patch.ops = initialState.ops;
@@ -494,8 +498,9 @@ export function providePatchesDoc<T extends object>(
   options: UsePatchesDocOptions = {}
 ): UsePatchesDocReturn<T> {
   const { patches } = usePatchesContext();
-  const { autoClose = false } = options;
+  const { autoClose = false, algorithm, metadata } = options;
   const shouldUntrack = autoClose === 'untrack';
+  const openDocOpts: OpenDocOptions = { algorithm, metadata };
   const manager = getDocManager(patches);
 
   const { setupDoc, baseReturn } = createDocReactiveState<T>({ changeBehavior: 'throw' });
@@ -510,7 +515,7 @@ export function providePatchesDoc<T extends object>(
 
     if (autoClose) {
       try {
-        const patchesDoc = await manager.openDoc<T>(patches, id);
+        const patchesDoc = await manager.openDoc<T>(patches, id, openDocOpts);
         unsubscribe = setupDoc(patchesDoc);
       } catch (err) {
         baseReturn.error.value = err as Error;

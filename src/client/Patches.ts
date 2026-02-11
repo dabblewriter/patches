@@ -7,6 +7,16 @@ import type { PatchesDoc, PatchesDocOptions } from './PatchesDoc.js';
 import type { AlgorithmName } from './PatchesStore.js';
 
 /**
+ * Options for opening a document, passed through to `patches.openDoc()`.
+ */
+export interface OpenDocOptions {
+  /** Optional metadata to attach to the document. */
+  metadata?: Record<string, any>;
+  /** Override the algorithm for this document (defaults to the Patches instance default). */
+  algorithm?: AlgorithmName;
+}
+
+/**
  * Options for creating a Patches instance.
  * Provides algorithms map and optional default algorithm.
  */
@@ -165,7 +175,7 @@ export class Patches {
   @singleInvocation(true) // ensure a second call to openDoc with the same docId returns the same promise while opening
   async openDoc<T extends object>(
     docId: string,
-    opts: { metadata?: Record<string, any>; algorithm?: AlgorithmName } = {}
+    opts: OpenDocOptions = {}
   ): Promise<PatchesDoc<T>> {
     const existing = this.docs.get(docId);
     if (existing) return existing.doc as PatchesDoc<T>;

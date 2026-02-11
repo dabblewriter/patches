@@ -8,6 +8,7 @@ import {
   type Accessor,
   type Resource,
 } from 'solid-js';
+import type { OpenDocOptions } from '../client/Patches.js';
 import type { PatchesDoc } from '../client/PatchesDoc.js';
 import { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { SyncingState, ChangeMutator } from '../types.js';
@@ -19,7 +20,7 @@ import { getDocManager } from './doc-manager.js';
 /**
  * Options for usePatchesDoc primitive (eager mode with docId).
  */
-export interface UsePatchesDocOptions {
+export interface UsePatchesDocOptions extends OpenDocOptions {
   /**
    * Controls document lifecycle management on cleanup.
    *
@@ -109,8 +110,9 @@ export interface UsePatchesDocLazyReturn<T extends object> extends UsePatchesDoc
    * Open a document by path. Closes any previously loaded document first.
    *
    * @param docPath - The document path to open
+   * @param options - Optional algorithm and metadata overrides
    */
-  load: (docPath: string) => Promise<void>;
+  load: (docPath: string, options?: OpenDocOptions) => Promise<void>;
 
   /**
    * Close the current document, unsubscribe, and reset all state.
@@ -124,8 +126,9 @@ export interface UsePatchesDocLazyReturn<T extends object> extends UsePatchesDoc
    *
    * @param docPath - The document path to create
    * @param initialState - Initial state object or JSONPatch to apply
+   * @param options - Optional algorithm and metadata overrides
    */
-  create: (docPath: string, initialState: T | JSONPatch) => Promise<void>;
+  create: (docPath: string, initialState: T | JSONPatch, options?: OpenDocOptions) => Promise<void>;
 }
 
 // --- Shared reactive state factory ---
@@ -268,8 +271,9 @@ function _usePatchesDocEager<T extends object>(
   options: UsePatchesDocOptions
 ): UsePatchesDocReturn<T> {
   const { patches } = usePatchesContext();
-  const autoClose = options.autoClose ?? false;
+  const { autoClose = false, algorithm, metadata } = options;
   const shouldUntrack = autoClose === 'untrack';
+  const openDocOpts: OpenDocOptions = { algorithm, metadata };
   const manager = getDocManager(patches);
 
   const { setupDoc, setError, setLoading, baseReturn } = createDocReactiveState<T>({ changeBehavior: 'throw' });
@@ -278,7 +282,7 @@ function _usePatchesDocEager<T extends object>(
 
   if (autoClose) {
     const [docResource] = createResource(docIdAccessor, async id => {
-      return await manager.openDoc<T>(patches, id);
+      return await manager.openDoc<T>(patches, id, openDocOpts);
     });
 
     createEffect(() => {
@@ -348,7 +352,7 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
     resetSignals();
   }
 
-  async function load(docPath: string) {
+  async function load(docPath: string, options?: OpenDocOptions) {
     if (path()) {
       const prevPath = path()!;
       teardown();
@@ -358,7 +362,7 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
     setPath(docPath);
 
     try {
-      const patchesDoc = await patches.openDoc<T>(docPath);
+      const patchesDoc = await patches.openDoc<T>(docPath, options);
       unsubscribe = setupDoc(patchesDoc);
     } catch (err) {
       setError(err as Error);
@@ -375,8 +379,8 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
     }
   }
 
-  async function create(docPath: string, initialState: T | JSONPatch) {
-    const newDoc = await patches.openDoc<T>(docPath);
+  async function create(docPath: string, initialState: T | JSONPatch, options?: OpenDocOptions) {
+    const newDoc = await patches.openDoc<T>(docPath, options);
     newDoc.change((patch, root) => {
       if (initialState instanceof JSONPatch) {
         patch.ops = initialState.ops;
@@ -483,7 +487,7 @@ interface NamedDocContext<T extends object> {
 /**
  * Props for the Provider component returned by createPatchesDoc.
  */
-export interface PatchesDocProviderProps {
+export interface PatchesDocProviderProps extends OpenDocOptions {
   docId: MaybeAccessor<string>;
   autoClose?: boolean | 'untrack';
   children: any;
@@ -538,6 +542,7 @@ export function createPatchesDoc<T extends object>(name: string) {
     const manager = getDocManager(patches);
     const autoClose = props.autoClose ?? false;
     const shouldUntrack = autoClose === 'untrack';
+    const openDocOpts: OpenDocOptions = { algorithm: props.algorithm, metadata: props.metadata };
 
     const { setupDoc, setError, setLoading, baseReturn } = createDocReactiveState<T>({ changeBehavior: 'throw' });
 
@@ -545,7 +550,7 @@ export function createPatchesDoc<T extends object>(name: string) {
 
     if (autoClose) {
       const [docResource] = createResource(docIdAccessor, async id => {
-        return await manager.openDoc<T>(patches, id);
+        return await manager.openDoc<T>(patches, id, openDocOpts);
       });
 
       createEffect(() => {

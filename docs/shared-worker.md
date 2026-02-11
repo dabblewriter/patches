@@ -54,7 +54,7 @@ Tabs handle document state, UI updates, and user interactions.
 
 ## How the API Supports This
 
-The [`ClientStrategy`](algorithms.md) interface has two methods designed for this:
+The [`ClientAlgorithm`](algorithms.md) interface has two methods designed for this:
 
 ```typescript
 // Process a local change - doc can be undefined (worker scenario)
@@ -92,21 +92,21 @@ These internal methods let tabs update their documents from worker broadcasts. T
 
 ## Building the Worker Side
 
-The worker holds the strategy and store, but no documents:
+The worker holds the algorithm and store, but no documents:
 
 ```typescript
 // shared-worker.ts
-import { OTStrategy, OTIndexedDBStore } from '@dabble/patches/client';
+import { OTAlgorithm, OTIndexedDBStore } from '@dabble/patches/client';
 import type { JSONPatchOp, Change } from '@dabble/patches';
 
 class WorkerCoordinator {
-  private strategy: OTStrategy;
+  private algorithm: OTAlgorithm;
   private store: OTIndexedDBStore;
   private ports: Set<MessagePort> = new Set();
 
   constructor() {
     this.store = new OTIndexedDBStore('my-app');
-    this.strategy = new OTStrategy(this.store);
+    this.algorithm = new OTAlgorithm(this.store);
 
     // Set up your WebSocket connection here
     // When server sends changes, call this.handleServerChanges()
@@ -121,7 +121,7 @@ class WorkerCoordinator {
   // Tab made a change
   async handleLocalChange(docId: string, ops: JSONPatchOp[], metadata: Record<string, any> = {}) {
     // No doc instance - pass undefined
-    const changes = await this.strategy.handleDocChange(docId, ops, undefined, metadata);
+    const changes = await this.algorithm.handleDocChange(docId, ops, undefined, metadata);
 
     // Broadcast to ALL tabs (including the one that made the change)
     this.broadcast({ type: 'changes', docId, changes });
@@ -130,7 +130,7 @@ class WorkerCoordinator {
   // Server sent changes
   async handleServerChanges(docId: string, serverChanges: Change[]) {
     // No doc instance - pass undefined
-    const changes = await this.strategy.applyServerChanges(docId, serverChanges, undefined);
+    const changes = await this.algorithm.applyServerChanges(docId, serverChanges, undefined);
 
     // Broadcast to all tabs
     this.broadcast({ type: 'changes', docId, changes });
@@ -262,8 +262,8 @@ How changes flow through the system:
 1. User types in Tab A
 2. Tab A's doc.change() captures ops
 3. Tab A's onChange fires, sends ops to Worker
-4. Worker calls strategy.handleDocChange(docId, ops, undefined, metadata)
-5. Strategy creates Change, stores it, returns Change[]
+4. Worker calls algorithm.handleDocChange(docId, ops, undefined, metadata)
+5. Algorithm creates Change, stores it, returns Change[]
 6. Worker broadcasts { type: 'changes', changes } to ALL tabs
 7. Tab A, B, C all call doc.applyChanges(changes)
 8. All tabs show the same state
@@ -273,8 +273,8 @@ How changes flow through the system:
 
 ```
 1. Server pushes changes to Worker via WebSocket
-2. Worker calls strategy.applyServerChanges(docId, changes, undefined)
-3. Strategy processes changes (rebases pending for OT), returns Change[]
+2. Worker calls algorithm.applyServerChanges(docId, changes, undefined)
+3. Algorithm processes changes (rebases pending for OT), returns Change[]
 4. Worker broadcasts { type: 'changes', changes } to all tabs
 5. All tabs call doc.applyChanges(changes)
 6. Everyone's in sync
@@ -284,7 +284,7 @@ How changes flow through the system:
 
 ```
 1. Tab D opens, requests doc "project-123"
-2. Worker loads snapshot from store via strategy.loadDoc()
+2. Worker loads snapshot from store via algorithm.loadDoc()
 3. Worker sends snapshot to Tab D
 4. Tab D creates OTDoc with snapshot
 5. Tab D starts receiving broadcasts like everyone else
@@ -330,7 +330,7 @@ async reconnect() {
 
 ### LWW Works the Same Way
 
-Everything above applies to [LWW](last-write-wins.md) too. Swap `OTStrategy` for `LWWStrategy`, `OTDoc` for `LWWDoc`, and `OTIndexedDBStore` for `LWWIndexedDBStore`. The `handleDocChange` and `applyServerChanges` methods have identical signatures.
+Everything above applies to [LWW](last-write-wins.md) too. Swap `OTAlgorithm` for `LWWAlgorithm`, `OTDoc` for `LWWDoc`, and `OTIndexedDBStore` for `LWWIndexedDBStore`. The `handleDocChange` and `applyServerChanges` methods have identical signatures.
 
 **The key difference: no rebasing.** [OT](operational-transformation.md) transforms pending changes when server updates arrive. LWW compares timestamps - whoever wrote last wins. Simpler coordination, but the SharedWorker pattern still matters.
 
@@ -387,7 +387,7 @@ The Patches API provides the building blocks. The plumbing between worker and ta
 - [PatchesDoc](PatchesDoc.md) - Document interface and `BaseDoc` internals
 - [PatchesSync](PatchesSync.md) - Standard sync coordinator (what you're replacing with SharedWorker)
 - [persist.md](persist.md) - Store implementations (`OTIndexedDBStore`, `LWWIndexedDBStore`)
-- [algorithms.md](algorithms.md) - `ClientStrategy` interface details
-- [last-write-wins.md](last-write-wins.md) - LWW strategy overview
-- [operational-transformation.md](operational-transformation.md) - OT strategy overview
+- [algorithms.md](algorithms.md) - `ClientAlgorithm` interface details
+- [last-write-wins.md](last-write-wins.md) - LWW algorithm overview
+- [operational-transformation.md](operational-transformation.md) - OT algorithm overview
 - [net.md](net.md) - Networking layer (WebSocket protocol)

@@ -131,7 +131,7 @@ describe('LWWDoc', () => {
         patch.replace(path.text, 'world');
       });
 
-      // State should not change - strategy handles state updates
+      // State should not change - algorithm handles state updates
       expect(doc.state).toEqual({ text: 'hello', count: 0 });
     });
 

@@ -37,7 +37,7 @@ interface Snapshot {
 }
 
 /**
- * IndexedDB store implementation for Last-Writer-Wins (LWW) sync strategy.
+ * IndexedDB store implementation for Last-Writer-Wins (LWW) sync algorithm.
  *
  * Creates stores:
  * - docs<{ docId: string; committedRev: number; deleted?: boolean }> (primary key: docId) [shared with OT]

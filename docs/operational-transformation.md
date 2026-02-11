@@ -473,4 +473,4 @@ By combining this OT system with Patches' other features ([offline support](pers
 - [PatchesSync.md](PatchesSync.md) - Client-side sync coordination
 - [persist.md](persist.md) - Storage and persistence
 - [branching.md](branching.md) - Branch and merge workflows
-- [last-write-wins.md](last-write-wins.md) - Alternative sync strategy for simpler use cases
+- [last-write-wins.md](last-write-wins.md) - Alternative sync algorithm for simpler use cases

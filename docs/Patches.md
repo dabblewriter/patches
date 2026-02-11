@@ -18,7 +18,7 @@
 
 - **Document Management**: Opens, tracks, and closes your collaborative docs
 - **Event Coordination**: Listens to document events and re-emits them for your app
-- **Strategy Delegation**: Routes operations to the right sync strategy (OT or LWW)
+- **Algorithm Delegation**: Routes operations to the right sync algorithm (OT or LWW)
 - **Public API**: Provides the clean interface your app uses
 
 The pattern: create **one** `Patches` instance for your whole app, then use it to open as many documents as you need.
@@ -41,14 +41,14 @@ const patches = createOTIndexedDBPatches({ dbName: 'my-app' });
 
 Available factories:
 
-| Factory                                | Strategy | Storage   | Use Case                         |
-| -------------------------------------- | -------- | --------- | -------------------------------- |
-| `createOTPatches`                      | OT       | Memory    | Testing, ephemeral sessions      |
-| `createOTIndexedDBPatches`             | OT       | IndexedDB | Production collaborative editing |
-| `createLWWPatches`                     | LWW      | Memory    | Testing LWW features             |
-| `createLWWIndexedDBPatches`            | LWW      | IndexedDB | Production settings/preferences  |
-| `createMultiAlgorithmPatches`          | Both     | Memory    | Testing multi-strategy apps      |
-| `createMultiAlgorithmIndexedDBPatches` | Both     | IndexedDB | Production multi-strategy apps   |
+| Factory                                | Algorithm | Storage   | Use Case                          |
+| -------------------------------------- | --------- | --------- | --------------------------------- |
+| `createOTPatches`                      | OT        | Memory    | Testing, ephemeral sessions       |
+| `createOTIndexedDBPatches`             | OT        | IndexedDB | Production collaborative editing  |
+| `createLWWPatches`                     | LWW       | Memory    | Testing LWW features              |
+| `createLWWIndexedDBPatches`            | LWW       | IndexedDB | Production settings/preferences   |
+| `createMultiAlgorithmPatches`          | Both      | Memory    | Testing multi-algorithm apps      |
+| `createMultiAlgorithmIndexedDBPatches` | Both      | IndexedDB | Production multi-algorithm apps   |
 
 All factories accept optional `metadata` for attaching user info to changes:
 
@@ -64,17 +64,17 @@ const patches = createOTIndexedDBPatches({
 
 ### The Manual Way: Full Configuration
 
-If you need more control, construct `Patches` directly with a strategies map:
+If you need more control, construct `Patches` directly with an algorithms map:
 
 ```typescript
-import { Patches, OTStrategy, InMemoryStore } from '@dabble/patches';
+import { Patches, OTAlgorithm, InMemoryStore } from '@dabble/patches';
 
 const store = new InMemoryStore();
-const otStrategy = new OTStrategy(store);
+const otAlgorithm = new OTAlgorithm(store);
 
 const patches = new Patches({
-  strategies: { ot: otStrategy },
-  defaultStrategy: 'ot',
+  algorithms: { ot: otAlgorithm },
+  defaultAlgorithm: 'ot',
   metadata: { user: { id: 'user-123' } },
 });
 ```
@@ -82,10 +82,10 @@ const patches = new Patches({
 This approach lets you:
 
 - Use custom store implementations
-- Configure strategy-specific options
-- Mix strategies with different storage backends
+- Configure algorithm-specific options
+- Mix algorithms with different storage backends
 
-### Choosing a Strategy
+### Choosing an Algorithm
 
 **OT (Operational Transformation)** is for collaborative editing where concurrent changes need intelligent merging. Multiple users editing the same paragraph? OT handles that.
 
@@ -125,11 +125,11 @@ The `openDoc` method:
 - Loads the latest state from your store
 - Sets up change tracking
 
-You can also specify a different strategy when opening:
+You can also specify a different algorithm when opening:
 
 ```typescript
-// Open with LWW strategy instead of default
-const settingsDoc = await patches.openDoc('user-settings', { strategy: 'lww' });
+// Open with LWW algorithm instead of default
+const settingsDoc = await patches.openDoc('user-settings', { algorithm: 'lww' });
 ```
 
 ### Tracking Documents

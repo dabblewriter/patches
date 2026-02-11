@@ -241,13 +241,13 @@ The network layer is one piece of the collaborative puzzle:
 
 ## OT vs LWW Sync
 
-Patches supports two sync strategies, and PatchesSync handles both:
+Patches supports two sync algorithms, and PatchesSync handles both:
 
 **OT (Operational Transformation)**: For collaborative editing where concurrent changes need intelligent merging. Uses [algorithms](algorithms.md) like `rebaseChanges` to handle conflicts. See [operational-transformation.md](operational-transformation.md).
 
 **LWW (Last-Write-Wins)**: For settings, preferences, and status data where the most recent write should simply win. Uses timestamp comparison instead of transformation. See [last-write-wins.md](last-write-wins.md).
 
-PatchesSync is strategy-agnostic - it delegates to the appropriate strategy for each document type.
+PatchesSync is algorithm-agnostic - it delegates to the appropriate algorithm for each document type.
 
 ## Accessing the RPC Layer
 

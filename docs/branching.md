@@ -28,10 +28,10 @@ The branch document is a real document. Edit it just like any other. The branchi
 
 ## OT vs LWW Branching
 
-Patches supports two sync strategies, and each has its own branch manager:
+Patches supports two sync algorithms, and each has its own branch manager:
 
-| Strategy | Branch Manager                             | Merge Approach                             |
-| -------- | ------------------------------------------ | ------------------------------------------ |
+| Algorithm | Branch Manager                             | Merge Approach                             |
+| --------- | ------------------------------------------ | ------------------------------------------ |
 | OT       | [OTBranchManager](PatchesBranchManager.md) | Transforms operations, preserves history   |
 | LWW      | LWWBranchManager                           | Timestamps resolve conflicts automatically |
 
@@ -42,7 +42,7 @@ Patches supports two sync strategies, and each has its own branch manager:
 
 **LWW branching** (via `LWWBranchManager`) is simpler. Each field carries a timestamp. When merging, timestamps resolve conflicts automatically. No transformation needed. Later timestamp wins.
 
-For details on the underlying sync strategies, see [Operational Transformation](operational-transformation.md) and [Last-Write-Wins](last-write-wins.md).
+For details on the underlying sync algorithms, see [Operational Transformation](operational-transformation.md) and [Last-Write-Wins](last-write-wins.md).
 
 ## Creating a Branch
 
@@ -126,7 +126,7 @@ const committedChanges = await branchManager.mergeBranch(branchDocId);
 console.log(`Merged ${committedChanges.length} changes back to source`);
 ```
 
-### OT Merge Strategy
+### OT Merge Approach
 
 The [OTBranchManager](PatchesBranchManager.md) handles two scenarios:
 
@@ -159,7 +159,7 @@ When Alice merges her branch:
 
 Why flatten? Transforming 1,000 individual branch changes against 500 source changes would be slow. Flattening gives the same end result with better performance. The original version history is preserved with `origin: 'branch'` for traceability.
 
-### LWW Merge Strategy
+### LWW Merge Approach
 
 The `LWWBranchManager` approach is simpler:
 

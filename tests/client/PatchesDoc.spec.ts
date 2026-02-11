@@ -107,7 +107,7 @@ describe('OTDoc', () => {
   // Note: setId was removed as ID is now required in constructor
 
   // Note: setChangeMetadata was removed as part of thin doc refactor.
-  // Metadata is now passed to strategy when opening doc, not stored in doc.
+  // Metadata is now passed to algorithm when opening doc, not stored in doc.
 
   describe('subscribe', () => {
     it('should call callback immediately with current state', () => {
@@ -184,7 +184,7 @@ describe('OTDoc', () => {
         patch.replace(path.text, 'world');
       });
 
-      // State should not change - strategy handles state updates via applyChanges
+      // State should not change - algorithm handles state updates via applyChanges
       expect(doc.state).toEqual({ text: 'hello' });
     });
 

@@ -106,7 +106,7 @@ export class LWWBranchManager implements BranchManager {
   /**
    * Merges a branch back into its source document.
    *
-   * LWW merge strategy:
+   * LWW merge algorithm:
    * 1. Get all ops changes made on the branch since it was created
    * 2. Apply those changes to the source document
    * 3. Timestamps automatically resolve any conflicts (later wins)

@@ -172,10 +172,10 @@ One function call. The item now sorts between those two positions.
 
 ## In a Patches App
 
-Using [PatchesDoc](PatchesDoc.md) with the [LWW strategy](last-write-wins.md):
+Using [PatchesDoc](PatchesDoc.md) with the [LWW algorithm](last-write-wins.md):
 
 ```typescript
-const doc = await patches.openDoc<TodoList>('my-todos', { strategy: 'lww' });
+const doc = await patches.openDoc<TodoList>('my-todos', { algorithm: 'lww' });
 
 // Add a todo
 doc.change(state => {
@@ -403,6 +403,6 @@ One function. Tell it what's before and after. Get a string that goes between.
 
 ## Related Documentation
 
-- [Last-Write-Wins](last-write-wins.md): The sync strategy that needs fractional indexing for ordered lists
+- [Last-Write-Wins](last-write-wins.md): The sync algorithm that needs fractional indexing for ordered lists
 - [PatchesDoc](PatchesDoc.md): How to make changes to documents
 - [JSON Patch](json-patch.md): The underlying patch operations

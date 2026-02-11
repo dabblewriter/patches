@@ -12,7 +12,7 @@ Why separate algorithms from classes? Because testability isn't optional. Pure f
 - [Shared Algorithms](#shared-algorithms)
 - [LWW Algorithms](#lww-algorithms)
 - [Server Algorithms](#server-algorithms)
-- [The Strategy Layer](#the-strategy-layer)
+- [The Algorithm Layer](#the-algorithm-layer)
 - [How It Fits Together](#how-it-fits-together)
 
 ## Architecture
@@ -22,12 +22,12 @@ The separation of concerns:
 | Layer             | Components                                           | Responsibility                  |
 | ----------------- | ---------------------------------------------------- | ------------------------------- |
 | **Orchestration** | `PatchesSync`, `PatchesDoc`, `OTServer`, `LWWServer` | Coordination and event handling |
-| **Strategy**      | `OTStrategy`, `LWWStrategy`                          | Algorithm-specific coordination |
-| **Algorithms**    | Pure functions in `src/algorithms/`                  | The actual OT/LWW logic         |
+| **Algorithm**     | `OTAlgorithm`, `LWWAlgorithm`                        | Algorithm-specific coordination |
+| **Pure Functions**| Pure functions in `src/algorithms/`                  | The actual OT/LWW logic         |
 | **Storage**       | `IndexedDBStore`, `InMemoryStore`, etc.              | Data persistence only           |
 | **Transport**     | WebSocket, WebRTC                                    | Message delivery                |
 
-Stores are intentionally "dumb" - they save and load data, nothing more. Strategies invoke algorithm functions and handle coordination. This keeps each layer focused and testable.
+Stores are intentionally "dumb" - they save and load data, nothing more. Algorithm implementations invoke pure algorithm functions and handle coordination. This keeps each layer focused and testable.
 
 ## Directory Structure
 
@@ -57,7 +57,7 @@ src/algorithms/
 
 ## Client Algorithms
 
-These handle client-side state management. Used by [PatchesDoc](PatchesDoc.md) and client strategies.
+These handle client-side state management. Used by [PatchesDoc](PatchesDoc.md) and client algorithm implementations.
 
 ### applyCommittedChanges
 
@@ -287,14 +287,14 @@ Server state reconstruction - loads the appropriate snapshot and applies changes
 
 Manages offline sync complexity: processing offline sessions, multi-batch uploads, and version creation for offline work. See [persist](persist.md) for offline support details.
 
-## The Strategy Layer
+## The Algorithm Layer
 
-Between orchestration classes and algorithm functions, **strategies** handle coordination:
+Between orchestration classes and pure algorithm functions, **algorithm implementations** handle coordination:
 
-- **`OTStrategy`**: Invokes OT algorithms like `rebaseChanges` and `applyCommittedChanges`
-- **`LWWStrategy`**: Invokes LWW algorithms and handles field consolidation
+- **`OTAlgorithm`**: Invokes OT algorithms like `rebaseChanges` and `applyCommittedChanges`
+- **`LWWAlgorithm`**: Invokes LWW algorithms and handles field consolidation
 
-Strategies work with their matching stores (`OTClientStore` or `LWWClientStore`) and call the right algorithms at the right time. Stores stay "dumb" (data in, data out). Strategies handle the smarts.
+Algorithm implementations work with their matching stores (`OTClientStore` or `LWWClientStore`) and call the right pure functions at the right time. Stores stay "dumb" (data in, data out). Algorithm implementations handle the smarts.
 
 ## How It Fits Together
 

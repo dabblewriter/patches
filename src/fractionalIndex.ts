@@ -1,6 +1,6 @@
 /**
  * Utilities for fractional indexing to sort documents by a string field instead of putting them in an array. This is
- * for use with the LastWriteWins strategy provided by syncable.
+ * for use with the LastWriteWins algorithm provided by syncable.
  */
 const digits = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 const INTEGER_ZERO = 'a0';

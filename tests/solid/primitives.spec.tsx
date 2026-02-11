@@ -112,7 +112,7 @@ describe('Solid Primitives', () => {
           patch.replace(root.title!, 'Hello World');
         });
 
-        // Wait for async strategy handler
+        // Wait for async algorithm handler
         await tick();
 
         // Now check state
@@ -155,7 +155,7 @@ describe('Solid Primitives', () => {
           patch.replace(root.count!, 42);
         });
 
-        // Wait for async strategy handler
+        // Wait for async algorithm handler
         await tick();
 
         expect(data()?.count).toBe(42);

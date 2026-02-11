@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Patches is a TypeScript library for building real-time collaborative applications. It supports two sync strategies:
+Patches is a TypeScript library for building real-time collaborative applications. It supports two sync algorithms:
 - **OT (Operational Transformation)**: Centralized server model with change rebasing for collaborative editing
 - **LWW (Last-Write-Wins)**: Simpler timestamp-based resolution for settings, preferences, and status data
 
@@ -52,9 +52,9 @@ The codebase is divided into client-side and server-side components:
 3. **PatchesSync**: Sync coordinator between client and server
    - Orchestrates sync operations using algorithm functions
    - Handles connection management and batching
-4. **SyncStrategy**: Algorithm-specific sync logic
-   - `OTStrategy`: OT-specific operations (rebasing, change tracking)
-   - `LWWStrategy`: LWW-specific operations (field consolidation, timestamp handling)
+4. **ClientAlgorithm**: Algorithm-specific sync logic
+   - `OTAlgorithm`: OT-specific operations (rebasing, change tracking)
+   - `LWWAlgorithm`: LWW-specific operations (field consolidation, timestamp handling)
 5. **PatchesStore**: Client-side storage interface hierarchy
    ```
    PatchesStore (base - 9 methods: track, list, get, save, delete, close)
@@ -99,7 +99,7 @@ Algorithms are organized under `src/algorithms/` with symmetric `ot/` and `lww/`
    - `consolidateOps`: Consolidates LWW operations
    - `mergeServerWithLocal`: Merges server state with local state
 
-**Note**: Strategies invoke algorithm functions; stores are "dumb storage" that persist data without algorithm logic.
+**Note**: ClientAlgorithm implementations invoke algorithm functions; stores are "dumb storage" that persist data without algorithm logic.
 
 ### Networking & Persistence
 
@@ -107,7 +107,7 @@ Algorithms are organized under `src/algorithms/` with symmetric `ot/` and `lww/`
    - **WebSocketTransport**: Server-mediated communication
    - **WebRTCTransport**: Peer-to-peer communication
 
-### Sync Strategy Implementation
+### Sync Algorithm Implementation
 
 **OT (Operational Transformation)**:
 - Uses JSON Patch operations (RFC 6902) with custom OT transformations
@@ -121,13 +121,13 @@ Algorithms are organized under `src/algorithms/` with symmetric `ot/` and `lww/`
 - Server compares timestamps: `incoming.ts >= existing.ts` → incoming wins
 - Best for: settings, preferences, status data where last write should win
 
-Both strategies use pure algorithm functions, making them easy to test and reuse.
+Both algorithms use pure algorithm functions, making them easy to test and reuse.
 
 ## Code Structure
 
 - `/src/client`: Client-side implementation
   - Stores: `InMemoryStore`, `IndexedDBStore`, `LWWInMemoryStore`, `LWWIndexedDBStore`
-  - Strategies: `OTStrategy`, `LWWStrategy`
+  - Algorithms: `OTAlgorithm`, `LWWAlgorithm`
   - Store interfaces: `PatchesStore`, `OTClientStore`, `LWWClientStore`
 - `/src/server`: Server-side implementation
   - Servers: `OTServer`, `LWWServer`

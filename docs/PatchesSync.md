@@ -21,10 +21,10 @@
 - **WebSocket Connection**: Connects to your server, handles reconnection on failures
 - **Document Subscriptions**: Subscribes to tracked documents so you receive server updates
 - **Outgoing Changes**: Batches and sends local changes to the server
-- **Incoming Changes**: Receives server changes and applies them locally via the appropriate [strategy](algorithms.md)
+- **Incoming Changes**: Receives server changes and applies them locally via the appropriate [algorithm](algorithms.md)
 - **State Tracking**: Reports online status, connection status, and sync status
 
-The key insight: `PatchesSync` is strategy-agnostic. It works with both [OT (Operational Transformation)](operational-transformation.md) and [LWW (Last-Write-Wins)](last-write-wins.md) documents. It delegates the actual sync logic to strategy objects that know how to handle each type.
+The key insight: `PatchesSync` is algorithm-agnostic. It works with both [OT (Operational Transformation)](operational-transformation.md) and [LWW (Last-Write-Wins)](last-write-wins.md) documents. It delegates the actual sync logic to algorithm objects that know how to handle each type.
 
 ## How It Fits Together
 
@@ -33,10 +33,10 @@ Here's the architecture:
 - **[Patches](Patches.md)**: The conductor - manages documents and provides your app's API
 - **[PatchesDoc](PatchesDoc.md)**: Your document interface - handles local state and changes
 - **PatchesSync**: The sync coordinator - manages server communication
-- **[Strategies](algorithms.md)**: Algorithm-specific sync logic (OT or LWW)
+- **[Algorithms](algorithms.md)**: Algorithm-specific sync logic (OT or LWW)
 - **[Stores](persist.md)**: Persistence - saves documents and pending changes locally
 
-`PatchesSync` listens to events from `Patches` (document changes, tracking changes) and coordinates with the server. When server changes arrive, it delegates to the appropriate strategy to apply them.
+`PatchesSync` listens to events from `Patches` (document changes, tracking changes) and coordinates with the server. When server changes arrive, it delegates to the appropriate algorithm to apply them.
 
 ## Setting Up
 
@@ -98,8 +98,8 @@ Here's what happens:
 When the server sends changes (from other users or confirmations):
 
 1. `PatchesSync` receives the changes via WebSocket
-2. It gets the appropriate strategy for the document (OT or LWW)
-3. The strategy applies the changes, handling any rebasing or conflict resolution
+2. It gets the appropriate algorithm for the document (OT or LWW)
+3. The algorithm applies the changes, handling any rebasing or conflict resolution
 4. The store is updated with committed changes
 5. Any open [PatchesDoc](PatchesDoc.md) instances get the new state
 6. Your UI updates via the document's event system
@@ -111,13 +111,13 @@ When you and another user edit concurrently:
 **With OT:**
 
 1. Server sends changes your pending changes didn't know about
-2. The OT strategy uses [rebaseChanges](algorithms.md) to transform your pending changes
+2. The OT algorithm uses [rebaseChanges](algorithms.md) to transform your pending changes
 3. Your rebased changes get sent to the server
 
 **With LWW:**
 
 1. Server sends changes with timestamps
-2. The LWW strategy compares timestamps - higher timestamp wins
+2. The LWW algorithm compares timestamps - higher timestamp wins
 3. Your local state updates to reflect the resolution
 
 See [Operational Transformation](operational-transformation.md) or [Last-Write-Wins](last-write-wins.md) for details on each approach.
@@ -410,7 +410,7 @@ When a document is deleted locally while offline, `PatchesSync` creates a tombst
 - [Patches](Patches.md) - The main client coordinator
 - [PatchesDoc](PatchesDoc.md) - Document interface
 - [Persistence](persist.md) - Storage options
-- [Algorithms](algorithms.md) - Sync algorithms and strategies
+- [Algorithms](algorithms.md) - Sync algorithm implementations and pure functions
 - [Networking Overview](net.md) - Network layer architecture
 - [WebSocket Transport](websocket.md) - WebSocket implementation details
 - [JSON-RPC Protocol](json-rpc.md) - Wire protocol

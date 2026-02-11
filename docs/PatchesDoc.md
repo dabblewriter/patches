@@ -115,12 +115,12 @@ doc.change(draft => {
 });
 ```
 
-**Important**: The `change()` method emits JSON Patch ops via `onChange` - it does NOT apply them locally. The strategy layer packages these ops into Change objects, persists them, and calls back to update the doc's state.
+**Important**: The `change()` method emits JSON Patch ops via `onChange` - it does NOT apply them locally. The algorithm layer packages these ops into Change objects, persists them, and calls back to update the doc's state.
 
 This design means:
 
 1. Changes are captured as pure JSON Patch operations
-2. The strategy decides how to package and persist them (differently for OT vs LWW)
+2. The algorithm decides how to package and persist them (differently for OT vs LWW)
 3. State updates happen through a consistent path
 
 The sync layer ([`PatchesSync`](PatchesSync.md)) handles getting changes to the server and dealing with conflicts.
@@ -232,17 +232,17 @@ This is particularly useful for reactive frameworks that need the current value 
 
 ### OTDoc (Operational Transformation)
 
-Used with OT sync strategy. Tracks a separate committed state and pending changes array. When server changes arrive, pending changes get rebased using the [OT algorithms](algorithms.md).
+Used with the OT sync algorithm. Tracks a separate committed state and pending changes array. When server changes arrive, pending changes get rebased using the [OT algorithms](algorithms.md).
 
 Best for: Collaborative editing where concurrent changes need intelligent merging.
 
 ### LWWDoc (Last-Write-Wins)
 
-Used with LWW sync strategy. Simpler model - timestamps determine which value wins when there's a conflict.
+Used with the LWW sync algorithm. Simpler model - timestamps determine which value wins when there's a conflict.
 
 Best for: Settings, preferences, status data where the latest write should simply win.
 
-See [Operational Transformation](operational-transformation.md) and [Last-Write-Wins](last-write-wins.md) for the concepts, or [persist.md](persist.md) for guidance on which strategy to use.
+See [Operational Transformation](operational-transformation.md) and [Last-Write-Wins](last-write-wins.md) for the concepts, or [persist.md](persist.md) for guidance on which algorithm to use.
 
 ## Example Usage
 

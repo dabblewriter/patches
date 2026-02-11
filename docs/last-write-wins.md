@@ -37,8 +37,8 @@ See [Operational Transformation](operational-transformation.md) for more on when
 
 ### Real-World Examples
 
-| Use Case                   | Strategy | Why                                                           |
-| -------------------------- | -------- | ------------------------------------------------------------- |
+| Use Case                   | Algorithm | Why                                                           |
+| -------------------------- | --------- | ------------------------------------------------------------- |
 | Design tools (Figma-style) | LWW      | Users drag different objects; last position wins              |
 | Task managers              | LWW      | Users update different task fields; conflicts are rare        |
 | User settings/preferences  | LWW      | Single user editing; timestamps prevent stale writes          |
@@ -142,12 +142,12 @@ The tradeoff is that you lose one person's edit when conflicts happen. For most 
 
 ```
 Patches (coordinator)
-    └── LWWStrategy (algorithm orchestration)
+    └── LWWAlgorithm (algorithm orchestration)
             ├── LWWClientStore (persistence)
             └── LWWDoc (document state)
 ```
 
-**LWWStrategy** owns the algorithm logic:
+**LWWAlgorithm** owns the algorithm logic:
 
 - Adds timestamps to operations
 - Consolidates pending ops using the `consolidateOps` algorithm
@@ -204,11 +204,11 @@ doc.change((patch, path) => {
 **What happens:**
 
 1. `BaseDoc.change()` captures the op via proxy
-2. `LWWStrategy.handleDocChange()` receives the op via `onChange` signal
-3. Strategy adds timestamp: `{ op: 'replace', path: '/user/displayName', value: 'Alice Smith', ts: 1738761234567 }`
-4. Strategy calls `consolidateOps` to merge with any existing pending ops for that path
-5. Strategy saves consolidated ops via `store.savePendingOps()`
-6. Strategy creates a Change and calls `doc.applyChanges()` to update local state
+2. `LWWAlgorithm.handleDocChange()` receives the op via `onChange` signal
+3. Algorithm adds timestamp: `{ op: 'replace', path: '/user/displayName', value: 'Alice Smith', ts: 1738761234567 }`
+4. Algorithm calls `consolidateOps` to merge with any existing pending ops for that path
+5. Algorithm saves consolidated ops via `store.savePendingOps()`
+6. Algorithm creates a Change and calls `doc.applyChanges()` to update local state
 7. Doc emits `onUpdate` for UI updates
 
 ### 2. Client Sends to Server
@@ -216,7 +216,7 @@ doc.change((patch, path) => {
 When `PatchesSync` is ready to send:
 
 ```typescript
-// LWWStrategy.getPendingToSend() builds a change from pending ops
+// LWWAlgorithm.getPendingToSend() builds a change from pending ops
 const change = {
   id: 'abc123',
   ops: [{ op: 'replace', path: '/user/displayName', value: 'Alice Smith', ts: 1738761234567 }],
@@ -269,7 +269,7 @@ The response contains:
 ### 5. Client Applies Response
 
 ```typescript
-// LWWStrategy.applyServerChanges()
+// LWWAlgorithm.applyServerChanges()
 await store.applyServerChanges(docId, serverChanges);
 
 // Compute merged changes using the algorithm
@@ -293,7 +293,7 @@ Delta ops get applied to server values. Non-delta pending ops stay pending (they
 
 ```typescript
 // After successful server response
-await strategy.confirmSent(docId, changes);
+await algorithm.confirmSent(docId, changes);
 // This clears sendingChange - those ops are now committed
 ```
 
@@ -304,12 +304,12 @@ The cycle is complete. The client's state reflects:
 
 ## The Key Players
 
-### LWWStrategy
+### LWWAlgorithm
 
 The client-side coordinator. Owns the algorithm logic.
 
 ```typescript
-class LWWStrategy implements ClientStrategy {
+class LWWAlgorithm implements ClientAlgorithm {
   readonly name = 'lww';
   readonly store: LWWClientStore;
 
@@ -742,7 +742,7 @@ Use this when you want named versions users can browse, not just automatic snaps
 
 ## Using LWW and OT Together
 
-The real power comes from combining strategies in the same app.
+The real power comes from combining algorithms in the same app.
 
 ### Same App, Different Documents
 
@@ -759,13 +759,13 @@ import { LWWInMemoryStore } from '@dabble/patches/client';
 // OT for documents
 const patches = new Patches({
   store: new InMemoryStore(),
-  strategy: 'ot',
+  algorithm: 'ot',
 });
 
 // LWW for settings
 const settingsPatches = new Patches({
   store: new LWWInMemoryStore(),
-  strategy: 'lww',
+  algorithm: 'lww',
 });
 
 // Open OT document for collaborative editing
@@ -777,17 +777,17 @@ const settingsDoc = await settingsPatches.openDoc('settings-user-456');
 
 ### When to Split
 
-Split into separate sync strategies when:
+Split into separate sync algorithms when:
 
 - Different parts of your data have fundamentally different conflict semantics
 - Settings should never block content sync (or vice versa)
 - You want simpler debugging by isolating sync behavior
 
-Keep in one strategy when:
+Keep in one algorithm when:
 
 - Data is closely coupled and should sync together
 - You want transactional consistency across related fields
-- Complexity of multiple sync strategies isn't worth it
+- Complexity of multiple sync algorithms isn't worth it
 
 ## Why LWW Works
 

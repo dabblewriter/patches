@@ -4,10 +4,10 @@ import { signal } from '../event-signal.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
 /**
- * IndexedDB store providing common database operations for all sync strategies.
+ * IndexedDB store providing common database operations for all sync algorithms.
  *
  * Can be used as a standalone store or as a shared database connection
- * for multiple strategy-specific stores (OT, LWW).
+ * for multiple algorithm-specific stores (OT, LWW).
  *
  * Provides:
  * - Database lifecycle management (open, close, delete)
@@ -15,7 +15,7 @@ import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
  * - Document tracking (listDocs, trackDocs, untrackDocs)
  * - Basic document operations (deleteDoc, confirmDeleteDoc)
  * - Revision tracking
- * - Extensibility via onUpgrade signal for strategy-specific stores
+ * - Extensibility via onUpgrade signal for algorithm-specific stores
  */
 export class IndexedDBStore implements PatchesStore {
   private static readonly DB_VERSION = 1;
@@ -25,7 +25,7 @@ export class IndexedDBStore implements PatchesStore {
   protected dbPromise: Deferred<IDBDatabase>;
 
   /**
-   * Signal emitted during database upgrade, allowing strategy-specific stores
+   * Signal emitted during database upgrade, allowing algorithm-specific stores
    * to create their object stores.
    */
   readonly onUpgrade = signal<(db: IDBDatabase, oldVersion: number, transaction: IDBTransaction) => void>();
@@ -45,7 +45,7 @@ export class IndexedDBStore implements PatchesStore {
   }
 
   /**
-   * Creates shared object stores used by all sync strategies.
+   * Creates shared object stores used by all sync algorithms.
    */
   protected createSharedStores(db: IDBDatabase, _oldVersion: number, _transaction: IDBTransaction): void {
     // Create docs store
@@ -76,7 +76,7 @@ export class IndexedDBStore implements PatchesStore {
       const transaction = (event.target as IDBOpenDBRequest).transaction!;
       const oldVersion = event.oldVersion;
 
-      // Emit to all subscribers (base + strategy-specific stores)
+      // Emit to all subscribers (base + algorithm-specific stores)
       this.onUpgrade.emit(db, oldVersion, transaction);
     };
   }
@@ -135,33 +135,33 @@ export class IndexedDBStore implements PatchesStore {
     return [tx, ...stores];
   }
 
-  // ─── Strategy-Specific Methods ───────────────────────────────────────────
-  // These are implemented by strategy-specific stores (OT, LWW)
+  // ─── Algorithm-Specific Methods ──────────────────────────────────────────
+  // These are implemented by algorithm-specific stores (OT, LWW)
 
   /**
    * Retrieves the current document snapshot from storage.
-   * Implementation varies by sync strategy (OT vs LWW).
-   * This base implementation throws an error - override in strategy-specific stores.
+   * Implementation varies by sync algorithm (OT vs LWW).
+   * This base implementation throws an error - override in algorithm-specific stores.
    */
   async getDoc(_docId: string): Promise<PatchesSnapshot | undefined> {
-    throw new Error('getDoc must be implemented by strategy-specific store');
+    throw new Error('getDoc must be implemented by algorithm-specific store');
   }
 
   /**
    * Saves the current document state to persistent storage.
-   * Implementation varies by sync strategy.
-   * This base implementation throws an error - override in strategy-specific stores.
+   * Implementation varies by sync algorithm.
+   * This base implementation throws an error - override in algorithm-specific stores.
    */
   async saveDoc(_docId: string, _docState: PatchesState): Promise<void> {
-    throw new Error('saveDoc must be implemented by strategy-specific store');
+    throw new Error('saveDoc must be implemented by algorithm-specific store');
   }
 
   /**
    * Completely remove all data for this docId and mark it as deleted (tombstone).
-   * This base implementation throws an error - override in strategy-specific stores.
+   * This base implementation throws an error - override in algorithm-specific stores.
    */
   async deleteDoc(_docId: string): Promise<void> {
-    throw new Error('deleteDoc must be implemented by strategy-specific store');
+    throw new Error('deleteDoc must be implemented by algorithm-specific store');
   }
 
   /**
@@ -238,10 +238,10 @@ export class IndexedDBStore implements PatchesStore {
   /**
    * Untrack a document.
    * @param docIds - The IDs of the documents to untrack.
-   * This base implementation throws an error - override in strategy-specific stores.
+   * This base implementation throws an error - override in algorithm-specific stores.
    */
   async untrackDocs(_docIds: string[]): Promise<void> {
-    throw new Error('untrackDocs must be implemented by strategy-specific store');
+    throw new Error('untrackDocs must be implemented by algorithm-specific store');
   }
 
   /**

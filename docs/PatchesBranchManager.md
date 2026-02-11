@@ -7,7 +7,7 @@ Patches provides two implementations:
 - **`OTBranchManager`**: For documents using [Operational Transformation](operational-transformation.md)
 - **`LWWBranchManager`**: For documents using [Last-Write-Wins](last-write-wins.md) semantics
 
-Both implement the same `BranchManager` interface, so your application code works the same regardless of which sync strategy you use.
+Both implement the same `BranchManager` interface, so your application code works the same regardless of which sync algorithm you use.
 
 > **Note**: `PatchesBranchManager` is a deprecated alias for `OTBranchManager`. Update your imports.
 
@@ -175,7 +175,7 @@ This updates the branch status but doesn't delete anything. Valid statuses: `'cl
 
 ## OT vs LWW Branching
 
-The two branch managers handle merging differently based on their underlying sync strategy.
+The two branch managers handle merging differently based on their underlying sync algorithm.
 
 ### OT Branch Merging
 
@@ -227,7 +227,7 @@ interface BranchingStoreBackend {
 }
 ```
 
-Combine this with `OTStoreBackend` or `LWWStoreBackend` depending on your sync strategy.
+Combine this with `OTStoreBackend` or `LWWStoreBackend` depending on your sync algorithm.
 
 ## Real-World Example
 

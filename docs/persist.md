@@ -21,7 +21,7 @@ PatchesStore (base interface - 9 methods)
 - **OT** tracks a history of changes that get rebased against server changes. It needs to store pending changes and apply server changes atomically.
 - **LWW** tracks individual field values with timestamps. It needs path-based storage and a "sending change" lifecycle for idempotent retries.
 
-You don't need to understand these internals. Just pick the right store for your sync strategy.
+You don't need to understand these internals. Just pick the right store for your sync algorithm.
 
 ## Available Stores
 
@@ -153,10 +153,10 @@ snapshot -> apply committed ops -> apply sending change -> apply pending ops -> 
 
 ## Stores Are "Dumb"
 
-Stores just save and load data. The smart stuff - rebasing changes against server updates, consolidating field edits, timestamp comparison - happens in **strategies**.
+Stores just save and load data. The smart stuff - rebasing changes against server updates, consolidating field edits, timestamp comparison - happens in **algorithm implementations**.
 
-- `OTStrategy` works with `OTClientStore` implementations
-- `LWWStrategy` works with `LWWClientStore` implementations
+- `OTAlgorithm` works with `OTClientStore` implementations
+- `LWWAlgorithm` works with `LWWClientStore` implementations
 
 See [algorithms.md](algorithms.md) for the pure functions that handle sync logic.
 
@@ -198,8 +198,8 @@ This isn't just a nice-to-have. Users lose trust in apps that lose their work. L
 
 ## When to Use OT vs LWW
 
-| Use Case                   | Strategy | Reason                                          |
-| -------------------------- | -------- | ----------------------------------------------- |
+| Use Case                   | Algorithm | Reason                                          |
+| -------------------------- | --------- | ----------------------------------------------- |
 | Collaborative text editing | OT       | Concurrent character-level changes need merging |
 | Rich document editing      | OT       | Multiple users editing same content             |
 | User preferences           | LWW      | Last setting wins, no merging needed            |

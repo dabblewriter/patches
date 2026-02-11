@@ -480,11 +480,15 @@ export class PatchesSync {
     if (!existingIds.length) return;
 
     existingIds.forEach(id => this.trackedDocs.delete(id));
-    if (this.state.connected) {
+
+    // Filter out docs that weren't actually subscribed on the server
+    const unsubscribeIds = this.options?.subscribeFilter?.(existingIds) || existingIds;
+
+    if (this.state.connected && unsubscribeIds.length) {
       try {
-        await this.ws.unsubscribe(existingIds);
+        await this.ws.unsubscribe(unsubscribeIds);
       } catch (err) {
-        console.warn(`Failed to unsubscribe docs: ${existingIds.join(', ')}`, err);
+        console.warn(`Failed to unsubscribe docs: ${unsubscribeIds.join(', ')}`, err);
       }
     }
   }

@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { InMemoryStore } from '../../src/client/InMemoryStore';
+import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
 import type { Change, PatchesState } from '../../src/types';
 
 // Mock the dependencies
 vi.mock('../../src/algorithms/ot/shared/applyChanges');
 
-describe('InMemoryStore', () => {
-  let store: InMemoryStore;
+describe('OTInMemoryStore', () => {
+  let store: OTInMemoryStore;
 
   const createChange = (id: string, rev: number, baseRev = rev - 1): Change => ({
     id,
@@ -24,7 +24,7 @@ describe('InMemoryStore', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    store = new InMemoryStore();
+    store = new OTInMemoryStore();
 
     // Mock applyChanges
     const { applyChanges } = await import('../../src/algorithms/ot/shared/applyChanges');

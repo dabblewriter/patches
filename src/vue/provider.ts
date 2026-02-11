@@ -28,11 +28,11 @@ export interface PatchesContext {
  * @example
  * ```typescript
  * import { createApp } from 'vue'
- * import { Patches, InMemoryStore } from '@dabble/patches/client'
+ * import { Patches, OTInMemoryStore } from '@dabble/patches/client'
  * import { PatchesSync } from '@dabble/patches/net'
  * import { providePatchesContext } from '@dabble/patches/vue'
  *
- * const patches = new Patches({ store: new InMemoryStore() })
+ * const patches = new Patches({ store: new OTInMemoryStore() })
  * const sync = new PatchesSync(patches, 'wss://your-server.com')
  *
  * const app = createApp(App)

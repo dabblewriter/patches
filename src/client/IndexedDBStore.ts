@@ -1,51 +1,69 @@
 import type { PatchesSnapshot, PatchesState } from '../types.js';
 import { deferred, type Deferred } from '../utils/deferred.js';
+import { signal } from '../event-signal.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
 /**
- * Abstract base class for IndexedDB-based stores implementing PatchesStore.
+ * IndexedDB store providing common database operations for all sync strategies.
  *
- * Provides common functionality for IndexedDB operations:
+ * Can be used as a standalone store or as a shared database connection
+ * for multiple strategy-specific stores (OT, LWW).
+ *
+ * Provides:
  * - Database lifecycle management (open, close, delete)
  * - Transaction helpers
  * - Document tracking (listDocs, trackDocs, untrackDocs)
  * - Basic document operations (deleteDoc, confirmDeleteDoc)
  * - Revision tracking
- *
- * Subclasses must implement strategy-specific methods for document
- * state management and change handling.
+ * - Extensibility via onUpgrade signal for strategy-specific stores
  */
-export abstract class IndexedDBStore implements PatchesStore {
+export class IndexedDBStore implements PatchesStore {
+  private static readonly DB_VERSION = 1;
+
   protected db: IDBDatabase | null = null;
   protected dbName?: string;
   protected dbPromise: Deferred<IDBDatabase>;
 
+  /**
+   * Signal emitted during database upgrade, allowing strategy-specific stores
+   * to create their object stores.
+   */
+  readonly onUpgrade = signal<(db: IDBDatabase, oldVersion: number, transaction: IDBTransaction) => void>();
+
   constructor(dbName?: string) {
     this.dbName = dbName;
     this.dbPromise = deferred<IDBDatabase>();
+
+    // Subscribe to own upgrade signal to create shared stores
+    this.onUpgrade((db, oldVersion, transaction) => {
+      this.createSharedStores(db, oldVersion, transaction);
+    });
+
     if (this.dbName) {
       this.initDB();
     }
   }
 
   /**
-   * Returns the database version for this store.
-   * Subclasses should return their specific version number.
+   * Creates shared object stores used by all sync strategies.
    */
-  protected abstract getDBVersion(): number;
+  protected createSharedStores(db: IDBDatabase, _oldVersion: number, _transaction: IDBTransaction): void {
+    // Create docs store
+    if (!db.objectStoreNames.contains('docs')) {
+      const docsStore = db.createObjectStore('docs', { keyPath: 'docId' });
+      // Create index on algorithm field for efficient filtering
+      docsStore.createIndex('algorithm', 'algorithm', { unique: false });
+    }
 
-  /**
-   * Hook for subclasses to create strategy-specific object stores.
-   * Called during database upgrade.
-   *
-   * @param db - The IDBDatabase instance
-   * @param oldVersion - The previous database version
-   */
-  protected abstract onUpgrade(db: IDBDatabase, oldVersion: number): void;
+    // Create snapshots store
+    if (!db.objectStoreNames.contains('snapshots')) {
+      db.createObjectStore('snapshots', { keyPath: 'docId' });
+    }
+  }
 
   protected async initDB() {
     if (!this.dbName) return;
-    const request = indexedDB.open(this.dbName, this.getDBVersion());
+    const request = indexedDB.open(this.dbName, IndexedDBStore.DB_VERSION);
 
     request.onerror = () => this.dbPromise.reject(request.error);
     request.onsuccess = () => {
@@ -55,18 +73,11 @@ export abstract class IndexedDBStore implements PatchesStore {
 
     request.onupgradeneeded = event => {
       const db = (event.target as IDBOpenDBRequest).result;
+      const transaction = (event.target as IDBOpenDBRequest).transaction!;
       const oldVersion = event.oldVersion;
 
-      // Create base stores used by all strategies
-      if (!db.objectStoreNames.contains('snapshots')) {
-        db.createObjectStore('snapshots', { keyPath: 'docId' });
-      }
-      if (!db.objectStoreNames.contains('docs')) {
-        db.createObjectStore('docs', { keyPath: 'docId' });
-      }
-
-      // Allow subclasses to create their specific stores
-      this.onUpgrade(db, oldVersion);
+      // Emit to all subscribers (base + strategy-specific stores)
+      this.onUpgrade.emit(db, oldVersion, transaction);
     };
   }
 
@@ -114,7 +125,7 @@ export abstract class IndexedDBStore implements PatchesStore {
     });
   }
 
-  protected async transaction(
+  async transaction(
     storeNames: string[],
     mode: IDBTransactionMode
   ): Promise<[IDBTransactionWrapper, ...IDBStoreWrapper[]]> {
@@ -124,26 +135,34 @@ export abstract class IndexedDBStore implements PatchesStore {
     return [tx, ...stores];
   }
 
-  // ─── Abstract Methods (Strategy-Specific) ─────────────────────────────────
+  // ─── Strategy-Specific Methods ───────────────────────────────────────────
+  // These are implemented by strategy-specific stores (OT, LWW)
 
   /**
    * Retrieves the current document snapshot from storage.
    * Implementation varies by sync strategy (OT vs LWW).
+   * This base implementation throws an error - override in strategy-specific stores.
    */
-  abstract getDoc(docId: string): Promise<PatchesSnapshot | undefined>;
+  async getDoc(_docId: string): Promise<PatchesSnapshot | undefined> {
+    throw new Error('getDoc must be implemented by strategy-specific store');
+  }
 
   /**
    * Saves the current document state to persistent storage.
    * Implementation varies by sync strategy.
+   * This base implementation throws an error - override in strategy-specific stores.
    */
-  abstract saveDoc(docId: string, docState: PatchesState): Promise<void>;
-
-  // ─── Common Methods ───────────────────────────────────────────────────────
+  async saveDoc(_docId: string, _docState: PatchesState): Promise<void> {
+    throw new Error('saveDoc must be implemented by strategy-specific store');
+  }
 
   /**
    * Completely remove all data for this docId and mark it as deleted (tombstone).
+   * This base implementation throws an error - override in strategy-specific stores.
    */
-  abstract deleteDoc(docId: string): Promise<void>;
+  async deleteDoc(_docId: string): Promise<void> {
+    throw new Error('deleteDoc must be implemented by strategy-specific store');
+  }
 
   /**
    * Confirm the deletion of a document.
@@ -158,33 +177,58 @@ export abstract class IndexedDBStore implements PatchesStore {
   /**
    * List all documents in the store.
    * @param includeDeleted - Whether to include deleted documents.
+   * @param algorithm - Optional algorithm filter ('ot' or 'lww'). If provided, uses index for efficient filtering.
    * @returns The list of documents.
    */
-  async listDocs(includeDeleted = false): Promise<TrackedDoc[]> {
+  async listDocs(includeDeleted = false, algorithm?: 'ot' | 'lww'): Promise<TrackedDoc[]> {
     const [tx, docsStore] = await this.transaction(['docs'], 'readonly');
-    const allDocs = await docsStore.getAll<TrackedDoc>();
+
+    let docs: TrackedDoc[];
+
+    if (algorithm === 'lww') {
+      // LWW: only get docs explicitly marked as LWW
+      docs = await docsStore.getAllByIndex<TrackedDoc>('algorithm', 'lww');
+    } else if (algorithm === 'ot') {
+      // OT: get both OT docs AND docs with no algorithm (backward compatibility)
+      const otDocs = await docsStore.getAllByIndex<TrackedDoc>('algorithm', 'ot');
+      const allDocs = await docsStore.getAll<TrackedDoc>();
+      const noAlgoDocs = allDocs.filter(doc => !doc.algorithm);
+      docs = [...otDocs, ...noAlgoDocs];
+    } else {
+      // No filter - get all docs
+      docs = await docsStore.getAll<TrackedDoc>();
+    }
+
     await tx.complete();
-    return includeDeleted ? allDocs : allDocs.filter(doc => !doc.deleted);
+    return includeDeleted ? docs : docs.filter(doc => !doc.deleted);
   }
 
   /**
    * Track a document.
    * @param docIds - The IDs of the documents to track.
+   * @param algorithm - The algorithm to use for this document.
    */
-  async trackDocs(docIds: string[]): Promise<void> {
+  async trackDocs(docIds: string[], algorithm?: 'ot' | 'lww'): Promise<void> {
     const [tx, docsStore] = await this.transaction(['docs'], 'readwrite');
     await Promise.all(
       docIds.map(async docId => {
         const existing = await docsStore.get<TrackedDoc>(docId);
         if (existing) {
-          // If exists but deleted, undelete it
+          // If exists but deleted, undelete it and update algorithm if provided
           if (existing.deleted) {
-            await docsStore.put({ ...existing, deleted: undefined });
+            await docsStore.put({
+              ...existing,
+              deleted: undefined,
+              ...(algorithm && { algorithm }),
+            });
+          } else if (algorithm && existing.algorithm !== algorithm) {
+            // Update algorithm if provided and different
+            await docsStore.put({ ...existing, algorithm });
           }
           // Otherwise, it's already tracked and not deleted, do nothing
         } else {
           // If doesn't exist, add it
-          await docsStore.put({ docId, committedRev: 0 });
+          await docsStore.put({ docId, committedRev: 0, ...(algorithm && { algorithm }) });
         }
       })
     );
@@ -194,8 +238,11 @@ export abstract class IndexedDBStore implements PatchesStore {
   /**
    * Untrack a document.
    * @param docIds - The IDs of the documents to untrack.
+   * This base implementation throws an error - override in strategy-specific stores.
    */
-  abstract untrackDocs(docIds: string[]): Promise<void>;
+  async untrackDocs(_docIds: string[]): Promise<void> {
+    throw new Error('untrackDocs must be implemented by strategy-specific store');
+  }
 
   /**
    * Returns the last committed revision for a document.
@@ -246,6 +293,15 @@ export class IDBStoreWrapper {
   async getAll<T>(lower?: any, upper?: any, count?: number): Promise<T[]> {
     return new Promise((resolve, reject) => {
       const request = this.store.getAll(this.createRange(lower, upper), count);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async getAllByIndex<T>(indexName: string, query?: IDBValidKey | IDBKeyRange): Promise<T[]> {
+    return new Promise((resolve, reject) => {
+      const index = this.store.index(indexName);
+      const request = index.getAll(query);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });

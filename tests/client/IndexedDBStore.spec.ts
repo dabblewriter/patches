@@ -14,6 +14,14 @@ const createMockIDBStore = () => {
   return {
     get: vi.fn().mockImplementation((key: any) => Promise.resolve(data.get(JSON.stringify(key)))),
     getAll: vi.fn().mockImplementation(() => Promise.resolve(Array.from(data.values()))),
+    getAllByIndex: vi.fn().mockImplementation((indexName: string, query?: any) => {
+      // Simple mock that filters by algorithm field
+      const values = Array.from(data.values());
+      if (indexName === 'algorithm' && query) {
+        return Promise.resolve(values.filter((v: any) => v.algorithm === query));
+      }
+      return Promise.resolve(values);
+    }),
     put: vi.fn().mockImplementation((value: any) => {
       const key = value.docId || `${value.docId}-${value.rev}`;
       data.set(JSON.stringify(key), value);
@@ -112,8 +120,8 @@ describe('OTIndexedDBStore', () => {
     // Mock the transaction method to return our mocked stores
     store = new OTIndexedDBStore('test-db');
 
-    // Override the private transaction method
-    (store as any).transaction = vi.fn().mockImplementation((storeNames: string[]) => {
+    // Override methods on the internal db instance
+    (store as any).db.transaction = vi.fn().mockImplementation((storeNames: string[]) => {
       const tx = { complete: vi.fn().mockResolvedValue(undefined) };
       const stores = storeNames.map(name => {
         if (!mockStores.has(name)) {
@@ -123,6 +131,15 @@ describe('OTIndexedDBStore', () => {
       });
       return Promise.resolve([tx, ...stores]);
     });
+
+    // Mock other delegated methods
+    (store as any).db.close = vi.fn().mockResolvedValue(undefined);
+    (store as any).db.deleteDB = vi.fn().mockResolvedValue(undefined);
+    (store as any).db.setName = vi.fn();
+    (store as any).db.listDocs = vi.fn().mockResolvedValue([]);
+    (store as any).db.trackDocs = vi.fn().mockResolvedValue(undefined);
+    (store as any).db.confirmDeleteDoc = vi.fn().mockResolvedValue(undefined);
+    (store as any).db.getCommittedRev = vi.fn().mockResolvedValue(0);
   });
 
   describe('constructor and initialization', () => {
@@ -288,51 +305,52 @@ describe('OTIndexedDBStore', () => {
 
   describe('confirmDeleteDoc', () => {
     it('should permanently remove document', async () => {
+      // confirmDeleteDoc is delegated to db
+      (store as any).db.confirmDeleteDoc = vi.fn().mockResolvedValue(undefined);
+
       await store.confirmDeleteDoc('doc1');
 
-      const docsStore = mockStores.get('docs');
-      expect(docsStore?.delete).toHaveBeenCalledWith('doc1');
+      expect((store as any).db.confirmDeleteDoc).toHaveBeenCalledWith('doc1');
     });
   });
 
   describe('listDocs', () => {
     it('should return all non-deleted documents', async () => {
-      const docsStore = createMockIDBStore();
-      const docs = [
+      // listDocs is delegated to db
+      (store as any).db.listDocs = vi.fn().mockResolvedValue([
         { docId: 'doc1', committedRev: 5 },
-        { docId: 'doc2', committedRev: 3, deleted: true },
         { docId: 'doc3', committedRev: 1 },
-      ];
-      docsStore.getAll.mockResolvedValue(docs);
-      mockStores.set('docs', docsStore);
+      ]);
 
       const result = await store.listDocs();
 
       expect(result).toHaveLength(2);
       expect(result.map(d => d.docId)).toEqual(['doc1', 'doc3']);
+      expect((store as any).db.listDocs).toHaveBeenCalledWith(false, 'ot');
     });
 
     it('should include deleted documents when requested', async () => {
-      const docsStore = createMockIDBStore();
-      const docs = [
+      // listDocs is delegated to db
+      (store as any).db.listDocs = vi.fn().mockResolvedValue([
         { docId: 'doc1', committedRev: 5 },
         { docId: 'doc2', committedRev: 3, deleted: true },
-      ];
-      docsStore.getAll.mockResolvedValue(docs);
-      mockStores.set('docs', docsStore);
+      ]);
 
       const result = await store.listDocs(true);
 
       expect(result).toHaveLength(2);
+      expect((store as any).db.listDocs).toHaveBeenCalledWith(true, 'ot');
     });
   });
 
   describe('trackDocs', () => {
     it('should track new documents', async () => {
+      // trackDocs is delegated to db
+      (store as any).db.trackDocs = vi.fn().mockResolvedValue(undefined);
+
       await store.trackDocs(['doc1', 'doc2']);
 
-      const docsStore = mockStores.get('docs');
-      expect(docsStore?.put).toHaveBeenCalledTimes(2);
+      expect((store as any).db.trackDocs).toHaveBeenCalledWith(['doc1', 'doc2'], 'ot');
     });
   });
 
@@ -347,23 +365,73 @@ describe('OTIndexedDBStore', () => {
 
   describe('getCommittedRev', () => {
     it('should return committed revision from docs store', async () => {
-      const docsStore = createMockIDBStore();
-      docsStore.get.mockResolvedValue({ docId: 'doc1', committedRev: 4 });
-      mockStores.set('docs', docsStore);
+      // getCommittedRev is delegated to db
+      (store as any).db.getCommittedRev = vi.fn().mockResolvedValue(4);
 
       const result = await store.getCommittedRev('doc1');
 
       expect(result).toBe(4);
+      expect((store as any).db.getCommittedRev).toHaveBeenCalledWith('doc1');
     });
 
     it('should return 0 for non-existent document', async () => {
-      const docsStore = createMockIDBStore();
-      docsStore.get.mockResolvedValue(undefined);
-      mockStores.set('docs', docsStore);
+      // getCommittedRev is delegated to db
+      (store as any).db.getCommittedRev = vi.fn().mockResolvedValue(0);
 
       const result = await store.getCommittedRev('doc1');
 
       expect(result).toBe(0);
+      expect((store as any).db.getCommittedRev).toHaveBeenCalledWith('doc1');
+    });
+  });
+
+  describe('Shared Database Integration', () => {
+    it('should allow OT and LWW stores to use the same IndexedDBStore', async () => {
+      const { IndexedDBStore } = await import('../../src/client/IndexedDBStore.js');
+      const { LWWIndexedDBStore } = await import('../../src/client/LWWIndexedDBStore.js');
+
+      const baseStore = new IndexedDBStore('test-db');
+      const otStore = new OTIndexedDBStore(baseStore);
+      const lwwStore = new LWWIndexedDBStore(baseStore);
+
+      // Both stores should be created successfully without errors
+      expect(otStore).toBeDefined();
+      expect(lwwStore).toBeDefined();
+    });
+
+    it('should track OT documents with algorithm field', async () => {
+      await store.trackDocs(['doc1']);
+
+      // trackDocs is delegated to db, so check the mock on db
+      expect((store as any).db.trackDocs).toHaveBeenCalledWith(['doc1'], 'ot');
+    });
+
+    it('should filter documents by algorithm in listDocs', async () => {
+      // listDocs is delegated to db with 'ot' parameter
+      (store as any).db.listDocs = vi.fn().mockResolvedValue([{ docId: 'doc1', committedRev: 0, algorithm: 'ot' }]);
+
+      const result = await store.listDocs(false);
+
+      // Should delegate to db with 'ot' algorithm
+      expect((store as any).db.listDocs).toHaveBeenCalledWith(false, 'ot');
+      expect(result).toHaveLength(1);
+    });
+
+    it('should set algorithm field when creating doc via savePendingChanges', async () => {
+      const docsStore = createMockIDBStore();
+      docsStore.get.mockResolvedValue(undefined); // Doc doesn't exist yet
+      mockStores.set('docs', docsStore);
+      mockStores.set('pendingChanges', createMockIDBStore());
+
+      const changes = [createChange('p1', 1)];
+      await store.savePendingChanges('doc1', changes);
+
+      // Should set algorithm field
+      expect(docsStore.put).toHaveBeenCalledWith({
+        docId: 'doc1',
+        committedRev: 0,
+        algorithm: 'ot',
+      });
     });
   });
 });

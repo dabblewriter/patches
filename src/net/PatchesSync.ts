@@ -2,8 +2,8 @@ import { isEqual } from '@dabble/delta';
 import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/ot/shared/changeBatching.js';
 import { BaseDoc } from '../client/BaseDoc.js';
 import { Patches } from '../client/Patches.js';
-import type { TrackedDoc } from '../client/PatchesStore.js';
-import type { AlgorithmName, ClientAlgorithm } from '../client/ClientAlgorithm.js';
+import type { AlgorithmName, TrackedDoc } from '../client/PatchesStore.js';
+import type { ClientAlgorithm } from '../client/ClientAlgorithm.js';
 import { signal } from '../event-signal.js';
 import type { Change, SyncingState } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
@@ -183,14 +183,25 @@ export class PatchesSync {
     this.updateState({ syncing: 'updating' });
 
     try {
-      // Get tracked docs from the default algorithm (primary store)
-      const defaultAlgorithm = this.patches.algorithms[this.patches.defaultAlgorithm];
-      if (!defaultAlgorithm) {
-        throw new Error('Default algorithm not found');
+      // Get tracked docs from ALL algorithms and populate docAlgorithms Map
+      const allTracked: TrackedDoc[] = [];
+
+      for (const algorithm of Object.values(this.patches.algorithms)) {
+        if (!algorithm) continue; // Skip undefined algorithms
+
+        const docs = await algorithm.listDocs(true); // Include deleted docs
+        allTracked.push(...docs);
+
+        // Populate docAlgorithms Map for algorithm determination during sync
+        for (const doc of docs) {
+          if (doc.algorithm) {
+            this.docAlgorithms.set(doc.docId, doc.algorithm);
+          }
+        }
       }
-      const tracked = await defaultAlgorithm.listDocs(true); // Include deleted docs
-      const activeDocs = tracked.filter(t => !t.deleted);
-      const deletedDocs = tracked.filter(t => t.deleted);
+
+      const activeDocs = allTracked.filter(t => !t.deleted);
+      const deletedDocs = allTracked.filter(t => t.deleted);
 
       const activeDocIds = activeDocs.map((t: TrackedDoc) => t.docId);
 
@@ -427,6 +438,21 @@ export class PatchesSync {
     if (!newIds.length) return;
 
     newIds.forEach(id => this.trackedDocs.add(id));
+
+    // Populate docAlgorithms Map by reading from stores
+    for (const docId of newIds) {
+      for (const algorithm of Object.values(this.patches.algorithms)) {
+        if (!algorithm) continue;
+
+        const docs = await algorithm.listDocs(false);
+        const tracked = docs.find(d => d.docId === docId);
+        if (tracked?.algorithm) {
+          this.docAlgorithms.set(docId, tracked.algorithm);
+          break;
+        }
+      }
+    }
+
     let subscribeIds = newIds;
 
     // If a subscribe filter is provided, filter out docs that are already tracked

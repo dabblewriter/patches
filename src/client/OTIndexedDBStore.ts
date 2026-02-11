@@ -5,7 +5,6 @@ import { IndexedDBStore } from './IndexedDBStore.js';
 import type { OTClientStore } from './OTClientStore.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
-const DB_VERSION = 1;
 const SNAPSHOT_INTERVAL = 200;
 
 interface Snapshot {
@@ -22,10 +21,10 @@ interface StoredChange extends Change {
  * IndexedDB store implementation for Operational Transformation (OT) sync strategy.
  *
  * Creates stores:
- * - snapshots<{ docId: string; rev: number; state: any }> (primary key: docId)
+ * - snapshots<{ docId: string; rev: number; state: any }> (primary key: docId) [shared]
  * - committedChanges<Change & { docId: string; }> (primary key: [docId, rev])
  * - pendingChanges<Change & { docId: string; }> (primary key: [docId, rev])
- * - docs<{ docId: string; committedRev: number; deleted?: boolean }> (primary key: docId)
+ * - docs<{ docId: string; committedRev: number; deleted?: boolean }> (primary key: docId) [shared]
  *
  * Under the hood, this class stores snapshots of the document only for committed state.
  * It does not update the committed state on *every* received committed change as this
@@ -36,19 +35,78 @@ interface StoredChange extends Change {
  * A snapshot will not be created if there are pending changes based on revisions older
  * than the 200th committed change until those pending changes are committed.
  */
-export class OTIndexedDBStore extends IndexedDBStore implements OTClientStore {
-  protected getDBVersion(): number {
-    return DB_VERSION;
+export class OTIndexedDBStore implements OTClientStore {
+  public db: IndexedDBStore;
+
+  constructor(db?: string | IndexedDBStore) {
+    this.db = !db || typeof db === 'string' ? new IndexedDBStore(db) : db;
+
+    // Subscribe to upgrade event to create OT-specific stores
+    this.db.onUpgrade((db, _oldVersion, _transaction) => {
+      this.createOTStores(db);
+    });
   }
 
-  protected onUpgrade(db: IDBDatabase, _oldVersion: number): void {
-    // Create OT-specific stores
+  /**
+   * Creates OT-specific object stores during database upgrade.
+   */
+  protected createOTStores(db: IDBDatabase): void {
     if (!db.objectStoreNames.contains('committedChanges')) {
       db.createObjectStore('committedChanges', { keyPath: ['docId', 'rev'] });
     }
     if (!db.objectStoreNames.contains('pendingChanges')) {
       db.createObjectStore('pendingChanges', { keyPath: ['docId', 'rev'] });
     }
+  }
+
+  /**
+   * List documents for the OT algorithm.
+   * Uses the algorithm index for efficient querying.
+   */
+  async listDocs(includeDeleted = false): Promise<TrackedDoc[]> {
+    return this.db.listDocs(includeDeleted, 'ot');
+  }
+
+  /**
+   * Track documents using the OT algorithm.
+   */
+  async trackDocs(docIds: string[]): Promise<void> {
+    return this.db.trackDocs(docIds, 'ot');
+  }
+
+  /**
+   * Close the database connection.
+   */
+  async close(): Promise<void> {
+    return this.db.close();
+  }
+
+  /**
+   * Delete the database.
+   */
+  async deleteDB(): Promise<void> {
+    return this.db.deleteDB();
+  }
+
+  /**
+   * Set the database name.
+   */
+  setName(dbName: string): void {
+    return this.db.setName(dbName);
+  }
+
+  /**
+   * Confirm the deletion of a document.
+   */
+  async confirmDeleteDoc(docId: string): Promise<void> {
+    return this.db.confirmDeleteDoc(docId);
+  }
+
+  /**
+   * Get the committed revision for a document.
+   */
+  async getCommittedRev(docId: string): Promise<number> {
+    return this.db.getCommittedRev(docId);
   }
 
   /**
@@ -63,7 +121,7 @@ export class OTIndexedDBStore extends IndexedDBStore implements OTClientStore {
    */
   @blockable
   async getDoc(docId: string): Promise<PatchesSnapshot | undefined> {
-    const [tx, docsStore, snapshots, committedChanges, pendingChanges] = await this.transaction(
+    const [tx, docsStore, snapshots, committedChanges, pendingChanges] = await this.db.transaction(
       ['docs', 'snapshots', 'committedChanges', 'pendingChanges'],
       'readonly'
     );
@@ -96,7 +154,7 @@ export class OTIndexedDBStore extends IndexedDBStore implements OTClientStore {
    */
   @blockable
   async deleteDoc(docId: string): Promise<void> {
-    const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.transaction(
+    const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.db.transaction(
       ['snapshots', 'committedChanges', 'pendingChanges', 'docs'],
       'readwrite'
     );
@@ -120,7 +178,7 @@ export class OTIndexedDBStore extends IndexedDBStore implements OTClientStore {
    */
   @blockable
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
-    const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.transaction(
+    const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.db.transaction(
       ['snapshots', 'committedChanges', 'pendingChanges', 'docs'],
       'readwrite'
     );
@@ -143,11 +201,11 @@ export class OTIndexedDBStore extends IndexedDBStore implements OTClientStore {
    */
   @blockable
   async savePendingChanges(docId: string, changes: Change[]): Promise<void> {
-    const [tx, pendingChanges, docsStore] = await this.transaction(['pendingChanges', 'docs'], 'readwrite');
+    const [tx, pendingChanges, docsStore] = await this.db.transaction(['pendingChanges', 'docs'], 'readwrite');
 
     let docMeta = await docsStore.get<TrackedDoc>(docId);
     if (!docMeta) {
-      docMeta = { docId, committedRev: 0 };
+      docMeta = { docId, committedRev: 0, algorithm: 'ot' };
       await docsStore.put(docMeta);
     } else if (docMeta.deleted) {
       delete docMeta.deleted;
@@ -166,7 +224,7 @@ export class OTIndexedDBStore extends IndexedDBStore implements OTClientStore {
    */
   @blockable
   async getPendingChanges(docId: string): Promise<Change[]> {
-    const [tx, pendingChanges] = await this.transaction(['pendingChanges'], 'readonly');
+    const [tx, pendingChanges] = await this.db.transaction(['pendingChanges'], 'readonly');
     const result = await pendingChanges.getAll<Change>([docId, 0], [docId, Infinity]);
     await tx.complete();
     return result;
@@ -189,7 +247,7 @@ export class OTIndexedDBStore extends IndexedDBStore implements OTClientStore {
    */
   @blockable
   async applyServerChanges(docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]): Promise<void> {
-    const [tx, committedChangesStore, pendingChangesStore, snapshots, docsStore] = await this.transaction(
+    const [tx, committedChangesStore, pendingChangesStore, snapshots, docsStore] = await this.db.transaction(
       ['committedChanges', 'pendingChanges', 'snapshots', 'docs'],
       'readwrite'
     );
@@ -238,7 +296,7 @@ export class OTIndexedDBStore extends IndexedDBStore implements OTClientStore {
    * @param docIds - The IDs of the documents to untrack.
    */
   async untrackDocs(docIds: string[]): Promise<void> {
-    const [tx, docsStore, snapshots, committedChanges, pendingChanges] = await this.transaction(
+    const [tx, docsStore, snapshots, committedChanges, pendingChanges] = await this.db.transaction(
       ['docs', 'snapshots', 'committedChanges', 'pendingChanges'],
       'readwrite'
     );

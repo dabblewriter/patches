@@ -8,10 +8,10 @@
  * @example
  * ```tsx
  * import { render } from 'solid-js/web';
- * import { Patches, InMemoryStore } from '@dabble/patches/client';
+ * import { Patches, OTInMemoryStore } from '@dabble/patches/client';
  * import { PatchesProvider, usePatchesDoc } from '@dabble/patches/solid';
  *
- * const patches = new Patches({ store: new InMemoryStore() });
+ * const patches = new Patches({ store: new OTInMemoryStore() });
  *
  * function App() {
  *   return (

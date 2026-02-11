@@ -132,7 +132,7 @@ export class LWWAlgorithm implements ClientAlgorithm {
   // --- Store forwarding methods ---
 
   async trackDocs(docIds: string[]): Promise<void> {
-    return this.store.trackDocs(docIds);
+    return this.store.trackDocs(docIds, 'lww');
   }
 
   async untrackDocs(docIds: string[]): Promise<void> {

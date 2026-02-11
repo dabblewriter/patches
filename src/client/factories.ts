@@ -1,6 +1,7 @@
-import type { AlgorithmName } from './ClientAlgorithm.js';
-import { InMemoryStore } from './InMemoryStore.js';
+import type { AlgorithmName } from './PatchesStore.js';
+import { OTInMemoryStore } from './OTInMemoryStore.js';
 import { LWWInMemoryStore } from './LWWInMemoryStore.js';
+import { IndexedDBStore } from './IndexedDBStore.js';
 import { LWWIndexedDBStore } from './LWWIndexedDBStore.js';
 import { LWWAlgorithm } from './LWWAlgorithm.js';
 import { OTIndexedDBStore } from './OTIndexedDBStore.js';
@@ -49,7 +50,7 @@ export interface MultiAlgorithmIndexedDBFactoryOptions extends MultiAlgorithmFac
  * Useful for testing or when persistence isn't needed.
  */
 export function createOTPatches(options: PatchesFactoryOptions = {}): Patches {
-  const store = new InMemoryStore();
+  const store = new OTInMemoryStore();
   const otAlgorithm = new OTAlgorithm(store, options.docOptions);
 
   return new Patches({
@@ -116,8 +117,8 @@ export function createLWWIndexedDBPatches(options: IndexedDBFactoryOptions): Pat
  * Creates a Patches instance with both OT and LWW algorithms using in-memory stores.
  * Useful for testing or applications that need both algorithms without persistence.
  */
-export function createAllPatches(options: MultiAlgorithmFactoryOptions = {}): Patches {
-  const otStore = new InMemoryStore();
+export function createMultiAlgorithmPatches(options: MultiAlgorithmFactoryOptions = {}): Patches {
+  const otStore = new OTInMemoryStore();
   const lwwStore = new LWWInMemoryStore();
   const otAlgorithm = new OTAlgorithm(otStore, options.docOptions);
   const lwwAlgorithm = new LWWAlgorithm(lwwStore);
@@ -133,10 +134,14 @@ export function createAllPatches(options: MultiAlgorithmFactoryOptions = {}): Pa
 /**
  * Creates a Patches instance with both OT and LWW algorithms using IndexedDB stores.
  * For persistent storage in browser environments with support for both algorithms.
+ * Both algorithms share the same IndexedDB database with unified stores.
  */
-export function createAllIndexedDBPatches(options: MultiAlgorithmIndexedDBFactoryOptions): Patches {
-  const otStore = new OTIndexedDBStore(options.dbName);
-  const lwwStore = new LWWIndexedDBStore(`${options.dbName}-lww`);
+export function createMultiAlgorithmIndexedDBPatches(options: MultiAlgorithmIndexedDBFactoryOptions): Patches {
+  // Create a shared IndexedDB store that both OT and LWW will use
+  const baseStore = new IndexedDBStore(options.dbName);
+  const otStore = new OTIndexedDBStore(baseStore);
+  const lwwStore = new LWWIndexedDBStore(baseStore);
+
   const otAlgorithm = new OTAlgorithm(otStore, options.docOptions);
   const lwwAlgorithm = new LWWAlgorithm(lwwStore);
 

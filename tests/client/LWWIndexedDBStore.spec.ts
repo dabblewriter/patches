@@ -130,8 +130,8 @@ describe('LWWIndexedDBStore', () => {
     // Create store and override transaction method
     store = new LWWIndexedDBStore('test-db');
 
-    // Override the private transaction method
-    (store as any).transaction = vi.fn().mockImplementation((storeNames: string[]) => {
+    // Override methods on the internal db instance
+    (store as any).db.transaction = vi.fn().mockImplementation((storeNames: string[]) => {
       const tx = { complete: vi.fn().mockResolvedValue(undefined) };
       const stores = storeNames.map(name => {
         if (!mockStores.has(name)) {
@@ -141,6 +141,15 @@ describe('LWWIndexedDBStore', () => {
       });
       return Promise.resolve([tx, ...stores]);
     });
+
+    // Mock other delegated methods
+    (store as any).db.close = vi.fn().mockResolvedValue(undefined);
+    (store as any).db.deleteDB = vi.fn().mockResolvedValue(undefined);
+    (store as any).db.setName = vi.fn();
+    (store as any).db.listDocs = vi.fn().mockResolvedValue([]);
+    (store as any).db.trackDocs = vi.fn().mockResolvedValue(undefined);
+    (store as any).db.confirmDeleteDoc = vi.fn().mockResolvedValue(undefined);
+    (store as any).db.getCommittedRev = vi.fn().mockResolvedValue(0);
   });
 
   describe('constructor and initialization', () => {

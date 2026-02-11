@@ -30,9 +30,9 @@ export interface PatchesProviderProps {
  * @example
  * ```tsx
  * import { PatchesProvider } from '@dabble/patches/solid';
- * import { Patches, InMemoryStore } from '@dabble/patches/client';
+ * import { Patches, OTInMemoryStore } from '@dabble/patches/client';
  *
- * const patches = new Patches({ store: new InMemoryStore() });
+ * const patches = new Patches({ store: new OTInMemoryStore() });
  *
  * <PatchesProvider patches={patches}>
  *   <App />

@@ -109,7 +109,7 @@ export class LWWInMemoryStore implements LWWClientStore {
   /**
    * Track documents.
    */
-  async trackDocs(docIds: string[]): Promise<void> {
+  async trackDocs(docIds: string[], _algorithm?: 'ot' | 'lww'): Promise<void> {
     for (const docId of docIds) {
       const buf = this.getOrCreateBuffer(docId);
       delete buf.deleted;

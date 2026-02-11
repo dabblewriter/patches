@@ -1,4 +1,8 @@
 import type { PatchesSnapshot, PatchesState } from '../types.js';
+
+/** Available algorithm names */
+export type AlgorithmName = 'ot' | 'lww';
+
 /** Represents metadata for a document tracked by the store. */
 export interface TrackedDoc {
   docId: string;
@@ -6,6 +10,8 @@ export interface TrackedDoc {
   committedRev: number;
   /** Optional flag indicating the document has been locally deleted. */
   deleted?: true;
+  /** The sync algorithm this document uses. */
+  algorithm?: AlgorithmName;
 }
 
 /**
@@ -21,14 +27,15 @@ export interface PatchesStore {
    * Sets initial committedRev to 0 for new documents.
    *
    * @param docIds Array of document IDs to start tracking
+   * @param algorithm The algorithm to use for this document ('ot' or 'lww')
    * @example
    * // Start tracking two documents
-   * await store.trackDocs(['doc1', 'doc2']);
+   * await store.trackDocs(['doc1', 'doc2'], 'ot');
    *
    * // Reactivate a previously deleted document
-   * await store.trackDocs(['previously-deleted-doc']);
+   * await store.trackDocs(['previously-deleted-doc'], 'lww');
    */
-  trackDocs(docIds: string[]): Promise<void>;
+  trackDocs(docIds: string[], algorithm?: AlgorithmName): Promise<void>;
 
   /**
    * Permanently removes documents from local tracking and storage.

@@ -3,7 +3,7 @@ export * from './factories.js';
 export * from './IndexedDBStore.js';
 export * from './OTIndexedDBStore.js';
 export * from './LWWIndexedDBStore.js';
-export * from './InMemoryStore.js';
+export * from './OTInMemoryStore.js';
 export * from './LWWInMemoryStore.js';
 export * from './LWWDoc.js';
 export * from './LWWAlgorithm.js';

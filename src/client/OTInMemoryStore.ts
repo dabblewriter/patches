@@ -11,11 +11,11 @@ interface DocBuffers {
 }
 
 /**
- * A trivial in‑memory implementation of OfflineStore (soon PatchesStore).
+ * A trivial in‑memory implementation of OTClientStore.
  * All data lives in JS objects – nothing survives a page reload.
  * Useful for unit tests or when you want the old 'stateless realtime' behaviour.
  */
-export class InMemoryStore implements OTClientStore {
+export class OTInMemoryStore implements OTClientStore {
   private docs: Map<string, DocBuffers> = new Map();
 
   // ─── Reconstruction ────────────────────────────────────────────────────
@@ -55,7 +55,11 @@ export class InMemoryStore implements OTClientStore {
 
   // ─── Writes ────────────────────────────────────────────────────────────
   async saveDoc(docId: string, snapshot: PatchesState): Promise<void> {
-    this.docs.set(docId, { snapshot, committed: [], pending: [] });
+    this.docs.set(docId, {
+      snapshot,
+      committed: [],
+      pending: [],
+    });
   }
 
   async savePendingChanges(docId: string, changes: Change[]): Promise<void> {
@@ -73,7 +77,7 @@ export class InMemoryStore implements OTClientStore {
   }
 
   // ─── Metadata / Tracking ───────────────────────────────────────────
-  async trackDocs(docIds: string[]): Promise<void> {
+  async trackDocs(docIds: string[], _algorithm?: 'ot' | 'lww'): Promise<void> {
     for (const docId of docIds) {
       const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
       buf.deleted = undefined; // Ensure not marked as deleted

@@ -7,7 +7,6 @@ import { IDBStoreWrapper, IndexedDBStore } from './IndexedDBStore.js';
 import type { LWWClientStore } from './LWWClientStore.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
-const DB_VERSION = 1;
 const SNAPSHOT_INTERVAL = 200;
 
 /** A committed op stored after server confirmation (JSONPatchOp fields with docId, without ts/rev) */
@@ -54,13 +53,22 @@ interface Snapshot {
  *
  * Every 200 ops, committed ops are compacted into the snapshot.
  */
-export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore {
-  protected getDBVersion(): number {
-    return DB_VERSION;
+export class LWWIndexedDBStore implements LWWClientStore {
+  public db: IndexedDBStore;
+
+  constructor(db?: string | IndexedDBStore) {
+    this.db = !db || typeof db === 'string' ? new IndexedDBStore(db) : db;
+
+    // Subscribe to upgrade event to create LWW-specific stores
+    this.db.onUpgrade((db, _oldVersion, _transaction) => {
+      this.createLWWStores(db);
+    });
   }
 
-  protected onUpgrade(db: IDBDatabase, _oldVersion: number): void {
-    // Create LWW-specific stores
+  /**
+   * Creates LWW-specific object stores during database upgrade.
+   */
+  protected createLWWStores(db: IDBDatabase): void {
     if (!db.objectStoreNames.contains('committedOps')) {
       db.createObjectStore('committedOps', { keyPath: ['docId', 'path'] });
     }
@@ -70,6 +78,56 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
     if (!db.objectStoreNames.contains('sendingChanges')) {
       db.createObjectStore('sendingChanges', { keyPath: 'docId' });
     }
+  }
+
+  /**
+   * List documents for the LWW algorithm.
+   * Uses the algorithm index for efficient querying.
+   */
+  async listDocs(includeDeleted = false): Promise<TrackedDoc[]> {
+    return this.db.listDocs(includeDeleted, 'lww');
+  }
+
+  /**
+   * Track documents using the LWW algorithm.
+   */
+  async trackDocs(docIds: string[]): Promise<void> {
+    return this.db.trackDocs(docIds, 'lww');
+  }
+
+  /**
+   * Close the database connection.
+   */
+  async close(): Promise<void> {
+    return this.db.close();
+  }
+
+  /**
+   * Delete the database.
+   */
+  async deleteDB(): Promise<void> {
+    return this.db.deleteDB();
+  }
+
+  /**
+   * Set the database name.
+   */
+  setName(dbName: string): void {
+    return this.db.setName(dbName);
+  }
+
+  /**
+   * Confirm the deletion of a document.
+   */
+  async confirmDeleteDoc(docId: string): Promise<void> {
+    return this.db.confirmDeleteDoc(docId);
+  }
+
+  /**
+   * Get the committed revision for a document.
+   */
+  async getCommittedRev(docId: string): Promise<number> {
+    return this.db.getCommittedRev(docId);
   }
 
   // ─── Document Operations ─────────────────────────────────────────────────
@@ -85,7 +143,7 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async getDoc(docId: string): Promise<PatchesSnapshot | undefined> {
-    const [tx, docsStore, snapshots, committedOps, pendingOps, sendingChanges] = await this.transaction(
+    const [tx, docsStore, snapshots, committedOps, pendingOps, sendingChanges] = await this.db.transaction(
       ['docs', 'snapshots', 'committedOps', 'pendingOps', 'sendingChanges'],
       'readonly'
     );
@@ -148,7 +206,7 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
-    const [tx, snapshots, committedOps, pendingOps, sendingChanges, docsStore] = await this.transaction(
+    const [tx, snapshots, committedOps, pendingOps, sendingChanges, docsStore] = await this.db.transaction(
       ['snapshots', 'committedOps', 'pendingOps', 'sendingChanges', 'docs'],
       'readwrite'
     );
@@ -171,7 +229,7 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async deleteDoc(docId: string): Promise<void> {
-    const [tx, snapshots, committedOps, pendingOps, sendingChanges, docsStore] = await this.transaction(
+    const [tx, snapshots, committedOps, pendingOps, sendingChanges, docsStore] = await this.db.transaction(
       ['snapshots', 'committedOps', 'pendingOps', 'sendingChanges', 'docs'],
       'readwrite'
     );
@@ -193,7 +251,7 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    * Untracks documents by removing all their data.
    */
   async untrackDocs(docIds: string[]): Promise<void> {
-    const [tx, docsStore, snapshots, committedOps, pendingOps, sendingChanges] = await this.transaction(
+    const [tx, docsStore, snapshots, committedOps, pendingOps, sendingChanges] = await this.db.transaction(
       ['docs', 'snapshots', 'committedOps', 'pendingOps', 'sendingChanges'],
       'readwrite'
     );
@@ -220,7 +278,7 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async getPendingOps(docId: string, pathPrefixes?: string[]): Promise<JSONPatchOp[]> {
-    const [tx, pendingOpsStore] = await this.transaction(['pendingOps'], 'readonly');
+    const [tx, pendingOpsStore] = await this.db.transaction(['pendingOps'], 'readonly');
 
     let pending: PendingOp[];
 
@@ -249,11 +307,11 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async savePendingOps(docId: string, ops: JSONPatchOp[], pathsToDelete?: string[]): Promise<void> {
-    const [tx, pendingOpsStore, docsStore] = await this.transaction(['pendingOps', 'docs'], 'readwrite');
+    const [tx, pendingOpsStore, docsStore] = await this.db.transaction(['pendingOps', 'docs'], 'readwrite');
 
     let docMeta = await docsStore.get<TrackedDoc>(docId);
     if (!docMeta) {
-      docMeta = { docId, committedRev: 0 };
+      docMeta = { docId, committedRev: 0, algorithm: 'lww' };
       await docsStore.put(docMeta);
     } else if (docMeta.deleted) {
       delete docMeta.deleted;
@@ -286,7 +344,7 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async getSendingChange(docId: string): Promise<Change | null> {
-    const [tx, sendingChanges] = await this.transaction(['sendingChanges'], 'readonly');
+    const [tx, sendingChanges] = await this.db.transaction(['sendingChanges'], 'readonly');
     const sending = await sendingChanges.get<SendingChange>(docId);
     await tx.complete();
     return sending?.change ?? null;
@@ -297,7 +355,10 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async saveSendingChange(docId: string, change: Change): Promise<void> {
-    const [tx, pendingOpsStore, sendingChanges] = await this.transaction(['pendingOps', 'sendingChanges'], 'readwrite');
+    const [tx, pendingOpsStore, sendingChanges] = await this.db.transaction(
+      ['pendingOps', 'sendingChanges'],
+      'readwrite'
+    );
 
     // Save to sending
     await sendingChanges.put<SendingChange>({ docId, change });
@@ -313,7 +374,7 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async confirmSendingChange(docId: string): Promise<void> {
-    const [tx, sendingChanges, committedOps, docsStore] = await this.transaction(
+    const [tx, sendingChanges, committedOps, docsStore] = await this.db.transaction(
       ['sendingChanges', 'committedOps', 'docs'],
       'readwrite'
     );
@@ -342,7 +403,7 @@ export class LWWIndexedDBStore extends IndexedDBStore implements LWWClientStore 
    */
   @blockable
   async applyServerChanges(docId: string, serverChanges: Change[]): Promise<void> {
-    const [tx, committedOps, snapshots, docsStore] = await this.transaction(
+    const [tx, committedOps, snapshots, docsStore] = await this.db.transaction(
       ['committedOps', 'snapshots', 'docs'],
       'readwrite'
     );

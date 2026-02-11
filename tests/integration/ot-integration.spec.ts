@@ -6,7 +6,7 @@
  *
  * These tests use real implementations (not mocks) for all core components:
  * - OTAlgorithm (client)
- * - InMemoryStore (client storage)
+ * - OTInMemoryStore (client storage)
  * - OTServer (server)
  * - OTMemoryStoreBackend (server storage - test-only implementation)
  *
@@ -14,7 +14,7 @@
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { OTAlgorithm } from '../../src/client/OTAlgorithm.js';
-import { InMemoryStore } from '../../src/client/InMemoryStore.js';
+import { OTInMemoryStore } from '../../src/client/OTInMemoryStore.js';
 import { OTDoc } from '../../src/client/OTDoc.js';
 import { OTServer } from '../../src/server/OTServer.js';
 import type { OTStoreBackend } from '../../src/server/types.js';
@@ -167,7 +167,7 @@ class OTMemoryStoreBackend implements OTStoreBackend {
 class OTTestHarness {
   server: OTServer;
   serverStore: OTMemoryStoreBackend;
-  clients: Map<string, { algorithm: OTAlgorithm; store: InMemoryStore; doc: OTDoc<TestDoc> }> = new Map();
+  clients: Map<string, { algorithm: OTAlgorithm; store: OTInMemoryStore; doc: OTDoc<TestDoc> }> = new Map();
   lastBroadcast: { docId: string; changes: Change[] } | null = null;
 
   getBroadcastChanges(): Change[] {
@@ -192,7 +192,7 @@ class OTTestHarness {
    * The first client for a given docId initializes the document on the server.
    */
   createClient(clientId: string, docId: string, initialState: TestDoc = {}): OTDoc<TestDoc> {
-    const store = new InMemoryStore();
+    const store = new OTInMemoryStore();
     const algorithm = new OTAlgorithm(store);
     const doc = algorithm.createDoc<TestDoc>(docId, { state: initialState, rev: 0, changes: [] }) as OTDoc<TestDoc>;
 

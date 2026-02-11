@@ -96,7 +96,7 @@ export interface ClientAlgorithm {
 
   // --- Store forwarding methods ---
 
-  /** Registers documents for local tracking. */
+  /** Registers documents for local tracking with the algorithm for this instance. */
   trackDocs(docIds: string[]): Promise<void>;
 
   /** Removes documents from local tracking. */
@@ -117,6 +117,3 @@ export interface ClientAlgorithm {
   /** Closes the algorithm and its store. */
   close(): Promise<void>;
 }
-
-/** Available algorithm names */
-export type AlgorithmName = 'ot' | 'lww';

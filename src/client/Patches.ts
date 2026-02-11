@@ -2,8 +2,9 @@ import { type Unsubscriber, signal } from '../event-signal.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change } from '../types.js';
 import { singleInvocation } from '../utils/concurrency.js';
-import type { AlgorithmName, ClientAlgorithm } from './ClientAlgorithm.js';
+import type { ClientAlgorithm } from './ClientAlgorithm.js';
 import type { PatchesDoc, PatchesDocOptions } from './PatchesDoc.js';
+import type { AlgorithmName } from './PatchesStore.js';
 
 /**
  * Options for creating a Patches instance.
@@ -169,8 +170,25 @@ export class Patches {
     const existing = this.docs.get(docId);
     if (existing) return existing.doc as PatchesDoc<T>;
 
-    // Get the algorithm for this doc
-    const algorithmName = opts.algorithm ?? this.defaultAlgorithm;
+    // Determine the algorithm for this doc:
+    // 1. Use opts.algorithm if explicitly provided
+    // 2. Otherwise, check if already tracked and read persisted algorithm
+    // 3. Fall back to defaultAlgorithm
+    let algorithmName = opts.algorithm;
+
+    if (!algorithmName) {
+      // Check all algorithm stores to see if this doc is already tracked
+      for (const algo of Object.values(this.algorithms) as ClientAlgorithm[]) {
+        const docs = await algo.listDocs(false);
+        const tracked = docs.find(d => d.docId === docId);
+        if (tracked?.algorithm) {
+          algorithmName = tracked.algorithm;
+          break;
+        }
+      }
+      algorithmName = algorithmName ?? this.defaultAlgorithm;
+    }
+
     const algorithm = this._getAlgorithm(algorithmName);
 
     // Ensure the doc is tracked before proceeding

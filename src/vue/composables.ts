@@ -131,6 +131,87 @@ export interface UsePatchesDocLazyReturn<T extends object> extends UsePatchesDoc
   create: (docPath: string, initialState: T | JSONPatch) => Promise<void>;
 }
 
+// --- Shared reactive state factory ---
+
+interface DocReactiveStateOptions<T extends object> {
+  initialLoading?: boolean;
+  transformState?: (state: T, doc: PatchesDoc<T>) => T;
+  changeBehavior: 'throw' | 'noop';
+}
+
+/**
+ * Creates the shared reactive state, subscription wiring, and change helper
+ * used by all doc composable modes (eager, lazy, provider).
+ * @internal
+ */
+function createDocReactiveState<T extends object>(options: DocReactiveStateOptions<T>) {
+  const { initialLoading = true, transformState, changeBehavior } = options;
+
+  const doc = ref<PatchesDoc<T> | undefined>(undefined) as Ref<PatchesDoc<T> | undefined>;
+  const data = shallowRef<T | undefined>(undefined) as ShallowRef<T | undefined>;
+  const loading = ref<boolean>(initialLoading);
+  const error = ref<Error | null>(null);
+  const rev = ref<number>(0);
+  const hasPending = ref<boolean>(false);
+
+  function setupDoc(patchesDoc: PatchesDoc<T>): Unsubscriber {
+    doc.value = patchesDoc;
+
+    const unsubState = patchesDoc.subscribe(state => {
+      if (transformState && state) {
+        state = transformState(state, patchesDoc);
+      }
+      data.value = state;
+      rev.value = patchesDoc.committedRev;
+      hasPending.value = patchesDoc.hasPending;
+    });
+
+    const unsubSync = patchesDoc.onSyncing((syncState: SyncingState) => {
+      loading.value = syncState === 'initial' || syncState === 'updating';
+      error.value = syncState instanceof Error ? syncState : null;
+    });
+
+    loading.value = patchesDoc.syncing !== null;
+
+    return () => {
+      unsubState();
+      unsubSync();
+    };
+  }
+
+  function resetRefs() {
+    doc.value = undefined;
+    data.value = undefined;
+    loading.value = false;
+    error.value = null;
+    rev.value = 0;
+    hasPending.value = false;
+  }
+
+  function change(mutator: ChangeMutator<T>) {
+    if (changeBehavior === 'throw') {
+      if (!doc.value) {
+        throw new Error('Cannot make changes: document not loaded yet');
+      }
+      doc.value.change(mutator);
+    } else {
+      doc.value?.change(mutator);
+    }
+  }
+
+  const baseReturn: UsePatchesDocReturn<T> = {
+    data,
+    loading,
+    error,
+    rev,
+    hasPending,
+    change,
+    doc,
+  };
+
+  return { doc, data, loading, error, rev, hasPending, setupDoc, resetRefs, change, baseReturn };
+}
+
 // --- usePatchesDoc overloads ---
 
 /**
@@ -187,62 +268,28 @@ function _usePatchesDocEager<T extends object>(docId: string, options: UsePatche
   const { patches } = usePatchesContext();
   const { autoClose = false } = options;
   const shouldUntrack = autoClose === 'untrack';
-
-  const doc = ref<PatchesDoc<T> | undefined>(undefined) as Ref<PatchesDoc<T> | undefined>;
-  const data = shallowRef<T | undefined>(undefined) as ShallowRef<T | undefined>;
-  const loading = ref<boolean>(true);
-  const error = ref<Error | null>(null);
-  const rev = ref<number>(0);
-  const hasPending = ref<boolean>(false);
-
-  // Unsubscribe functions
-  const unsubscribers: Array<() => void> = [];
-
-  // ALWAYS use doc manager for universal ref counting
   const manager = getDocManager(patches);
 
-  // Setup reactivity for a doc
-  function setupDoc(patchesDoc: PatchesDoc<T>) {
-    doc.value = patchesDoc;
+  const { setupDoc, baseReturn } = createDocReactiveState<T>({ changeBehavior: 'throw' });
 
-    // Subscribe to state changes
-    const unsubState = patchesDoc.subscribe(state => {
-      data.value = state;
-      rev.value = patchesDoc.committedRev;
-      hasPending.value = patchesDoc.hasPending;
-    });
-    unsubscribers.push(unsubState);
+  let unsubscribe: Unsubscriber | null = null;
 
-    // Subscribe to sync state changes
-    const unsubSync = patchesDoc.onSyncing((syncState: SyncingState) => {
-      loading.value = syncState === 'initial' || syncState === 'updating';
-      error.value = syncState instanceof Error ? syncState : null;
-    });
-    unsubscribers.push(unsubSync);
-
-    // Set initial loading state
-    loading.value = patchesDoc.syncing !== null;
-  }
-
-  // Initialize based on mode
   if (autoClose) {
-    // Auto mode: manager opens and closes the doc
     manager
       .openDoc<T>(patches, docId)
       .then(patchesDoc => {
-        setupDoc(patchesDoc);
+        unsubscribe = setupDoc(patchesDoc);
       })
       .catch(err => {
-        error.value = err;
-        loading.value = false;
+        baseReturn.error.value = err;
+        baseReturn.loading.value = false;
       });
 
     onBeforeUnmount(() => {
-      unsubscribers.forEach(unsub => unsub());
+      unsubscribe?.();
       manager.closeDoc(patches, docId, shouldUntrack);
     });
   } else {
-    // Explicit mode: just track ref count, don't open/close
     const patchesDoc = patches.getOpenDoc<T>(docId);
 
     if (!patchesDoc) {
@@ -251,35 +298,16 @@ function _usePatchesDocEager<T extends object>(docId: string, options: UsePatche
       );
     }
 
-    // Increment ref count so autoClose mode won't close while we're using it
     manager.incrementRefCount(docId);
-
-    setupDoc(patchesDoc);
+    unsubscribe = setupDoc(patchesDoc);
 
     onBeforeUnmount(() => {
-      unsubscribers.forEach(unsub => unsub());
-      // Decrement ref count (but don't close - explicit mode never closes)
+      unsubscribe?.();
       manager.decrementRefCount(docId);
     });
   }
 
-  // Change helper
-  function change(mutator: ChangeMutator<T>) {
-    if (!doc.value) {
-      throw new Error('Cannot make changes: document not loaded yet');
-    }
-    doc.value.change(mutator);
-  }
-
-  return {
-    data,
-    loading,
-    error,
-    rev,
-    hasPending,
-    change,
-    doc,
-  };
+  return baseReturn;
 }
 
 /**
@@ -290,59 +318,24 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
   const { patches } = usePatchesContext();
   const { idProp } = options;
 
-  let currentDoc: PatchesDoc<T> | null = null;
+  const { setupDoc, resetRefs, baseReturn } = createDocReactiveState<T>({
+    initialLoading: false,
+    changeBehavior: 'noop',
+    transformState: idProp
+      ? (state, patchesDoc) => ({ ...state, [idProp]: patchesDoc.id }) as T
+      : undefined,
+  });
+
   let unsubscribe: Unsubscriber | null = null;
-
   const path = ref<string | null>(null);
-  const doc = ref<PatchesDoc<T> | undefined>(undefined) as Ref<PatchesDoc<T> | undefined>;
-  const data = shallowRef<T | undefined>(undefined) as ShallowRef<T | undefined>;
-  const loading = ref<boolean>(false);
-  const error = ref<Error | null>(null);
-  const rev = ref<number>(0);
-  const hasPending = ref<boolean>(false);
-
-  function setupDoc(patchesDoc: PatchesDoc<T>) {
-    currentDoc = patchesDoc;
-    doc.value = patchesDoc;
-
-    unsubscribe = patchesDoc.subscribe(state => {
-      if (state && idProp && currentDoc) {
-        state = { ...state, [idProp]: currentDoc.id } as T;
-      }
-      data.value = state;
-      rev.value = patchesDoc.committedRev;
-      hasPending.value = patchesDoc.hasPending;
-    });
-
-    const unsubSync = patchesDoc.onSyncing((syncState: SyncingState) => {
-      loading.value = syncState === 'initial' || syncState === 'updating';
-      error.value = syncState instanceof Error ? syncState : null;
-    });
-
-    // Store both unsubscribers in one cleanup
-    const origUnsub = unsubscribe;
-    unsubscribe = () => {
-      origUnsub();
-      unsubSync();
-    };
-
-    loading.value = patchesDoc.syncing !== null;
-  }
 
   function teardown() {
     unsubscribe?.();
     unsubscribe = null;
-    currentDoc = null;
-    doc.value = undefined;
-    data.value = undefined;
-    loading.value = false;
-    error.value = null;
-    rev.value = 0;
-    hasPending.value = false;
+    resetRefs();
   }
 
   async function load(docPath: string) {
-    // Close previous doc if any
     if (path.value) {
       const prevPath = path.value;
       teardown();
@@ -353,10 +346,10 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
 
     try {
       const patchesDoc = await patches.openDoc<T>(docPath);
-      setupDoc(patchesDoc);
+      unsubscribe = setupDoc(patchesDoc);
     } catch (err) {
-      error.value = err as Error;
-      loading.value = false;
+      baseReturn.error.value = err as Error;
+      baseReturn.loading.value = false;
     }
   }
 
@@ -383,24 +376,7 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
     await patches.closeDoc(docPath);
   }
 
-  // Change helper — silently no-ops if no doc is loaded
-  function change(mutator: ChangeMutator<T>) {
-    currentDoc?.change(mutator);
-  }
-
-  return {
-    data,
-    loading,
-    error,
-    rev,
-    hasPending,
-    change,
-    doc,
-    path,
-    load,
-    close,
-    create,
-  };
+  return { ...baseReturn, path, load, close, create };
 }
 
 /**
@@ -522,60 +498,25 @@ export function providePatchesDoc<T extends object>(
   const shouldUntrack = autoClose === 'untrack';
   const manager = getDocManager(patches);
 
-  // Create reactive refs for document state
-  const doc = ref<PatchesDoc<T> | undefined>(undefined) as Ref<PatchesDoc<T> | undefined>;
-  const data = shallowRef<T | undefined>(undefined) as ShallowRef<T | undefined>;
-  const loading = ref<boolean>(true);
-  const error = ref<Error | null>(null);
-  const rev = ref<number>(0);
-  const hasPending = ref<boolean>(false);
+  const { setupDoc, baseReturn } = createDocReactiveState<T>({ changeBehavior: 'throw' });
 
-  // Track current docId and unsubscribers
   const currentDocId = ref<string>(unref(docId));
-  const unsubscribers: Array<() => void> = [];
+  let unsubscribe: Unsubscriber | null = null;
 
-  // Setup reactivity for a doc
-  function setupDoc(patchesDoc: PatchesDoc<T>) {
-    // Clear previous subscriptions
-    unsubscribers.forEach(unsub => unsub());
-    unsubscribers.length = 0;
-
-    doc.value = patchesDoc;
-
-    // Subscribe to state changes
-    const unsubState = patchesDoc.subscribe(state => {
-      data.value = state;
-      rev.value = patchesDoc.committedRev;
-      hasPending.value = patchesDoc.hasPending;
-    });
-    unsubscribers.push(unsubState);
-
-    // Subscribe to sync state changes
-    const unsubSync = patchesDoc.onSyncing((syncState: SyncingState) => {
-      loading.value = syncState === 'initial' || syncState === 'updating';
-      error.value = syncState instanceof Error ? syncState : null;
-    });
-    unsubscribers.push(unsubSync);
-
-    // Set initial loading state
-    loading.value = patchesDoc.syncing !== null;
-  }
-
-  // Initialize the document
   async function initDoc(id: string) {
     currentDocId.value = id;
+    unsubscribe?.();
+    unsubscribe = null;
 
     if (autoClose) {
-      // Auto mode: open doc with ref counting
       try {
         const patchesDoc = await manager.openDoc<T>(patches, id);
-        setupDoc(patchesDoc);
+        unsubscribe = setupDoc(patchesDoc);
       } catch (err) {
-        error.value = err as Error;
-        loading.value = false;
+        baseReturn.error.value = err as Error;
+        baseReturn.loading.value = false;
       }
     } else {
-      // Explicit mode: doc must already be open
       try {
         const patchesDoc = patches.getOpenDoc<T>(id);
         if (!patchesDoc) {
@@ -584,65 +525,39 @@ export function providePatchesDoc<T extends object>(
           );
         }
         manager.incrementRefCount(id);
-        setupDoc(patchesDoc);
+        unsubscribe = setupDoc(patchesDoc);
       } catch (err) {
-        error.value = err as Error;
-        loading.value = false;
+        baseReturn.error.value = err as Error;
+        baseReturn.loading.value = false;
       }
     }
   }
 
-  // Change helper
-  function change(mutator: ChangeMutator<T>) {
-    if (!doc.value) {
-      throw new Error('Cannot make changes: document not loaded yet');
-    }
-    doc.value.change(mutator);
-  }
-
-  // Provide the document state BEFORE initializing
-  // This allows useCurrentDoc to be called in the same component
-  const docReturn: UsePatchesDocReturn<T> = {
-    data,
-    loading,
-    error,
-    rev,
-    hasPending,
-    change,
-    doc,
-  };
-
+  // Provide BEFORE initializing so useCurrentDoc works in the same component
   const key = createDocInjectionKey<T>(name);
-  provide(key, docReturn);
+  provide(key, baseReturn);
 
-  // Initialize with initial docId (async)
   initDoc(unref(docId));
 
-  // Watch for docId changes (only if docId is a ref)
   if (typeof docId !== 'string') {
     watch(docId, async (newDocId, oldDocId) => {
       if (newDocId === oldDocId) return;
 
-      // Clean up old doc
-      unsubscribers.forEach(unsub => unsub());
-      unsubscribers.length = 0;
+      unsubscribe?.();
+      unsubscribe = null;
 
       if (autoClose) {
-        // Close old doc (ref counted)
         await manager.closeDoc(patches, oldDocId, shouldUntrack);
       } else {
-        // Just decrement ref count
         manager.decrementRefCount(oldDocId);
       }
 
-      // Open new doc
       await initDoc(newDocId);
     });
   }
 
-  // Cleanup on unmount
   onBeforeUnmount(async () => {
-    unsubscribers.forEach(unsub => unsub());
+    unsubscribe?.();
 
     if (autoClose) {
       await manager.closeDoc(patches, currentDocId.value, shouldUntrack);
@@ -651,7 +566,7 @@ export function providePatchesDoc<T extends object>(
     }
   });
 
-  return docReturn;
+  return baseReturn;
 }
 
 /**

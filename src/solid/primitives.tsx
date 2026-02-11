@@ -128,6 +128,88 @@ export interface UsePatchesDocLazyReturn<T extends object> extends UsePatchesDoc
   create: (docPath: string, initialState: T | JSONPatch) => Promise<void>;
 }
 
+// --- Shared reactive state factory ---
+
+interface DocReactiveStateOptions<T extends object> {
+  initialLoading?: boolean;
+  transformState?: (state: T, doc: PatchesDoc<T>) => T;
+  changeBehavior: 'throw' | 'noop';
+}
+
+/**
+ * Creates the shared reactive state, subscription wiring, and change helper
+ * used by all doc primitive modes (eager, lazy, provider).
+ * @internal
+ */
+function createDocReactiveState<T extends object>(options: DocReactiveStateOptions<T>) {
+  const { initialLoading = true, transformState, changeBehavior } = options;
+
+  const [doc, setDoc] = createSignal<PatchesDoc<T> | undefined>(undefined);
+  const [data, setData] = createSignal<T | undefined>(undefined);
+  const [loading, setLoading] = createSignal<boolean>(initialLoading);
+  const [error, setError] = createSignal<Error | null>(null);
+  const [rev, setRev] = createSignal<number>(0);
+  const [hasPending, setHasPending] = createSignal<boolean>(false);
+
+  function setupDoc(patchesDoc: PatchesDoc<T>): Unsubscriber {
+    setDoc(patchesDoc);
+
+    const unsubState = patchesDoc.subscribe(state => {
+      if (transformState && state) {
+        state = transformState(state, patchesDoc);
+      }
+      setData(() => state as T);
+      setRev(patchesDoc.committedRev);
+      setHasPending(patchesDoc.hasPending);
+    });
+
+    const unsubSync = patchesDoc.onSyncing((syncState: SyncingState) => {
+      setLoading(syncState === 'initial' || syncState === 'updating');
+      setError(syncState instanceof Error ? syncState : null);
+    });
+
+    setLoading(patchesDoc.syncing !== null);
+
+    return () => {
+      unsubState();
+      unsubSync();
+    };
+  }
+
+  function resetSignals() {
+    setDoc(undefined);
+    setData(undefined);
+    setLoading(false);
+    setError(null);
+    setRev(0);
+    setHasPending(false);
+  }
+
+  function change(mutator: ChangeMutator<T>) {
+    if (changeBehavior === 'throw') {
+      const currentDoc = doc();
+      if (!currentDoc) {
+        throw new Error('Cannot make changes: document not loaded yet');
+      }
+      currentDoc.change(mutator);
+    } else {
+      doc()?.change(mutator);
+    }
+  }
+
+  const baseReturn: UsePatchesDocReturn<T> = {
+    data,
+    loading,
+    error,
+    rev,
+    hasPending,
+    change,
+    doc,
+  };
+
+  return { doc, setDoc, data, setData, loading, setLoading, error, setError, rev, setRev, hasPending, setHasPending, setupDoc, resetSignals, change, baseReturn };
+}
+
 // --- usePatchesDoc overloads ---
 
 /**
@@ -188,55 +270,22 @@ function _usePatchesDocEager<T extends object>(
   const { patches } = usePatchesContext();
   const autoClose = options.autoClose ?? false;
   const shouldUntrack = autoClose === 'untrack';
-
-  const [doc, setDoc] = createSignal<PatchesDoc<T> | undefined>(undefined);
-  const [data, setData] = createSignal<T | undefined>(undefined);
-  const [loading, setLoading] = createSignal<boolean>(true);
-  const [error, setError] = createSignal<Error | null>(null);
-  const [rev, setRev] = createSignal<number>(0);
-  const [hasPending, setHasPending] = createSignal<boolean>(false);
-
-  // ALWAYS use doc manager for universal ref counting
   const manager = getDocManager(patches);
 
-  // Convert to accessor for consistent handling
+  const { setupDoc, setError, setLoading, baseReturn } = createDocReactiveState<T>({ changeBehavior: 'throw' });
+
   const docIdAccessor = toAccessor(docId);
 
-  // Setup reactivity for a doc
-  function setupDoc(patchesDoc: PatchesDoc<T>) {
-    setDoc(patchesDoc);
-
-    // Subscribe to state changes
-    const unsubState = patchesDoc.subscribe(state => {
-      setData(() => state as T);
-      setRev(patchesDoc.committedRev);
-      setHasPending(patchesDoc.hasPending);
-    });
-    onCleanup(() => unsubState());
-
-    // Subscribe to sync state changes
-    const unsubSync = patchesDoc.onSyncing((syncState: SyncingState) => {
-      setLoading(syncState === 'initial' || syncState === 'updating');
-      setError(syncState instanceof Error ? syncState : null);
-    });
-    onCleanup(() => unsubSync());
-
-    // Set initial loading state
-    setLoading(patchesDoc.syncing !== null);
-  }
-
-  // Initialize based on mode
   if (autoClose) {
-    // Auto mode: use createResource for async doc opening
     const [docResource] = createResource(docIdAccessor, async id => {
       return await manager.openDoc<T>(patches, id);
     });
 
-    // Setup doc when resource loads
     createEffect(() => {
       const loadedDoc = docResource();
       if (loadedDoc) {
-        setupDoc(loadedDoc);
+        const unsub = setupDoc(loadedDoc);
+        onCleanup(() => unsub());
       }
       const resourceError = docResource.error;
       if (resourceError) {
@@ -245,13 +294,11 @@ function _usePatchesDocEager<T extends object>(
       }
     });
 
-    // Cleanup: close doc when component unmounts
     onCleanup(() => {
       const id = docIdAccessor();
       manager.closeDoc(patches, id, shouldUntrack);
     });
   } else {
-    // Explicit mode: doc must already be open
     createEffect(() => {
       const id = docIdAccessor();
       const patchesDoc = patches.getOpenDoc<T>(id);
@@ -262,36 +309,18 @@ function _usePatchesDocEager<T extends object>(
         );
       }
 
-      // Increment ref count so autoClose mode won't close while we're using it
       manager.incrementRefCount(id);
 
-      setupDoc(patchesDoc);
+      const unsub = setupDoc(patchesDoc);
 
-      // Cleanup: decrement ref count (but don't close - explicit mode never closes)
       onCleanup(() => {
+        unsub();
         manager.decrementRefCount(id);
       });
     });
   }
 
-  // Change helper
-  function change(mutator: ChangeMutator<T>) {
-    const currentDoc = doc();
-    if (!currentDoc) {
-      throw new Error('Cannot make changes: document not loaded yet');
-    }
-    currentDoc.change(mutator);
-  }
-
-  return {
-    data,
-    loading,
-    error,
-    rev,
-    hasPending,
-    change,
-    doc,
-  };
+  return baseReturn;
 }
 
 /**
@@ -302,59 +331,24 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
   const { patches } = usePatchesContext();
   const { idProp } = options;
 
-  let currentDoc: PatchesDoc<T> | null = null;
+  const { setupDoc, resetSignals, setError, setLoading, baseReturn } = createDocReactiveState<T>({
+    initialLoading: false,
+    changeBehavior: 'noop',
+    transformState: idProp
+      ? (state, patchesDoc) => ({ ...state, [idProp]: patchesDoc.id }) as T
+      : undefined,
+  });
+
   let unsubscribe: Unsubscriber | null = null;
-
   const [path, setPath] = createSignal<string | null>(null);
-  const [doc, setDoc] = createSignal<PatchesDoc<T> | undefined>(undefined);
-  const [data, setData] = createSignal<T | undefined>(undefined);
-  const [loading, setLoading] = createSignal<boolean>(false);
-  const [error, setError] = createSignal<Error | null>(null);
-  const [rev, setRev] = createSignal<number>(0);
-  const [hasPending, setHasPending] = createSignal<boolean>(false);
-
-  function setupDoc(patchesDoc: PatchesDoc<T>) {
-    currentDoc = patchesDoc;
-    setDoc(patchesDoc);
-
-    unsubscribe = patchesDoc.subscribe(state => {
-      if (state && idProp && currentDoc) {
-        state = { ...state, [idProp]: currentDoc.id } as T;
-      }
-      setData(() => state as T);
-      setRev(patchesDoc.committedRev);
-      setHasPending(patchesDoc.hasPending);
-    });
-
-    const unsubSync = patchesDoc.onSyncing((syncState: SyncingState) => {
-      setLoading(syncState === 'initial' || syncState === 'updating');
-      setError(syncState instanceof Error ? syncState : null);
-    });
-
-    // Store both unsubscribers in one cleanup
-    const origUnsub = unsubscribe;
-    unsubscribe = () => {
-      origUnsub();
-      unsubSync();
-    };
-
-    setLoading(patchesDoc.syncing !== null);
-  }
 
   function teardown() {
     unsubscribe?.();
     unsubscribe = null;
-    currentDoc = null;
-    setDoc(undefined);
-    setData(undefined);
-    setLoading(false);
-    setError(null);
-    setRev(0);
-    setHasPending(false);
+    resetSignals();
   }
 
   async function load(docPath: string) {
-    // Close previous doc if any
     if (path()) {
       const prevPath = path()!;
       teardown();
@@ -365,7 +359,7 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
 
     try {
       const patchesDoc = await patches.openDoc<T>(docPath);
-      setupDoc(patchesDoc);
+      unsubscribe = setupDoc(patchesDoc);
     } catch (err) {
       setError(err as Error);
       setLoading(false);
@@ -395,24 +389,7 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
     await patches.closeDoc(docPath);
   }
 
-  // Change helper — silently no-ops if no doc is loaded
-  function change(mutator: ChangeMutator<T>) {
-    currentDoc?.change(mutator);
-  }
-
-  return {
-    data,
-    loading,
-    error,
-    rev,
-    hasPending,
-    change,
-    doc,
-    path,
-    load,
-    close,
-    create,
-  };
+  return { ...baseReturn, path, load, close, create };
 }
 
 /**
@@ -562,51 +539,20 @@ export function createPatchesDoc<T extends object>(name: string) {
     const autoClose = props.autoClose ?? false;
     const shouldUntrack = autoClose === 'untrack';
 
-    const [doc, setDoc] = createSignal<PatchesDoc<T> | undefined>(undefined);
-    const [data, setData] = createSignal<T | undefined>(undefined);
-    const [loading, setLoading] = createSignal<boolean>(true);
-    const [error, setError] = createSignal<Error | null>(null);
-    const [rev, setRev] = createSignal<number>(0);
-    const [hasPending, setHasPending] = createSignal<boolean>(false);
+    const { setupDoc, setError, setLoading, baseReturn } = createDocReactiveState<T>({ changeBehavior: 'throw' });
 
-    // Setup reactivity for a doc
-    function setupDoc(patchesDoc: PatchesDoc<T>) {
-      setDoc(patchesDoc);
-
-      // Subscribe to state changes
-      const unsubState = patchesDoc.subscribe(state => {
-        setData(() => state as T);
-        setRev(patchesDoc.committedRev);
-        setHasPending(patchesDoc.hasPending);
-      });
-      onCleanup(() => unsubState());
-
-      // Subscribe to sync state changes
-      const unsubSync = patchesDoc.onSyncing((syncState: SyncingState) => {
-        setLoading(syncState === 'initial' || syncState === 'updating');
-        setError(syncState instanceof Error ? syncState : null);
-      });
-      onCleanup(() => unsubSync());
-
-      // Set initial loading state
-      setLoading(patchesDoc.syncing !== null);
-    }
-
-    // Convert docId to accessor
     const docIdAccessor = toAccessor(props.docId);
 
-    // Handle doc lifecycle with reactive docId
     if (autoClose) {
-      // Auto mode: use createResource for async doc opening
       const [docResource] = createResource(docIdAccessor, async id => {
         return await manager.openDoc<T>(patches, id);
       });
 
-      // Setup doc when resource loads
       createEffect(() => {
         const loadedDoc = docResource();
         if (loadedDoc) {
-          setupDoc(loadedDoc);
+          const unsub = setupDoc(loadedDoc);
+          onCleanup(() => unsub());
         }
         const resourceError = docResource.error;
         if (resourceError) {
@@ -615,30 +561,24 @@ export function createPatchesDoc<T extends object>(name: string) {
         }
       });
 
-      // Cleanup: close doc when component unmounts or docId changes
       createEffect((prevId: string | undefined) => {
         const currentId = docIdAccessor();
 
-        // Close previous doc if it changed
         if (prevId && prevId !== currentId) {
           manager.closeDoc(patches, prevId, shouldUntrack);
         }
 
-        // Return current id for next iteration
         return currentId;
       });
 
-      // Final cleanup on unmount
       onCleanup(() => {
         const id = docIdAccessor();
         manager.closeDoc(patches, id, shouldUntrack);
       });
     } else {
-      // Explicit mode: doc must already be open
       createEffect((prevId: string | undefined) => {
         const id = docIdAccessor();
 
-        // Decrement ref for previous doc if it changed
         if (prevId && prevId !== id) {
           manager.decrementRefCount(prevId);
         }
@@ -650,42 +590,22 @@ export function createPatchesDoc<T extends object>(name: string) {
           );
         }
 
-        // Increment ref count so autoClose mode won't close while we're using it
         manager.incrementRefCount(id);
 
-        setupDoc(patchesDoc);
+        const unsub = setupDoc(patchesDoc);
 
-        // Return current id for next iteration
+        onCleanup(() => unsub());
+
         return id;
       });
 
-      // Cleanup: decrement ref count (but don't close - explicit mode never closes)
       onCleanup(() => {
         const id = docIdAccessor();
         manager.decrementRefCount(id);
       });
     }
 
-    // Change helper
-    function change(mutator: ChangeMutator<T>) {
-      const currentDoc = doc();
-      if (!currentDoc) {
-        throw new Error('Cannot make changes: document not loaded yet');
-      }
-      currentDoc.change(mutator);
-    }
-
-    const value: UsePatchesDocReturn<T> = {
-      data,
-      loading,
-      error,
-      rev,
-      hasPending,
-      change,
-      doc,
-    };
-
-    return <Context.Provider value={value} children={props.children} />;
+    return <Context.Provider value={baseReturn} children={props.children} />;
   }
 
   function useDoc(): UsePatchesDocReturn<T> {

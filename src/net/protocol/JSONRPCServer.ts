@@ -210,8 +210,10 @@ export class JSONRPCServer {
   ): Promise<void> {
     if (!this.auth) return; // No auth provider = allow all
 
-    // docId is validated as a non-empty string by register() before this point
-    const docId = args?.[0] as string;
+    const docId = args?.[0];
+    if (typeof docId !== 'string' || !docId) {
+      throw new StatusError(400, `INVALID_REQUEST: docId is required (got ${docId === '' ? 'empty string' : String(docId)})`);
+    }
     const ok = await this.auth.canAccess(ctx, docId, access, method);
     if (!ok) {
       throw new StatusError(401, `${access.toUpperCase()}_FORBIDDEN:${docId}`);

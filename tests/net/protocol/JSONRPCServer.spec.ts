@@ -764,6 +764,116 @@ describe('JSONRPCServer', () => {
     });
   });
 
+  describe('assertAccess docId validation', () => {
+    it('should throw 400 for object docId when auth is configured', async () => {
+      const auth = { canAccess: vi.fn().mockReturnValue(true) };
+      const authServer = new JSONRPCServer({ auth });
+
+      class FakeServer {
+        static api = { getDoc: 'read' as const };
+        getDoc = vi.fn().mockResolvedValue({ ok: true });
+      }
+
+      const fake = new FakeServer();
+      authServer.register(fake);
+
+      // Client sends named params instead of positional — _dispatch wraps as [{ docId: 'x' }]
+      const request: JsonRpcRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getDoc',
+        params: { docId: 'users/test' },
+      };
+
+      const response = (await authServer.processMessage(request)) as JsonRpcResponse;
+
+      expect(response.error).toBeDefined();
+      expect(response.error!.code).toBe(400);
+      expect(response.error!.message).toContain('docId is required');
+      expect(auth.canAccess).not.toHaveBeenCalled();
+    });
+
+    it('should throw 400 for missing docId when auth is configured', async () => {
+      const auth = { canAccess: vi.fn().mockReturnValue(true) };
+      const authServer = new JSONRPCServer({ auth });
+
+      class FakeServer {
+        static api = { getDoc: 'read' as const };
+        getDoc = vi.fn().mockResolvedValue({ ok: true });
+      }
+
+      const fake = new FakeServer();
+      authServer.register(fake);
+
+      const request: JsonRpcRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getDoc',
+        params: [],
+      };
+
+      const response = (await authServer.processMessage(request)) as JsonRpcResponse;
+
+      expect(response.error).toBeDefined();
+      expect(response.error!.code).toBe(400);
+      expect(response.error!.message).toContain('docId is required');
+      expect(auth.canAccess).not.toHaveBeenCalled();
+    });
+
+    it('should not call auth check when auth is not configured', async () => {
+      // No auth = allow all, assertAccess returns early before docId check
+      const noAuthServer = new JSONRPCServer();
+
+      class FakeServer {
+        static api = { getDoc: 'read' as const };
+        getDoc = vi.fn().mockResolvedValue({ ok: true });
+      }
+
+      const fake = new FakeServer();
+      noAuthServer.register(fake);
+
+      // register() validation catches this before assertAccess is called
+      const request: JsonRpcRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getDoc',
+        params: [],
+      };
+
+      const response = (await noAuthServer.processMessage(request)) as JsonRpcResponse;
+
+      // Caught by register() validation, not assertAccess
+      expect(response.error).toBeDefined();
+      expect(response.error!.code).toBe(400);
+    });
+
+    it('should allow valid docId through assertAccess with auth', async () => {
+      const auth = { canAccess: vi.fn().mockReturnValue(true) };
+      const authServer = new JSONRPCServer({ auth });
+
+      class FakeServer {
+        static api = { getDoc: 'read' as const };
+        getDoc = vi.fn().mockResolvedValue({ state: {}, rev: 0 });
+      }
+
+      const fake = new FakeServer();
+      authServer.register(fake);
+
+      const request: JsonRpcRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getDoc',
+        params: ['users/test'],
+      };
+
+      const response = (await authServer.processMessage(request)) as JsonRpcResponse;
+
+      expect(response.error).toBeUndefined();
+      expect(auth.canAccess).toHaveBeenCalledWith(undefined, 'users/test', 'read', 'getDoc');
+      expect(fake.getDoc).toHaveBeenCalledWith('users/test');
+    });
+  });
+
   describe('type safety and TypeScript integration', () => {
     it('should support strongly typed method handlers', async () => {
       interface CreateUserParams {

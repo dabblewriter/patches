@@ -31,6 +31,7 @@ export class JSONRPCClient {
    */
   async call<T = any>(method: string, ...args: any[]): Promise<T> {
     const id = this.nextId++;
+    while (args.length > 0 && args[args.length - 1] === undefined) args.pop();
     const params = args.length > 0 ? args : undefined;
     const message: JsonRpcRequest = { jsonrpc: '2.0', id, method, params };
 
@@ -47,6 +48,7 @@ export class JSONRPCClient {
    * @param args - The arguments to pass to the remote procedure (sent as array)
    */
   notify(method: string, ...args: any[]): void {
+    while (args.length > 0 && args[args.length - 1] === undefined) args.pop();
     const params = args.length > 0 ? args : undefined;
     const message: JsonRpcNotification = { jsonrpc: '2.0', method, params };
     this.transport.send(JSON.stringify(message));

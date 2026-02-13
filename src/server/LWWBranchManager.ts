@@ -99,8 +99,8 @@ export class LWWBranchManager implements BranchManager {
    * @param branchId - The branch document ID.
    * @param status - The status to set (defaults to 'closed').
    */
-  async closeBranch(branchId: string, status: Exclude<BranchStatus, 'open'> = 'closed'): Promise<void> {
-    await this.store.updateBranch(branchId, { status });
+  async closeBranch(branchId: string, status?: Exclude<BranchStatus, 'open'> | null): Promise<void> {
+    await this.store.updateBranch(branchId, { status: status ?? 'closed' });
   }
 
   /**

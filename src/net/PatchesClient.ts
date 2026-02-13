@@ -79,8 +79,8 @@ export class PatchesClient implements PatchesAPI {
    * @param docId - The ID of the document.
    * @returns A promise resolving with the document snapshot.
    */
-  async getDoc<T = any>(docId: string, atRev?: number): Promise<PatchesState<T>> {
-    return this.rpc.call('getDoc', docId, atRev);
+  async getDoc<T = any>(docId: string): Promise<PatchesState<T>> {
+    return this.rpc.call('getDoc', docId);
   }
 
   /**

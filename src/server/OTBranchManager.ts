@@ -102,8 +102,8 @@ export class OTBranchManager implements BranchManager {
    * @param branchId - The ID of the branch to close.
    * @param status - The status to set for the branch.
    */
-  async closeBranch(branchId: string, status: Exclude<BranchStatus, 'open'> = 'closed'): Promise<void> {
-    await this.store.updateBranch(branchId, { status });
+  async closeBranch(branchId: string, status?: Exclude<BranchStatus, 'open'> | null): Promise<void> {
+    await this.store.updateBranch(branchId, { status: status ?? 'closed' });
   }
 
   /**

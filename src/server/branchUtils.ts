@@ -138,7 +138,7 @@ export async function wrapMergeCommit<T>(
 export async function closeBranch(
   store: { updateBranch(branchId: string, updates: Partial<Pick<Branch, 'status' | 'name'>>): Promise<void> },
   branchId: string,
-  status: Exclude<BranchStatus, 'open'> = 'closed'
+  status?: Exclude<BranchStatus, 'open'> | null
 ): Promise<void> {
-  await store.updateBranch(branchId, { status });
+  await store.updateBranch(branchId, { status: status ?? 'closed' });
 }

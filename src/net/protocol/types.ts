@@ -145,7 +145,7 @@ export interface PatchesAPI {
 
   // === Document Operations ===
   /** Get the latest version of a document and changes since the last version. */
-  getDoc(docId: string, atRev?: number): Promise<PatchesState>;
+  getDoc(docId: string): Promise<PatchesState>;
 
   /** Get changes that occurred after a specific revision. */
   getChangesSince(docId: string, rev: number): Promise<Change[]>;

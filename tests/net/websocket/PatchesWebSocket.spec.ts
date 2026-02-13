@@ -63,7 +63,7 @@ describe('PatchesWebSocket', () => {
 
       mockRPCInstance.call = vi.fn().mockResolvedValue({ doc: {}, rev: 1 });
       await patchesWS.getDoc('doc1');
-      expect(mockRPCInstance.call).toHaveBeenCalledWith('getDoc', 'doc1', undefined);
+      expect(mockRPCInstance.call).toHaveBeenCalledWith('getDoc', 'doc1');
 
       mockRPCInstance.call = vi.fn().mockResolvedValue([]);
       await patchesWS.getChangesSince('doc1', 5);

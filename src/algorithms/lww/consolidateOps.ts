@@ -148,10 +148,11 @@ export function consolidateOps(
 }
 
 /**
- * Any delta ops that aren't combined in consolidateOps need to be converted to replace ops.
+ * Any delta ops that aren't combined in consolidateOps need to be converted to replace/remove ops.
  */
 export function convertDeltaOps(ops: JSONPatchOp[]): JSONPatchOp[] {
   return ops.map(op => {
+    if (op.op === 'remove') return op;
     const combiner = combinableOps[op.op];
     const value = typeof op.value === 'string' ? '' : 0;
     if (combiner) return { ...op, op: 'replace', value: combiner.apply(value, op.value) };

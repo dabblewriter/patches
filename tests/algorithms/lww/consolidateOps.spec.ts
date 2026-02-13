@@ -628,14 +628,14 @@ describe('convertDeltaOps', () => {
     expect(result[0].value).toBe('hello');
   });
 
-  it('should convert remove ops to replace', () => {
+  it('should preserve remove ops as-is', () => {
     const ops: JSONPatchOp[] = [{ op: 'remove', path: '/field', ts: 1000 }];
 
     const result = convertDeltaOps(ops);
 
     expect(result).toHaveLength(1);
-    expect(result[0].op).toBe('replace');
-    expect(result[0].value).toBeUndefined();
+    expect(result[0].op).toBe('remove');
+    expect(result[0]).toEqual({ op: 'remove', path: '/field', ts: 1000 });
   });
 
   it('should convert array of mixed ops', () => {

@@ -59,9 +59,9 @@ describe('WebSocketServer', () => {
       vi.mocked(serverContext.getAuthContext).mockReturnValue(mockCtx);
       mockTransport.addSubscription.mockResolvedValue(['doc1']);
 
-      const result = await webSocketServer.subscribe({ ids: 'doc1' });
+      const result = await webSocketServer.subscribe('doc1');
 
-      expect(mockAuth.canAccess).toHaveBeenCalledWith(mockCtx, 'doc1', 'read', 'subscribe', { ids: 'doc1' });
+      expect(mockAuth.canAccess).toHaveBeenCalledWith(mockCtx, 'doc1', 'read', 'subscribe');
       expect(mockTransport.addSubscription).toHaveBeenCalledWith('client1', ['doc1']);
       expect(result).toEqual(['doc1']);
     });
@@ -74,7 +74,7 @@ describe('WebSocketServer', () => {
 
       mockTransport.addSubscription.mockResolvedValue(['doc1']);
 
-      const result = await webSocketServer.subscribe({ ids: ['doc1', 'doc2'] });
+      const result = await webSocketServer.subscribe(['doc1', 'doc2']);
 
       expect(mockTransport.addSubscription).toHaveBeenCalledWith('client1', ['doc1']);
       expect(result).toEqual(['doc1']);
@@ -84,7 +84,7 @@ describe('WebSocketServer', () => {
       vi.mocked(serverContext.getAuthContext).mockReturnValue(mockCtx);
       mockTransport.removeSubscription.mockResolvedValue(['doc1']);
 
-      const result = await webSocketServer.unsubscribe({ ids: 'doc1' });
+      const result = await webSocketServer.unsubscribe('doc1');
 
       expect(mockAuth.canAccess).not.toHaveBeenCalled();
       expect(mockTransport.removeSubscription).toHaveBeenCalledWith('client1', ['doc1']);
@@ -93,10 +93,10 @@ describe('WebSocketServer', () => {
 
     it('should return empty array when no client ID', async () => {
       vi.mocked(serverContext.getAuthContext).mockReturnValue(undefined);
-      const result = await webSocketServer.subscribe({ ids: 'doc1' });
+      const result = await webSocketServer.subscribe('doc1');
       expect(result).toEqual([]);
 
-      const result2 = await webSocketServer.unsubscribe({ ids: 'doc1' });
+      const result2 = await webSocketServer.unsubscribe('doc1');
       expect(result2).toEqual([]);
     });
   });
@@ -143,7 +143,7 @@ describe('WebSocketServer', () => {
       vi.mocked(serverContext.getAuthContext).mockReturnValue(mockCtx);
       mockAuth.canAccess.mockRejectedValue(new Error('Auth error'));
 
-      const result = await webSocketServer.subscribe({ ids: 'doc1' });
+      const result = await webSocketServer.subscribe('doc1');
 
       expect(result).toEqual([]);
       expect(mockTransport.addSubscription).not.toHaveBeenCalled();
@@ -154,7 +154,7 @@ describe('WebSocketServer', () => {
       const error = new Error('Transport error');
       mockTransport.addSubscription.mockRejectedValue(error);
 
-      await expect(webSocketServer.subscribe({ ids: 'doc1' })).rejects.toThrow('Transport error');
+      await expect(webSocketServer.subscribe('doc1')).rejects.toThrow('Transport error');
     });
   });
 });

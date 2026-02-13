@@ -93,6 +93,10 @@ export class JSONRPCServer {
       }
 
       this.registerMethod(method, async (...args: any[]) => {
+        const docId = args[0];
+        if (typeof docId !== 'string' || !docId) {
+          throw new StatusError(400, `INVALID_REQUEST: docId is required (got ${docId === '' ? 'empty string' : String(docId)})`);
+        }
         const ctx = getAuthContext();
         await this.assertAccess(access, ctx, method, args);
         return (obj as any)[method](...args);
@@ -206,10 +210,8 @@ export class JSONRPCServer {
   ): Promise<void> {
     if (!this.auth) return; // No auth provider = allow all
 
-    // Most methods have docId as the first parameter
-    const docId = args?.[0];
-    if (typeof docId !== 'string') return; // No docId = allow
-
+    // docId is validated as a non-empty string by register() before this point
+    const docId = args?.[0] as string;
     const ok = await this.auth.canAccess(ctx, docId, access, method);
     if (!ok) {
       throw new StatusError(401, `${access.toUpperCase()}_FORBIDDEN:${docId}`);

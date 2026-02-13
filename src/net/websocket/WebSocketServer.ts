@@ -65,20 +65,18 @@ export class WebSocketServer {
   /**
    * Subscribes the client to one or more documents to receive real-time updates.
    * If a document has been deleted (tombstone exists), sends immediate docDeleted notification.
-   * @param params - The subscription parameters
-   * @param params.ids - Document ID or IDs to subscribe to
+   * @param ids - Document ID or IDs to subscribe to
    */
-  async subscribe(params: { ids: string | string[] }) {
+  async subscribe(ids: string | string[]) {
     const ctx = getAuthContext();
     if (!ctx?.clientId) return [];
-    const { ids } = params;
     const allIds = Array.isArray(ids) ? ids : [ids];
     const allowed: string[] = [];
 
     await Promise.all(
       allIds.map(async id => {
         try {
-          if (await this.auth.canAccess(ctx, id, 'read', 'subscribe', params)) {
+          if (await this.auth.canAccess(ctx, id, 'read', 'subscribe')) {
             allowed.push(id);
           }
         } catch (err) {
@@ -107,13 +105,11 @@ export class WebSocketServer {
 
   /**
    * Unsubscribes the client from one or more documents.
-   * @param params - The unsubscription parameters
-   * @param params.ids - Document ID or IDs to unsubscribe from
+   * @param ids - Document ID or IDs to unsubscribe from
    */
-  async unsubscribe(params: { ids: string | string[] }) {
+  async unsubscribe(ids: string | string[]) {
     const ctx = getAuthContext();
     if (!ctx?.clientId) return [];
-    const { ids } = params;
     // We deliberately do **not** enforce authorization here –
     // removing a subscription doesn't leak information and helps
     // clean up server-side state if a client has lost access mid-session.

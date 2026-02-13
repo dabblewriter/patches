@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { StatusError } from '../../../src/net/error';
 import { JSONRPCServer } from '../../../src/net/protocol/JSONRPCServer';
 import type { JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, Message } from '../../../src/net/protocol/types';
 import { getAuthContext } from '../../../src/net/serverContext';
@@ -665,6 +666,101 @@ describe('JSONRPCServer', () => {
       const response = await server.processMessage(notification);
 
       expect(response).toBeUndefined();
+    });
+  });
+
+  describe('register() docId validation', () => {
+    class FakeServer {
+      static api = { getDoc: 'read' as const, saveDoc: 'write' as const };
+      getDoc = vi.fn().mockResolvedValue({ state: {}, rev: 0 });
+      saveDoc = vi.fn().mockResolvedValue({ ok: true });
+    }
+
+    let fakeServer: FakeServer;
+
+    beforeEach(() => {
+      fakeServer = new FakeServer();
+      server.register(fakeServer);
+    });
+
+    it('should reject null docId with a clear error', async () => {
+      const request: JsonRpcRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getDoc',
+        params: [null],
+      };
+
+      const response = (await server.processMessage(request)) as JsonRpcResponse;
+
+      expect(response.error).toBeDefined();
+      expect(response.error!.code).toBe(400);
+      expect(response.error!.message).toContain('docId is required');
+      expect(response.error!.message).toContain('null');
+      expect(fakeServer.getDoc).not.toHaveBeenCalled();
+    });
+
+    it('should reject undefined docId (no params)', async () => {
+      const request: JsonRpcRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getDoc',
+        params: [],
+      };
+
+      const response = (await server.processMessage(request)) as JsonRpcResponse;
+
+      expect(response.error).toBeDefined();
+      expect(response.error!.code).toBe(400);
+      expect(response.error!.message).toContain('docId is required');
+      expect(fakeServer.getDoc).not.toHaveBeenCalled();
+    });
+
+    it('should reject empty string docId', async () => {
+      const request: JsonRpcRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getDoc',
+        params: [''],
+      };
+
+      const response = (await server.processMessage(request)) as JsonRpcResponse;
+
+      expect(response.error).toBeDefined();
+      expect(response.error!.code).toBe(400);
+      expect(response.error!.message).toContain('empty string');
+      expect(fakeServer.getDoc).not.toHaveBeenCalled();
+    });
+
+    it('should reject numeric docId', async () => {
+      const request: JsonRpcRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'saveDoc',
+        params: [42],
+      };
+
+      const response = (await server.processMessage(request)) as JsonRpcResponse;
+
+      expect(response.error).toBeDefined();
+      expect(response.error!.code).toBe(400);
+      expect(response.error!.message).toContain('docId is required');
+      expect(fakeServer.saveDoc).not.toHaveBeenCalled();
+    });
+
+    it('should allow valid string docId through', async () => {
+      const request: JsonRpcRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getDoc',
+        params: ['my-doc-123'],
+      };
+
+      const response = (await server.processMessage(request)) as JsonRpcResponse;
+
+      expect(response.error).toBeUndefined();
+      expect(response.result).toEqual({ state: {}, rev: 0 });
+      expect(fakeServer.getDoc).toHaveBeenCalledWith('my-doc-123');
     });
   });
 

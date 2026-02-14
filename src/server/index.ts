@@ -38,6 +38,8 @@ export type {
   LWWStoreBackend,
   OTStoreBackend,
   ServerStoreBackend,
+  TextDeltaEntry,
+  TextDeltaStoreBackend,
   TombstoneStoreBackend,
   VersioningStoreBackend,
 } from './types.js';

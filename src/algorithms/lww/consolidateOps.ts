@@ -1,3 +1,4 @@
+import { Delta } from '@dabble/delta';
 import { applyBitmask, combineBitmasks } from '../../json-patch/ops/bitmask.js';
 import type { JSONPatchOp } from '../../json-patch/types.js';
 import { isEmptyContainer } from '../../json-patch/utils/softWrites.js';
@@ -48,6 +49,7 @@ function isExistingNewer(existingTs: number | undefined, incomingTs: number | un
 
 /**
  * Consolidates two ops on the same path.
+ * - @txt: composes Delta values (rich text merge)
  * - @inc: sums values
  * - @bit: combines bitmasks
  * - @max: keeps maximum
@@ -57,6 +59,15 @@ function isExistingNewer(existingTs: number | undefined, incomingTs: number | un
  * Returns null if existing wins (incoming should be dropped).
  */
 export function consolidateFieldOp(existing: JSONPatchOp, incoming: JSONPatchOp): JSONPatchOp | null {
+  // @txt ops compose using Delta.compose() — always merge, never replace
+  if (incoming.op === '@txt' && existing.op === '@txt') {
+    const composed = new Delta(existing.value).compose(new Delta(incoming.value));
+    return { ...incoming, value: composed.ops };
+  }
+
+  // If a non-@txt op overwrites a @txt field (or vice versa), use LWW timestamp rules
+  // (e.g., replace on a text field means the field is being replaced entirely)
+
   const combiner = combinableOps[incoming.op];
 
   // If incoming is combinable AND existing has same op type, combine

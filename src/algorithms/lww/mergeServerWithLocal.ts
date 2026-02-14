@@ -1,12 +1,28 @@
+import { Delta } from '@dabble/delta';
 import type { JSONPatchOp } from '../../json-patch/types.js';
 import type { Change } from '../../types.js';
 import { combinableOps } from './consolidateOps.js';
 
 /**
+ * Result of merging server changes with local ops.
+ *
+ * @property changes - The merged changes to apply to the doc.
+ * @property updatedLocalOps - Local ops updated after merge (e.g., @txt deltas transformed
+ *   against server deltas). Null if no local ops were modified (callers can skip updating the store).
+ */
+export interface MergeResult {
+  changes: Change[];
+  updatedLocalOps: JSONPatchOp[] | null;
+}
+
+/**
  * Merges server changes with local ops (sending + pending) for doc display.
  *
  * For paths that server touched:
- * - If local has a delta op (@inc, @bit, @max, @min), apply it to server value
+ * - If local has a @txt op, use bidirectional Delta.transform() to merge.
+ *   The server delta is transformed to apply on top of local pending, and
+ *   the local pending is transformed to account for the server change.
+ * - If local has a combinable delta op (@inc, @bit, @max, @min), apply it to server value
  * - If local has a non-delta op, keep server value (already committed)
  *
  * For paths server didn't touch:
@@ -14,13 +30,14 @@ import { combinableOps } from './consolidateOps.js';
  *
  * @param serverChanges Changes received from server
  * @param localOps Local ops (sendingChange.ops + pendingOps) from the store
- * @returns Changes to apply to the doc
+ * @returns MergeResult with changes to apply and optionally updated local ops
  */
-export function mergeServerWithLocal(serverChanges: Change[], localOps: JSONPatchOp[]): Change[] {
-  if (localOps.length === 0) return serverChanges;
+export function mergeServerWithLocal(serverChanges: Change[], localOps: JSONPatchOp[]): MergeResult {
+  if (localOps.length === 0) return { changes: serverChanges, updatedLocalOps: null };
 
   const localByPath = new Map(localOps.map(op => [op.path, op]));
   const serverPaths = new Set<string>();
+  let localOpsModified = false;
 
   // Process server changes, merging with local delta ops
   const mergedChanges = serverChanges.map(change => {
@@ -28,6 +45,23 @@ export function mergeServerWithLocal(serverChanges: Change[], localOps: JSONPatc
       serverPaths.add(serverOp.path);
       const local = localByPath.get(serverOp.path);
       if (!local) return serverOp;
+
+      // @txt: bidirectional Delta.transform()
+      if (serverOp.op === '@txt' && local.op === '@txt') {
+        const serverDelta = new Delta(serverOp.value);
+        const localDelta = new Delta(local.value);
+
+        // Transform server delta to apply on top of our pending local state
+        const transformedServer = localDelta.transform(serverDelta, true);
+        // Transform local pending to account for server's change
+        const transformedLocal = serverDelta.transform(localDelta, false);
+
+        // Update the local op with the transformed delta
+        localByPath.set(serverOp.path, { ...local, value: transformedLocal.ops });
+        localOpsModified = true;
+
+        return { ...serverOp, value: transformedServer.ops };
+      }
 
       const combiner = combinableOps[local.op];
       if (!combiner) return serverOp; // Non-delta local op - server value already committed
@@ -55,5 +89,8 @@ export function mergeServerWithLocal(serverChanges: Change[], localOps: JSONPatc
     };
   }
 
-  return mergedChanges;
+  // Build updated local ops if any were modified (e.g., @txt transforms)
+  const updatedLocalOps = localOpsModified ? Array.from(localByPath.values()) : null;
+
+  return { changes: mergedChanges, updatedLocalOps };
 }

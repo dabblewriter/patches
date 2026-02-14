@@ -1,3 +1,4 @@
+import { Delta } from '@dabble/delta';
 import { describe, expect, it } from 'vitest';
 import { consolidateFieldOp, consolidateOps, convertDeltaOps } from '../../../src/algorithms/lww/consolidateOps';
 import type { JSONPatchOp } from '../../../src/json-patch/types';
@@ -80,6 +81,61 @@ describe('consolidateFieldOp', () => {
 
       expect(result).not.toBeNull();
       expect(result!.value).toBe(50);
+    });
+  });
+
+  describe('@txt operations', () => {
+    it('should compose when both ops are @txt', () => {
+      // existing inserts "hello", incoming inserts " world" after
+      const existing: JSONPatchOp = { op: '@txt', path: '/body', value: [{ insert: 'hello' }], ts: 1000 };
+      const incoming: JSONPatchOp = {
+        op: '@txt',
+        path: '/body',
+        value: [{ retain: 5 }, { insert: ' world' }],
+        ts: 2000,
+      };
+      const result = consolidateFieldOp(existing, incoming);
+      // Should compose into a single delta
+      expect(result).not.toBeNull();
+      expect(result!.op).toBe('@txt');
+      // The composed delta should be equivalent to "hello world"
+      const composed = new Delta(result!.value);
+      const applied = new Delta().compose(composed);
+      expect(applied.ops).toEqual([{ insert: 'hello world' }]);
+    });
+
+    it('should always compose @txt regardless of timestamps', () => {
+      // Even with older timestamp, @txt ops compose (don't use LWW timestamp rules)
+      const existing: JSONPatchOp = { op: '@txt', path: '/body', value: [{ insert: 'hello' }], ts: 3000 };
+      const incoming: JSONPatchOp = { op: '@txt', path: '/body', value: [{ retain: 5 }, { insert: '!' }], ts: 1000 };
+      const result = consolidateFieldOp(existing, incoming);
+      expect(result).not.toBeNull();
+      expect(result!.op).toBe('@txt');
+    });
+
+    it('should use LWW rules when non-@txt replaces @txt field', () => {
+      // Replace overwrites @txt if newer timestamp
+      const existing: JSONPatchOp = { op: '@txt', path: '/body', value: [{ insert: 'hello' }], ts: 1000 };
+      const incoming: JSONPatchOp = { op: 'replace', path: '/body', value: 'plain text', ts: 2000 };
+      const result = consolidateFieldOp(existing, incoming);
+      expect(result).not.toBeNull();
+      expect(result!.op).toBe('replace');
+      expect(result!.value).toBe('plain text');
+    });
+
+    it('should use LWW rules when @txt replaces non-@txt field', () => {
+      const existing: JSONPatchOp = { op: 'replace', path: '/body', value: 'plain text', ts: 1000 };
+      const incoming: JSONPatchOp = { op: '@txt', path: '/body', value: [{ insert: 'hello' }], ts: 2000 };
+      // @txt is not in combinableOps, so it uses the LWW timestamp path
+      const result = consolidateFieldOp(existing, incoming);
+      expect(result).not.toBeNull();
+    });
+
+    it('should reject non-@txt over @txt when existing is newer', () => {
+      const existing: JSONPatchOp = { op: '@txt', path: '/body', value: [{ insert: 'hello' }], ts: 3000 };
+      const incoming: JSONPatchOp = { op: 'replace', path: '/body', value: 'old', ts: 1000 };
+      const result = consolidateFieldOp(existing, incoming);
+      expect(result).toBeNull(); // existing wins by timestamp
     });
   });
 
@@ -567,6 +623,45 @@ describe('consolidatePendingOps', () => {
       expect(result.opsToSave).toHaveLength(2);
       expect(result.opsToSave[0].path).toBe('/users');
       expect(result.opsToSave[1].path).toBe('/users/1');
+    });
+  });
+
+  describe('@txt operations', () => {
+    it('should compose @txt ops on same path in consolidateOps', () => {
+      const existingOps: JSONPatchOp[] = [{ op: '@txt', path: '/body', value: [{ insert: 'hello' }], ts: 1000 }];
+      const newOps: JSONPatchOp[] = [
+        { op: '@txt', path: '/body', value: [{ retain: 5 }, { insert: ' world' }], ts: 2000 },
+      ];
+      const result = consolidateOps(existingOps, newOps);
+      expect(result.opsToSave).toHaveLength(1);
+      expect(result.opsToSave[0].op).toBe('@txt');
+    });
+
+    it('should add @txt op when no existing op at path', () => {
+      const existingOps: JSONPatchOp[] = [];
+      const newOps: JSONPatchOp[] = [{ op: '@txt', path: '/body', value: [{ insert: 'hello' }], ts: 1000 }];
+      const result = consolidateOps(existingOps, newOps);
+      expect(result.opsToSave).toHaveLength(1);
+      expect(result.opsToSave[0].op).toBe('@txt');
+      expect(result.opsToSave[0].path).toBe('/body');
+    });
+
+    it('should handle @txt alongside other ops on different paths', () => {
+      const existingOps: JSONPatchOp[] = [
+        { op: '@inc', path: '/views', value: 10, ts: 1000 },
+      ];
+      const newOps: JSONPatchOp[] = [
+        { op: '@txt', path: '/body', value: [{ insert: 'hello' }], ts: 2000 },
+        { op: '@inc', path: '/views', value: 5, ts: 2000 },
+      ];
+      const result = consolidateOps(existingOps, newOps);
+      expect(result.opsToSave).toHaveLength(2);
+
+      const textOp = result.opsToSave.find(op => op.path === '/body');
+      expect(textOp?.op).toBe('@txt');
+
+      const viewsOp = result.opsToSave.find(op => op.path === '/views');
+      expect(viewsOp?.value).toBe(15);
     });
   });
 });

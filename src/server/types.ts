@@ -77,6 +77,20 @@ export type ListFieldsOptions = { sinceRev: number } | { paths: string[] };
 /**
  * Interface for LWW (Last-Write-Wins) storage backend.
  * LWW stores fields (not changes) and reconstructs state from fields.
+ *
+ * ## Rich Text Support
+ *
+ * LWW supports collaborative rich text editing via `@txt` operations. While standard
+ * LWW fields use timestamp-based conflict resolution, `@txt` fields use Delta-based
+ * Operational Transformation for character-level merge of concurrent edits.
+ *
+ * To support `@txt`, the store must implement the optional `TextDeltaStoreBackend`
+ * interface. The text delta log stores individual deltas per text field path, enabling:
+ * 1. **Transform**: Incoming text deltas are transformed against concurrent edits
+ * 2. **Catchup**: Clients that missed changes receive composed deltas (not full text)
+ *
+ * The delta log can be pruned after snapshots — it is not needed for state reconstruction.
+ * The field store always contains the current composed text value for each text field.
  */
 export interface LWWStoreBackend extends ServerStoreBackend {
   /**
@@ -131,6 +145,105 @@ export interface LWWStoreBackend extends ServerStoreBackend {
    * @returns The new revision number.
    */
   saveOps(docId: string, ops: JSONPatchOp[], pathsToDelete?: string[]): Promise<number>;
+}
+
+/**
+ * Optional interface for storing text delta history, enabling collaborative
+ * rich text editing within LWW documents.
+ *
+ * The text delta log is an append-only record of individual `@txt` deltas per field path.
+ * It serves two purposes:
+ * 1. **Transform**: When concurrent text edits arrive, the server transforms incoming
+ *    deltas against recent deltas from the log to ensure correct merge.
+ * 2. **Catchup**: When a client requests changes since a revision, text fields return
+ *    a composed delta (not the full text) so the client can transform against local pending.
+ *
+ * The delta log is NOT needed for state reconstruction — the field store (`listOps`)
+ * always contains the current composed text value. Deltas can be pruned after snapshots.
+ *
+ * ## Implementation Requirements
+ *
+ * - `appendTextDelta`: Store a delta with its document path and revision. Called after
+ *   the field store is updated with the composed text value.
+ * - `getTextDeltasSince`: Return all deltas for a specific path since a given revision,
+ *   ordered by revision ascending. Used for both transform and catchup.
+ * - `getAllTextDeltasSince`: Return all text deltas across all paths since a revision,
+ *   ordered by revision ascending. Used by `getChangesSince()` for efficient catchup.
+ * - `pruneTextDeltas`: Delete deltas at or before a revision. Called after snapshots
+ *   and when text fields are deleted. Pass specific paths to clean up deleted fields,
+ *   or omit paths to prune all deltas up to the revision (e.g., after compaction).
+ *
+ * ## Example: SQL Schema
+ *
+ * ```sql
+ * CREATE TABLE text_deltas (
+ *   doc_id TEXT NOT NULL,
+ *   path TEXT NOT NULL,
+ *   rev INTEGER NOT NULL,
+ *   delta JSON NOT NULL,
+ *   PRIMARY KEY (doc_id, path, rev)
+ * );
+ * CREATE INDEX idx_text_deltas_since ON text_deltas (doc_id, rev);
+ * ```
+ */
+export interface TextDeltaStoreBackend {
+  /**
+   * Append a text delta to the log for a specific field path.
+   * Called after the field store is updated with the composed text value.
+   *
+   * @param docId - The document ID.
+   * @param path - The JSON Pointer path of the text field (e.g., '/body').
+   * @param delta - The delta ops array (from Delta.ops).
+   * @param rev - The revision number this delta was committed at.
+   */
+  appendTextDelta(docId: string, path: string, delta: any[], rev: number): Promise<void>;
+
+  /**
+   * Get all text deltas for a specific path since a given revision.
+   * Returns deltas in ascending revision order.
+   *
+   * @param docId - The document ID.
+   * @param path - The JSON Pointer path of the text field.
+   * @param sinceRev - Return deltas with rev strictly greater than this value.
+   * @returns Array of `{ path, delta, rev }` entries ordered by rev ascending.
+   */
+  getTextDeltasSince(docId: string, path: string, sinceRev: number): Promise<TextDeltaEntry[]>;
+
+  /**
+   * Get all text deltas across all paths since a given revision.
+   * Returns deltas in ascending revision order. Used by `getChangesSince()`
+   * to build composed text catchup for clients.
+   *
+   * @param docId - The document ID.
+   * @param sinceRev - Return deltas with rev strictly greater than this value.
+   * @returns Array of `{ path, delta, rev }` entries ordered by rev ascending.
+   */
+  getAllTextDeltasSince(docId: string, sinceRev: number): Promise<TextDeltaEntry[]>;
+
+  /**
+   * Delete text deltas at or before a given revision, optionally filtered by paths.
+   *
+   * When `paths` is provided, only deletes deltas for those specific paths (used when
+   * a text field is deleted or overwritten). When `paths` is omitted, deletes all
+   * deltas up to the revision (used after snapshot compaction).
+   *
+   * @param docId - The document ID.
+   * @param atOrBeforeRev - Delete deltas with rev ≤ this value.
+   * @param paths - Optional specific paths to prune. If omitted, prunes all paths.
+   */
+  pruneTextDeltas(docId: string, atOrBeforeRev: number, paths?: string[]): Promise<void>;
+}
+
+/**
+ * A single entry in the text delta log.
+ */
+export interface TextDeltaEntry {
+  /** The JSON Pointer path of the text field. */
+  path: string;
+  /** The delta ops array. */
+  delta: any[];
+  /** The revision this delta was committed at. */
+  rev: number;
 }
 
 /**

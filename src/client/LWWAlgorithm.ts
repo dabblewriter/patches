@@ -113,7 +113,15 @@ export class LWWAlgorithm implements ClientAlgorithm {
     const sendingChange = await this.store.getSendingChange(docId);
     const pendingOps = await this.store.getPendingOps(docId);
     const localOps = [...(sendingChange?.ops ?? []), ...pendingOps];
-    const mergedChanges = mergeServerWithLocal(serverChanges, localOps);
+    const { changes: mergedChanges, updatedLocalOps } = mergeServerWithLocal(serverChanges, localOps);
+
+    // If @txt ops were transformed, update pending ops in the store
+    if (updatedLocalOps) {
+      // Only update the pending ops portion (not the sending change)
+      const sendingOpCount = sendingChange?.ops?.length ?? 0;
+      const updatedPendingOps = updatedLocalOps.slice(sendingOpCount);
+      await this.store.savePendingOps(docId, updatedPendingOps, []);
+    }
 
     if (doc) {
       const hasPending = localOps.length > 0;

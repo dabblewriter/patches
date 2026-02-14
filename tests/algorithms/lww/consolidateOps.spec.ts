@@ -498,9 +498,7 @@ describe('consolidatePendingOps', () => {
     });
 
     it('should skip explicit soft op when child paths exist', () => {
-      const existingOps: JSONPatchOp[] = [
-        { op: 'replace', path: '/config/theme', value: 'dark', ts: 1000 },
-      ];
+      const existingOps: JSONPatchOp[] = [{ op: 'replace', path: '/config/theme', value: 'dark', ts: 1000 }];
       const newOps: JSONPatchOp[] = [{ op: 'replace', path: '/config', value: {}, ts: 2000, soft: true }];
 
       const result = consolidateOps(existingOps, newOps);
@@ -548,9 +546,7 @@ describe('consolidatePendingOps', () => {
     });
 
     it('should allow soft op when parent op value does not contain that subpath', () => {
-      const existingOps: JSONPatchOp[] = [
-        { op: 'replace', path: '/person', value: { age: 30 }, ts: 1000 },
-      ];
+      const existingOps: JSONPatchOp[] = [{ op: 'replace', path: '/person', value: { age: 30 }, ts: 1000 }];
       const newOps: JSONPatchOp[] = [{ op: 'add', path: '/person/name', value: {}, ts: 2000 }];
 
       const result = consolidateOps(existingOps, newOps);

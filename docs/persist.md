@@ -200,11 +200,11 @@ This isn't just a nice-to-have. Users lose trust in apps that lose their work. L
 
 | Use Case                   | Algorithm | Reason                                          |
 | -------------------------- | --------- | ----------------------------------------------- |
-| Collaborative text editing | OT       | Concurrent character-level changes need merging |
-| Rich document editing      | OT       | Multiple users editing same content             |
-| User preferences           | LWW      | Last setting wins, no merging needed            |
-| Application settings       | LWW      | Simple key-value updates                        |
-| Presence/status data       | LWW      | Latest status is what matters                   |
+| Collaborative text editing | OT        | Concurrent character-level changes need merging |
+| Rich document editing      | OT        | Multiple users editing same content             |
+| User preferences           | LWW       | Last setting wins, no merging needed            |
+| Application settings       | LWW       | Simple key-value updates                        |
+| Presence/status data       | LWW       | Latest status is what matters                   |
 
 ## Related Documentation
 

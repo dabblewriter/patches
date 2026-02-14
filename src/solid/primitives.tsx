@@ -210,7 +210,24 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
     doc,
   };
 
-  return { doc, setDoc, data, setData, loading, setLoading, error, setError, rev, setRev, hasPending, setHasPending, setupDoc, resetSignals, change, baseReturn };
+  return {
+    doc,
+    setDoc,
+    data,
+    setData,
+    loading,
+    setLoading,
+    error,
+    setError,
+    rev,
+    setRev,
+    hasPending,
+    setHasPending,
+    setupDoc,
+    resetSignals,
+    change,
+    baseReturn,
+  };
 }
 
 // --- usePatchesDoc overloads ---
@@ -338,9 +355,7 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
   const { setupDoc, resetSignals, setError, setLoading, baseReturn } = createDocReactiveState<T>({
     initialLoading: false,
     changeBehavior: 'noop',
-    transformState: idProp
-      ? (state, patchesDoc) => ({ ...state, [idProp]: patchesDoc.id }) as T
-      : undefined,
+    transformState: idProp ? (state, patchesDoc) => ({ ...state, [idProp]: patchesDoc.id }) as T : undefined,
   });
 
   let unsubscribe: Unsubscriber | null = null;

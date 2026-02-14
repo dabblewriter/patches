@@ -173,10 +173,7 @@ export class Patches {
    * @returns The opened PatchesDoc instance.
    */
   @singleInvocation(true) // ensure a second call to openDoc with the same docId returns the same promise while opening
-  async openDoc<T extends object>(
-    docId: string,
-    opts: OpenDocOptions = {}
-  ): Promise<PatchesDoc<T>> {
+  async openDoc<T extends object>(docId: string, opts: OpenDocOptions = {}): Promise<PatchesDoc<T>> {
     const existing = this.docs.get(docId);
     if (existing) return existing.doc as PatchesDoc<T>;
 

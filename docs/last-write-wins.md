@@ -39,13 +39,13 @@ See [Operational Transformation](operational-transformation.md) for more on when
 
 | Use Case                   | Algorithm | Why                                                           |
 | -------------------------- | --------- | ------------------------------------------------------------- |
-| Design tools (Figma-style) | LWW      | Users drag different objects; last position wins              |
-| Task managers              | LWW      | Users update different task fields; conflicts are rare        |
-| User settings/preferences  | LWW      | Single user editing; timestamps prevent stale writes          |
-| Collaborative whiteboards  | LWW      | Each sticky note is independent; position overwrites are fine |
-| Real-time dashboards       | LWW      | Status fields update independently                            |
-| Document editors           | OT       | Same paragraph edited by multiple people needs merging        |
-| Collaborative text         | OT       | Character-level conflicts need transformation                 |
+| Design tools (Figma-style) | LWW       | Users drag different objects; last position wins              |
+| Task managers              | LWW       | Users update different task fields; conflicts are rare        |
+| User settings/preferences  | LWW       | Single user editing; timestamps prevent stale writes          |
+| Collaborative whiteboards  | LWW       | Each sticky note is independent; position overwrites are fine |
+| Real-time dashboards       | LWW       | Status fields update independently                            |
+| Document editors           | OT        | Same paragraph edited by multiple people needs merging        |
+| Collaborative text         | OT        | Character-level conflicts need transformation                 |
 
 The rule of thumb: if conflicts feel like "whoever saved last should win," use LWW. If conflicts feel like "we need to keep both changes," use OT.
 

@@ -19,13 +19,13 @@ Why separate algorithms from classes? Because testability isn't optional. Pure f
 
 The separation of concerns:
 
-| Layer             | Components                                           | Responsibility                  |
-| ----------------- | ---------------------------------------------------- | ------------------------------- |
-| **Orchestration** | `PatchesSync`, `PatchesDoc`, `OTServer`, `LWWServer` | Coordination and event handling |
-| **Algorithm**     | `OTAlgorithm`, `LWWAlgorithm`                        | Algorithm-specific coordination |
-| **Pure Functions**| Pure functions in `src/algorithms/`                  | The actual OT/LWW logic         |
-| **Storage**       | `IndexedDBStore`, `InMemoryStore`, etc.              | Data persistence only           |
-| **Transport**     | WebSocket, WebRTC                                    | Message delivery                |
+| Layer              | Components                                           | Responsibility                  |
+| ------------------ | ---------------------------------------------------- | ------------------------------- |
+| **Orchestration**  | `PatchesSync`, `PatchesDoc`, `OTServer`, `LWWServer` | Coordination and event handling |
+| **Algorithm**      | `OTAlgorithm`, `LWWAlgorithm`                        | Algorithm-specific coordination |
+| **Pure Functions** | Pure functions in `src/algorithms/`                  | The actual OT/LWW logic         |
+| **Storage**        | `IndexedDBStore`, `InMemoryStore`, etc.              | Data persistence only           |
+| **Transport**      | WebSocket, WebRTC                                    | Message delivery                |
 
 Stores are intentionally "dumb" - they save and load data, nothing more. Algorithm implementations invoke pure algorithm functions and handle coordination. This keeps each layer focused and testable.
 

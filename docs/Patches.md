@@ -41,14 +41,14 @@ const patches = createOTIndexedDBPatches({ dbName: 'my-app' });
 
 Available factories:
 
-| Factory                                | Algorithm | Storage   | Use Case                          |
-| -------------------------------------- | --------- | --------- | --------------------------------- |
-| `createOTPatches`                      | OT        | Memory    | Testing, ephemeral sessions       |
-| `createOTIndexedDBPatches`             | OT        | IndexedDB | Production collaborative editing  |
-| `createLWWPatches`                     | LWW       | Memory    | Testing LWW features              |
-| `createLWWIndexedDBPatches`            | LWW       | IndexedDB | Production settings/preferences   |
-| `createMultiAlgorithmPatches`          | Both      | Memory    | Testing multi-algorithm apps      |
-| `createMultiAlgorithmIndexedDBPatches` | Both      | IndexedDB | Production multi-algorithm apps   |
+| Factory                                | Algorithm | Storage   | Use Case                         |
+| -------------------------------------- | --------- | --------- | -------------------------------- |
+| `createOTPatches`                      | OT        | Memory    | Testing, ephemeral sessions      |
+| `createOTIndexedDBPatches`             | OT        | IndexedDB | Production collaborative editing |
+| `createLWWPatches`                     | LWW       | Memory    | Testing LWW features             |
+| `createLWWIndexedDBPatches`            | LWW       | IndexedDB | Production settings/preferences  |
+| `createMultiAlgorithmPatches`          | Both      | Memory    | Testing multi-algorithm apps     |
+| `createMultiAlgorithmIndexedDBPatches` | Both      | IndexedDB | Production multi-algorithm apps  |
 
 All factories accept optional `metadata` for attaching user info to changes:
 

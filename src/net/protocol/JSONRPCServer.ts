@@ -95,7 +95,10 @@ export class JSONRPCServer {
       this.registerMethod(method, async (...args: any[]) => {
         const docId = args[0];
         if (typeof docId !== 'string' || !docId) {
-          throw new StatusError(400, `INVALID_REQUEST: docId is required (got ${docId === '' ? 'empty string' : String(docId)})`);
+          throw new StatusError(
+            400,
+            `INVALID_REQUEST: docId is required (got ${docId === '' ? 'empty string' : String(docId)})`
+          );
         }
         const ctx = getAuthContext();
         await this.assertAccess(access, ctx, method, args);
@@ -212,7 +215,10 @@ export class JSONRPCServer {
 
     const docId = args?.[0];
     if (typeof docId !== 'string' || !docId) {
-      throw new StatusError(400, `INVALID_REQUEST: docId is required (got ${docId === '' ? 'empty string' : String(docId)})`);
+      throw new StatusError(
+        400,
+        `INVALID_REQUEST: docId is required (got ${docId === '' ? 'empty string' : String(docId)})`
+      );
     }
     const ok = await this.auth.canAccess(ctx, docId, access, method);
     if (!ok) {

@@ -32,8 +32,8 @@ Patches supports two sync algorithms, and each has its own branch manager:
 
 | Algorithm | Branch Manager                             | Merge Approach                             |
 | --------- | ------------------------------------------ | ------------------------------------------ |
-| OT       | [OTBranchManager](PatchesBranchManager.md) | Transforms operations, preserves history   |
-| LWW      | LWWBranchManager                           | Timestamps resolve conflicts automatically |
+| OT        | [OTBranchManager](PatchesBranchManager.md) | Transforms operations, preserves history   |
+| LWW       | LWWBranchManager                           | Timestamps resolve conflicts automatically |
 
 **OT branching** (via `OTBranchManager`) works like git. The branch captures the source at a specific revision. When merging, the system checks if the source has new changes since the branch was created:
 

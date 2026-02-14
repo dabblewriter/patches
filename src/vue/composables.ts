@@ -325,9 +325,7 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
   const { setupDoc, resetRefs, baseReturn } = createDocReactiveState<T>({
     initialLoading: false,
     changeBehavior: 'noop',
-    transformState: idProp
-      ? (state, patchesDoc) => ({ ...state, [idProp]: patchesDoc.id }) as T
-      : undefined,
+    transformState: idProp ? (state, patchesDoc) => ({ ...state, [idProp]: patchesDoc.id }) as T : undefined,
   });
 
   let unsubscribe: Unsubscriber | null = null;

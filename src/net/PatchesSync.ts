@@ -29,6 +29,20 @@ export interface PatchesSyncOptions {
   sizeCalculator?: SizeCalculator;
 }
 
+export type SyncedDocStatus = 'unsynced' | 'syncing' | 'synced' | 'error';
+
+export interface SyncedDoc {
+  committedRev: number;
+  hasPending: boolean;
+  status: SyncedDocStatus;
+}
+
+const EMPTY_SYNCED_DOC: SyncedDoc = {
+  committedRev: 0,
+  hasPending: false,
+  status: 'unsynced',
+};
+
 /**
  * Handles WebSocket connection, document subscriptions, and syncing logic between
  * the Patches instance and the server.
@@ -48,6 +62,7 @@ export class PatchesSync {
   /** Maps docId to the algorithm name used for that doc */
   protected docAlgorithms: Map<string, AlgorithmName> = new Map();
   protected _state: PatchesSyncState = { online: false, connected: false, syncing: null };
+  protected _synced: Record<string, SyncedDoc> = {};
 
   /**
    * Signal emitted when the sync state changes.
@@ -62,6 +77,10 @@ export class PatchesSync {
    * Provides the pending changes that were discarded so the application can handle them.
    */
   readonly onRemoteDocDeleted = signal<(docId: string, pendingChanges: Change[]) => void>();
+  /**
+   * Signal emitted when the synced doc map changes.
+   */
+  readonly onSyncedChange = signal<(synced: Record<string, SyncedDoc>) => void>();
 
   constructor(
     patches: Patches,
@@ -134,6 +153,14 @@ export class PatchesSync {
   }
 
   /**
+   * Map of all tracked documents and their current sync status.
+   * Updated immutably — new object reference on every change.
+   */
+  get synced(): Record<string, SyncedDoc> {
+    return this._synced;
+  }
+
+  /**
    * Gets the JSON-RPC client for making custom RPC calls.
    * Useful for application-specific methods not part of the Patches protocol.
    */
@@ -173,6 +200,7 @@ export class PatchesSync {
   disconnect(): void {
     this.ws.disconnect();
     this.updateState({ connected: false, syncing: null });
+    this._resetSyncingStatuses();
   }
 
   /**
@@ -207,6 +235,20 @@ export class PatchesSync {
 
       // Ensure tracked set reflects only active docs for subscription purposes
       this.trackedDocs = new Set(activeDocIds);
+
+      // Populate synced map for active docs
+      const syncedEntries: Record<string, SyncedDoc> = {};
+      for (const doc of activeDocs) {
+        const algorithm = this._getAlgorithm(doc.docId);
+        const pending = await algorithm.getPendingToSend(doc.docId);
+        syncedEntries[doc.docId] = {
+          committedRev: doc.committedRev,
+          hasPending: pending != null && pending.length > 0,
+          status: doc.committedRev === 0 ? 'unsynced' : 'synced',
+        };
+      }
+      this._synced = syncedEntries;
+      this.onSyncedChange.emit(this._synced);
 
       // Subscribe to active docs
       if (activeDocIds.length > 0) {
@@ -259,6 +301,8 @@ export class PatchesSync {
   protected async syncDoc(docId: string): Promise<void> {
     if (!this.state.connected) return;
 
+    this._updateSyncedDoc(docId, { status: 'syncing' });
+
     const doc = this.patches.getOpenDoc(docId);
     const algorithm = this._getAlgorithm(docId);
 
@@ -292,6 +336,7 @@ export class PatchesSync {
           }
         }
       }
+      this._updateSyncedDoc(docId, { status: 'synced' });
       if (baseDoc) {
         baseDoc.updateSyncing(null);
       }
@@ -301,6 +346,7 @@ export class PatchesSync {
         await this._handleRemoteDocDeleted(docId);
         return;
       }
+      this._updateSyncedDoc(docId, { status: 'error' });
       console.error(`Error syncing doc ${docId}:`, err);
       this.onError.emit(err as Error, { docId });
       if (baseDoc) {
@@ -354,11 +400,15 @@ export class PatchesSync {
         // Fetch remaining pending for next batch or check completion
         pending = (await algorithm.getPendingToSend(docId)) ?? [];
       }
+
+      const stillHasPending = pending != null && pending.length > 0;
+      this._updateSyncedDoc(docId, { hasPending: stillHasPending, status: 'synced' });
     } catch (err) {
       if (this._isDocDeletedError(err)) {
         await this._handleRemoteDocDeleted(docId);
         return;
       }
+      this._updateSyncedDoc(docId, { status: 'error' });
       console.error(`Flush failed for doc ${docId}:`, err);
       this.onError.emit(err as Error, { docId });
       throw err;
@@ -390,6 +440,11 @@ export class PatchesSync {
 
     // Delegate to algorithm - it handles store updates and doc updates
     await algorithm.applyServerChanges(docId, serverChanges, doc);
+
+    if (serverChanges.length > 0) {
+      const lastRev = serverChanges[serverChanges.length - 1].rev;
+      this._updateSyncedDoc(docId, { committedRev: lastRev });
+    }
   }
 
   /**
@@ -430,6 +485,9 @@ export class PatchesSync {
     if (isConnected) {
       // Sync everything on connect/reconnect
       void this.syncAllKnownDocs();
+    } else if (!isConnecting) {
+      // Reset any stale 'syncing' statuses on disconnect/error
+      this._resetSyncingStatuses();
     }
   }
 
@@ -456,6 +514,19 @@ export class PatchesSync {
       }
     }
 
+    // Populate synced entries for newly tracked docs
+    for (const docId of newIds) {
+      const algorithm = this._getAlgorithm(docId);
+      const committedRev = await algorithm.getCommittedRev(docId);
+      const pending = await algorithm.getPendingToSend(docId);
+      this._updateSyncedDoc(docId, {
+        committedRev,
+        hasPending: pending != null && pending.length > 0,
+        status: committedRev === 0 ? 'unsynced' : 'synced',
+      }, false);
+    }
+    this._emitSyncedChange();
+
     if (this.state.connected) {
       try {
         // Only subscribe to IDs not already covered by existing subscriptions
@@ -480,6 +551,8 @@ export class PatchesSync {
     const subscribedBefore = this._getActiveSubscriptions();
 
     existingIds.forEach(id => this.trackedDocs.delete(id));
+    existingIds.forEach(id => this._updateSyncedDoc(id, undefined, false));
+    this._emitSyncedChange();
 
     // Only unsubscribe from subscriptions no longer needed by any remaining tracked doc
     const subscribedAfter = this._getActiveSubscriptions();
@@ -495,8 +568,11 @@ export class PatchesSync {
   }
 
   protected async _handleDocChange(docId: string): Promise<void> {
-    if (!this.state.connected) return;
     if (!this.trackedDocs.has(docId)) return;
+    // Emit if not connected, otherwise let the next update emit
+    this._updateSyncedDoc(docId, { hasPending: true }, !this.state.connected);
+    if (!this.state.connected) return;
+    this._updateSyncedDoc(docId, { status: 'syncing' });
     await this.flushDoc(docId);
   }
 
@@ -518,10 +594,53 @@ export class PatchesSync {
 
     // Clean up tracking and local storage
     this.trackedDocs.delete(docId);
+    this._updateSyncedDoc(docId, undefined);
     await algorithm.confirmDeleteDoc(docId);
 
     // Notify application (with any pending changes that were lost)
     await this.onRemoteDocDeleted.emit(docId, pendingChanges);
+  }
+
+  /**
+   * Adds, updates, or removes a synced doc entry immutably and emits onSyncedChange.
+   * - Pass a full SyncedDoc to add a new entry or overwrite an existing one.
+   * - Pass a Partial<SyncedDoc> to merge into an existing entry (no-ops if doc not in map).
+   * - Pass undefined to remove the entry.
+   * No-ops if nothing actually changed.
+   */
+  protected _updateSyncedDoc(docId: string, updates: Partial<SyncedDoc> | undefined, emit: boolean = true): void {
+    if (updates === undefined) {
+      // Remove
+      if (!(docId in this._synced)) return;
+      this._synced = { ...this._synced }; // Create a new object to avoid mutating the original
+      delete this._synced[docId];
+    } else {
+      const updated = { ...EMPTY_SYNCED_DOC, ...this._synced[docId], ...updates } as SyncedDoc;
+      if (isEqual(this._synced[docId], updated)) return;
+      this._synced = { ...this._synced, [docId]: updated };
+    }
+    if (emit) this._emitSyncedChange();
+  }
+
+  protected _emitSyncedChange(): void {
+    this.onSyncedChange.emit(this._synced);
+  }
+
+  /**
+   * Resets any docs with status 'syncing' back to a stable state on disconnect.
+   * Uses hasPending to decide: pending docs become 'synced' (they have local data),
+   * docs with no pending and no committed rev become 'unsynced'.
+   */
+  protected _resetSyncingStatuses(): void {
+    let changed = false;
+    for (const [docId, doc] of Object.entries(this._synced)) {
+      if (doc.status === 'syncing') {
+        const newStatus = doc.committedRev === 0 && !doc.hasPending ? 'unsynced' : 'synced';
+        this._updateSyncedDoc(docId, { status: newStatus }, false);
+        changed = true;
+      }
+    }
+    if (changed) this._emitSyncedChange();
   }
 
   /**

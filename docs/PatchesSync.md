@@ -9,6 +9,7 @@
 - [Setting Up](#setting-up)
 - [The Sync Flow](#the-sync-flow)
 - [State Management](#state-management)
+- [Per-Document Sync Status](#per-document-sync-status)
 - [Event Handling](#event-handling)
 - [Configuration Options](#configuration-options)
 - [Real-World Example](#real-world-example)
@@ -158,6 +159,97 @@ sync.onStateChange(state => {
 });
 ```
 
+## Per-Document Sync Status
+
+The `state` property tells you about the connection. The `synced` property tells you about each document. It's a `Record<string, SyncedDoc>` — one entry per tracked document, updated in real time as sync events happen.
+
+```typescript
+type SyncedDocStatus = 'unsynced' | 'syncing' | 'synced' | 'error';
+
+interface SyncedDoc {
+  committedRev: number; // Last confirmed server revision. 0 = never synced.
+  hasPending: boolean; // Has local changes not yet confirmed by server.
+  status: SyncedDocStatus; // Current sync lifecycle state.
+}
+```
+
+### Reading Sync Status
+
+```typescript
+// Get the full map
+const synced = sync.synced;
+
+// Check a specific document
+const docStatus = synced['project-notes'];
+if (docStatus?.status === 'error') {
+  showError('Sync failed for project notes');
+}
+
+// Show an indicator per document
+for (const [docId, info] of Object.entries(sync.synced)) {
+  console.log(`${docId}: rev=${info.committedRev}, pending=${info.hasPending}, status=${info.status}`);
+}
+```
+
+The `synced` object is immutable. Every change produces a new reference, so shallow comparison works for change detection.
+
+### Listening for Changes
+
+Use `onSyncedChange` to react when any document's sync status changes:
+
+```typescript
+sync.onSyncedChange(synced => {
+  for (const [docId, info] of Object.entries(synced)) {
+    updateDocIndicator(docId, info.status, info.hasPending);
+  }
+});
+```
+
+### Status Lifecycle
+
+Here's exactly when each field changes:
+
+| Event                  | Effect                                                                                                                           |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Doc tracked            | Entry added. `committedRev` from store, `hasPending` from pending check, `status` = `committedRev === 0 ? 'unsynced' : 'synced'` |
+| `syncDoc` starts       | `status` → `'syncing'`                                                                                                           |
+| Server changes applied | `committedRev` updated to last server change's revision                                                                          |
+| `syncDoc` succeeds     | `status` → `'synced'`                                                                                                            |
+| `syncDoc` fails        | `status` → `'error'`                                                                                                             |
+| Local change made      | `hasPending` = `true`, `status` → `'syncing'` (if connected)                                                                      |
+| `flushDoc` succeeds    | `hasPending` updated from remaining pending, `status` → `'synced'`                                                               |
+| `flushDoc` fails       | `status` → `'error'`                                                                                                             |
+| Doc untracked          | Entry removed                                                                                                                    |
+| Doc remotely deleted   | Entry removed                                                                                                                    |
+
+### Practical Example: Per-Document Save Indicator
+
+```typescript
+sync.onSyncedChange(synced => {
+  for (const [docId, info] of Object.entries(synced)) {
+    const el = document.getElementById(`status-${docId}`);
+    if (!el) continue;
+
+    switch (info.status) {
+      case 'unsynced':
+        el.textContent = 'Never synced';
+        break;
+      case 'syncing':
+        el.textContent = info.hasPending ? 'Saving...' : 'Syncing...';
+        break;
+      case 'synced':
+        el.textContent = info.hasPending ? 'Unsaved changes' : 'All saved';
+        break;
+      case 'error':
+        el.textContent = 'Sync error';
+        break;
+    }
+  }
+});
+```
+
+The difference between `state.syncing` and `synced`: `state.syncing` tells you the overall connection-level sync status. `synced` tells you the status of each individual document. Use `state` for a global spinner. Use `synced` for per-document indicators.
+
 ## Event Handling
 
 ```typescript
@@ -189,6 +281,7 @@ sync.onRemoteDocDeleted((docId, pendingChanges) => {
 | Event                | Parameters                                     | Description                        |
 | -------------------- | ---------------------------------------------- | ---------------------------------- |
 | `onStateChange`      | `(state: PatchesSyncState)`                    | Connection/sync state changed      |
+| `onSyncedChange`     | `(synced: Record<string, SyncedDoc>)`          | Per-document sync status changed   |
 | `onError`            | `(error: Error, context?: { docId?: string })` | An error occurred                  |
 | `onRemoteDocDeleted` | `(docId: string, pendingChanges: Change[])`    | Document deleted by another client |
 

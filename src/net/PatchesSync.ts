@@ -1,9 +1,9 @@
 import { isEqual } from '@dabble/delta';
 import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/ot/shared/changeBatching.js';
 import { BaseDoc } from '../client/BaseDoc.js';
+import type { ClientAlgorithm } from '../client/ClientAlgorithm.js';
 import { Patches } from '../client/Patches.js';
 import type { AlgorithmName, TrackedDoc } from '../client/PatchesStore.js';
-import type { ClientAlgorithm } from '../client/ClientAlgorithm.js';
 import { signal } from '../event-signal.js';
 import type { Change, SyncingState } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
@@ -211,7 +211,7 @@ export class PatchesSync {
       // Subscribe to active docs
       if (activeDocIds.length > 0) {
         try {
-          const subscribeIds = this.options?.subscribeFilter?.(activeDocIds) || activeDocIds;
+          const subscribeIds = this._filterSubscribeIds(activeDocIds);
           if (subscribeIds.length) {
             await this.ws.subscribe(subscribeIds);
           }
@@ -437,6 +437,9 @@ export class PatchesSync {
     const newIds = docIds.filter(id => !this.trackedDocs.has(id));
     if (!newIds.length) return;
 
+    // Snapshot current subscriptions before adding new docs
+    const alreadySubscribed = this._getActiveSubscriptions();
+
     newIds.forEach(id => this.trackedDocs.add(id));
 
     // Populate docAlgorithms Map by reading from stores
@@ -453,16 +456,10 @@ export class PatchesSync {
       }
     }
 
-    let subscribeIds = newIds;
-
-    // If a subscribe filter is provided, filter out docs that are already tracked
-    if (this.options?.subscribeFilter) {
-      const alreadyTracked = this.options.subscribeFilter([...this.trackedDocs]);
-      subscribeIds = subscribeIds.filter(id => !alreadyTracked.includes(id));
-    }
-
     if (this.state.connected) {
       try {
+        // Only subscribe to IDs not already covered by existing subscriptions
+        const subscribeIds = this._filterSubscribeIds(newIds).filter(id => !alreadySubscribed.has(id));
         if (subscribeIds.length) {
           await this.ws.subscribe(subscribeIds);
         }
@@ -479,10 +476,14 @@ export class PatchesSync {
     const existingIds = docIds.filter(id => this.trackedDocs.has(id));
     if (!existingIds.length) return;
 
+    // Snapshot current subscriptions before removing docs
+    const subscribedBefore = this._getActiveSubscriptions();
+
     existingIds.forEach(id => this.trackedDocs.delete(id));
 
-    // Filter out docs that weren't actually subscribed on the server
-    const unsubscribeIds = this.options?.subscribeFilter?.(existingIds) || existingIds;
+    // Only unsubscribe from subscriptions no longer needed by any remaining tracked doc
+    const subscribedAfter = this._getActiveSubscriptions();
+    const unsubscribeIds = [...subscribedBefore].filter(id => !subscribedAfter.has(id));
 
     if (this.state.connected && unsubscribeIds.length) {
       try {
@@ -521,6 +522,22 @@ export class PatchesSync {
 
     // Notify application (with any pending changes that were lost)
     await this.onRemoteDocDeleted.emit(docId, pendingChanges);
+  }
+
+  /**
+   * Applies the subscribeFilter option to a list of doc IDs, returning the subset
+   * that should be sent to ws.subscribe/unsubscribe. Returns the full list if no filter is set.
+   */
+  protected _filterSubscribeIds(docIds: string[]): string[] {
+    return this.options?.subscribeFilter?.(docIds) || docIds;
+  }
+
+  /**
+   * Returns the set of doc IDs currently subscribed on the server, derived by
+   * applying the subscribe filter to the full tracked set.
+   */
+  protected _getActiveSubscriptions(): Set<string> {
+    return new Set(this._filterSubscribeIds([...this.trackedDocs]));
   }
 
   /**

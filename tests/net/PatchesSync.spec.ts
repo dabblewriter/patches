@@ -639,6 +639,121 @@ describe('PatchesSync', () => {
     });
   });
 
+  describe('subscribeFilter', () => {
+    // Simulates a hierarchical doc database: subscribing to a root doc (e.g. 'users/:uid')
+    // covers all subdocs (e.g. 'users/:uid/preferences', 'users/:uid/stats/2026-02').
+    // The filter maps any doc ID to its root subscription endpoint.
+    const hierarchicalFilter = (docIds: string[]) => {
+      const roots = new Set<string>();
+      for (const id of docIds) {
+        // Extract root: first two path segments (e.g. 'users/:uid')
+        const parts = id.split('/');
+        roots.add(parts.slice(0, 2).join('/'));
+      }
+      return [...roots];
+    };
+
+    let syncWithFilter: PatchesSync;
+    let trackHandler: (docIds: string[]) => Promise<void>;
+    let untrackHandler: (docIds: string[]) => Promise<void>;
+
+    beforeEach(() => {
+      mockPatches.trackedDocs = [];
+      syncWithFilter = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        subscribeFilter: hierarchicalFilter,
+      });
+      syncWithFilter['updateState']({ connected: true });
+
+      trackHandler = vi.mocked(mockPatches.onTrackDocs).mock.calls.at(-1)![0];
+      untrackHandler = vi.mocked(mockPatches.onUntrackDocs).mock.calls.at(-1)![0];
+
+      vi.spyOn(syncWithFilter as any, 'syncDoc').mockResolvedValue(undefined);
+    });
+
+    it('should subscribe to root when tracking root doc', async () => {
+      await trackHandler(['users/u1']);
+
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['users/u1']);
+    });
+
+    it('should not re-subscribe when tracking a subdoc under an already-tracked root', async () => {
+      await trackHandler(['users/u1']);
+      mockWebSocket.subscribe.mockClear();
+
+      await trackHandler(['users/u1/preferences']);
+
+      expect(mockWebSocket.subscribe).not.toHaveBeenCalled();
+    });
+
+    it('should subscribe once when tracking root and subdocs together', async () => {
+      await trackHandler(['users/u1', 'users/u1/preferences', 'users/u1/stats']);
+
+      expect(mockWebSocket.subscribe).toHaveBeenCalledTimes(1);
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['users/u1']);
+    });
+
+    it('should subscribe to a new root when tracking docs under a different root', async () => {
+      await trackHandler(['users/u1']);
+      mockWebSocket.subscribe.mockClear();
+
+      await trackHandler(['projects/p1', 'projects/p1/tasks']);
+
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['projects/p1']);
+    });
+
+    it('should not unsubscribe root when untracking a subdoc while root is still tracked', async () => {
+      await trackHandler(['users/u1', 'users/u1/preferences']);
+      mockWebSocket.subscribe.mockClear();
+
+      await untrackHandler(['users/u1/preferences']);
+
+      expect(mockWebSocket.unsubscribe).not.toHaveBeenCalled();
+    });
+
+    it('should not unsubscribe root when untracking a subdoc while other subdocs remain', async () => {
+      await trackHandler(['users/u1', 'users/u1/preferences', 'users/u1/stats']);
+      mockWebSocket.subscribe.mockClear();
+
+      await untrackHandler(['users/u1/preferences']);
+
+      expect(mockWebSocket.unsubscribe).not.toHaveBeenCalled();
+    });
+
+    it('should unsubscribe root when all docs under that root are untracked', async () => {
+      await trackHandler(['users/u1', 'users/u1/preferences']);
+      mockWebSocket.subscribe.mockClear();
+
+      await untrackHandler(['users/u1', 'users/u1/preferences']);
+
+      expect(mockWebSocket.unsubscribe).toHaveBeenCalledWith(['users/u1']);
+    });
+
+    it('should only unsubscribe the root whose docs are all gone', async () => {
+      await trackHandler(['users/u1', 'users/u1/preferences', 'projects/p1']);
+      mockWebSocket.subscribe.mockClear();
+
+      await untrackHandler(['projects/p1']);
+
+      expect(mockWebSocket.unsubscribe).toHaveBeenCalledWith(['projects/p1']);
+    });
+
+    it('should still sync all newly tracked docs regardless of subscribe filter', async () => {
+      const syncDocSpy = vi.spyOn(syncWithFilter as any, 'syncDoc').mockResolvedValue(undefined);
+
+      await trackHandler(['users/u1', 'users/u1/preferences']);
+
+      expect(syncDocSpy).toHaveBeenCalledWith('users/u1');
+      expect(syncDocSpy).toHaveBeenCalledWith('users/u1/preferences');
+    });
+
+    it('should still track all docs locally regardless of subscribe filter', async () => {
+      await trackHandler(['users/u1', 'users/u1/preferences']);
+
+      expect(syncWithFilter['trackedDocs'].has('users/u1')).toBe(true);
+      expect(syncWithFilter['trackedDocs'].has('users/u1/preferences')).toBe(true);
+    });
+  });
+
   describe('edge cases and robustness', () => {
     it('should handle empty tracked docs list', async () => {
       mockPatches.trackedDocs = [];

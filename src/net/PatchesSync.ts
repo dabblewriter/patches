@@ -17,7 +17,7 @@ export interface PatchesSyncState {
   online: boolean;
   connected: boolean;
   syncStatus: DocSyncStatus;
-  syncError: Error | undefined;
+  syncError?: Error;
 }
 
 export interface PatchesSyncOptions {
@@ -35,7 +35,6 @@ const EMPTY_SYNCED_DOC: SyncedDoc = {
   committedRev: 0,
   hasPending: false,
   syncStatus: 'unsynced',
-  syncError: undefined,
   isLoaded: false,
 };
 

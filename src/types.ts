@@ -82,7 +82,7 @@ export interface SyncedDoc {
   committedRev: number;
   hasPending: boolean;
   syncStatus: DocSyncStatus;
-  syncError: Error | undefined;
+  syncError?: Error;
   isLoaded: boolean;
 }
 

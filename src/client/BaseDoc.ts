@@ -20,7 +20,7 @@ export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T
   protected _id: string;
   protected _state: T;
   protected _syncStatus: DocSyncStatus = 'unsynced';
-  protected _syncError: Error | undefined;
+  protected _syncError?: Error;
   protected _isLoaded: boolean = false;
 
   /**

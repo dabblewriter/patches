@@ -67,7 +67,7 @@ export interface UsePatchesDocReturn<T extends object> {
   /**
    * Error that occurred during sync, if any.
    */
-  error: Ref<Error | null>;
+  error: Ref<Error | undefined>;
 
   /**
    * The committed revision number.
@@ -154,7 +154,7 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
   const doc = ref<PatchesDoc<T> | undefined>(undefined) as Ref<PatchesDoc<T> | undefined>;
   const data = shallowRef<T | undefined>(undefined) as ShallowRef<T | undefined>;
   const loading = ref<boolean>(initialLoading);
-  const error = ref<Error | null>(null);
+  const error = ref<Error | undefined>();
   const rev = ref<number>(0);
   const hasPending = ref<boolean>(false);
 
@@ -192,7 +192,7 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
 
     const unsubSync = patchesDoc.onSyncStatus((status: DocSyncStatus) => {
       updateLoading();
-      error.value = status === 'error' ? patchesDoc.syncError : null;
+      error.value = status === 'error' ? patchesDoc.syncError : undefined;
     });
 
     return () => {
@@ -205,7 +205,7 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
     doc.value = undefined;
     data.value = undefined;
     loading.value = false;
-    error.value = null;
+    error.value = undefined;
     rev.value = 0;
     hasPending.value = false;
   }

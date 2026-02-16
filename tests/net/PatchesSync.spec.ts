@@ -160,7 +160,7 @@ describe('PatchesSync', () => {
         online: true,
         connected: false,
         syncStatus: 'unsynced',
-        syncError: null,
+        syncError: undefined,
       });
     });
 
@@ -174,7 +174,7 @@ describe('PatchesSync', () => {
         online: true,
         connected: true,
         syncStatus: 'unsynced',
-        syncError: null,
+        syncError: undefined,
       });
     });
 
@@ -198,7 +198,7 @@ describe('PatchesSync', () => {
         online: false,
         connected: false,
         syncStatus: 'unsynced',
-        syncError: null,
+        syncError: undefined,
       });
     });
   });
@@ -778,7 +778,7 @@ describe('PatchesSync', () => {
         sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
 
         expect(sync.syncedDocs).toEqual({
-          doc1: { committedRev: 0, hasPending: false, syncStatus: 'unsynced', syncError: null, isLoaded: false },
+          doc1: { committedRev: 0, hasPending: false, syncStatus: 'unsynced', syncError: undefined, isLoaded: false },
         });
         await vi.waitFor(() => expect(handler).toHaveBeenCalledWith(sync.syncedDocs));
       });
@@ -801,7 +801,7 @@ describe('PatchesSync', () => {
           committedRev: 0,
           hasPending: false,
           syncStatus: 'syncing',
-          syncError: null,
+          syncError: undefined,
           isLoaded: false,
         });
         await vi.waitFor(() => expect(handler).toHaveBeenCalledWith(sync.syncedDocs));
@@ -951,14 +951,14 @@ describe('PatchesSync', () => {
           committedRev: 5,
           hasPending: false,
           syncStatus: 'synced',
-          syncError: null,
+          syncError: undefined,
           isLoaded: true,
         });
         expect(sync.syncedDocs.doc2).toEqual({
           committedRev: 0,
           hasPending: false,
           syncStatus: 'unsynced',
-          syncError: null,
+          syncError: undefined,
           isLoaded: false,
         });
       });
@@ -1123,7 +1123,7 @@ describe('PatchesSync', () => {
           committedRev: 5,
           hasPending: false,
           syncStatus: 'synced',
-          syncError: null,
+          syncError: undefined,
           isLoaded: true,
         });
       });
@@ -1140,7 +1140,7 @@ describe('PatchesSync', () => {
           committedRev: 0,
           hasPending: false,
           syncStatus: 'unsynced',
-          syncError: null,
+          syncError: undefined,
           isLoaded: false,
         });
       });
@@ -1248,14 +1248,14 @@ describe('PatchesSync', () => {
           committedRev: 5,
           hasPending: false,
           syncStatus: 'synced',
-          syncError: null,
+          syncError: undefined,
           isLoaded: true,
         });
         expect(sync.syncedDocs.doc3).toEqual({
           committedRev: 10,
           hasPending: false,
           syncStatus: 'synced',
-          syncError: null,
+          syncError: undefined,
           isLoaded: true,
         });
       });

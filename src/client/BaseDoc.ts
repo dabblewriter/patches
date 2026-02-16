@@ -20,7 +20,7 @@ export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T
   protected _id: string;
   protected _state: T;
   protected _syncStatus: DocSyncStatus = 'unsynced';
-  protected _syncError: Error | null = null;
+  protected _syncError: Error | undefined;
   protected _isLoaded: boolean = false;
 
   /**
@@ -62,7 +62,7 @@ export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T
   }
 
   /** Error from the last failed sync attempt, if any. */
-  get syncError(): Error | null {
+  get syncError(): Error | undefined {
     return this._syncError;
   }
 
@@ -107,7 +107,7 @@ export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T
    */
   updateSyncStatus(status: DocSyncStatus, error?: Error): void {
     this._syncStatus = status;
-    this._syncError = status === 'error' ? (error ?? null) : null;
+    this._syncError = status === 'error' ? error : undefined;
     this._checkLoaded();
     this.onSyncStatus.emit(status);
   }

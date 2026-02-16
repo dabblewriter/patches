@@ -17,7 +17,7 @@ export interface PatchesSyncState {
   online: boolean;
   connected: boolean;
   syncStatus: DocSyncStatus;
-  syncError: Error | null;
+  syncError: Error | undefined;
 }
 
 export interface PatchesSyncOptions {
@@ -35,7 +35,7 @@ const EMPTY_SYNCED_DOC: SyncedDoc = {
   committedRev: 0,
   hasPending: false,
   syncStatus: 'unsynced',
-  syncError: null,
+  syncError: undefined,
   isLoaded: false,
 };
 
@@ -57,7 +57,12 @@ export class PatchesSync {
   protected trackedDocs: Set<string>;
   /** Maps docId to the algorithm name used for that doc */
   protected docAlgorithms: Map<string, AlgorithmName> = new Map();
-  protected _state: PatchesSyncState = { online: false, connected: false, syncStatus: 'unsynced', syncError: null };
+  protected _state: PatchesSyncState = {
+    online: false,
+    connected: false,
+    syncStatus: 'unsynced',
+    syncError: undefined,
+  };
   protected _syncedDocs: Record<string, SyncedDoc> = {};
 
   /**
@@ -172,7 +177,7 @@ export class PatchesSync {
     const newState = { ...this._state, ...update };
     // Clear error when moving away from 'error' status
     if (newState.syncStatus !== 'error' && newState.syncError) {
-      newState.syncError = null;
+      newState.syncError = undefined;
     }
     if (!isEqual(this._state, newState)) {
       this._state = newState;
@@ -246,7 +251,7 @@ export class PatchesSync {
           committedRev: doc.committedRev,
           hasPending: pending != null && pending.length > 0,
           syncStatus: doc.committedRev === 0 ? 'unsynced' : 'synced',
-          syncError: null,
+          syncError: undefined,
           isLoaded: false,
         };
         // Preserve sticky isLoaded from previous lifecycle, or derive it
@@ -634,7 +639,7 @@ export class PatchesSync {
       const updated = { ...EMPTY_SYNCED_DOC, ...this._syncedDocs[docId], ...updates } as SyncedDoc;
       // Clear error when moving away from 'error' status
       if (updated.syncStatus !== 'error' && updated.syncError) {
-        updated.syncError = null;
+        updated.syncError = undefined;
       }
       // Latch isLoaded: once true, stays true for this sync lifecycle
       if (!updated.isLoaded) {

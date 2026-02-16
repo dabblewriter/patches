@@ -64,7 +64,7 @@ export interface UsePatchesDocReturn<T extends object> {
   /**
    * Error that occurred during sync, if any.
    */
-  error: Accessor<Error | null>;
+  error: Accessor<Error | undefined>;
 
   /**
    * The committed revision number.
@@ -151,7 +151,7 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
   const [doc, setDoc] = createSignal<PatchesDoc<T> | undefined>(undefined);
   const [data, setData] = createSignal<T | undefined>(undefined);
   const [loading, setLoading] = createSignal<boolean>(initialLoading);
-  const [error, setError] = createSignal<Error | null>(null);
+  const [error, setError] = createSignal<Error | undefined>();
   const [rev, setRev] = createSignal<number>(0);
   const [hasPending, setHasPending] = createSignal<boolean>(false);
 
@@ -189,7 +189,7 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
 
     const unsubSync = patchesDoc.onSyncStatus((status: DocSyncStatus) => {
       updateLoading();
-      setError(status === 'error' ? patchesDoc.syncError : null);
+      setError(status === 'error' ? patchesDoc.syncError : undefined);
     });
 
     return () => {
@@ -202,7 +202,7 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
     setDoc(undefined);
     setData(undefined);
     setLoading(false);
-    setError(null);
+    setError(undefined);
     setRev(0);
     setHasPending(false);
   }

@@ -52,7 +52,7 @@ export interface PatchesDoc<T extends object = object> extends SyncedDoc {
   readonly syncStatus: DocSyncStatus;
 
   /** Error from the last failed sync attempt, if any. */
-  readonly syncError: Error | null;
+  readonly syncError: Error | undefined;
 
   /** Whether the document has completed its initial load. Sticky: once true, never reverts to false. */
   readonly isLoaded: boolean;

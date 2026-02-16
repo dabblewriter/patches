@@ -319,7 +319,7 @@ describe('OTDoc', () => {
 
       doc.updateSyncStatus('syncing');
       expect(doc.syncStatus).toBe('syncing');
-      expect(doc.syncError).toBeNull();
+      expect(doc.syncError).toBeUndefined();
     });
   });
 

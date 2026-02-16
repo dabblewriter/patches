@@ -1,4 +1,5 @@
 export * from './deepEqual.js';
+export * from './escapePathComponent.js';
 export * from './get.js';
 export * from './getOpData.js';
 export * from './getType.js';

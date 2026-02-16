@@ -1,4 +1,5 @@
 import type { PathProxy } from '../types.js';
+import { escapePathComponent } from './utils/escapePathComponent.js';
 
 // We use a function as the target so that `push` and other array methods can be called without error.
 const proxyFodder = {} as any;
@@ -39,7 +40,7 @@ export function pathProxy<T>(path = ''): PathProxy<T> {
       }
 
       // Create a proxy for the property to continue path building
-      return pathProxy(`${path}/${prop}`);
+      return pathProxy(`${path}/${escapePathComponent(prop)}`);
     },
 
     set(_, prop: string): boolean {

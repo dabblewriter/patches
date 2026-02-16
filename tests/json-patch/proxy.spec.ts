@@ -2,6 +2,7 @@ import { Delta } from '@dabble/delta';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { JSONPatch } from '../../src/json-patch/JSONPatch.js';
 import { createPathProxy } from '../../src/json-patch/pathProxy.js';
+import { escapePathComponent } from '../../src/json-patch/utils/escapePathComponent.js';
 
 interface TestType {
   foo: string;
@@ -137,6 +138,51 @@ describe('Path Proxy Utilities', () => {
       expect(patch.ops[2]).toMatchObject({ op: '@txt', path: '/nested/a' });
       expect(patch.ops[2].value).toBeInstanceOf(Delta);
       expect(patch.ops[3]).toEqual({ op: '@inc', path: '/bar', value: -2 });
+    });
+  });
+
+  describe('escapePathComponent', () => {
+    it('should escape ~ before /', () => {
+      expect(escapePathComponent('a~b/c')).toBe('a~0b~1c');
+    });
+
+    it('should return the string unchanged when no special characters', () => {
+      expect(escapePathComponent('normal')).toBe('normal');
+    });
+
+    it('should handle strings with only special characters', () => {
+      expect(escapePathComponent('~/')).toBe('~0~1');
+    });
+  });
+
+  describe('createPathProxy - JSON Pointer escaping', () => {
+    it('should escape / as ~1 in property names', () => {
+      const path = createPathProxy<any>();
+      expect(path['a/b'].toString()).toBe('/a~1b');
+    });
+
+    it('should escape ~ as ~0 in property names', () => {
+      const path = createPathProxy<any>();
+      expect(path['a~b'].toString()).toBe('/a~0b');
+    });
+
+    it('should escape both ~ and / correctly', () => {
+      const path = createPathProxy<any>();
+      expect(path['a~b/c'].toString()).toBe('/a~0b~1c');
+    });
+
+    it('should escape in nested paths', () => {
+      const path = createPathProxy<any>();
+      expect(path.normal['key/with/slashes'].deep.toString()).toBe('/normal/key~1with~1slashes/deep');
+    });
+
+    it('should produce paths that toKeys can round-trip', async () => {
+      const { toKeys } = await import('../../src/json-patch/utils/toKeys.js');
+      const path = createPathProxy<any>();
+      const pathStr = path['a/b']['c~d'].toString();
+      const keys = toKeys(pathStr);
+      // First key is empty (leading /)
+      expect(keys).toEqual(['', 'a/b', 'c~d']);
     });
   });
 

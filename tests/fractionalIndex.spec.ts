@@ -257,6 +257,19 @@ describe('sortByOrder', () => {
     expect(sorted.map(([k]) => k)).toEqual(['a', 'b', 'c']);
   });
 
+  it('should sort uppercase order values before lowercase (codepoint order)', () => {
+    const beforeFirst = fractionalIndex(null, 'a0');
+    const items: Record<string, string> = {
+      proj1: 'a0',
+      proj2: 'a1',
+      moved: beforeFirst,
+    };
+
+    const sorted = sortByOrder(items, false);
+
+    expect(sorted.map(([k]) => k)).toEqual(['moved', 'proj1', 'proj2']);
+  });
+
   it('should return empty array for empty object', () => {
     const items: Record<string, { order: string }> = {};
     const sorted = sortByOrder(items);

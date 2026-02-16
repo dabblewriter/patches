@@ -259,9 +259,11 @@ export function sortByOrder<T extends Record<string, unknown> | string>(
 ): Array<[string, T]> {
   const getOrder = createOrderGetter<T>(orderField);
   return Object.entries(items).sort((a, b) => {
-    const orderCmp = getOrder(a[1]).localeCompare(getOrder(b[1]));
+    const orderA = getOrder(a[1]);
+    const orderB = getOrder(b[1]);
+    const orderCmp = orderA < orderB ? -1 : orderA > orderB ? 1 : 0;
     if (orderCmp !== 0) return orderCmp;
-    return a[0].localeCompare(b[0]);
+    return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
   });
 }
 

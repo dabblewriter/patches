@@ -31,8 +31,6 @@ export interface PatchesSyncOptions {
   sizeCalculator?: SizeCalculator;
 }
 
-export { isDocLoaded };
-
 const EMPTY_SYNCED_DOC: SyncedDoc = {
   committedRev: 0,
   hasPending: false,
@@ -340,6 +338,8 @@ export class PatchesSync {
           const snapshot = await this.ws.getDoc(docId);
           // Save via algorithm's store
           await algorithm.store.saveDoc(docId, snapshot);
+          // Update synced doc with the server's revision
+          this._updateSyncedDoc(docId, { committedRev: snapshot.rev });
           // Import into doc if open (use BaseDoc.import)
           if (baseDoc) {
             baseDoc.import({ ...snapshot, changes: [] });

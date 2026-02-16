@@ -5,7 +5,8 @@ import type { ClientAlgorithm } from '../client/ClientAlgorithm.js';
 import { Patches } from '../client/Patches.js';
 import type { AlgorithmName, TrackedDoc } from '../client/PatchesStore.js';
 import { signal } from '../event-signal.js';
-import type { Change, SyncingState } from '../types.js';
+import { isDocLoaded } from '../shared/utils.js';
+import type { Change, DocSyncStatus, SyncedDoc } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
 import type { ConnectionState } from './protocol/types.js';
 import { PatchesWebSocket } from './websocket/PatchesWebSocket.js';
@@ -15,7 +16,8 @@ import { onlineState } from './websocket/onlineState.js';
 export interface PatchesSyncState {
   online: boolean;
   connected: boolean;
-  syncing: SyncingState;
+  syncStatus: DocSyncStatus;
+  syncError: Error | null;
 }
 
 export interface PatchesSyncOptions {
@@ -29,18 +31,14 @@ export interface PatchesSyncOptions {
   sizeCalculator?: SizeCalculator;
 }
 
-export type SyncedDocStatus = 'unsynced' | 'syncing' | 'synced' | 'error';
-
-export interface SyncedDoc {
-  committedRev: number;
-  hasPending: boolean;
-  status: SyncedDocStatus;
-}
+export { isDocLoaded };
 
 const EMPTY_SYNCED_DOC: SyncedDoc = {
   committedRev: 0,
   hasPending: false,
-  status: 'unsynced',
+  syncStatus: 'unsynced',
+  syncError: null,
+  isLoaded: false,
 };
 
 /**
@@ -61,8 +59,8 @@ export class PatchesSync {
   protected trackedDocs: Set<string>;
   /** Maps docId to the algorithm name used for that doc */
   protected docAlgorithms: Map<string, AlgorithmName> = new Map();
-  protected _state: PatchesSyncState = { online: false, connected: false, syncing: null };
-  protected _synced: Record<string, SyncedDoc> = {};
+  protected _state: PatchesSyncState = { online: false, connected: false, syncStatus: 'unsynced', syncError: null };
+  protected _syncedDocs: Record<string, SyncedDoc> = {};
 
   /**
    * Signal emitted when the sync state changes.
@@ -80,7 +78,7 @@ export class PatchesSync {
   /**
    * Signal emitted when the synced doc map changes.
    */
-  readonly onSyncedChange = signal<(synced: Record<string, SyncedDoc>) => void>();
+  readonly onSyncedDocsChange = signal<(synced: Record<string, SyncedDoc>) => void>();
 
   constructor(
     patches: Patches,
@@ -156,8 +154,8 @@ export class PatchesSync {
    * Map of all tracked documents and their current sync status.
    * Updated immutably — new object reference on every change.
    */
-  get synced(): Record<string, SyncedDoc> {
-    return this._synced;
+  get syncedDocs(): Record<string, SyncedDoc> {
+    return this._syncedDocs;
   }
 
   /**
@@ -174,6 +172,10 @@ export class PatchesSync {
    */
   protected updateState(update: Partial<PatchesSyncState>) {
     const newState = { ...this._state, ...update };
+    // Clear error when moving away from 'error' status
+    if (newState.syncStatus !== 'error' && newState.syncError) {
+      newState.syncError = null;
+    }
     if (!isEqual(this._state, newState)) {
       this._state = newState;
       this.onStateChange.emit(this._state);
@@ -188,8 +190,9 @@ export class PatchesSync {
       await this.ws.connect();
     } catch (err) {
       console.error('PatchesSync connection failed:', err);
-      this.updateState({ connected: false, syncing: err instanceof Error ? err : new Error(String(err)) });
-      this.onError.emit(err as Error);
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.updateState({ connected: false, syncStatus: 'error', syncError: error });
+      this.onError.emit(error);
       throw err;
     }
   }
@@ -199,7 +202,7 @@ export class PatchesSync {
    */
   disconnect(): void {
     this.ws.disconnect();
-    this.updateState({ connected: false, syncing: null });
+    this.updateState({ connected: false, syncStatus: 'unsynced' });
     this._resetSyncingStatuses();
   }
 
@@ -208,7 +211,7 @@ export class PatchesSync {
    */
   protected async syncAllKnownDocs(): Promise<void> {
     if (!this.state.connected) return;
-    this.updateState({ syncing: 'updating' });
+    this.updateState({ syncStatus: 'syncing' });
 
     try {
       // Get tracked docs from ALL algorithms and populate docAlgorithms Map
@@ -241,14 +244,20 @@ export class PatchesSync {
       for (const doc of activeDocs) {
         const algorithm = this._getAlgorithm(doc.docId);
         const pending = await algorithm.getPendingToSend(doc.docId);
-        syncedEntries[doc.docId] = {
+        const entry: SyncedDoc = {
           committedRev: doc.committedRev,
           hasPending: pending != null && pending.length > 0,
-          status: doc.committedRev === 0 ? 'unsynced' : 'synced',
+          syncStatus: doc.committedRev === 0 ? 'unsynced' : 'synced',
+          syncError: null,
+          isLoaded: false,
         };
+        // Preserve sticky isLoaded from previous lifecycle, or derive it
+        const existing = this._syncedDocs[doc.docId];
+        entry.isLoaded = existing?.isLoaded || isDocLoaded(entry);
+        syncedEntries[doc.docId] = entry;
       }
-      this._synced = syncedEntries;
-      this.onSyncedChange.emit(this._synced);
+      this._syncedDocs = syncedEntries;
+      this.onSyncedDocsChange.emit(this._syncedDocs);
 
       // Subscribe to active docs
       if (activeDocIds.length > 0) {
@@ -285,11 +294,12 @@ export class PatchesSync {
       // Wait for all sync and delete operations
       await Promise.all([...activeSyncPromises, ...deletePromises]);
 
-      this.updateState({ syncing: null });
+      this.updateState({ syncStatus: 'synced' });
     } catch (error) {
       console.error('Error during global sync:', error);
-      this.updateState({ syncing: error instanceof Error ? error : new Error(String(error)) });
-      this.onError.emit(error as Error);
+      const syncError = error instanceof Error ? error : new Error(String(error));
+      this.updateState({ syncStatus: 'error', syncError });
+      this.onError.emit(syncError);
     }
   }
 
@@ -301,16 +311,16 @@ export class PatchesSync {
   protected async syncDoc(docId: string): Promise<void> {
     if (!this.state.connected) return;
 
-    this._updateSyncedDoc(docId, { status: 'syncing' });
+    this._updateSyncedDoc(docId, { syncStatus: 'syncing' });
 
     const doc = this.patches.getOpenDoc(docId);
     const algorithm = this._getAlgorithm(docId);
 
-    // Cast to BaseDoc for internal methods (updateSyncing, import)
+    // Cast to BaseDoc for internal methods (updateSyncStatus, import)
     const baseDoc = doc as BaseDoc | undefined;
 
     if (baseDoc) {
-      baseDoc.updateSyncing('updating');
+      baseDoc.updateSyncStatus('syncing');
     }
     try {
       // Use algorithm to get pending changes to send
@@ -336,9 +346,9 @@ export class PatchesSync {
           }
         }
       }
-      this._updateSyncedDoc(docId, { status: 'synced' });
+      this._updateSyncedDoc(docId, { syncStatus: 'synced' });
       if (baseDoc) {
-        baseDoc.updateSyncing(null);
+        baseDoc.updateSyncStatus('synced');
       }
     } catch (err) {
       // Handle DOC_DELETED error (document was deleted while we were offline)
@@ -346,11 +356,12 @@ export class PatchesSync {
         await this._handleRemoteDocDeleted(docId);
         return;
       }
-      this._updateSyncedDoc(docId, { status: 'error' });
+      const syncError = err instanceof Error ? err : new Error(String(err));
+      this._updateSyncedDoc(docId, { syncStatus: 'error', syncError });
       console.error(`Error syncing doc ${docId}:`, err);
-      this.onError.emit(err as Error, { docId });
+      this.onError.emit(syncError, { docId });
       if (baseDoc) {
-        baseDoc.updateSyncing(err instanceof Error ? err : new Error(String(err)));
+        baseDoc.updateSyncStatus('error', syncError);
       }
     }
   }
@@ -402,15 +413,16 @@ export class PatchesSync {
       }
 
       const stillHasPending = pending != null && pending.length > 0;
-      this._updateSyncedDoc(docId, { hasPending: stillHasPending, status: 'synced' });
+      this._updateSyncedDoc(docId, { hasPending: stillHasPending, syncStatus: 'synced' });
     } catch (err) {
       if (this._isDocDeletedError(err)) {
         await this._handleRemoteDocDeleted(docId);
         return;
       }
-      this._updateSyncedDoc(docId, { status: 'error' });
+      const flushError = err instanceof Error ? err : new Error(String(err));
+      this._updateSyncedDoc(docId, { syncStatus: 'error', syncError: flushError });
       console.error(`Flush failed for doc ${docId}:`, err);
-      this.onError.emit(err as Error, { docId });
+      this.onError.emit(flushError, { docId });
       throw err;
     }
   }
@@ -474,13 +486,13 @@ export class PatchesSync {
 
     // Preserve syncing state if moving from connecting -> connected
     // Reset syncing if disconnected or errored
-    const newSyncingState = isConnected
-      ? this._state.syncing // Preserve
+    const newSyncStatus: DocSyncStatus = isConnected
+      ? this._state.syncStatus // Preserve
       : isConnecting
-        ? this._state.syncing // Preserve during connecting phase too
-        : null; // Reset
+        ? this._state.syncStatus // Preserve during connecting phase too
+        : 'unsynced'; // Reset
 
-    this.updateState({ connected: isConnected, syncing: newSyncingState });
+    this.updateState({ connected: isConnected, syncStatus: newSyncStatus });
 
     if (isConnected) {
       // Sync everything on connect/reconnect
@@ -519,11 +531,15 @@ export class PatchesSync {
       const algorithm = this._getAlgorithm(docId);
       const committedRev = await algorithm.getCommittedRev(docId);
       const pending = await algorithm.getPendingToSend(docId);
-      this._updateSyncedDoc(docId, {
-        committedRev,
-        hasPending: pending != null && pending.length > 0,
-        status: committedRev === 0 ? 'unsynced' : 'synced',
-      }, false);
+      this._updateSyncedDoc(
+        docId,
+        {
+          committedRev,
+          hasPending: pending != null && pending.length > 0,
+          syncStatus: committedRev === 0 ? 'unsynced' : 'synced',
+        },
+        false
+      );
     }
     this._emitSyncedChange();
 
@@ -572,7 +588,7 @@ export class PatchesSync {
     // Emit if not connected, otherwise let the next update emit
     this._updateSyncedDoc(docId, { hasPending: true }, !this.state.connected);
     if (!this.state.connected) return;
-    this._updateSyncedDoc(docId, { status: 'syncing' });
+    this._updateSyncedDoc(docId, { syncStatus: 'syncing' });
     await this.flushDoc(docId);
   }
 
@@ -611,19 +627,27 @@ export class PatchesSync {
   protected _updateSyncedDoc(docId: string, updates: Partial<SyncedDoc> | undefined, emit: boolean = true): void {
     if (updates === undefined) {
       // Remove
-      if (!(docId in this._synced)) return;
-      this._synced = { ...this._synced }; // Create a new object to avoid mutating the original
-      delete this._synced[docId];
+      if (!(docId in this._syncedDocs)) return;
+      this._syncedDocs = { ...this._syncedDocs }; // Create a new object to avoid mutating the original
+      delete this._syncedDocs[docId];
     } else {
-      const updated = { ...EMPTY_SYNCED_DOC, ...this._synced[docId], ...updates } as SyncedDoc;
-      if (isEqual(this._synced[docId], updated)) return;
-      this._synced = { ...this._synced, [docId]: updated };
+      const updated = { ...EMPTY_SYNCED_DOC, ...this._syncedDocs[docId], ...updates } as SyncedDoc;
+      // Clear error when moving away from 'error' status
+      if (updated.syncStatus !== 'error' && updated.syncError) {
+        updated.syncError = null;
+      }
+      // Latch isLoaded: once true, stays true for this sync lifecycle
+      if (!updated.isLoaded) {
+        updated.isLoaded = isDocLoaded(updated);
+      }
+      if (isEqual(this._syncedDocs[docId], updated)) return;
+      this._syncedDocs = { ...this._syncedDocs, [docId]: updated };
     }
     if (emit) this._emitSyncedChange();
   }
 
   protected _emitSyncedChange(): void {
-    this.onSyncedChange.emit(this._synced);
+    this.onSyncedDocsChange.emit(this._syncedDocs);
   }
 
   /**
@@ -633,10 +657,10 @@ export class PatchesSync {
    */
   protected _resetSyncingStatuses(): void {
     let changed = false;
-    for (const [docId, doc] of Object.entries(this._synced)) {
-      if (doc.status === 'syncing') {
+    for (const [docId, doc] of Object.entries(this._syncedDocs)) {
+      if (doc.syncStatus === 'syncing') {
         const newStatus = doc.committedRev === 0 && !doc.hasPending ? 'unsynced' : 'synced';
-        this._updateSyncedDoc(docId, { status: newStatus }, false);
+        this._updateSyncedDoc(docId, { syncStatus: newStatus }, false);
         changed = true;
       }
     }

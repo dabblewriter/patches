@@ -44,7 +44,7 @@ try {
 ### What PatchesSync Does
 
 - **Connection Management**: Establishes and maintains a WebSocket connection via [PatchesWebSocket](websocket.md)
-- **State Tracking**: Monitors `online` (browser connectivity), `connected` (WebSocket status), and `syncing` (sync progress) states
+- **State Tracking**: Monitors `online` (browser connectivity), `connected` (WebSocket status), and `syncStatus` (sync progress) states
 - **Document Tracking**: Automatically subscribes to server updates for documents your Patches instance tracks
 - **Outgoing Changes**: When you call [doc.change()](PatchesDoc.md), PatchesSync batches and sends changes to the server
 - **Incoming Changes**: Receives server changes and applies them using the appropriate [algorithm functions](algorithms.md)
@@ -122,18 +122,18 @@ Your app should react to connection changes. `PatchesSync` provides an `onStateC
 
 ```typescript
 sync.onStateChange(state => {
-  // state: { online: boolean, connected: boolean, syncing: SyncingState }
-  // where SyncingState = 'initial' | 'updating' | null | Error
+  // state: { online: boolean, connected: boolean, syncStatus: DocSyncStatus, syncError: Error | null }
+  // where DocSyncStatus = 'unsynced' | 'syncing' | 'synced' | 'error'
 
   if (state.connected) {
     hideOfflineWarning();
     updateStatusUI('Connected');
   } else if (!state.online) {
     showOfflineWarning('You are offline. Changes saved locally.');
-  } else if (state.syncing === 'initial' || state.syncing === 'updating') {
+  } else if (state.syncStatus === 'syncing') {
     showSyncingIndicator('Syncing...');
-  } else if (state.syncing instanceof Error) {
-    showErrorUI('Sync failed: ' + state.syncing.message);
+  } else if (state.syncStatus === 'error') {
+    showErrorUI('Sync failed: ' + state.syncError?.message);
   } else {
     showOfflineWarning('Disconnected. Reconnecting...');
   }

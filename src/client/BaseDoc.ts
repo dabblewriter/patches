@@ -1,7 +1,8 @@
 import { signal, type Unsubscriber } from '../event-signal.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
-import type { Change, ChangeMutator, PatchesSnapshot, SyncingState } from '../types.js';
+import { isDocLoaded } from '../shared/utils.js';
+import type { Change, ChangeMutator, DocSyncStatus, PatchesSnapshot } from '../types.js';
 import type { PatchesDoc } from './PatchesDoc.js';
 
 /**
@@ -12,13 +13,15 @@ import type { PatchesDoc } from './PatchesDoc.js';
  * apply locally. The algorithm handles packaging ops, persisting them, and updating
  * the doc's state via `applyChanges()`.
  *
- * Internal methods (updateSyncing, applyChanges, import) are on this class but not
+ * Internal methods (updateSyncStatus, applyChanges, import) are on this class but not
  * on the PatchesDoc interface, as they're only used by Algorithm and PatchesSync.
  */
 export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T> {
   protected _id: string;
   protected _state: T;
-  protected _syncing: SyncingState = null;
+  protected _syncStatus: DocSyncStatus = 'unsynced';
+  protected _syncError: Error | null = null;
+  protected _isLoaded: boolean = false;
 
   /**
    * Subscribe to be notified when the user makes local changes.
@@ -30,8 +33,8 @@ export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T
   /** Subscribe to be notified whenever state changes from any source. */
   readonly onUpdate = signal<(newState: T) => void>();
 
-  /** Subscribe to be notified when syncing state changes. */
-  readonly onSyncing = signal<(newSyncing: SyncingState) => void>();
+  /** Subscribe to be notified when sync status changes. */
+  readonly onSyncStatus = signal<(newStatus: DocSyncStatus) => void>();
 
   /**
    * Creates an instance of BaseDoc.
@@ -53,9 +56,19 @@ export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T
     return this._state;
   }
 
-  /** Are we currently syncing this document? */
-  get syncing(): SyncingState {
-    return this._syncing;
+  /** Current sync status of this document. */
+  get syncStatus(): DocSyncStatus {
+    return this._syncStatus;
+  }
+
+  /** Error from the last failed sync attempt, if any. */
+  get syncError(): Error | null {
+    return this._syncError;
+  }
+
+  /** Whether the document has completed its initial load. Sticky: once true, never reverts to false. */
+  get isLoaded(): boolean {
+    return this._isLoaded;
   }
 
   /** Last committed revision number from the server. */
@@ -87,13 +100,23 @@ export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T
   // --- Internal methods (not on PatchesDoc interface) ---
 
   /**
-   * Updates the syncing state of the document.
+   * Updates the sync status of the document.
    * Called by PatchesSync - not part of the app-facing PatchesDoc interface.
-   * @param newSyncing The new syncing state.
+   * @param status The new sync status.
+   * @param error Optional error when status is 'error'.
    */
-  updateSyncing(newSyncing: SyncingState): void {
-    this._syncing = newSyncing;
-    this.onSyncing.emit(newSyncing);
+  updateSyncStatus(status: DocSyncStatus, error?: Error): void {
+    this._syncStatus = status;
+    this._syncError = status === 'error' ? (error ?? null) : null;
+    this._checkLoaded();
+    this.onSyncStatus.emit(status);
+  }
+
+  /** Latches _isLoaded to true when the doc has data or sync has resolved. */
+  protected _checkLoaded(): void {
+    if (!this._isLoaded && isDocLoaded(this)) {
+      this._isLoaded = true;
+    }
   }
 
   /**

@@ -1,3 +1,13 @@
+import type { SyncedDoc } from '../types.js';
+
+/**
+ * Returns true if a document has completed its initial load — i.e., it has data
+ * to display (server data, cached data, or local changes) or sync has resolved.
+ */
+export function isDocLoaded(doc: Pick<SyncedDoc, 'committedRev' | 'hasPending' | 'syncStatus'>): boolean {
+  return doc.committedRev > 0 || doc.hasPending || doc.syncStatus === 'synced' || doc.syncStatus === 'error';
+}
+
 /**
  * Resolves a path template by replacing `:param` placeholders with values.
  *

@@ -60,13 +60,31 @@ export interface PatchesSnapshot<T = any> extends PatchesState<T> {
 }
 
 /**
- * Represents the syncing state of a document.
- * @property initial - The document is not syncing.
- * @property updating - The document is syncing.
- * @property null - The document is not syncing.
- * @property Error - The document is syncing with an error.
+ * Sync status for a document, used by both PatchesDoc and PatchesSync's SyncedDoc.
+ * - `'unsynced'` — not yet synced (initial state, or disconnected)
+ * - `'syncing'`  — actively syncing with the server
+ * - `'synced'`   — up to date with the server
+ * - `'error'`    — sync failed (see syncError for details)
  */
-export type SyncingState = 'initial' | 'updating' | null | Error;
+export type DocSyncStatus = 'unsynced' | 'syncing' | 'synced' | 'error';
+
+/**
+ * Represents the synced state of a document.
+ * @property committedRev - The last committed revision number from the server.
+ * @property hasPending - Whether there are local changes that haven't been committed yet.
+ * @property syncStatus - The current sync status of the document.
+ * @property syncError - The error from the last failed sync attempt, if any.
+ * @property isLoaded - Whether the document has completed its initial load. Sticky: once true, never reverts to false
+ *   within a sync lifecycle. A document is considered loaded when it has data to display (server data, cached data,
+ *   or local changes) or sync has resolved (successfully or with error).
+ */
+export interface SyncedDoc {
+  committedRev: number;
+  hasPending: boolean;
+  syncStatus: DocSyncStatus;
+  syncError: Error | null;
+  isLoaded: boolean;
+}
 
 /** Status options for a branch */
 export type BranchStatus = 'open' | 'closed' | 'merged' | 'archived' | 'abandoned';

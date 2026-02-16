@@ -11,7 +11,7 @@ import {
 import type { OpenDocOptions } from '../client/Patches.js';
 import type { PatchesDoc } from '../client/PatchesDoc.js';
 import { JSONPatch } from '../json-patch/JSONPatch.js';
-import type { SyncingState, ChangeMutator } from '../types.js';
+import type { DocSyncStatus, ChangeMutator } from '../types.js';
 import type { Unsubscriber } from '../event-signal.js';
 import type { PatchesSyncState } from '../net/PatchesSync.js';
 import { usePatchesContext } from './context.js';
@@ -135,6 +135,7 @@ export interface UsePatchesDocLazyReturn<T extends object> extends UsePatchesDoc
 
 interface DocReactiveStateOptions<T extends object> {
   initialLoading?: boolean;
+  hasSyncContext?: boolean;
   transformState?: (state: T, doc: PatchesDoc<T>) => T;
   changeBehavior: 'throw' | 'noop';
 }
@@ -145,7 +146,7 @@ interface DocReactiveStateOptions<T extends object> {
  * @internal
  */
 function createDocReactiveState<T extends object>(options: DocReactiveStateOptions<T>) {
-  const { initialLoading = true, transformState, changeBehavior } = options;
+  const { initialLoading = true, hasSyncContext = false, transformState, changeBehavior } = options;
 
   const [doc, setDoc] = createSignal<PatchesDoc<T> | undefined>(undefined);
   const [data, setData] = createSignal<T | undefined>(undefined);
@@ -157,6 +158,25 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
   function setupDoc(patchesDoc: PatchesDoc<T>): Unsubscriber {
     setDoc(patchesDoc);
 
+    // Track whether the initial load has completed. Once loaded, loading stays false.
+    let loaded = false;
+
+    function updateLoading(): void {
+      if (loaded) return;
+
+      if (patchesDoc.isLoaded) {
+        loaded = true;
+        setLoading(false);
+      } else if (patchesDoc.syncStatus === 'syncing') {
+        setLoading(true);
+      } else if (!hasSyncContext) {
+        // No sync configured — doc is as loaded as it'll get
+        loaded = true;
+        setLoading(false);
+      }
+      // With sync context: leave loading unchanged (waiting for sync to start)
+    }
+
     const unsubState = patchesDoc.subscribe(state => {
       if (transformState && state) {
         state = transformState(state, patchesDoc);
@@ -164,14 +184,13 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
       setData(() => state as T);
       setRev(patchesDoc.committedRev);
       setHasPending(patchesDoc.hasPending);
+      updateLoading();
     });
 
-    const unsubSync = patchesDoc.onSyncing((syncState: SyncingState) => {
-      setLoading(syncState === 'initial' || syncState === 'updating');
-      setError(syncState instanceof Error ? syncState : null);
+    const unsubSync = patchesDoc.onSyncStatus((status: DocSyncStatus) => {
+      updateLoading();
+      setError(status === 'error' ? patchesDoc.syncError : null);
     });
-
-    setLoading(patchesDoc.syncing !== null);
 
     return () => {
       unsubState();
@@ -287,13 +306,17 @@ function _usePatchesDocEager<T extends object>(
   docId: MaybeAccessor<string>,
   options: UsePatchesDocOptions
 ): UsePatchesDocReturn<T> {
-  const { patches } = usePatchesContext();
+  const { patches, sync } = usePatchesContext();
   const { autoClose = false, algorithm, metadata } = options;
   const shouldUntrack = autoClose === 'untrack';
   const openDocOpts: OpenDocOptions = { algorithm, metadata };
   const manager = getDocManager(patches);
 
-  const { setupDoc, setError, setLoading, baseReturn } = createDocReactiveState<T>({ changeBehavior: 'throw' });
+  const { setupDoc, setError, setLoading, baseReturn } = createDocReactiveState<T>({
+    initialLoading: !!autoClose,
+    hasSyncContext: !!sync,
+    changeBehavior: 'throw',
+  });
 
   const docIdAccessor = toAccessor(docId);
 
@@ -349,11 +372,12 @@ function _usePatchesDocEager<T extends object>(
  * Caller manages lifecycle via load()/close().
  */
 function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions): UsePatchesDocLazyReturn<T> {
-  const { patches } = usePatchesContext();
+  const { patches, sync } = usePatchesContext();
   const { idProp } = options;
 
   const { setupDoc, resetSignals, setError, setLoading, baseReturn } = createDocReactiveState<T>({
     initialLoading: false,
+    hasSyncContext: !!sync,
     changeBehavior: 'noop',
     transformState: idProp ? (state, patchesDoc) => ({ ...state, [idProp]: patchesDoc.id }) as T : undefined,
   });
@@ -375,6 +399,7 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
     }
 
     setPath(docPath);
+    setLoading(true);
 
     try {
       const patchesDoc = await patches.openDoc<T>(docPath, options);
@@ -460,12 +485,12 @@ export function usePatchesSync(): UsePatchesSyncReturn {
   }
 
   const [connected, setConnected] = createSignal(sync.state.connected);
-  const [syncing, setSyncing] = createSignal(sync.state.syncing === 'updating');
+  const [syncing, setSyncing] = createSignal(sync.state.syncStatus === 'syncing');
   const [online, setOnline] = createSignal(sync.state.online);
 
   const unsubscribe = sync.onStateChange((state: PatchesSyncState) => {
     setConnected(state.connected);
-    setSyncing(state.syncing === 'updating');
+    setSyncing(state.syncStatus === 'syncing');
     setOnline(state.online);
   });
 
@@ -553,13 +578,17 @@ export function createPatchesDoc<T extends object>(name: string) {
   const Context = createContext<UsePatchesDocReturn<T>>();
 
   function Provider(props: PatchesDocProviderProps) {
-    const { patches } = usePatchesContext();
+    const { patches, sync } = usePatchesContext();
     const manager = getDocManager(patches);
     const autoClose = props.autoClose ?? false;
     const shouldUntrack = autoClose === 'untrack';
     const openDocOpts: OpenDocOptions = { algorithm: props.algorithm, metadata: props.metadata };
 
-    const { setupDoc, setError, setLoading, baseReturn } = createDocReactiveState<T>({ changeBehavior: 'throw' });
+    const { setupDoc, setError, setLoading, baseReturn } = createDocReactiveState<T>({
+      initialLoading: !!autoClose,
+      hasSyncContext: !!sync,
+      changeBehavior: 'throw',
+    });
 
     const docIdAccessor = toAccessor(props.docId);
 

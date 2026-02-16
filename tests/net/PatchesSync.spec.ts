@@ -144,7 +144,7 @@ describe('PatchesSync', () => {
     it('should initialize state with online status', () => {
       expect(sync.state.online).toBe(true);
       expect(sync.state.connected).toBe(false);
-      expect(sync.state.syncing).toBeNull();
+      expect(sync.state.syncStatus).toBe('unsynced');
     });
 
     it('should track existing docs from patches', () => {
@@ -159,7 +159,8 @@ describe('PatchesSync', () => {
       expect(state).toEqual({
         online: true,
         connected: false,
-        syncing: null,
+        syncStatus: 'unsynced',
+        syncError: null,
       });
     });
 
@@ -172,7 +173,8 @@ describe('PatchesSync', () => {
       expect(stateHandler).toHaveBeenCalledWith({
         online: true,
         connected: true,
-        syncing: null,
+        syncStatus: 'unsynced',
+        syncError: null,
       });
     });
 
@@ -195,7 +197,8 @@ describe('PatchesSync', () => {
       expect(stateHandler).toHaveBeenCalledWith({
         online: false,
         connected: false,
-        syncing: null,
+        syncStatus: 'unsynced',
+        syncError: null,
       });
     });
   });
@@ -214,7 +217,7 @@ describe('PatchesSync', () => {
       await expect(sync.connect()).rejects.toThrow('Connection failed');
 
       expect(sync.state.connected).toBe(false);
-      expect(sync.state.syncing).toBe(error);
+      expect(sync.state.syncStatus).toBe('error');
     });
 
     it('should handle non-Error connection failures', async () => {
@@ -222,19 +225,19 @@ describe('PatchesSync', () => {
 
       await expect(sync.connect()).rejects.toBe('string error');
 
-      expect(sync.state.syncing).toBeInstanceOf(Error);
+      expect(sync.state.syncStatus).toBe('error');
     });
   });
 
   describe('disconnect method', () => {
     it('should disconnect and reset state', () => {
-      sync['updateState']({ connected: true, syncing: 'updating' });
+      sync['updateState']({ connected: true, syncStatus: 'syncing' });
 
       sync.disconnect();
 
       expect(mockWebSocket.disconnect).toHaveBeenCalled();
       expect(sync.state.connected).toBe(false);
-      expect(sync.state.syncing).toBeNull();
+      expect(sync.state.syncStatus).toBe('unsynced');
     });
   });
 
@@ -259,7 +262,7 @@ describe('PatchesSync', () => {
       expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc1', 'doc2']);
       expect(syncDocSpy).toHaveBeenCalledWith('doc1');
       expect(syncDocSpy).toHaveBeenCalledWith('doc2');
-      expect(sync.state.syncing).toBeNull();
+      expect(sync.state.syncStatus).toBe('synced');
     });
 
     it('should handle deleted documents', async () => {
@@ -360,7 +363,7 @@ describe('PatchesSync', () => {
 
     it('should update open document syncing state', async () => {
       const mockDoc = {
-        updateSyncing: vi.fn(),
+        updateSyncStatus: vi.fn(),
         import: vi.fn(),
       };
 
@@ -374,13 +377,13 @@ describe('PatchesSync', () => {
 
       await sync['syncDoc']('doc1');
 
-      expect(mockDoc.updateSyncing).toHaveBeenCalledWith('updating');
-      expect(mockDoc.updateSyncing).toHaveBeenCalledWith(null);
+      expect(mockDoc.updateSyncStatus).toHaveBeenCalledWith('syncing');
+      expect(mockDoc.updateSyncStatus).toHaveBeenCalledWith('synced');
     });
 
     it('should import snapshot into open doc when no committed rev', async () => {
       const mockDoc = {
-        updateSyncing: vi.fn(),
+        updateSyncStatus: vi.fn(),
         import: vi.fn(),
       };
 
@@ -521,24 +524,24 @@ describe('PatchesSync', () => {
     });
 
     it('should preserve syncing state when connecting', () => {
-      sync['updateState']({ syncing: 'updating' });
+      sync['updateState']({ syncStatus: 'syncing' });
 
       const connectionHandler = vi.mocked(mockWebSocket.onStateChange).mock.calls[0][0];
 
       connectionHandler('connecting');
 
-      expect(sync.state.syncing).toBe('updating'); // Preserved
+      expect(sync.state.syncStatus).toBe('syncing'); // Preserved
     });
 
     it('should reset syncing state when disconnected', () => {
-      sync['updateState']({ connected: true, syncing: 'updating' });
+      sync['updateState']({ connected: true, syncStatus: 'syncing' });
 
       const connectionHandler = vi.mocked(mockWebSocket.onStateChange).mock.calls[0][0];
 
       connectionHandler('disconnected');
 
       expect(sync.state.connected).toBe(false);
-      expect(sync.state.syncing).toBeNull(); // Reset
+      expect(sync.state.syncStatus).toBe('unsynced'); // Reset
     });
   });
 
@@ -757,52 +760,58 @@ describe('PatchesSync', () => {
   describe('synced doc status', () => {
     describe('initial state', () => {
       it('should initialize with empty synced map', () => {
-        expect(sync.synced).toEqual({});
+        expect(sync.syncedDocs).toEqual({});
       });
 
       it('should have onSyncedChange signal', () => {
-        expect(sync.onSyncedChange).toBeDefined();
-        expect(typeof sync.onSyncedChange).toBe('function');
-        expect(typeof sync.onSyncedChange.emit).toBe('function');
+        expect(sync.onSyncedDocsChange).toBeDefined();
+        expect(typeof sync.onSyncedDocsChange).toBe('function');
+        expect(typeof sync.onSyncedDocsChange.emit).toBe('function');
       });
     });
 
     describe('_updateSyncedDoc', () => {
       it('should add a new doc entry when it does not exist and emit', async () => {
         const handler = vi.fn();
-        sync.onSyncedChange(handler);
+        sync.onSyncedDocsChange(handler);
 
-        sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: false, status: 'unsynced' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
 
-        expect(sync.synced).toEqual({
-          doc1: { committedRev: 0, hasPending: false, status: 'unsynced' },
+        expect(sync.syncedDocs).toEqual({
+          doc1: { committedRev: 0, hasPending: false, syncStatus: 'unsynced', syncError: null, isLoaded: false },
         });
-        await vi.waitFor(() => expect(handler).toHaveBeenCalledWith(sync.synced));
+        await vi.waitFor(() => expect(handler).toHaveBeenCalledWith(sync.syncedDocs));
       });
 
       it('should create new object reference on add', () => {
-        const before = sync.synced;
-        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, status: 'synced' });
-        expect(sync.synced).not.toBe(before);
+        const before = sync.syncedDocs;
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        expect(sync.syncedDocs).not.toBe(before);
       });
 
       it('should merge updates into an existing entry and emit', async () => {
-        sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: false, status: 'unsynced' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
 
         const handler = vi.fn();
-        sync.onSyncedChange(handler);
+        sync.onSyncedDocsChange(handler);
 
-        sync['_updateSyncedDoc']('doc1', { status: 'syncing' });
+        sync['_updateSyncedDoc']('doc1', { syncStatus: 'syncing' });
 
-        expect(sync.synced.doc1).toEqual({ committedRev: 0, hasPending: false, status: 'syncing' });
-        await vi.waitFor(() => expect(handler).toHaveBeenCalledWith(sync.synced));
+        expect(sync.syncedDocs.doc1).toEqual({
+          committedRev: 0,
+          hasPending: false,
+          syncStatus: 'syncing',
+          syncError: null,
+          isLoaded: false,
+        });
+        await vi.waitFor(() => expect(handler).toHaveBeenCalledWith(sync.syncedDocs));
       });
 
       it('should no-op if nothing changed on existing entry', () => {
-        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, status: 'synced' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
 
         const handler = vi.fn();
-        sync.onSyncedChange(handler);
+        sync.onSyncedDocsChange(handler);
 
         sync['_updateSyncedDoc']('doc1', { committedRev: 5 });
 
@@ -810,29 +819,29 @@ describe('PatchesSync', () => {
       });
 
       it('should create new object reference on update', () => {
-        sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: false, status: 'unsynced' });
-        const before = sync.synced;
+        sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
+        const before = sync.syncedDocs;
 
         sync['_updateSyncedDoc']('doc1', { hasPending: true });
 
-        expect(sync.synced).not.toBe(before);
+        expect(sync.syncedDocs).not.toBe(before);
       });
 
       it('should remove a doc entry when updates is undefined and emit', async () => {
-        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, status: 'synced' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
 
         const handler = vi.fn();
-        sync.onSyncedChange(handler);
+        sync.onSyncedDocsChange(handler);
 
         sync['_updateSyncedDoc']('doc1', undefined);
 
-        expect(sync.synced).toEqual({});
-        await vi.waitFor(() => expect(handler).toHaveBeenCalledWith(sync.synced));
+        expect(sync.syncedDocs).toEqual({});
+        await vi.waitFor(() => expect(handler).toHaveBeenCalledWith(sync.syncedDocs));
       });
 
       it('should no-op when removing a doc not in the map', () => {
         const handler = vi.fn();
-        sync.onSyncedChange(handler);
+        sync.onSyncedDocsChange(handler);
 
         sync['_updateSyncedDoc']('nonexistent', undefined);
 
@@ -840,12 +849,85 @@ describe('PatchesSync', () => {
       });
 
       it('should create new object reference on remove', () => {
-        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, status: 'synced' });
-        const before = sync.synced;
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        const before = sync.syncedDocs;
 
         sync['_updateSyncedDoc']('doc1', undefined);
 
-        expect(sync.synced).not.toBe(before);
+        expect(sync.syncedDocs).not.toBe(before);
+      });
+    });
+
+    describe('isLoaded stickiness', () => {
+      it('should set isLoaded true when committedRev > 0', () => {
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        expect(sync.syncedDocs.doc1.isLoaded).toBe(true);
+      });
+
+      it('should set isLoaded true when hasPending is true', () => {
+        sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: true, syncStatus: 'unsynced' });
+        expect(sync.syncedDocs.doc1.isLoaded).toBe(true);
+      });
+
+      it('should set isLoaded true when syncStatus is synced', () => {
+        sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'synced' });
+        expect(sync.syncedDocs.doc1.isLoaded).toBe(true);
+      });
+
+      it('should set isLoaded true when syncStatus is error', () => {
+        sync['_updateSyncedDoc']('doc1', {
+          committedRev: 0,
+          hasPending: false,
+          syncStatus: 'error',
+          syncError: new Error('fail'),
+        });
+        expect(sync.syncedDocs.doc1.isLoaded).toBe(true);
+      });
+
+      it('should start isLoaded false for fresh unsynced doc', () => {
+        sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
+        expect(sync.syncedDocs.doc1.isLoaded).toBe(false);
+      });
+
+      it('should keep isLoaded true when syncStatus changes to syncing (reconnect)', () => {
+        sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'synced' });
+        expect(sync.syncedDocs.doc1.isLoaded).toBe(true);
+
+        sync['_updateSyncedDoc']('doc1', { syncStatus: 'syncing' });
+        expect(sync.syncedDocs.doc1.isLoaded).toBe(true);
+      });
+
+      it('should keep isLoaded true when status resets to unsynced on disconnect', () => {
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: true, syncStatus: 'syncing' });
+        expect(sync.syncedDocs.doc1.isLoaded).toBe(true);
+
+        sync.disconnect();
+        expect(sync.syncedDocs.doc1.isLoaded).toBe(true);
+      });
+
+      it('should reset isLoaded when doc is untracked and re-tracked', () => {
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        expect(sync.syncedDocs.doc1.isLoaded).toBe(true);
+
+        sync['_updateSyncedDoc']('doc1', undefined);
+        expect(sync.syncedDocs.doc1).toBeUndefined();
+
+        sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
+        expect(sync.syncedDocs.doc1.isLoaded).toBe(false);
+      });
+
+      it('should preserve isLoaded true across syncAllKnownDocs reconnect', async () => {
+        sync['updateState']({ connected: true });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        expect(sync.syncedDocs.doc1.isLoaded).toBe(true);
+
+        const activeDocs: TrackedDoc[] = [{ docId: 'doc1', committedRev: 5 }];
+        mockAlgorithm.listDocs.mockResolvedValue(activeDocs);
+        mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+        vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+        await sync['syncAllKnownDocs']();
+        expect(sync.syncedDocs.doc1.isLoaded).toBe(true);
       });
     });
 
@@ -865,8 +947,20 @@ describe('PatchesSync', () => {
 
         await sync['syncAllKnownDocs']();
 
-        expect(sync.synced.doc1).toEqual({ committedRev: 5, hasPending: false, status: 'synced' });
-        expect(sync.synced.doc2).toEqual({ committedRev: 0, hasPending: false, status: 'unsynced' });
+        expect(sync.syncedDocs.doc1).toEqual({
+          committedRev: 5,
+          hasPending: false,
+          syncStatus: 'synced',
+          syncError: null,
+          isLoaded: true,
+        });
+        expect(sync.syncedDocs.doc2).toEqual({
+          committedRev: 0,
+          hasPending: false,
+          syncStatus: 'unsynced',
+          syncError: null,
+          isLoaded: false,
+        });
       });
 
       it('should set hasPending true when doc has pending changes', async () => {
@@ -879,7 +973,7 @@ describe('PatchesSync', () => {
 
         await sync['syncAllKnownDocs']();
 
-        expect(sync.synced.doc1.hasPending).toBe(true);
+        expect(sync.syncedDocs.doc1.hasPending).toBe(true);
       });
 
       it('should not include deleted docs in synced map', async () => {
@@ -893,8 +987,8 @@ describe('PatchesSync', () => {
 
         await sync['syncAllKnownDocs']();
 
-        expect(sync.synced.doc1).toBeDefined();
-        expect(sync.synced.doc2).toBeUndefined();
+        expect(sync.syncedDocs.doc1).toBeDefined();
+        expect(sync.syncedDocs.doc2).toBeUndefined();
       });
 
       it('should emit onSyncedChange once for bulk population', async () => {
@@ -907,7 +1001,7 @@ describe('PatchesSync', () => {
         vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
 
         const handler = vi.fn();
-        sync.onSyncedChange(handler);
+        sync.onSyncedDocsChange(handler);
 
         await sync['syncAllKnownDocs']();
 
@@ -920,13 +1014,13 @@ describe('PatchesSync', () => {
       beforeEach(() => {
         sync['updateState']({ connected: true });
         // Pre-populate synced entry so _updateSyncedDoc has something to update
-        sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: false, status: 'unsynced' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
       });
 
       it('should set status to syncing at start of syncDoc', async () => {
         const statuses: string[] = [];
-        sync.onSyncedChange(() => {
-          statuses.push(sync.synced.doc1?.status);
+        sync.onSyncedDocsChange(() => {
+          statuses.push(sync.syncedDocs.doc1?.syncStatus);
         });
 
         mockAlgorithm.getPendingToSend.mockResolvedValue(null);
@@ -945,7 +1039,7 @@ describe('PatchesSync', () => {
 
         await sync['syncDoc']('doc1');
 
-        expect(sync.synced.doc1.status).toBe('synced');
+        expect(sync.syncedDocs.doc1.syncStatus).toBe('synced');
       });
 
       it('should set status to error on sync failure', async () => {
@@ -953,11 +1047,11 @@ describe('PatchesSync', () => {
 
         await sync['syncDoc']('doc1');
 
-        expect(sync.synced.doc1.status).toBe('error');
+        expect(sync.syncedDocs.doc1.syncStatus).toBe('error');
       });
 
       it('should update committedRev when server changes are applied', async () => {
-        sync['_updateSyncedDoc']('doc1', { committedRev: 5, status: 'synced' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, syncStatus: 'synced' });
 
         mockAlgorithm.getPendingToSend.mockResolvedValue(null);
         mockAlgorithm.getCommittedRev.mockResolvedValue(5);
@@ -966,7 +1060,7 @@ describe('PatchesSync', () => {
 
         await sync['syncDoc']('doc1');
 
-        expect(sync.synced.doc1.committedRev).toBe(8);
+        expect(sync.syncedDocs.doc1.committedRev).toBe(8);
       });
     });
 
@@ -974,7 +1068,7 @@ describe('PatchesSync', () => {
       beforeEach(() => {
         sync['updateState']({ connected: true });
         sync['trackedDocs'].add('doc1');
-        sync['_updateSyncedDoc']('doc1', { committedRev: 3, hasPending: true, status: 'syncing' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 3, hasPending: true, syncStatus: 'syncing' });
       });
 
       it('should set hasPending false and status synced after successful flush', async () => {
@@ -985,8 +1079,8 @@ describe('PatchesSync', () => {
 
         await sync['flushDoc']('doc1', pending as Change[]);
 
-        expect(sync.synced.doc1.hasPending).toBe(false);
-        expect(sync.synced.doc1.status).toBe('synced');
+        expect(sync.syncedDocs.doc1.hasPending).toBe(false);
+        expect(sync.syncedDocs.doc1.syncStatus).toBe('synced');
       });
 
       it('should keep hasPending true if more pending remain after flush', async () => {
@@ -999,7 +1093,7 @@ describe('PatchesSync', () => {
 
         await sync['flushDoc']('doc1', pending as Change[]);
 
-        expect(sync.synced.doc1.hasPending).toBe(true);
+        expect(sync.syncedDocs.doc1.hasPending).toBe(true);
       });
 
       it('should set status to error on flush failure', async () => {
@@ -1008,7 +1102,7 @@ describe('PatchesSync', () => {
 
         await expect(sync['flushDoc']('doc1', pending as Change[])).rejects.toThrow('network error');
 
-        expect(sync.synced.doc1.status).toBe('error');
+        expect(sync.syncedDocs.doc1.syncStatus).toBe('error');
       });
     });
 
@@ -1025,7 +1119,13 @@ describe('PatchesSync', () => {
 
         await trackHandler(['doc3']);
 
-        expect(sync.synced.doc3).toEqual({ committedRev: 5, hasPending: false, status: 'synced' });
+        expect(sync.syncedDocs.doc3).toEqual({
+          committedRev: 5,
+          hasPending: false,
+          syncStatus: 'synced',
+          syncError: null,
+          isLoaded: true,
+        });
       });
 
       it('should add unsynced entry for new doc with committedRev 0', async () => {
@@ -1036,23 +1136,29 @@ describe('PatchesSync', () => {
 
         await trackHandler(['doc3']);
 
-        expect(sync.synced.doc3).toEqual({ committedRev: 0, hasPending: false, status: 'unsynced' });
+        expect(sync.syncedDocs.doc3).toEqual({
+          committedRev: 0,
+          hasPending: false,
+          syncStatus: 'unsynced',
+          syncError: null,
+          isLoaded: false,
+        });
       });
 
       it('should remove synced entries when docs are untracked', async () => {
-        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, status: 'synced' });
-        sync['_updateSyncedDoc']('doc2', { committedRev: 3, hasPending: false, status: 'synced' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        sync['_updateSyncedDoc']('doc2', { committedRev: 3, hasPending: false, syncStatus: 'synced' });
 
         const untrackHandler = vi.mocked(mockPatches.onUntrackDocs).mock.calls[0][0];
 
         await untrackHandler(['doc1', 'doc2']);
 
-        expect(sync.synced.doc1).toBeUndefined();
-        expect(sync.synced.doc2).toBeUndefined();
+        expect(sync.syncedDocs.doc1).toBeUndefined();
+        expect(sync.syncedDocs.doc2).toBeUndefined();
       });
 
       it('should set hasPending true on doc change', async () => {
-        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, status: 'synced' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
         sync['trackedDocs'].add('doc1');
 
         // Mock flushDoc to prevent actual flush
@@ -1061,25 +1167,25 @@ describe('PatchesSync', () => {
         const changeHandler = vi.mocked(mockPatches.onChange).mock.calls[0][0];
         await changeHandler('doc1');
 
-        expect(sync.synced.doc1.hasPending).toBe(true);
-        expect(sync.synced.doc1.status).toBe('syncing');
+        expect(sync.syncedDocs.doc1.hasPending).toBe(true);
+        expect(sync.syncedDocs.doc1.syncStatus).toBe('syncing');
       });
 
       it('should set hasPending true on doc change while offline', async () => {
         sync['updateState']({ connected: false });
-        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, status: 'synced' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
         sync['trackedDocs'].add('doc1');
 
         const changeHandler = vi.mocked(mockPatches.onChange).mock.calls[0][0];
         await changeHandler('doc1');
 
-        expect(sync.synced.doc1.hasPending).toBe(true);
+        expect(sync.syncedDocs.doc1.hasPending).toBe(true);
         // Status stays synced (not syncing) since we're offline
-        expect(sync.synced.doc1.status).toBe('synced');
+        expect(sync.syncedDocs.doc1.syncStatus).toBe('synced');
       });
 
       it('should update committedRev when server pushes committed changes', async () => {
-        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, status: 'synced' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
 
         const changesHandler = vi.mocked(mockWebSocket.onChangesCommitted).mock.calls[0][0];
         const serverChanges = [
@@ -1089,39 +1195,39 @@ describe('PatchesSync', () => {
 
         await changesHandler('doc1', serverChanges);
 
-        expect(sync.synced.doc1.committedRev).toBe(10);
+        expect(sync.syncedDocs.doc1.committedRev).toBe(10);
       });
 
       it('should reset syncing statuses on disconnect', () => {
-        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: true, status: 'syncing' });
-        sync['_updateSyncedDoc']('doc2', { committedRev: 0, hasPending: false, status: 'syncing' });
-        sync['_updateSyncedDoc']('doc3', { committedRev: 3, hasPending: false, status: 'synced' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: true, syncStatus: 'syncing' });
+        sync['_updateSyncedDoc']('doc2', { committedRev: 0, hasPending: false, syncStatus: 'syncing' });
+        sync['_updateSyncedDoc']('doc3', { committedRev: 3, hasPending: false, syncStatus: 'synced' });
 
         sync.disconnect();
 
-        expect(sync.synced.doc1.status).toBe('synced');
-        expect(sync.synced.doc2.status).toBe('unsynced');
-        expect(sync.synced.doc3.status).toBe('synced'); // unchanged
+        expect(sync.syncedDocs.doc1.syncStatus).toBe('synced');
+        expect(sync.syncedDocs.doc2.syncStatus).toBe('unsynced');
+        expect(sync.syncedDocs.doc3.syncStatus).toBe('synced'); // unchanged
       });
 
       it('should reset syncing statuses on connection loss', () => {
-        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, status: 'syncing' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'syncing' });
 
         const connectionHandler = vi.mocked(mockWebSocket.onStateChange).mock.calls[0][0];
         connectionHandler('disconnected');
 
-        expect(sync.synced.doc1.status).toBe('synced');
+        expect(sync.syncedDocs.doc1.syncStatus).toBe('synced');
       });
 
       it('should re-populate synced map on reconnection', async () => {
         // Initial state with some docs
-        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: true, status: 'syncing' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: true, syncStatus: 'syncing' });
 
         // Simulate disconnect
         const connectionHandler = vi.mocked(mockWebSocket.onStateChange).mock.calls[0][0];
         connectionHandler('disconnected');
 
-        expect(sync.synced.doc1.status).toBe('synced'); // Reset from syncing
+        expect(sync.syncedDocs.doc1.syncStatus).toBe('synced'); // Reset from syncing
 
         // Set up mocks for reconnection sync
         const activeDocs: TrackedDoc[] = [
@@ -1135,22 +1241,34 @@ describe('PatchesSync', () => {
         // Simulate reconnect
         connectionHandler('connected');
         // Wait for syncAllKnownDocs to complete
-        await vi.waitFor(() => expect(sync.state.syncing).toBeNull());
+        await vi.waitFor(() => expect(sync.state.syncStatus).toBe('synced'));
 
         // Synced map should be rebuilt from store
-        expect(sync.synced.doc1).toEqual({ committedRev: 5, hasPending: false, status: 'synced' });
-        expect(sync.synced.doc3).toEqual({ committedRev: 10, hasPending: false, status: 'synced' });
+        expect(sync.syncedDocs.doc1).toEqual({
+          committedRev: 5,
+          hasPending: false,
+          syncStatus: 'synced',
+          syncError: null,
+          isLoaded: true,
+        });
+        expect(sync.syncedDocs.doc3).toEqual({
+          committedRev: 10,
+          hasPending: false,
+          syncStatus: 'synced',
+          syncError: null,
+          isLoaded: true,
+        });
       });
 
       it('should remove synced entry on remote doc deleted', async () => {
-        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, status: 'synced' });
+        sync['_updateSyncedDoc']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
         sync['trackedDocs'].add('doc1');
         mockAlgorithm.getPendingToSend.mockResolvedValue(null);
         mockPatches.closeDoc = vi.fn().mockResolvedValue(undefined);
 
         await sync['_handleRemoteDocDeleted']('doc1');
 
-        expect(sync.synced.doc1).toBeUndefined();
+        expect(sync.syncedDocs.doc1).toBeUndefined();
       });
     });
   });

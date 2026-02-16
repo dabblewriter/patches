@@ -14,7 +14,7 @@ import {
 import type { OpenDocOptions } from '../client/Patches.js';
 import type { PatchesDoc } from '../client/PatchesDoc.js';
 import { JSONPatch } from '../json-patch/JSONPatch.js';
-import type { SyncingState, ChangeMutator } from '../types.js';
+import type { DocSyncStatus, ChangeMutator } from '../types.js';
 import type { Unsubscriber } from '../event-signal.js';
 import type { PatchesSyncState } from '../net/PatchesSync.js';
 import { usePatchesContext } from './provider.js';
@@ -138,6 +138,7 @@ export interface UsePatchesDocLazyReturn<T extends object> extends UsePatchesDoc
 
 interface DocReactiveStateOptions<T extends object> {
   initialLoading?: boolean;
+  hasSyncContext?: boolean;
   transformState?: (state: T, doc: PatchesDoc<T>) => T;
   changeBehavior: 'throw' | 'noop';
 }
@@ -148,7 +149,7 @@ interface DocReactiveStateOptions<T extends object> {
  * @internal
  */
 function createDocReactiveState<T extends object>(options: DocReactiveStateOptions<T>) {
-  const { initialLoading = true, transformState, changeBehavior } = options;
+  const { initialLoading = true, hasSyncContext = false, transformState, changeBehavior } = options;
 
   const doc = ref<PatchesDoc<T> | undefined>(undefined) as Ref<PatchesDoc<T> | undefined>;
   const data = shallowRef<T | undefined>(undefined) as ShallowRef<T | undefined>;
@@ -160,6 +161,25 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
   function setupDoc(patchesDoc: PatchesDoc<T>): Unsubscriber {
     doc.value = patchesDoc;
 
+    // Track whether the initial load has completed. Once loaded, loading stays false.
+    let loaded = false;
+
+    function updateLoading(): void {
+      if (loaded) return;
+
+      if (patchesDoc.isLoaded) {
+        loaded = true;
+        loading.value = false;
+      } else if (patchesDoc.syncStatus === 'syncing') {
+        loading.value = true;
+      } else if (!hasSyncContext) {
+        // No sync configured — doc is as loaded as it'll get
+        loaded = true;
+        loading.value = false;
+      }
+      // With sync context: leave loading unchanged (waiting for sync to start)
+    }
+
     const unsubState = patchesDoc.subscribe(state => {
       if (transformState && state) {
         state = transformState(state, patchesDoc);
@@ -167,14 +187,13 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
       data.value = state;
       rev.value = patchesDoc.committedRev;
       hasPending.value = patchesDoc.hasPending;
+      updateLoading();
     });
 
-    const unsubSync = patchesDoc.onSyncing((syncState: SyncingState) => {
-      loading.value = syncState === 'initial' || syncState === 'updating';
-      error.value = syncState instanceof Error ? syncState : null;
+    const unsubSync = patchesDoc.onSyncStatus((status: DocSyncStatus) => {
+      updateLoading();
+      error.value = status === 'error' ? patchesDoc.syncError : null;
     });
-
-    loading.value = patchesDoc.syncing !== null;
 
     return () => {
       unsubState();
@@ -268,13 +287,17 @@ export function usePatchesDoc<T extends object>(
  * Eager mode implementation — the original behavior.
  */
 function _usePatchesDocEager<T extends object>(docId: string, options: UsePatchesDocOptions): UsePatchesDocReturn<T> {
-  const { patches } = usePatchesContext();
+  const { patches, sync } = usePatchesContext();
   const { autoClose = false, algorithm, metadata } = options;
   const shouldUntrack = autoClose === 'untrack';
   const openDocOpts: OpenDocOptions = { algorithm, metadata };
   const manager = getDocManager(patches);
 
-  const { setupDoc, baseReturn } = createDocReactiveState<T>({ changeBehavior: 'throw' });
+  const { setupDoc, baseReturn } = createDocReactiveState<T>({
+    initialLoading: !!autoClose,
+    hasSyncContext: !!sync,
+    changeBehavior: 'throw',
+  });
 
   let unsubscribe: Unsubscriber | null = null;
 
@@ -319,11 +342,12 @@ function _usePatchesDocEager<T extends object>(docId: string, options: UsePatche
  * No onBeforeUnmount. Caller manages lifecycle via load()/close().
  */
 function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions): UsePatchesDocLazyReturn<T> {
-  const { patches } = usePatchesContext();
+  const { patches, sync } = usePatchesContext();
   const { idProp } = options;
 
-  const { setupDoc, resetRefs, baseReturn } = createDocReactiveState<T>({
+  const { setupDoc, resetRefs, loading, baseReturn } = createDocReactiveState<T>({
     initialLoading: false,
+    hasSyncContext: !!sync,
     changeBehavior: 'noop',
     transformState: idProp ? (state, patchesDoc) => ({ ...state, [idProp]: patchesDoc.id }) as T : undefined,
   });
@@ -345,13 +369,14 @@ function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions)
     }
 
     path.value = docPath;
+    loading.value = true;
 
     try {
       const patchesDoc = await patches.openDoc<T>(docPath, options);
       unsubscribe = setupDoc(patchesDoc);
     } catch (err) {
       baseReturn.error.value = err as Error;
-      baseReturn.loading.value = false;
+      loading.value = false;
     }
   }
 
@@ -429,12 +454,12 @@ export function usePatchesSync(): UsePatchesSyncReturn {
   }
 
   const connected = ref(sync.state.connected);
-  const syncing = ref(sync.state.syncing === 'updating');
+  const syncing = ref(sync.state.syncStatus === 'syncing');
   const online = ref(sync.state.online);
 
   const unsubscribe = sync.onStateChange((state: PatchesSyncState) => {
     connected.value = state.connected;
-    syncing.value = state.syncing === 'updating';
+    syncing.value = state.syncStatus === 'syncing';
     online.value = state.online;
   });
 
@@ -495,13 +520,17 @@ export function providePatchesDoc<T extends object>(
   docId: MaybeRef<string>,
   options: UsePatchesDocOptions = {}
 ): UsePatchesDocReturn<T> {
-  const { patches } = usePatchesContext();
+  const { patches, sync } = usePatchesContext();
   const { autoClose = false, algorithm, metadata } = options;
   const shouldUntrack = autoClose === 'untrack';
   const openDocOpts: OpenDocOptions = { algorithm, metadata };
   const manager = getDocManager(patches);
 
-  const { setupDoc, baseReturn } = createDocReactiveState<T>({ changeBehavior: 'throw' });
+  const { setupDoc, baseReturn } = createDocReactiveState<T>({
+    initialLoading: !!autoClose,
+    hasSyncContext: !!sync,
+    changeBehavior: 'throw',
+  });
 
   const currentDocId = ref<string>(unref(docId));
   let unsubscribe: Unsubscriber | null = null;

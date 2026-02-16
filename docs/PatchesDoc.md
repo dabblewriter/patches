@@ -94,7 +94,7 @@ Local edits waiting for server confirmation. The `doc.hasPending` boolean tells 
 
 ### Syncing Status
 
-The `doc.syncing` property tells you the current sync state: `null` when idle, `'syncing'` when actively syncing, or an `Error` if something went wrong.
+The `doc.syncStatus` property tells you the current sync state: `'unsynced'` when not yet synced, `'syncing'` when actively syncing, `'synced'` when up to date, or `'error'` if something went wrong (check `doc.syncError` for details). The `doc.isLoaded` boolean tells you whether the document has completed its initial load — once true, it stays true.
 
 You don't need to manage this complexity directly. Make changes, check status, and let the system handle the rest.
 
@@ -157,15 +157,34 @@ if (doc.hasPending) {
 }
 ```
 
-### `syncing`
+### `syncStatus`
 
 ```typescript
-if (doc.syncing === 'syncing') {
+if (doc.syncStatus === 'syncing') {
   // Currently syncing with server
-} else if (doc.syncing instanceof Error) {
-  // Sync error occurred
+} else if (doc.syncStatus === 'error') {
+  // Sync error occurred - check doc.syncError for details
+} else if (doc.syncStatus === 'synced') {
+  // Up to date with the server
 } else {
-  // Idle - no sync in progress
+  // 'unsynced' - not yet synced
+}
+```
+
+### `syncError`
+
+```typescript
+if (doc.syncError) {
+  console.error('Last sync error:', doc.syncError.message);
+}
+```
+
+### `isLoaded`
+
+```typescript
+if (doc.isLoaded) {
+  // Document has data to display (server data, cached data, or local changes)
+  // Once true, this never reverts to false within a sync lifecycle
 }
 ```
 
@@ -193,16 +212,16 @@ doc.onChange(ops => {
 });
 ```
 
-### `onSyncing` - Sync Status Changes
+### `onSyncStatus` - Sync Status Changes
 
 Called when the sync status changes:
 
 ```typescript
-doc.onSyncing(syncingState => {
-  if (syncingState === 'syncing') {
+doc.onSyncStatus(status => {
+  if (status === 'syncing') {
     showSpinner();
-  } else if (syncingState instanceof Error) {
-    showError(syncingState.message);
+  } else if (status === 'error') {
+    showError(doc.syncError?.message);
   } else {
     hideSpinner();
   }
@@ -294,8 +313,8 @@ function TodoApp() {
         setHasUnsaved(todoDoc.hasPending);
       });
 
-      todoDoc.onSyncing(syncState => {
-        setSyncError(syncState instanceof Error ? syncState : null);
+      todoDoc.onSyncStatus(status => {
+        setSyncError(status === 'error' ? todoDoc.syncError : null);
         setHasUnsaved(todoDoc.hasPending);
       });
 

@@ -51,7 +51,7 @@ describe('LWWDoc', () => {
     vi.useRealTimers();
     doc.onChange.clear();
     doc.onUpdate.clear();
-    doc.onSyncing.clear();
+    doc.onSyncStatus.clear();
   });
 
   describe('constructor', () => {
@@ -62,7 +62,7 @@ describe('LWWDoc', () => {
       expect(emptyDoc.id).toBe('empty-doc');
       expect(emptyDoc.committedRev).toBe(0);
       expect(emptyDoc.hasPending).toBe(false);
-      expect(emptyDoc.syncing).toBeNull();
+      expect(emptyDoc.syncStatus).toBe('unsynced');
     });
 
     it('should initialize with provided snapshot', () => {
@@ -103,11 +103,11 @@ describe('LWWDoc', () => {
       expect(doc.hasPending).toBe(false);
     });
 
-    it('should return syncing state', () => {
-      expect(doc.syncing).toBeNull();
+    it('should return sync status', () => {
+      expect(doc.syncStatus).toBe('unsynced');
 
-      doc.updateSyncing('updating');
-      expect(doc.syncing).toBe('updating');
+      doc.updateSyncStatus('syncing');
+      expect(doc.syncStatus).toBe('syncing');
     });
   });
 
@@ -284,29 +284,81 @@ describe('LWWDoc', () => {
     });
   });
 
-  describe('updateSyncing', () => {
-    it('should update syncing state and emit onSyncing', async () => {
+  describe('updateSyncStatus', () => {
+    it('should update sync status and emit onSyncing', async () => {
       const syncListener = vi.fn();
-      doc.onSyncing(syncListener);
+      doc.onSyncStatus(syncListener);
 
-      doc.updateSyncing('updating');
+      doc.updateSyncStatus('syncing');
 
-      expect(doc.syncing).toBe('updating');
-      expect(doc.onSyncing.emit).toHaveBeenCalledWith('updating');
+      expect(doc.syncStatus).toBe('syncing');
+      expect(doc.onSyncStatus.emit).toHaveBeenCalledWith('syncing');
     });
 
-    it('should handle error syncing state', async () => {
+    it('should handle error sync status', async () => {
       const error = new Error('Sync failed');
-      doc.updateSyncing(error);
+      doc.updateSyncStatus('error', error);
 
-      expect(doc.syncing).toBe(error);
+      expect(doc.syncStatus).toBe('error');
+      expect(doc.syncError).toBe(error);
     });
 
-    it('should handle null syncing state', async () => {
-      doc.updateSyncing('updating');
-      doc.updateSyncing(null);
+    it('should handle synced state', async () => {
+      doc.updateSyncStatus('syncing');
+      doc.updateSyncStatus('synced');
 
-      expect(doc.syncing).toBeNull();
+      expect(doc.syncStatus).toBe('synced');
+    });
+
+    it('should clear syncError when transitioning away from error', async () => {
+      const error = new Error('Sync failed');
+      doc.updateSyncStatus('error', error);
+      expect(doc.syncError).toBe(error);
+
+      doc.updateSyncStatus('syncing');
+      expect(doc.syncStatus).toBe('syncing');
+      expect(doc.syncError).toBeNull();
+    });
+  });
+
+  describe('isLoaded', () => {
+    it('should default to false', () => {
+      expect(doc.isLoaded).toBe(false);
+    });
+
+    it('should become true when constructed with committedRev > 0', () => {
+      const loadedDoc = new LWWDoc('loaded', createSnapshot({ text: 'hi' }, 5));
+      expect(loadedDoc.isLoaded).toBe(true);
+    });
+
+    it('should become true when constructed with pending changes', () => {
+      const change = createChange('c1', 1, [{ op: 'replace', path: '/text', value: 'hi' }], false);
+      const loadedDoc = new LWWDoc('loaded', createSnapshot({ text: 'hello' }, 0, [change]));
+      expect(loadedDoc.isLoaded).toBe(true);
+    });
+
+    it('should become true after updateSyncStatus synced', () => {
+      doc.updateSyncStatus('synced');
+      expect(doc.isLoaded).toBe(true);
+    });
+
+    it('should stay true after transitioning back to syncing', () => {
+      doc.updateSyncStatus('synced');
+      expect(doc.isLoaded).toBe(true);
+
+      doc.updateSyncStatus('syncing');
+      expect(doc.isLoaded).toBe(true);
+    });
+
+    it('should become true after applyChanges with committed changes', () => {
+      const change = createChange('c1', 1, [{ op: 'replace', path: '/text', value: 'world' }]);
+      doc.applyChanges([change]);
+      expect(doc.isLoaded).toBe(true);
+    });
+
+    it('should become true after import with rev > 0', () => {
+      doc.import(createSnapshot({ text: 'imported' }, 3));
+      expect(doc.isLoaded).toBe(true);
     });
   });
 
@@ -342,9 +394,9 @@ describe('LWWDoc', () => {
       expect(typeof unsubscribe).toBe('function');
     });
 
-    it('should provide onSyncing signal', () => {
+    it('should provide onSyncStatus signal', () => {
       const callback = vi.fn();
-      const unsubscribe = doc.onSyncing(callback);
+      const unsubscribe = doc.onSyncStatus(callback);
 
       expect(typeof unsubscribe).toBe('function');
     });

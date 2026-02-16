@@ -49,7 +49,7 @@ describe('OTDoc', () => {
   afterEach(() => {
     doc.onChange.clear();
     doc.onUpdate.clear();
-    doc.onSyncing.clear();
+    doc.onSyncStatus.clear();
   });
 
   describe('constructor', () => {
@@ -60,7 +60,7 @@ describe('OTDoc', () => {
       expect(emptyDoc.id).toBe('empty-doc');
       expect(emptyDoc.committedRev).toBe(0);
       expect(emptyDoc.hasPending).toBe(false);
-      expect(emptyDoc.syncing).toBeNull();
+      expect(emptyDoc.syncStatus).toBe('unsynced');
     });
 
     it('should initialize with provided snapshot', () => {
@@ -83,11 +83,11 @@ describe('OTDoc', () => {
       expect(doc.state).toEqual({ text: 'hello' });
     });
 
-    it('should return syncing state', () => {
-      expect(doc.syncing).toBeNull();
+    it('should return sync status', () => {
+      expect(doc.syncStatus).toBe('unsynced');
 
-      doc.updateSyncing('updating');
-      expect(doc.syncing).toBe('updating');
+      doc.updateSyncStatus('syncing');
+      expect(doc.syncStatus).toBe('syncing');
     });
 
     it('should return committed revision', () => {
@@ -289,19 +289,79 @@ describe('OTDoc', () => {
     });
   });
 
-  describe('updateSyncing', () => {
-    it('should update syncing state and emit event', () => {
-      doc.updateSyncing('updating');
+  describe('updateSyncStatus', () => {
+    it('should update sync status and emit event', () => {
+      doc.updateSyncStatus('syncing');
 
-      expect(doc.syncing).toBe('updating');
-      expect(doc.onSyncing.emit).toHaveBeenCalledWith('updating');
+      expect(doc.syncStatus).toBe('syncing');
+      expect(doc.onSyncStatus.emit).toHaveBeenCalledWith('syncing');
     });
 
-    it('should handle null syncing state', () => {
-      doc.updateSyncing('updating');
-      doc.updateSyncing(null);
+    it('should handle synced state', () => {
+      doc.updateSyncStatus('syncing');
+      doc.updateSyncStatus('synced');
 
-      expect(doc.syncing).toBeNull();
+      expect(doc.syncStatus).toBe('synced');
+    });
+
+    it('should handle error state with syncError', () => {
+      const error = new Error('Sync failed');
+      doc.updateSyncStatus('error', error);
+
+      expect(doc.syncStatus).toBe('error');
+      expect(doc.syncError).toBe(error);
+    });
+
+    it('should clear syncError when transitioning away from error', () => {
+      const error = new Error('Sync failed');
+      doc.updateSyncStatus('error', error);
+      expect(doc.syncError).toBe(error);
+
+      doc.updateSyncStatus('syncing');
+      expect(doc.syncStatus).toBe('syncing');
+      expect(doc.syncError).toBeNull();
+    });
+  });
+
+  describe('isLoaded', () => {
+    it('should default to false', () => {
+      expect(doc.isLoaded).toBe(false);
+    });
+
+    it('should become true when constructed with committedRev > 0', () => {
+      const loadedDoc = new OTDoc('loaded', createSnapshot({ text: 'hi' }, 5));
+      expect(loadedDoc.isLoaded).toBe(true);
+    });
+
+    it('should become true when constructed with pending changes', () => {
+      const change = createChange('c1', 1, 0);
+      change.committedAt = 0; // pending
+      const loadedDoc = new OTDoc('loaded', createSnapshot({ text: 'hi' }, 0, [change]));
+      expect(loadedDoc.isLoaded).toBe(true);
+    });
+
+    it('should become true after updateSyncStatus synced', () => {
+      doc.updateSyncStatus('synced');
+      expect(doc.isLoaded).toBe(true);
+    });
+
+    it('should stay true after transitioning back to syncing', () => {
+      doc.updateSyncStatus('synced');
+      expect(doc.isLoaded).toBe(true);
+
+      doc.updateSyncStatus('syncing');
+      expect(doc.isLoaded).toBe(true);
+    });
+
+    it('should become true after applyChanges with committed changes', () => {
+      const change = createChange('c1', 1, 0);
+      doc.applyChanges([change]);
+      expect(doc.isLoaded).toBe(true);
+    });
+
+    it('should become true after import with rev > 0', () => {
+      doc.import(createSnapshot({ text: 'imported' }, 3));
+      expect(doc.isLoaded).toBe(true);
     });
   });
 
@@ -332,9 +392,9 @@ describe('OTDoc', () => {
       expect(typeof unsubscribe).toBe('function');
     });
 
-    it('should provide onSyncing signal', () => {
+    it('should provide onSyncStatus signal', () => {
       const callback = vi.fn();
-      const unsubscribe = doc.onSyncing(callback);
+      const unsubscribe = doc.onSyncStatus(callback);
 
       expect(typeof unsubscribe).toBe('function');
     });

@@ -96,7 +96,7 @@ describe('Patches', () => {
       id: 'test-doc',
       import: vi.fn(),
       applyChanges: vi.fn(),
-      updateSyncing: vi.fn(),
+      updateSyncStatus: vi.fn(),
       onChange: vi.fn().mockReturnValue(vi.fn()),
       close: vi.fn(),
       state: {},

@@ -120,16 +120,17 @@ doc.change(draft => {
 sync.onStateChange(state => {
   // state.online - browser online/offline
   // state.connected - WebSocket connected
-  // state.syncing - null, 'initial', 'updating', or Error
+  // state.syncStatus - 'unsynced', 'syncing', 'synced', or 'error'
+  // state.syncError - Error | null (details when syncStatus is 'error')
 
   if (!state.online) {
     showOfflineBanner();
   } else if (!state.connected) {
     showReconnectingMessage();
-  } else if (state.syncing === 'updating') {
+  } else if (state.syncStatus === 'syncing') {
     showSyncingIndicator();
-  } else if (state.syncing instanceof Error) {
-    showSyncError(state.syncing);
+  } else if (state.syncStatus === 'error') {
+    showSyncError(state.syncError);
   } else {
     showConnectedStatus();
   }

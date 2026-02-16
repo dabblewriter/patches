@@ -138,7 +138,7 @@ describe('Vue Composables', () => {
       const doc = patches.getOpenDoc<any>('doc-1')!;
 
       const subscribeSpy = vi.spyOn(doc, 'subscribe');
-      const onSyncingSpy = vi.spyOn(doc, 'onSyncing');
+      const onSyncStatusSpy = vi.spyOn(doc, 'onSyncStatus');
 
       const TestComponent = defineComponent({
         setup() {
@@ -154,18 +154,18 @@ describe('Vue Composables', () => {
       app.mount(el);
 
       expect(subscribeSpy).toHaveBeenCalled();
-      expect(onSyncingSpy).toHaveBeenCalled();
+      expect(onSyncStatusSpy).toHaveBeenCalled();
 
       // Get unsubscribe functions
       const unsubState = subscribeSpy.mock.results[0].value;
-      const unsubSync = onSyncingSpy.mock.results[0].value;
+      const unsubSync = onSyncStatusSpy.mock.results[0].value;
 
       const unsubStateSpy = vi.fn(unsubState);
       const unsubSyncSpy = vi.fn(unsubSync);
 
       // Replace with spies
       subscribeSpy.mockReturnValue(unsubStateSpy as any);
-      onSyncingSpy.mockReturnValue(unsubSyncSpy as any);
+      onSyncStatusSpy.mockReturnValue(unsubSyncSpy as any);
 
       app.unmount();
 
@@ -657,7 +657,7 @@ describe('Vue Composables', () => {
       const mockSync = {
         state: {
           connected: true,
-          syncing: 'updating' as const,
+          syncStatus: 'syncing' as const,
           online: true,
         },
         onStateChange: vi.fn().mockReturnValue(vi.fn()),
@@ -684,7 +684,7 @@ describe('Vue Composables', () => {
       app.mount(el);
 
       expect(capturedConnected.value).toBe(true);
-      expect(capturedSyncing.value).toBe(true); // 'updating' -> true
+      expect(capturedSyncing.value).toBe(true); // 'syncing' -> true
       expect(capturedOnline.value).toBe(true);
 
       app.unmount();
@@ -695,7 +695,7 @@ describe('Vue Composables', () => {
       const mockSync = {
         state: {
           connected: false,
-          syncing: null,
+          syncStatus: 'unsynced',
           online: false,
         },
         onStateChange: vi.fn().mockReturnValue(mockUnsubscribe),

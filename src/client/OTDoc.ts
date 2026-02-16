@@ -45,6 +45,7 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
     if (this._pendingChanges.length > 0) {
       this._state = applyChangesToState(this._committedState, this._pendingChanges);
     }
+    this._checkLoaded();
   }
 
   /** Last committed revision number from the server. */
@@ -74,6 +75,7 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
     this._committedRev = snapshot.rev;
     this._pendingChanges = snapshot.changes;
     this._state = createStateFromSnapshot(snapshot);
+    this._checkLoaded();
     this.onUpdate.emit(this._state);
   }
 
@@ -119,7 +121,7 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       this._pendingChanges.push(...changes);
     }
 
-    // Notify listeners
+    this._checkLoaded();
     this.onUpdate.emit(this._state);
   }
 

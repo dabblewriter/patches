@@ -16,7 +16,7 @@ describe('Vue Provider', () => {
 
   beforeEach(() => {
     patches = createOTPatches();
-    mockSync = { state: { connected: false, syncing: null, online: true } };
+    mockSync = { state: { connected: false, syncStatus: null, online: true } };
   });
 
   describe('providePatchesContext', () => {

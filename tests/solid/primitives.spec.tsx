@@ -690,7 +690,7 @@ describe('Solid Primitives', () => {
 
     it('should return reactive sync state', () => {
       const mockSync: any = {
-        state: { connected: true, syncing: 'updating', online: true },
+        state: { connected: true, syncStatus: 'syncing', online: true },
         onStateChange: vi.fn(() => () => {}),
       };
 
@@ -717,7 +717,7 @@ describe('Solid Primitives', () => {
         App();
 
         expect(connected()).toBe(true);
-        expect(syncing()).toBe(true); // 'updating' → true
+        expect(syncing()).toBe(true); // 'syncing' → true
         expect(online()).toBe(true);
         expect(mockSync.onStateChange).toHaveBeenCalled();
 
@@ -728,7 +728,7 @@ describe('Solid Primitives', () => {
     it('should update reactively on state changes', () => {
       let stateChangeCallback: any;
       const mockSync: any = {
-        state: { connected: false, syncing: null, online: false },
+        state: { connected: false, syncStatus: 'unsynced', online: false },
         onStateChange: vi.fn((cb: any) => {
           stateChangeCallback = cb;
           return () => {};
@@ -756,7 +756,7 @@ describe('Solid Primitives', () => {
         expect(connected()).toBe(false);
 
         // Trigger state change
-        stateChangeCallback({ connected: true, syncing: null, online: true });
+        stateChangeCallback({ connected: true, syncStatus: 'synced', online: true });
 
         expect(connected()).toBe(true);
 

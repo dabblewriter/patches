@@ -42,6 +42,7 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
         }
       }
     }
+    this._checkLoaded();
   }
 
   /** Last committed revision number from the server. */
@@ -72,6 +73,7 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
       }
     }
 
+    this._checkLoaded();
     this.onUpdate.emit(this._state);
   }
 
@@ -114,6 +116,7 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
     this._committedRev = lastCommittedRev;
     this._hasPending = hasPending ?? hasPendingChanges;
 
+    this._checkLoaded();
     this.onUpdate.emit(this._state);
   }
 }

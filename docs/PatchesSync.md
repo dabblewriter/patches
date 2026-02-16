@@ -131,27 +131,28 @@ See [Operational Transformation](operational-transformation.md) or [Last-Write-W
 interface PatchesSyncState {
   online: boolean; // Is the browser online?
   connected: boolean; // Is the WebSocket connected?
-  syncing: SyncingState; // 'initial' | 'updating' | null | Error
+  syncStatus: DocSyncStatus; // 'unsynced' | 'syncing' | 'synced' | 'error'
+  syncError: Error | null; // Error details when syncStatus is 'error'
 }
 ```
 
-The `syncing` property tells you:
+The `syncStatus` property tells you:
 
-- `'initial'` - First sync in progress
-- `'updating'` - Syncing with server
-- `null` - Idle, fully synced
-- `Error` - Sync failed
+- `'unsynced'` - Not yet synced (initial state, or disconnected)
+- `'syncing'` - Actively syncing with server
+- `'synced'` - Up to date with the server
+- `'error'` - Sync failed (check `syncError` for details)
 
 ```typescript
 // Check current state
 console.log(sync.state);
-// { online: true, connected: true, syncing: null }
+// { online: true, connected: true, syncStatus: 'synced', syncError: null }
 
 // React to state changes
 sync.onStateChange(state => {
-  if (state.syncing instanceof Error) {
-    showError('Sync failed: ' + state.syncing.message);
-  } else if (state.syncing === 'updating') {
+  if (state.syncStatus === 'error') {
+    showError('Sync failed: ' + state.syncError?.message);
+  } else if (state.syncStatus === 'syncing') {
     showSpinner('Syncing...');
   } else if (state.connected) {
     showSuccess('All synced up!');
@@ -161,15 +162,17 @@ sync.onStateChange(state => {
 
 ## Per-Document Sync Status
 
-The `state` property tells you about the connection. The `synced` property tells you about each document. It's a `Record<string, SyncedDoc>` — one entry per tracked document, updated in real time as sync events happen.
+The `state` property tells you about the connection. The `syncedDocs` property tells you about each document. It's a `Record<string, SyncedDoc>` — one entry per tracked document, updated in real time as sync events happen.
 
 ```typescript
-type SyncedDocStatus = 'unsynced' | 'syncing' | 'synced' | 'error';
+type DocSyncStatus = 'unsynced' | 'syncing' | 'synced' | 'error';
 
 interface SyncedDoc {
   committedRev: number; // Last confirmed server revision. 0 = never synced.
   hasPending: boolean; // Has local changes not yet confirmed by server.
-  status: SyncedDocStatus; // Current sync lifecycle state.
+  syncStatus: DocSyncStatus; // Current sync lifecycle state.
+  syncError: Error | null; // Error details when syncStatus is 'error'.
+  isLoaded: boolean; // Whether the doc has completed initial load. Sticky: once true, never reverts.
 }
 ```
 
@@ -177,30 +180,30 @@ interface SyncedDoc {
 
 ```typescript
 // Get the full map
-const synced = sync.synced;
+const syncedDocs = sync.syncedDocs;
 
 // Check a specific document
-const docStatus = synced['project-notes'];
-if (docStatus?.status === 'error') {
+const docStatus = syncedDocs['project-notes'];
+if (docStatus?.syncStatus === 'error') {
   showError('Sync failed for project notes');
 }
 
 // Show an indicator per document
-for (const [docId, info] of Object.entries(sync.synced)) {
-  console.log(`${docId}: rev=${info.committedRev}, pending=${info.hasPending}, status=${info.status}`);
+for (const [docId, info] of Object.entries(sync.syncedDocs)) {
+  console.log(`${docId}: rev=${info.committedRev}, pending=${info.hasPending}, status=${info.syncStatus}`);
 }
 ```
 
-The `synced` object is immutable. Every change produces a new reference, so shallow comparison works for change detection.
+The `syncedDocs` object is immutable. Every change produces a new reference, so shallow comparison works for change detection.
 
 ### Listening for Changes
 
 Use `onSyncedChange` to react when any document's sync status changes:
 
 ```typescript
-sync.onSyncedChange(synced => {
-  for (const [docId, info] of Object.entries(synced)) {
-    updateDocIndicator(docId, info.status, info.hasPending);
+sync.onSyncedChange(syncedDocs => {
+  for (const [docId, info] of Object.entries(syncedDocs)) {
+    updateDocIndicator(docId, info.syncStatus, info.hasPending);
   }
 });
 ```
@@ -209,28 +212,28 @@ sync.onSyncedChange(synced => {
 
 Here's exactly when each field changes:
 
-| Event                  | Effect                                                                                                                           |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Doc tracked            | Entry added. `committedRev` from store, `hasPending` from pending check, `status` = `committedRev === 0 ? 'unsynced' : 'synced'` |
-| `syncDoc` starts       | `status` → `'syncing'`                                                                                                           |
-| Server changes applied | `committedRev` updated to last server change's revision                                                                          |
-| `syncDoc` succeeds     | `status` → `'synced'`                                                                                                            |
-| `syncDoc` fails        | `status` → `'error'`                                                                                                             |
-| Local change made      | `hasPending` = `true`, `status` → `'syncing'` (if connected)                                                                      |
-| `flushDoc` succeeds    | `hasPending` updated from remaining pending, `status` → `'synced'`                                                               |
-| `flushDoc` fails       | `status` → `'error'`                                                                                                             |
-| Doc untracked          | Entry removed                                                                                                                    |
-| Doc remotely deleted   | Entry removed                                                                                                                    |
+| Event                  | Effect                                                                                                                               |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Doc tracked            | Entry added. `committedRev` from store, `hasPending` from pending check, `syncStatus` = `committedRev === 0 ? 'unsynced' : 'synced'` |
+| `syncDoc` starts       | `syncStatus` → `'syncing'`                                                                                                           |
+| Server changes applied | `committedRev` updated to last server change's revision                                                                              |
+| `syncDoc` succeeds     | `syncStatus` → `'synced'`                                                                                                            |
+| `syncDoc` fails        | `syncStatus` → `'error'`, `syncError` set                                                                                            |
+| Local change made      | `hasPending` = `true`, `syncStatus` → `'syncing'` (if connected)                                                                     |
+| `flushDoc` succeeds    | `hasPending` updated from remaining pending, `syncStatus` → `'synced'`                                                               |
+| `flushDoc` fails       | `syncStatus` → `'error'`, `syncError` set                                                                                            |
+| Doc untracked          | Entry removed                                                                                                                        |
+| Doc remotely deleted   | Entry removed                                                                                                                        |
 
 ### Practical Example: Per-Document Save Indicator
 
 ```typescript
-sync.onSyncedChange(synced => {
-  for (const [docId, info] of Object.entries(synced)) {
+sync.onSyncedChange(syncedDocs => {
+  for (const [docId, info] of Object.entries(syncedDocs)) {
     const el = document.getElementById(`status-${docId}`);
     if (!el) continue;
 
-    switch (info.status) {
+    switch (info.syncStatus) {
       case 'unsynced':
         el.textContent = 'Never synced';
         break;
@@ -248,7 +251,7 @@ sync.onSyncedChange(synced => {
 });
 ```
 
-The difference between `state.syncing` and `synced`: `state.syncing` tells you the overall connection-level sync status. `synced` tells you the status of each individual document. Use `state` for a global spinner. Use `synced` for per-document indicators.
+The difference between `state.syncStatus` and `syncedDocs`: `state.syncStatus` tells you the overall connection-level sync status. `syncedDocs` tells you the status of each individual document. Use `state` for a global spinner. Use `syncedDocs` for per-document indicators.
 
 ## Event Handling
 
@@ -370,8 +373,8 @@ class CollaborativeApp {
       this.updateUI({
         isOnline: state.online,
         isConnected: state.connected,
-        isSyncing: state.syncing === 'updating',
-        syncError: state.syncing instanceof Error ? state.syncing : null,
+        isSyncing: state.syncStatus === 'syncing',
+        syncError: state.syncStatus === 'error' ? state.syncError : null,
       });
     });
 

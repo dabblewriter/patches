@@ -81,8 +81,8 @@ On the document side, [`BaseDoc`](PatchesDoc.md) has:
 // Apply changes from the worker (after broadcast)
 applyChanges(changes: Change[]): void;
 
-// Update sync state indicator
-updateSyncing(newSyncing: SyncingState): void;
+// Update sync status indicator
+updateSyncStatus(status: DocSyncStatus, error?: Error): void;
 
 // Restore state from a snapshot
 import(snapshot: PatchesSnapshot<T>): void;
@@ -178,7 +178,7 @@ Tabs hold documents but delegate storage and sync to the worker:
 ```typescript
 // tab-client.ts
 import { OTDoc, BaseDoc } from '@dabble/patches/client';
-import type { Change, PatchesSnapshot, SyncingState } from '@dabble/patches';
+import type { Change, PatchesSnapshot, DocSyncStatus } from '@dabble/patches';
 
 class TabClient {
   private worker: SharedWorker;
@@ -228,8 +228,8 @@ class TabClient {
       case 'changes':
         this.applyChanges(message.docId, message.changes);
         break;
-      case 'syncing':
-        this.updateSyncingState(message.docId, message.state);
+      case 'syncStatus':
+        this.updateSyncStatus(message.docId, message.status, message.error);
         break;
     }
   }
@@ -242,11 +242,11 @@ class TabClient {
     }
   }
 
-  // Update syncing state from worker
-  private updateSyncingState(docId: string, state: SyncingState) {
+  // Update sync status from worker
+  private updateSyncStatus(docId: string, status: DocSyncStatus, error?: Error) {
     const doc = this.docs.get(docId) as BaseDoc | undefined;
     if (doc) {
-      doc.updateSyncing(state);
+      doc.updateSyncStatus(status, error);
     }
   }
 }
@@ -356,15 +356,15 @@ Each layer overwrites the previous. Snapshot is the base, committed ops are serv
 
 ### Cast to BaseDoc for Internal Methods
 
-The [`PatchesDoc`](PatchesDoc.md) interface is app-facing and doesn't expose `applyChanges`, `import`, or `updateSyncing`. To call these from your tab client, cast to `BaseDoc`:
+The [`PatchesDoc`](PatchesDoc.md) interface is app-facing and doesn't expose `applyChanges`, `import`, or `updateSyncStatus`. To call these from your tab client, cast to `BaseDoc`:
 
 ```typescript
 import { BaseDoc } from '@dabble/patches/client';
-import type { SyncingState } from '@dabble/patches';
+import type { DocSyncStatus } from '@dabble/patches';
 
 const baseDoc = doc as BaseDoc;
 baseDoc.applyChanges(changes);
-baseDoc.updateSyncing(null); // SyncingState: null = synced, 'updating' = syncing, 'initial' = first sync, Error = failed
+baseDoc.updateSyncStatus('synced'); // DocSyncStatus: 'unsynced' | 'syncing' | 'synced' | 'error'
 baseDoc.import(snapshot);
 ```
 

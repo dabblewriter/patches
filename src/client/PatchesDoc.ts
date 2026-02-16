@@ -1,6 +1,6 @@
 import type { Signal, Unsubscriber } from '../event-signal.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
-import type { ChangeMutator, SyncingState } from '../types.js';
+import type { ChangeMutator, DocSyncStatus, SyncedDoc } from '../types.js';
 
 /**
  * Options for creating a PatchesDoc instance
@@ -33,9 +33,9 @@ export interface PatchesDocOptions {
  * This interface is implemented by both OTDoc (Operational Transformation)
  * and LWWDoc (Last-Write-Wins) implementations via BaseDoc.
  *
- * Internal methods (updateSyncing, applyChanges, import) are on BaseDoc, not this interface.
+ * Internal methods (updateSyncStatus, applyChanges, import) are on BaseDoc, not this interface.
  */
-export interface PatchesDoc<T extends object = object> {
+export interface PatchesDoc<T extends object = object> extends SyncedDoc {
   /** The unique identifier for this document. */
   readonly id: string;
 
@@ -48,8 +48,14 @@ export interface PatchesDoc<T extends object = object> {
   /** Are there local changes that haven't been committed yet? */
   readonly hasPending: boolean;
 
-  /** Are we currently syncing this document? */
-  readonly syncing: SyncingState;
+  /** Current sync status of this document. */
+  readonly syncStatus: DocSyncStatus;
+
+  /** Error from the last failed sync attempt, if any. */
+  readonly syncError: Error | null;
+
+  /** Whether the document has completed its initial load. Sticky: once true, never reverts to false. */
+  readonly isLoaded: boolean;
 
   /**
    * Subscribe to be notified when the user makes local changes.
@@ -61,8 +67,8 @@ export interface PatchesDoc<T extends object = object> {
   /** Subscribe to be notified whenever state changes from any source. */
   readonly onUpdate: Signal<(newState: T) => void>;
 
-  /** Subscribe to be notified when syncing state changes. */
-  readonly onSyncing: Signal<(newSyncing: SyncingState) => void>;
+  /** Subscribe to be notified when sync status changes. */
+  readonly onSyncStatus: Signal<(newStatus: DocSyncStatus) => void>;
 
   /** Subscribe to be notified whenever the state changes (calls immediately with current state). */
   subscribe(onUpdate: (newValue: T) => void): Unsubscriber;

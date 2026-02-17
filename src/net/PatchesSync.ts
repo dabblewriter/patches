@@ -507,7 +507,7 @@ export class PatchesSync {
     }
   }
 
-  protected async _handleDocsTracked(docIds: string[]) {
+  protected async _handleDocsTracked(docIds: string[], algorithmName?: AlgorithmName) {
     const newIds = docIds.filter(id => !this.trackedDocs.has(id));
     if (!newIds.length) return;
 
@@ -516,16 +516,24 @@ export class PatchesSync {
 
     newIds.forEach(id => this.trackedDocs.add(id));
 
-    // Populate docAlgorithms Map by reading from stores
-    for (const docId of newIds) {
-      for (const algorithm of Object.values(this.patches.algorithms)) {
-        if (!algorithm) continue;
+    // Populate docAlgorithms Map
+    if (algorithmName) {
+      // Algorithm name provided directly from signal — no store lookup needed
+      for (const docId of newIds) {
+        this.docAlgorithms.set(docId, algorithmName);
+      }
+    } else {
+      // Fallback: read from stores (backward compatibility)
+      for (const docId of newIds) {
+        for (const algorithm of Object.values(this.patches.algorithms)) {
+          if (!algorithm) continue;
 
-        const docs = await algorithm.listDocs(false);
-        const tracked = docs.find(d => d.docId === docId);
-        if (tracked?.algorithm) {
-          this.docAlgorithms.set(docId, tracked.algorithm);
-          break;
+          const docs = await algorithm.listDocs(false);
+          const tracked = docs.find(d => d.docId === docId);
+          if (tracked?.algorithm) {
+            this.docAlgorithms.set(docId, tracked.algorithm);
+            break;
+          }
         }
       }
     }
@@ -589,11 +597,9 @@ export class PatchesSync {
 
   protected async _handleDocChange(docId: string): Promise<void> {
     if (!this.trackedDocs.has(docId)) return;
-    // Emit if not connected, otherwise let the next update emit
     this._updateSyncedDoc(docId, { hasPending: true }, !this.state.connected);
     if (!this.state.connected) return;
-    this._updateSyncedDoc(docId, { syncStatus: 'syncing' });
-    await this.flushDoc(docId);
+    await this.syncDoc(docId);
   }
 
   /**

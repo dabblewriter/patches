@@ -189,7 +189,7 @@ describe('Patches', () => {
       expect(patches.trackedDocs.has('doc1')).toBe(true);
       expect(patches.trackedDocs.has('doc2')).toBe(true);
       expect(mockAlgorithm.trackDocs).toHaveBeenCalledWith(['doc1', 'doc2']);
-      expect(onTrackSpy).toHaveBeenCalledWith(['doc1', 'doc2']);
+      expect(onTrackSpy).toHaveBeenCalledWith(['doc1', 'doc2'], 'ot');
     });
 
     it('should filter out already tracked documents', async () => {

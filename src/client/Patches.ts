@@ -57,7 +57,7 @@ export class Patches {
   // Public signals
   readonly onError = signal<(error: Error, context?: { docId?: string }) => void>();
   readonly onServerCommit = signal<(docId: string, changes: Change[]) => void>();
-  readonly onTrackDocs = signal<(docIds: string[]) => void>();
+  readonly onTrackDocs = signal<(docIds: string[], algorithmName: AlgorithmName) => void>();
   readonly onUntrackDocs = signal<(docIds: string[]) => void>();
   readonly onDeleteDoc = signal<(docId: string) => void>();
   /** Emitted when a doc has pending changes ready to send */
@@ -88,11 +88,11 @@ export class Patches {
    * Extracted as a protected method so subclasses can override initialization behavior.
    */
   protected init(): void {
-    const algorithms = Object.values(this.algorithms).filter(Boolean) as ClientAlgorithm[];
+    const entries = Object.entries(this.algorithms).filter(([, a]) => Boolean(a)) as [AlgorithmName, ClientAlgorithm][];
     Promise.all(
-      algorithms.map(algorithm =>
+      entries.map(([name, algorithm]) =>
         algorithm.listDocs().then(docs => {
-          this.trackDocs(docs.map(({ docId }) => docId));
+          this.trackDocs(docs.map(({ docId }) => docId), name);
         })
       )
     ).catch(err => {
@@ -131,7 +131,7 @@ export class Patches {
     docIds = docIds.filter(id => !this.trackedDocs.has(id));
     if (!docIds.length) return;
     docIds.forEach(this.trackedDocs.add, this.trackedDocs);
-    this.onTrackDocs.emit(docIds);
+    this.onTrackDocs.emit(docIds, algorithmName ?? this.defaultAlgorithm);
     const algorithm = this._getAlgorithm(algorithmName ?? this.defaultAlgorithm);
     await algorithm.trackDocs(docIds);
   }

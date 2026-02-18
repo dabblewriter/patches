@@ -60,7 +60,7 @@ export interface PatchesSnapshot<T = any> extends PatchesState<T> {
 }
 
 /**
- * Sync status for a document, used by both PatchesDoc and PatchesSync's SyncedDoc.
+ * Sync status for a document, used by both PatchesDoc and DocSyncState.
  * - `'unsynced'` — not yet synced (initial state, or disconnected)
  * - `'syncing'`  — actively syncing with the server
  * - `'synced'`   — up to date with the server
@@ -69,7 +69,7 @@ export interface PatchesSnapshot<T = any> extends PatchesState<T> {
 export type DocSyncStatus = 'unsynced' | 'syncing' | 'synced' | 'error';
 
 /**
- * Represents the synced state of a document.
+ * Plain snapshot of a document's sync state, used by PatchesSync to track per-document status.
  * @property committedRev - The last committed revision number from the server.
  * @property hasPending - Whether there are local changes that haven't been committed yet.
  * @property syncStatus - The current sync status of the document.
@@ -78,7 +78,7 @@ export type DocSyncStatus = 'unsynced' | 'syncing' | 'synced' | 'error';
  *   within a sync lifecycle. A document is considered loaded when it has data to display (server data, cached data,
  *   or local changes) or sync has resolved (successfully or with error).
  */
-export interface SyncedDoc {
+export interface DocSyncState {
   committedRev: number;
   hasPending: boolean;
   syncStatus: DocSyncStatus;

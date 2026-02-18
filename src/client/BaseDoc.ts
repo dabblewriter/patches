@@ -85,10 +85,7 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
 
   /** Latches _isLoaded to true when the doc has data or sync has resolved. */
   protected _checkLoaded(): void {
-    if (
-      !this.isLoaded.state &&
-      isDocLoaded({ committedRev: this.committedRev, hasPending: this.hasPending, syncStatus: this.syncStatus.state })
-    ) {
+    if (!this.isLoaded.state && isDocLoaded(this.committedRev, this.hasPending, this.syncStatus.state)) {
       this.isLoaded.state = true;
     }
   }

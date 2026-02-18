@@ -1,11 +1,11 @@
-import type { SyncedDoc } from '../types.js';
+import type { DocSyncStatus } from '../types.js';
 
 /**
  * Returns true if a document has completed its initial load — i.e., it has data
  * to display (server data, cached data, or local changes) or sync has resolved.
  */
-export function isDocLoaded(doc: Pick<SyncedDoc, 'committedRev' | 'hasPending' | 'syncStatus'>): boolean {
-  return doc.committedRev > 0 || doc.hasPending || doc.syncStatus === 'synced' || doc.syncStatus === 'error';
+export function isDocLoaded(committedRev: number, hasPending: boolean, syncStatus: DocSyncStatus): boolean {
+  return committedRev > 0 || hasPending || syncStatus === 'synced' || syncStatus === 'error';
 }
 
 /**

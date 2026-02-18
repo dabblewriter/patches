@@ -6,7 +6,7 @@ import type { ClientAlgorithm } from '../client/ClientAlgorithm.js';
 import { Patches } from '../client/Patches.js';
 import type { AlgorithmName, TrackedDoc } from '../client/PatchesStore.js';
 import { isDocLoaded } from '../shared/utils.js';
-import type { Change, DocSyncStatus, SyncedDoc } from '../types.js';
+import type { Change, DocSyncState, DocSyncStatus } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
 import type { ConnectionState } from './protocol/types.js';
 import { PatchesWebSocket } from './websocket/PatchesWebSocket.js';
@@ -31,7 +31,7 @@ export interface PatchesSyncOptions {
   sizeCalculator?: SizeCalculator;
 }
 
-const EMPTY_SYNCED_DOC: SyncedDoc = {
+const EMPTY_DOC_STATE: DocSyncState = {
   committedRev: 0,
   hasPending: false,
   syncStatus: 'unsynced',
@@ -57,9 +57,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   /** Maps docId to the algorithm name used for that doc */
   protected docAlgorithms: Map<string, AlgorithmName> = new Map();
   /**
-   * Reactive store for the synced doc map.
+   * Reactive store tracking per-document sync state.
    */
-  readonly syncedDocs: Store<Record<string, SyncedDoc>>;
+  readonly docStates: Store<Record<string, DocSyncState>>;
   /**
    * Signal emitted when an error occurs.
    */
@@ -86,7 +86,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.maxStorageBytes = options?.maxStorageBytes ?? patches.docOptions?.maxStorageBytes;
     this.sizeCalculator = options?.sizeCalculator ?? patches.docOptions?.sizeCalculator;
     this.ws = new PatchesWebSocket(url, options?.websocket);
-    this.syncedDocs = store<Record<string, SyncedDoc>>({});
+    this.docStates = store<Record<string, DocSyncState>>({});
     this.trackedDocs = new Set(patches.trackedDocs);
 
     // --- Event Listeners ---
@@ -219,11 +219,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this.trackedDocs = new Set(activeDocIds);
 
       // Populate synced map for active docs
-      const syncedEntries: Record<string, SyncedDoc> = {};
+      const syncedEntries: Record<string, DocSyncState> = {};
       for (const doc of activeDocs) {
         const algorithm = this._getAlgorithm(doc.docId);
         const pending = await algorithm.getPendingToSend(doc.docId);
-        const entry: SyncedDoc = {
+        const entry: DocSyncState = {
           committedRev: doc.committedRev,
           hasPending: pending != null && pending.length > 0,
           syncStatus: doc.committedRev === 0 ? 'unsynced' : 'synced',
@@ -231,11 +231,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           isLoaded: false,
         };
         // Preserve sticky isLoaded from previous lifecycle, or derive it
-        const existing = this.syncedDocs.state[doc.docId];
-        entry.isLoaded = existing?.isLoaded || isDocLoaded(entry);
+        const existing = this.docStates.state[doc.docId];
+        entry.isLoaded = existing?.isLoaded || isDocLoaded(entry.committedRev, entry.hasPending, entry.syncStatus);
         syncedEntries[doc.docId] = entry;
       }
-      this.syncedDocs.state = syncedEntries;
+      this.docStates.state = syncedEntries;
 
       // Subscribe to active docs
       if (activeDocIds.length > 0) {
@@ -289,7 +289,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   protected async syncDoc(docId: string): Promise<void> {
     if (!this.state.connected) return;
 
-    this._updateSyncedDoc(docId, { syncStatus: 'syncing' });
+    this._updateDocSyncState(docId, { syncStatus: 'syncing' });
 
     const doc = this.patches.getOpenDoc(docId);
     const algorithm = this._getAlgorithm(docId);
@@ -319,14 +319,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // Save via algorithm's store
           await algorithm.store.saveDoc(docId, snapshot);
           // Update synced doc with the server's revision
-          this._updateSyncedDoc(docId, { committedRev: snapshot.rev });
+          this._updateDocSyncState(docId, { committedRev: snapshot.rev });
           // Import into doc if open (use BaseDoc.import)
           if (baseDoc) {
             baseDoc.import({ ...snapshot, changes: [] });
           }
         }
       }
-      this._updateSyncedDoc(docId, { syncStatus: 'synced' });
+      this._updateDocSyncState(docId, { syncStatus: 'synced' });
       if (baseDoc) {
         baseDoc.updateSyncStatus('synced');
       }
@@ -337,7 +337,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         return;
       }
       const syncError = err instanceof Error ? err : new Error(String(err));
-      this._updateSyncedDoc(docId, { syncStatus: 'error', syncError });
+      this._updateDocSyncState(docId, { syncStatus: 'error', syncError });
       console.error(`Error syncing doc ${docId}:`, err);
       this.onError.emit(syncError, { docId });
       if (baseDoc) {
@@ -393,14 +393,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       }
 
       const stillHasPending = pending != null && pending.length > 0;
-      this._updateSyncedDoc(docId, { hasPending: stillHasPending, syncStatus: 'synced' });
+      this._updateDocSyncState(docId, { hasPending: stillHasPending, syncStatus: 'synced' });
     } catch (err) {
       if (this._isDocDeletedError(err)) {
         await this._handleRemoteDocDeleted(docId);
         return;
       }
       const flushError = err instanceof Error ? err : new Error(String(err));
-      this._updateSyncedDoc(docId, { syncStatus: 'error', syncError: flushError });
+      this._updateDocSyncState(docId, { syncStatus: 'error', syncError: flushError });
       console.error(`Flush failed for doc ${docId}:`, err);
       this.onError.emit(flushError, { docId });
       throw err;
@@ -435,7 +435,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     if (serverChanges.length > 0) {
       const lastRev = serverChanges[serverChanges.length - 1].rev;
-      this._updateSyncedDoc(docId, { committedRev: lastRev });
+      this._updateDocSyncState(docId, { committedRev: lastRev });
     }
   }
 
@@ -530,7 +530,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // Batch all synced doc updates so subscribers are only notified once
     batch(() => {
       for (const { docId, committedRev, hasPending } of docData) {
-        this._updateSyncedDoc(docId, {
+        this._updateDocSyncState(docId, {
           committedRev,
           hasPending,
           syncStatus: committedRev === 0 ? 'unsynced' : 'synced',
@@ -563,7 +563,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     existingIds.forEach(id => this.trackedDocs.delete(id));
     batch(() => {
-      existingIds.forEach(id => this._updateSyncedDoc(id, undefined));
+      existingIds.forEach(id => this._updateDocSyncState(id, undefined));
     });
 
     // Only unsubscribe from subscriptions no longer needed by any remaining tracked doc
@@ -581,7 +581,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
   protected async _handleDocChange(docId: string): Promise<void> {
     if (!this.trackedDocs.has(docId)) return;
-    this._updateSyncedDoc(docId, { hasPending: true });
+    this._updateDocSyncState(docId, { hasPending: true });
     if (!this.state.connected) return;
     await this.syncDoc(docId);
   }
@@ -604,7 +604,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     // Clean up tracking and local storage
     this.trackedDocs.delete(docId);
-    this._updateSyncedDoc(docId, undefined);
+    this._updateDocSyncState(docId, undefined);
     await algorithm.confirmDeleteDoc(docId);
 
     // Notify application (with any pending changes that were lost)
@@ -612,33 +612,33 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
-   * Adds, updates, or removes a synced doc entry immutably and notifies via store.
-   * - Pass a full SyncedDoc to add a new entry or overwrite an existing one.
-   * - Pass a Partial<SyncedDoc> to merge into an existing entry (no-ops if doc not in map).
+   * Adds, updates, or removes a doc state entry immutably and notifies via store.
+   * - Pass a full DocSyncState to add a new entry or overwrite an existing one.
+   * - Pass a Partial<DocSyncState> to merge into an existing entry (no-ops if doc not in map).
    * - Pass undefined to remove the entry.
    * No-ops if nothing actually changed.
    */
-  protected _updateSyncedDoc(docId: string, updates: Partial<SyncedDoc> | undefined): void {
-    const currentDocs = this.syncedDocs.state;
+  protected _updateDocSyncState(docId: string, updates: Partial<DocSyncState> | undefined): void {
+    const currentDocs = this.docStates.state;
 
     if (updates === undefined) {
       // Remove
       if (!(docId in currentDocs)) return;
       const newDocs = { ...currentDocs };
       delete newDocs[docId];
-      this.syncedDocs.state = newDocs;
+      this.docStates.state = newDocs;
     } else {
-      const updated = { ...EMPTY_SYNCED_DOC, ...currentDocs[docId], ...updates } as SyncedDoc;
+      const updated = { ...EMPTY_DOC_STATE, ...currentDocs[docId], ...updates } as DocSyncState;
       // Clear error when moving away from 'error' status
       if (updated.syncStatus !== 'error' && updated.syncError) {
         updated.syncError = undefined;
       }
       // Latch isLoaded: once true, stays true for this sync lifecycle
       if (!updated.isLoaded) {
-        updated.isLoaded = isDocLoaded(updated);
+        updated.isLoaded = isDocLoaded(updated.committedRev, updated.hasPending, updated.syncStatus);
       }
       if (isEqual(currentDocs[docId], updated)) return;
-      this.syncedDocs.state = { ...currentDocs, [docId]: updated };
+      this.docStates.state = { ...currentDocs, [docId]: updated };
     }
   }
 
@@ -649,10 +649,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   protected _resetSyncingStatuses(): void {
     batch(() => {
-      for (const [docId, doc] of Object.entries(this.syncedDocs.state)) {
+      for (const [docId, doc] of Object.entries(this.docStates.state)) {
         if (doc.syncStatus === 'syncing') {
           const newStatus = doc.committedRev === 0 && !doc.hasPending ? 'unsynced' : 'synced';
-          this._updateSyncedDoc(docId, { syncStatus: newStatus });
+          this._updateDocSyncState(docId, { syncStatus: newStatus });
         }
       }
     });

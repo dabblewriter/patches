@@ -164,12 +164,12 @@ sync.subscribe(state => {
 
 ## Per-Document Sync Status
 
-The `state` property tells you about the connection. The `syncedDocs` property tells you about each document. It's a `Store<Record<string, SyncedDoc>>` — one entry per tracked document, updated in real time as sync events happen.
+The `state` property tells you about the connection. The `docStates` property tells you about each document. It's a `Store<Record<string, DocSyncState>>` — one entry per tracked document, updated in real time as sync events happen.
 
 ```typescript
 type DocSyncStatus = 'unsynced' | 'syncing' | 'synced' | 'error';
 
-interface SyncedDoc {
+interface DocSyncState {
   committedRev: number; // Last confirmed server revision. 0 = never synced.
   hasPending: boolean; // Has local changes not yet confirmed by server.
   syncStatus: DocSyncStatus; // Current sync lifecycle state.
@@ -182,29 +182,29 @@ interface SyncedDoc {
 
 ```typescript
 // Get the full map
-const syncedDocs = sync.syncedDocs.state;
+const docStates = sync.docStates.state;
 
 // Check a specific document
-const docStatus = syncedDocs['project-notes'];
+const docStatus = docStates['project-notes'];
 if (docStatus?.syncStatus === 'error') {
   showError('Sync failed for project notes');
 }
 
 // Show an indicator per document
-for (const [docId, info] of Object.entries(sync.syncedDocs.state)) {
+for (const [docId, info] of Object.entries(sync.docStates.state)) {
   console.log(`${docId}: rev=${info.committedRev}, pending=${info.hasPending}, status=${info.syncStatus}`);
 }
 ```
 
-The `syncedDocs` store's state is immutable. Every change produces a new reference, so shallow comparison works for change detection.
+The `docStates` store's state is immutable. Every change produces a new reference, so shallow comparison works for change detection.
 
 ### Listening for Changes
 
-Subscribe to the `syncedDocs` store to react when any document's sync status changes:
+Subscribe to the `docStates` store to react when any document's sync status changes:
 
 ```typescript
-sync.syncedDocs.subscribe(syncedDocs => {
-  for (const [docId, info] of Object.entries(syncedDocs)) {
+sync.docStates.subscribe(docStates => {
+  for (const [docId, info] of Object.entries(docStates)) {
     updateDocIndicator(docId, info.syncStatus, info.hasPending);
   }
 });
@@ -230,8 +230,8 @@ Here's exactly when each field changes:
 ### Practical Example: Per-Document Save Indicator
 
 ```typescript
-sync.syncedDocs.subscribe(syncedDocs => {
-  for (const [docId, info] of Object.entries(syncedDocs)) {
+sync.docStates.subscribe(docStates => {
+  for (const [docId, info] of Object.entries(docStates)) {
     const el = document.getElementById(`status-${docId}`);
     if (!el) continue;
 
@@ -253,7 +253,7 @@ sync.syncedDocs.subscribe(syncedDocs => {
 });
 ```
 
-The difference between `state.syncStatus` and `syncedDocs`: `state.syncStatus` tells you the overall connection-level sync status. `syncedDocs` tells you the status of each individual document. Use `state` for a global spinner. Use `syncedDocs` for per-document indicators.
+The difference between `state.syncStatus` and `docStates`: `state.syncStatus` tells you the overall connection-level sync status. `docStates` tells you the status of each individual document. Use `state` for a global spinner. Use `docStates` for per-document indicators.
 
 ## Event Handling
 
@@ -265,8 +265,8 @@ sync.subscribe(state => {
 });
 
 // Per-document sync status changes
-sync.syncedDocs.subscribe(syncedDocs => {
-  updateDocIndicators(syncedDocs);
+sync.docStates.subscribe(docStates => {
+  updateDocIndicators(docStates);
 });
 
 // Errors (network issues, server errors)
@@ -292,7 +292,7 @@ sync.onRemoteDocDeleted((docId, pendingChanges) => {
 | Interface             | Type                                                           | Description                                      |
 | --------------------- | -------------------------------------------------------------- | ------------------------------------------------ |
 | `state` / `subscribe` | `ReadonlyStore<PatchesSyncState>`                              | Connection/sync state (implements ReadonlyStore) |
-| `syncedDocs`          | `Store<Record<string, SyncedDoc>>`                             | Per-document sync status                         |
+| `docStates`           | `Store<Record<string, DocSyncState>>`                          | Per-document sync status                         |
 | `onError`             | `Signal<(error: Error, context?: { docId?: string }) => void>` | An error occurred                                |
 | `onRemoteDocDeleted`  | `Signal<(docId: string, pendingChanges: Change[]) => void>`    | Document deleted by another client               |
 

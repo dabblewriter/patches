@@ -53,6 +53,7 @@ describe('PatchesSync', () => {
     mockAlgorithm = {
       name: 'ot',
       store: mockStore,
+      hasPending: vi.fn().mockResolvedValue(false),
       getPendingToSend: vi.fn().mockResolvedValue(null),
       applyServerChanges: vi.fn().mockResolvedValue([]),
       confirmSent: vi.fn().mockResolvedValue(undefined),
@@ -967,9 +968,7 @@ describe('PatchesSync', () => {
       it('should set hasPending true when doc has pending changes', async () => {
         const activeDocs: TrackedDoc[] = [{ docId: 'doc1', committedRev: 3 }];
         mockAlgorithm.listDocs.mockResolvedValue(activeDocs);
-        mockAlgorithm.getPendingToSend.mockResolvedValue([
-          { id: 'c1', rev: 4, baseRev: 3, ops: [], createdAt: 0, committedAt: 0 },
-        ]);
+        mockAlgorithm.hasPending.mockResolvedValue(true);
         vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
 
         await sync['syncAllKnownDocs']();
@@ -1076,7 +1075,7 @@ describe('PatchesSync', () => {
         const pending = [{ id: 'c1', rev: 4, baseRev: 3, ops: [], createdAt: 0, committedAt: 0 }];
         const committed = [{ id: 'c1', rev: 4, baseRev: 3, ops: [], createdAt: 0, committedAt: 0 }];
         mockWebSocket.commitChanges.mockResolvedValue(committed);
-        mockAlgorithm.getPendingToSend.mockResolvedValueOnce(null); // After confirm — no more pending
+        mockAlgorithm.hasPending.mockResolvedValueOnce(false); // After confirm — no more pending
 
         await sync['flushDoc']('doc1', pending as Change[]);
 
@@ -1088,9 +1087,7 @@ describe('PatchesSync', () => {
         const pending = [{ id: 'c1', rev: 4, baseRev: 3, ops: [], createdAt: 0, committedAt: 0 }];
         const committed = [{ id: 'c1', rev: 4, baseRev: 3, ops: [], createdAt: 0, committedAt: 0 }];
         mockWebSocket.commitChanges.mockResolvedValue(committed);
-        mockAlgorithm.getPendingToSend.mockResolvedValueOnce([
-          { id: 'c2', rev: 5, baseRev: 4, ops: [], createdAt: 0, committedAt: 0 },
-        ]); // More pending
+        mockAlgorithm.hasPending.mockResolvedValueOnce(true); // More pending
 
         await sync['flushDoc']('doc1', pending as Change[]);
 

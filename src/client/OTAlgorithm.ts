@@ -76,6 +76,11 @@ export class OTAlgorithm implements ClientAlgorithm {
     return changes;
   }
 
+  async hasPending(docId: string): Promise<boolean> {
+    const pending = await this.store.getPendingChanges(docId);
+    return pending.length > 0;
+  }
+
   async getPendingToSend(docId: string): Promise<Change[] | null> {
     const pending = await this.store.getPendingChanges(docId);
     return pending.length > 0 ? pending : null;

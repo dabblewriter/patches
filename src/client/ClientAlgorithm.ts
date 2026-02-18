@@ -64,6 +64,15 @@ export interface ClientAlgorithm {
   ): Promise<Change[]>;
 
   /**
+   * Read-only check for whether a document has any pending local data.
+   * - OT: Checks pendingChanges
+   * - LWW: Checks both pendingOps and sendingChange
+   *
+   * Unlike getPendingToSend, this has no side effects.
+   */
+  hasPending(docId: string): Promise<boolean>;
+
+  /**
    * Gets pending data to send to the server.
    * - OT: Returns all pending changes (may batch)
    * - LWW: Creates single Change from pendingFields (or returns existing)

@@ -76,6 +76,13 @@ export class LWWAlgorithm implements ClientAlgorithm {
     return changes;
   }
 
+  async hasPending(docId: string): Promise<boolean> {
+    const sendingChange = await this.store.getSendingChange(docId);
+    if (sendingChange) return true;
+    const pendingOps = await this.store.getPendingOps(docId);
+    return pendingOps.length > 0;
+  }
+
   async getPendingToSend(docId: string): Promise<Change[] | null> {
     // Check for existing sending change first (for retry)
     const sendingChange = await this.store.getSendingChange(docId);

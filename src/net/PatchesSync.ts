@@ -222,10 +222,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       const syncedEntries: Record<string, DocSyncState> = {};
       for (const doc of activeDocs) {
         const algorithm = this._getAlgorithm(doc.docId);
-        const pending = await algorithm.getPendingToSend(doc.docId);
+        const hasPending = await algorithm.hasPending(doc.docId);
         const entry: DocSyncState = {
           committedRev: doc.committedRev,
-          hasPending: pending != null && pending.length > 0,
+          hasPending,
           syncStatus: doc.committedRev === 0 ? 'unsynced' : 'synced',
           syncError: undefined,
           isLoaded: false,
@@ -392,7 +392,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         pending = (await algorithm.getPendingToSend(docId)) ?? [];
       }
 
-      const stillHasPending = pending != null && pending.length > 0;
+      const stillHasPending = await algorithm.hasPending(docId);
       this._updateDocSyncState(docId, { hasPending: stillHasPending, syncStatus: 'synced' });
     } catch (err) {
       if (this._isDocDeletedError(err)) {
@@ -519,11 +519,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     for (const docId of newIds) {
       const algorithm = this._getAlgorithm(docId);
       const committedRev = await algorithm.getCommittedRev(docId);
-      const pending = await algorithm.getPendingToSend(docId);
+      const hasPending = await algorithm.hasPending(docId);
       docData.push({
         docId,
         committedRev,
-        hasPending: pending != null && pending.length > 0,
+        hasPending,
       });
     }
 

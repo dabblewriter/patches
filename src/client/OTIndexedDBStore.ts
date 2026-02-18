@@ -159,7 +159,7 @@ export class OTIndexedDBStore implements OTClientStore {
       'readwrite'
     );
 
-    const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
+    const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0, algorithm: 'ot' as const };
     await docsStore.put({ ...docMeta, deleted: true });
 
     await Promise.all([
@@ -186,7 +186,7 @@ export class OTIndexedDBStore implements OTClientStore {
     const { rev, state } = docState;
 
     await Promise.all([
-      docsStore.put<TrackedDoc>({ docId, committedRev: rev }),
+      docsStore.put<TrackedDoc>({ docId, committedRev: rev, algorithm: 'ot' }),
       snapshots.put<Snapshot>({ docId, state, rev }),
       committedChanges.delete([docId, 0], [docId, Infinity]),
       pendingChanges.delete([docId, 0], [docId, Infinity]),
@@ -282,7 +282,7 @@ export class OTIndexedDBStore implements OTClientStore {
     // Update committedRev in the docs store
     const lastCommittedRev = serverChanges.at(-1)?.rev;
     if (lastCommittedRev !== undefined) {
-      const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
+      const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0, algorithm: 'ot' as const };
       if (lastCommittedRev > docMeta.committedRev) {
         await docsStore.put({ ...docMeta, committedRev: lastCommittedRev, deleted: undefined });
       }

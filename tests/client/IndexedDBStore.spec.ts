@@ -298,6 +298,7 @@ describe('OTIndexedDBStore', () => {
       expect(docsStore?.put).toHaveBeenCalledWith({
         docId: 'doc1',
         committedRev: 0,
+        algorithm: 'ot',
         deleted: true,
       });
     });
@@ -432,6 +433,60 @@ describe('OTIndexedDBStore', () => {
         committedRev: 0,
         algorithm: 'ot',
       });
+    });
+
+    it('should preserve algorithm field in saveDoc', async () => {
+      const snapshot = createState({ text: 'hello' }, 5);
+      await store.saveDoc('doc1', snapshot);
+
+      const docsStore = mockStores.get('docs');
+      expect(docsStore?.put).toHaveBeenCalledWith(
+        expect.objectContaining({
+          docId: 'doc1',
+          committedRev: 5,
+          algorithm: 'ot',
+        })
+      );
+    });
+
+    it('should include algorithm in applyServerChanges fallback doc meta', async () => {
+      const docsStore = createMockIDBStore();
+      // No existing doc meta — forces the fallback path
+      docsStore.get.mockResolvedValue(undefined);
+      mockStores.set('docs', docsStore);
+      mockStores.set('committedChanges', createMockIDBStore());
+      mockStores.set('pendingChanges', createMockIDBStore());
+      mockStores.set('snapshots', createMockIDBStore());
+
+      const serverChanges = [createChange('c1', 1)];
+      await store.applyServerChanges('doc1', serverChanges, []);
+
+      expect(docsStore.put).toHaveBeenCalledWith(
+        expect.objectContaining({
+          docId: 'doc1',
+          algorithm: 'ot',
+        })
+      );
+    });
+
+    it('should include algorithm in deleteDoc fallback doc meta', async () => {
+      const docsStore = createMockIDBStore();
+      // No existing doc meta — forces the fallback path
+      docsStore.get.mockResolvedValue(undefined);
+      mockStores.set('docs', docsStore);
+      mockStores.set('committedChanges', createMockIDBStore());
+      mockStores.set('pendingChanges', createMockIDBStore());
+      mockStores.set('snapshots', createMockIDBStore());
+
+      await store.deleteDoc('doc1');
+
+      expect(docsStore.put).toHaveBeenCalledWith(
+        expect.objectContaining({
+          docId: 'doc1',
+          algorithm: 'ot',
+          deleted: true,
+        })
+      );
     });
   });
 });

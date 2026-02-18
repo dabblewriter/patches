@@ -294,6 +294,7 @@ describe('LWWIndexedDBStore', () => {
       expect(docsStore?.put).toHaveBeenCalledWith({
         docId: 'doc1',
         committedRev: 5,
+        algorithm: 'lww',
       });
     });
   });
@@ -603,6 +604,80 @@ describe('LWWIndexedDBStore', () => {
       const snapshotsStore = mockStores.get('snapshots');
       expect(snapshotsStore?.delete).toHaveBeenCalledWith('doc1');
       expect(snapshotsStore?.delete).toHaveBeenCalledWith('doc2');
+    });
+  });
+
+  describe('algorithm field preservation', () => {
+    it('should include algorithm in confirmSendingChange fallback doc meta', async () => {
+      const sendingStore = createMockIDBStore();
+      sendingStore.data.set('"doc1"', {
+        docId: 'doc1',
+        change: {
+          id: 'c1',
+          rev: 6,
+          baseRev: 5,
+          ops: [],
+          createdAt: Date.now(),
+          committedAt: Date.now(),
+        },
+      });
+
+      const docsStore = createMockIDBStore();
+      // No existing doc meta — forces the fallback path
+      docsStore.get.mockResolvedValue(undefined);
+
+      mockStores.set('sendingChanges', sendingStore);
+      mockStores.set('committedOps', createMockIDBStore());
+      mockStores.set('docs', docsStore);
+
+      await store.confirmSendingChange('doc1');
+
+      expect(docsStore.put).toHaveBeenCalledWith(
+        expect.objectContaining({
+          docId: 'doc1',
+          algorithm: 'lww',
+        })
+      );
+    });
+
+    it('should include algorithm in applyServerChanges fallback doc meta', async () => {
+      const docsStore = createMockIDBStore();
+      // No existing doc meta — forces the fallback path
+      docsStore.get.mockResolvedValue(undefined);
+      mockStores.set('docs', docsStore);
+      mockStores.set('committedOps', createMockIDBStore());
+      mockStores.set('snapshots', createMockIDBStore());
+
+      const serverChanges = [createChange('c1', 1)];
+      await store.applyServerChanges('doc1', serverChanges);
+
+      expect(docsStore.put).toHaveBeenCalledWith(
+        expect.objectContaining({
+          docId: 'doc1',
+          algorithm: 'lww',
+        })
+      );
+    });
+
+    it('should include algorithm in deleteDoc fallback doc meta', async () => {
+      const docsStore = createMockIDBStore();
+      // No existing doc meta — forces the fallback path
+      docsStore.get.mockResolvedValue(undefined);
+      mockStores.set('docs', docsStore);
+      mockStores.set('snapshots', createMockIDBStore());
+      mockStores.set('committedOps', createMockIDBStore());
+      mockStores.set('pendingOps', createMockIDBStore());
+      mockStores.set('sendingChanges', createMockIDBStore());
+
+      await store.deleteDoc('doc1');
+
+      expect(docsStore.put).toHaveBeenCalledWith(
+        expect.objectContaining({
+          docId: 'doc1',
+          algorithm: 'lww',
+          deleted: true,
+        })
+      );
     });
   });
 

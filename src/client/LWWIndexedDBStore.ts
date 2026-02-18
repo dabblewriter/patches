@@ -214,7 +214,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
     const { rev, state } = docState;
 
     await Promise.all([
-      docsStore.put<TrackedDoc>({ docId, committedRev: rev }),
+      docsStore.put<TrackedDoc>({ docId, committedRev: rev, algorithm: 'lww' }),
       snapshots.put<Snapshot>({ docId, state, rev }),
       this.deleteFieldsForDoc(committedOps, docId),
       this.deleteFieldsForDoc(pendingOps, docId),
@@ -234,7 +234,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
       'readwrite'
     );
 
-    const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
+    const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0, algorithm: 'lww' as const };
     await docsStore.put({ ...docMeta, deleted: true });
 
     await Promise.all([
@@ -389,7 +389,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
     await Promise.all(sending.change.ops.map(op => committedOps.put<CommittedOp>({ ...op, docId })));
 
     // Update committed rev
-    const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
+    const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0, algorithm: 'lww' as const };
     if (sending.change.rev > docMeta.committedRev) {
       await docsStore.put({ ...docMeta, committedRev: sending.change.rev });
     }
@@ -418,7 +418,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
     // Update committedRev
     const lastCommittedRev = serverChanges.at(-1)?.rev;
     if (lastCommittedRev !== undefined) {
-      const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0 };
+      const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0, algorithm: 'lww' as const };
       if (lastCommittedRev > docMeta.committedRev) {
         await docsStore.put({ ...docMeta, committedRev: lastCommittedRev });
       }

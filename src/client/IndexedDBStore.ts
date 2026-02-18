@@ -185,15 +185,8 @@ export class IndexedDBStore implements PatchesStore {
 
     let docs: TrackedDoc[];
 
-    if (algorithm === 'lww') {
-      // LWW: only get docs explicitly marked as LWW
-      docs = await docsStore.getAllByIndex<TrackedDoc>('algorithm', 'lww');
-    } else if (algorithm === 'ot') {
-      // OT: get both OT docs AND docs with no algorithm (backward compatibility)
-      const otDocs = await docsStore.getAllByIndex<TrackedDoc>('algorithm', 'ot');
-      const allDocs = await docsStore.getAll<TrackedDoc>();
-      const noAlgoDocs = allDocs.filter(doc => !doc.algorithm);
-      docs = [...otDocs, ...noAlgoDocs];
+    if (algorithm) {
+      docs = await docsStore.getAllByIndex<TrackedDoc>('algorithm', algorithm);
     } else {
       // No filter - get all docs
       docs = await docsStore.getAll<TrackedDoc>();

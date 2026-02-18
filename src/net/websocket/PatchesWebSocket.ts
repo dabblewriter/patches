@@ -1,4 +1,4 @@
-import { type Signal } from '../../event-signal.js';
+import { type Signal } from 'easy-signal';
 import { PatchesClient } from '../PatchesClient.js';
 import type { ConnectionState } from '../protocol/types.js';
 import { WebSocketTransport, type WebSocketOptions } from './WebSocketTransport.js';

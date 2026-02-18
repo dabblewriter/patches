@@ -31,27 +31,31 @@ vi.mock('../../src/utils/concurrency', () => ({
   }),
 }));
 
-vi.mock('../../src/event-signal', () => ({
-  signal: vi.fn().mockImplementation(function () {
-    const subscribers = new Set();
-    const mockSignal = vi.fn().mockImplementation(function (callback: any) {
-      subscribers.add(callback);
-      return function () {
-        return subscribers.delete(callback);
-      };
-    }) as any;
-    mockSignal.emit = vi.fn().mockImplementation(async function (...args: any[]) {
-      for (const callback of subscribers) {
-        await (callback as any)(...args);
-      }
-    });
-    mockSignal.error = vi.fn().mockReturnValue(vi.fn());
-    mockSignal.clear = vi.fn().mockImplementation(function () {
-      return subscribers.clear();
-    });
-    return mockSignal;
-  }),
-}));
+vi.mock('easy-signal', async () => {
+  const actual = await vi.importActual<typeof import('easy-signal')>('easy-signal');
+  return {
+    ...actual,
+    signal: vi.fn().mockImplementation(function () {
+      const subscribers = new Set();
+      const mockSignal = vi.fn().mockImplementation(function (callback: any) {
+        subscribers.add(callback);
+        return function () {
+          return subscribers.delete(callback);
+        };
+      }) as any;
+      mockSignal.emit = vi.fn().mockImplementation(async function (...args: any[]) {
+        for (const callback of subscribers) {
+          await (callback as any)(...args);
+        }
+      });
+      mockSignal.emitError = vi.fn();
+      mockSignal.clear = vi.fn().mockImplementation(function () {
+        return subscribers.clear();
+      });
+      return mockSignal;
+    }),
+  };
+});
 
 // Now import after mocking
 const { Patches } = await import('../../src/client/Patches');

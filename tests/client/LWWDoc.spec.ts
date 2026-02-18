@@ -1,23 +1,27 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Change, PatchesSnapshot } from '../../src/types';
 
-vi.mock('../../src/event-signal', () => ({
-  signal: vi.fn().mockImplementation(() => {
-    const subscribers = new Set();
-    const mockSignal = vi.fn().mockImplementation((callback: any) => {
-      subscribers.add(callback);
-      return () => subscribers.delete(callback);
-    }) as any;
-    mockSignal.emit = vi.fn().mockImplementation(async (...args: any[]) => {
-      for (const callback of subscribers) {
-        await (callback as any)(...args);
-      }
-    });
-    mockSignal.error = vi.fn().mockReturnValue(vi.fn());
-    mockSignal.clear = vi.fn().mockImplementation(() => subscribers.clear());
-    return mockSignal;
-  }),
-}));
+vi.mock('easy-signal', async () => {
+  const actual = await vi.importActual<typeof import('easy-signal')>('easy-signal');
+  return {
+    ...actual,
+    signal: vi.fn().mockImplementation(() => {
+      const subscribers = new Set();
+      const mockSignal = vi.fn().mockImplementation((callback: any) => {
+        subscribers.add(callback);
+        return () => subscribers.delete(callback);
+      }) as any;
+      mockSignal.emit = vi.fn().mockImplementation(async (...args: any[]) => {
+        for (const callback of subscribers) {
+          await (callback as any)(...args);
+        }
+      });
+      mockSignal.emitError = vi.fn();
+      mockSignal.clear = vi.fn().mockImplementation(() => subscribers.clear());
+      return mockSignal;
+    }),
+  };
+});
 
 // Import after mocking
 const { LWWDoc } = await import('../../src/client/LWWDoc');
@@ -49,9 +53,6 @@ describe('LWWDoc', () => {
 
   afterEach(() => {
     vi.useRealTimers();
-    doc.onChange.clear();
-    doc.onUpdate.clear();
-    doc.onSyncStatus.clear();
   });
 
   describe('constructor', () => {
@@ -62,7 +63,7 @@ describe('LWWDoc', () => {
       expect(emptyDoc.id).toBe('empty-doc');
       expect(emptyDoc.committedRev).toBe(0);
       expect(emptyDoc.hasPending).toBe(false);
-      expect(emptyDoc.syncStatus).toBe('unsynced');
+      expect(emptyDoc.syncStatus.state).toBe('unsynced');
     });
 
     it('should initialize with provided snapshot', () => {
@@ -104,10 +105,10 @@ describe('LWWDoc', () => {
     });
 
     it('should return sync status', () => {
-      expect(doc.syncStatus).toBe('unsynced');
+      expect(doc.syncStatus.state).toBe('unsynced');
 
       doc.updateSyncStatus('syncing');
-      expect(doc.syncStatus).toBe('syncing');
+      expect(doc.syncStatus.state).toBe('syncing');
     });
   });
 
@@ -195,11 +196,14 @@ describe('LWWDoc', () => {
       expect(doc.hasPending).toBe(true);
     });
 
-    it('should emit onUpdate after import', () => {
+    it('should notify subscribers after import', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
       const newSnapshot = createSnapshot({ title: 'New Doc' }, 10);
       doc.import(newSnapshot);
 
-      expect(doc.onUpdate.emit).toHaveBeenCalled();
+      expect(callback).toHaveBeenCalled();
     });
   });
 
@@ -270,100 +274,106 @@ describe('LWWDoc', () => {
       expect(doc.hasPending).toBe(true);
     });
 
-    it('should emit onUpdate after applying changes', () => {
+    it('should notify subscribers after applying changes', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
       const change = createChange('c1', 1, [{ op: 'replace', path: '/text', value: 'world' }]);
       doc.applyChanges([change]);
 
-      expect(doc.onUpdate.emit).toHaveBeenCalledWith({ text: 'world', count: 0 });
+      expect(callback).toHaveBeenCalledWith({ text: 'world', count: 0 });
     });
 
-    it('should not emit for empty changes array', () => {
+    it('should not notify for empty changes array', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
       doc.applyChanges([]);
 
-      expect(doc.onUpdate.emit).not.toHaveBeenCalled();
+      expect(callback).not.toHaveBeenCalled();
     });
   });
 
   describe('updateSyncStatus', () => {
-    it('should update sync status and emit onSyncing', async () => {
+    it('should update sync status and notify subscribers', async () => {
       const syncListener = vi.fn();
-      doc.onSyncStatus(syncListener);
+      doc.syncStatus.subscribe(syncListener, false);
 
       doc.updateSyncStatus('syncing');
 
-      expect(doc.syncStatus).toBe('syncing');
-      expect(doc.onSyncStatus.emit).toHaveBeenCalledWith('syncing');
+      expect(doc.syncStatus.state).toBe('syncing');
+      expect(syncListener).toHaveBeenCalledWith('syncing');
     });
 
     it('should handle error sync status', async () => {
       const error = new Error('Sync failed');
       doc.updateSyncStatus('error', error);
 
-      expect(doc.syncStatus).toBe('error');
-      expect(doc.syncError).toBe(error);
+      expect(doc.syncStatus.state).toBe('error');
+      expect(doc.syncError.state).toBe(error);
     });
 
     it('should handle synced state', async () => {
       doc.updateSyncStatus('syncing');
       doc.updateSyncStatus('synced');
 
-      expect(doc.syncStatus).toBe('synced');
+      expect(doc.syncStatus.state).toBe('synced');
     });
 
     it('should clear syncError when transitioning away from error', async () => {
       const error = new Error('Sync failed');
       doc.updateSyncStatus('error', error);
-      expect(doc.syncError).toBe(error);
+      expect(doc.syncError.state).toBe(error);
 
       doc.updateSyncStatus('syncing');
-      expect(doc.syncStatus).toBe('syncing');
-      expect(doc.syncError).toBeUndefined();
+      expect(doc.syncStatus.state).toBe('syncing');
+      expect(doc.syncError.state).toBeUndefined();
     });
   });
 
   describe('isLoaded', () => {
     it('should default to false', () => {
-      expect(doc.isLoaded).toBe(false);
+      expect(doc.isLoaded.state).toBe(false);
     });
 
     it('should become true when constructed with committedRev > 0', () => {
       const loadedDoc = new LWWDoc('loaded', createSnapshot({ text: 'hi' }, 5));
-      expect(loadedDoc.isLoaded).toBe(true);
+      expect(loadedDoc.isLoaded.state).toBe(true);
     });
 
     it('should become true when constructed with pending changes', () => {
       const change = createChange('c1', 1, [{ op: 'replace', path: '/text', value: 'hi' }], false);
       const loadedDoc = new LWWDoc('loaded', createSnapshot({ text: 'hello' }, 0, [change]));
-      expect(loadedDoc.isLoaded).toBe(true);
+      expect(loadedDoc.isLoaded.state).toBe(true);
     });
 
     it('should become true after updateSyncStatus synced', () => {
       doc.updateSyncStatus('synced');
-      expect(doc.isLoaded).toBe(true);
+      expect(doc.isLoaded.state).toBe(true);
     });
 
     it('should stay true after transitioning back to syncing', () => {
       doc.updateSyncStatus('synced');
-      expect(doc.isLoaded).toBe(true);
+      expect(doc.isLoaded.state).toBe(true);
 
       doc.updateSyncStatus('syncing');
-      expect(doc.isLoaded).toBe(true);
+      expect(doc.isLoaded.state).toBe(true);
     });
 
     it('should become true after applyChanges with committed changes', () => {
       const change = createChange('c1', 1, [{ op: 'replace', path: '/text', value: 'world' }]);
       doc.applyChanges([change]);
-      expect(doc.isLoaded).toBe(true);
+      expect(doc.isLoaded.state).toBe(true);
     });
 
     it('should become true after import with rev > 0', () => {
       doc.import(createSnapshot({ text: 'imported' }, 3));
-      expect(doc.isLoaded).toBe(true);
+      expect(doc.isLoaded.state).toBe(true);
     });
   });
 
   describe('subscribe', () => {
-    it('should call callback immediately with current state', () => {
+    it('should call callback immediately with current state via store subscribe', () => {
       const subscribeDoc = new LWWDoc('sub-doc', createSnapshot({ text: 'hello', count: 0 }, 0));
       const callback = vi.fn();
       subscribeDoc.subscribe(callback);
@@ -387,18 +397,20 @@ describe('LWWDoc', () => {
       expect(typeof unsubscribe).toBe('function');
     });
 
-    it('should provide onUpdate signal', () => {
+    it('should provide state store with subscribe', () => {
       const callback = vi.fn();
-      const unsubscribe = doc.onUpdate(callback);
+      const unsubscribe = doc.subscribe(callback);
 
       expect(typeof unsubscribe).toBe('function');
+      expect(callback).toHaveBeenCalledWith({ text: 'hello', count: 0 });
     });
 
-    it('should provide onSyncStatus signal', () => {
+    it('should provide syncStatus store with subscribe', () => {
       const callback = vi.fn();
-      const unsubscribe = doc.onSyncStatus(callback);
+      const unsubscribe = doc.syncStatus.subscribe(callback);
 
       expect(typeof unsubscribe).toBe('function');
+      expect(callback).toHaveBeenCalledWith('unsynced');
     });
   });
 });

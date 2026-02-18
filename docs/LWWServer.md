@@ -313,7 +313,7 @@ Don't confuse these with user-visible versions. Internal snapshots are housekeep
 Fires after changes are successfully committed - specifically, when `opsToStore.length > 0` (when the server actually persisted new ops).
 
 ```typescript
-server.onChangesCommitted.add((docId, changes, options, originClientId) => {
+server.onChangesCommitted((docId, changes, options, originClientId) => {
   // Broadcast to all subscribed clients except the origin
   broadcastToSubscribers(docId, changes, { exclude: originClientId });
 });
@@ -331,7 +331,7 @@ Parameters:
 Fires when a document is deleted.
 
 ```typescript
-server.onDocDeleted.add((docId, options, originClientId) => {
+server.onDocDeleted((docId, options, originClientId) => {
   // Notify subscribers the document is gone
   notifyDeletion(docId, { exclude: originClientId });
 });
@@ -431,7 +431,7 @@ const store = new MyLWWStore({ connectionString: '...' });
 const server = new LWWServer(store, { snapshotInterval: 100 });
 
 // Listen for committed changes
-server.onChangesCommitted.add((docId, changes, options, clientId) => {
+server.onChangesCommitted((docId, changes, options, clientId) => {
   console.log(`Doc ${docId} updated by ${clientId}`);
   // Broadcast to other clients...
 });

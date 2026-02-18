@@ -1,4 +1,4 @@
-import { signal, type Unsubscriber } from '../event-signal.js';
+import { ReadonlyStoreClass, signal, store, type Store } from 'easy-signal';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import { isDocLoaded } from '../shared/utils.js';
@@ -16,12 +16,17 @@ import type { PatchesDoc } from './PatchesDoc.js';
  * Internal methods (updateSyncStatus, applyChanges, import) are on this class but not
  * on the PatchesDoc interface, as they're only used by Algorithm and PatchesSync.
  */
-export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T> {
+export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreClass<T> implements PatchesDoc<T> {
   protected _id: string;
-  protected _state: T;
-  protected _syncStatus: DocSyncStatus = 'unsynced';
-  protected _syncError?: Error;
-  protected _isLoaded: boolean = false;
+
+  /** Current sync status of this document. */
+  readonly syncStatus = store<DocSyncStatus>('unsynced');
+
+  /** Whether the document has completed its initial load. Sticky: once true, never reverts to false. */
+  readonly isLoaded: Store<boolean> = store(false);
+
+  /** Error from the last failed sync attempt, if any. */
+  readonly syncError: Store<Error | undefined> = store<Error | undefined>(undefined);
 
   /**
    * Subscribe to be notified when the user makes local changes.
@@ -30,20 +35,14 @@ export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T
    */
   readonly onChange = signal<(ops: JSONPatchOp[]) => void>();
 
-  /** Subscribe to be notified whenever state changes from any source. */
-  readonly onUpdate = signal<(newState: T) => void>();
-
-  /** Subscribe to be notified when sync status changes. */
-  readonly onSyncStatus = signal<(newStatus: DocSyncStatus) => void>();
-
   /**
    * Creates an instance of BaseDoc.
    * @param id The unique identifier for this document.
    * @param initialState Optional initial state.
    */
   constructor(id: string, initialState: T = {} as T) {
+    super(initialState);
     this._id = id;
-    this._state = initialState;
   }
 
   /** The unique identifier for this document. */
@@ -51,38 +50,11 @@ export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T
     return this._id;
   }
 
-  /** Current local state (committed + pending merged). */
-  get state(): T {
-    return this._state;
-  }
-
-  /** Current sync status of this document. */
-  get syncStatus(): DocSyncStatus {
-    return this._syncStatus;
-  }
-
-  /** Error from the last failed sync attempt, if any. */
-  get syncError(): Error | undefined {
-    return this._syncError;
-  }
-
-  /** Whether the document has completed its initial load. Sticky: once true, never reverts to false. */
-  get isLoaded(): boolean {
-    return this._isLoaded;
-  }
-
   /** Last committed revision number from the server. */
   abstract get committedRev(): number;
 
   /** Are there local changes that haven't been committed yet? */
   abstract get hasPending(): boolean;
-
-  /** Subscribe to be notified whenever the state changes (calls immediately with current state). */
-  subscribe(onUpdate: (newValue: T) => void): Unsubscriber {
-    const unsub = this.onUpdate(onUpdate);
-    onUpdate(this._state);
-    return unsub;
-  }
 
   /**
    * Captures an update to the document, emitting JSON Patch ops via onChange.
@@ -106,16 +78,18 @@ export abstract class BaseDoc<T extends object = object> implements PatchesDoc<T
    * @param error Optional error when status is 'error'.
    */
   updateSyncStatus(status: DocSyncStatus, error?: Error): void {
-    this._syncStatus = status;
-    this._syncError = status === 'error' ? error : undefined;
+    this.syncError.state = status === 'error' ? error : undefined;
+    this.syncStatus.state = status;
     this._checkLoaded();
-    this.onSyncStatus.emit(status);
   }
 
   /** Latches _isLoaded to true when the doc has data or sync has resolved. */
   protected _checkLoaded(): void {
-    if (!this._isLoaded && isDocLoaded(this)) {
-      this._isLoaded = true;
+    if (
+      !this.isLoaded.state &&
+      isDocLoaded({ committedRev: this.committedRev, hasPending: this.hasPending, syncStatus: this.syncStatus.state })
+    ) {
+      this.isLoaded.state = true;
     }
   }
 

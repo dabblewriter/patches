@@ -10,23 +10,27 @@ vi.mock('../../src/algorithms/ot/shared/applyChanges', () => ({
   })),
 }));
 
-vi.mock('../../src/event-signal', () => ({
-  signal: vi.fn().mockImplementation(() => {
-    const subscribers = new Set();
-    const mockSignal = vi.fn().mockImplementation((callback: any) => {
-      subscribers.add(callback);
-      return () => subscribers.delete(callback);
-    }) as any;
-    mockSignal.emit = vi.fn().mockImplementation(async (...args: any[]) => {
-      for (const callback of subscribers) {
-        await (callback as any)(...args);
-      }
-    });
-    mockSignal.error = vi.fn().mockReturnValue(vi.fn());
-    mockSignal.clear = vi.fn().mockImplementation(() => subscribers.clear());
-    return mockSignal;
-  }),
-}));
+vi.mock('easy-signal', async () => {
+  const actual = await vi.importActual<typeof import('easy-signal')>('easy-signal');
+  return {
+    ...actual,
+    signal: vi.fn().mockImplementation(() => {
+      const subscribers = new Set();
+      const mockSignal = vi.fn().mockImplementation((callback: any) => {
+        subscribers.add(callback);
+        return () => subscribers.delete(callback);
+      }) as any;
+      mockSignal.emit = vi.fn().mockImplementation(async (...args: any[]) => {
+        for (const callback of subscribers) {
+          await (callback as any)(...args);
+        }
+      });
+      mockSignal.emitError = vi.fn();
+      mockSignal.clear = vi.fn().mockImplementation(() => subscribers.clear());
+      return mockSignal;
+    }),
+  };
+});
 
 // Now import after mocking
 const { PatchesHistoryClient } = await import('../../src/client/PatchesHistoryClient');
@@ -79,18 +83,18 @@ describe('PatchesHistoryClient', () => {
   describe('constructor', () => {
     it('should initialize with document ID and API', () => {
       expect(client.id).toBe('doc1');
-      expect(client.versions).toEqual([]);
-      expect(client.state).toBeNull();
+      expect(client.versions.state).toEqual([]);
+      expect(client.historyState.state).toBeNull();
     });
   });
 
-  describe('getters', () => {
+  describe('stores', () => {
     it('should return versions list', () => {
-      expect(client.versions).toEqual([]);
+      expect(client.versions.state).toEqual([]);
     });
 
     it('should return current state', () => {
-      expect(client.state).toBeNull();
+      expect(client.historyState.state).toBeNull();
     });
   });
 
@@ -102,7 +106,7 @@ describe('PatchesHistoryClient', () => {
       const result = await client.listVersions();
 
       expect(mockAPI.listVersions).toHaveBeenCalledWith('doc1', undefined);
-      expect(client.versions).toEqual(versions);
+      expect(client.versions.state).toEqual(versions);
       expect(result).toEqual(versions);
     });
 
@@ -114,10 +118,10 @@ describe('PatchesHistoryClient', () => {
       expect(mockAPI.listVersions).toHaveBeenCalledWith('doc1', options);
     });
 
-    it('should emit onVersionsChange event', async () => {
+    it('should notify subscribers when versions change', async () => {
       const versions = [createVersion('v1', 1)];
       const versionsSpy = vi.fn();
-      client.onVersionsChange(versionsSpy);
+      client.versions.subscribe(versionsSpy, false);
       vi.mocked(mockAPI.listVersions).mockResolvedValue(versions);
 
       await client.listVersions();
@@ -142,7 +146,7 @@ describe('PatchesHistoryClient', () => {
       expect(mockAPI.createVersion).toHaveBeenCalledWith('doc1', metadata);
       expect(mockAPI.listVersions).toHaveBeenCalledWith('doc1', undefined);
       expect(result).toBe('new-version-id');
-      expect(client.versions).toEqual(versions);
+      expect(client.versions.state).toEqual(versions);
     });
   });
 
@@ -160,7 +164,7 @@ describe('PatchesHistoryClient', () => {
 
       expect(mockAPI.updateVersion).toHaveBeenCalledWith('doc1', 'v1', metadata);
       expect(mockAPI.listVersions).toHaveBeenCalledWith('doc1', undefined);
-      expect(client.versions).toEqual(versions);
+      expect(client.versions.state).toEqual(versions);
     });
   });
 
@@ -173,7 +177,7 @@ describe('PatchesHistoryClient', () => {
 
       expect(mockAPI.getVersionState).toHaveBeenCalledWith('doc1', 'v1');
       expect(result).toEqual(state);
-      expect(client.state).toEqual(state);
+      expect(client.historyState.state).toEqual(state);
     });
 
     it('should return cached state on second call', async () => {
@@ -190,10 +194,10 @@ describe('PatchesHistoryClient', () => {
       expect(result).toEqual(state);
     });
 
-    it('should emit onStateChange event', async () => {
+    it('should notify subscribers when state changes', async () => {
       const state = { test: 'state' };
       const stateSpy = vi.fn();
-      client.onStateChange(stateSpy);
+      client.historyState.subscribe(stateSpy, false);
       vi.mocked(mockAPI.getVersionState).mockResolvedValue({ state, rev: 1 });
 
       await client.getVersionState('v1');
@@ -278,14 +282,14 @@ describe('PatchesHistoryClient', () => {
       vi.mocked(applyChanges).mockReturnValue(expectedState);
 
       const stateSpy = vi.fn();
-      client.onStateChange(stateSpy);
+      client.historyState.subscribe(stateSpy, false);
 
       await client.scrubTo('v2', 2);
 
       expect(mockAPI.getVersionState).toHaveBeenCalledWith('doc1', 'v1');
       expect(mockAPI.getVersionChanges).toHaveBeenCalledWith('doc1', 'v2');
       expect(applyChanges).toHaveBeenCalledWith(parentState, changes.slice(0, 2));
-      expect(client.state).toEqual(expectedState);
+      expect(client.historyState.state).toEqual(expectedState);
       expect(stateSpy).toHaveBeenCalledWith(expectedState);
     });
 
@@ -300,7 +304,7 @@ describe('PatchesHistoryClient', () => {
 
       expect(mockAPI.getVersionState).toHaveBeenCalledWith('doc1', 'v1');
       expect(applyChanges).not.toHaveBeenCalled();
-      expect(client.state).toEqual(parentState);
+      expect(client.historyState.state).toEqual(parentState);
     });
 
     it('should handle version without parent', async () => {
@@ -315,10 +319,10 @@ describe('PatchesHistoryClient', () => {
       expect(applyChanges).toHaveBeenCalledWith(undefined, changes.slice(0, 1));
     });
 
-    it('should emit state change event', async () => {
+    it('should update historyState store', async () => {
       const changes = [createChange('c1', 1)];
       const stateSpy = vi.fn();
-      client.onStateChange(stateSpy);
+      client.historyState.subscribe(stateSpy, false);
 
       vi.mocked(mockAPI.getVersionChanges).mockResolvedValue(changes);
 
@@ -340,22 +344,32 @@ describe('PatchesHistoryClient', () => {
       await client.listVersions();
       await client.getVersionState('v1');
 
-      expect(client.versions).toHaveLength(1);
-      expect(client.state).toEqual(state);
+      expect(client.versions.state).toHaveLength(1);
+      expect(client.historyState.state).toEqual(state);
 
       // Clear everything
       client.clear();
 
-      expect(client.versions).toEqual([]);
-      expect(client.state).toBeNull();
+      expect(client.versions.state).toEqual([]);
+      expect(client.historyState.state).toBeNull();
     });
 
-    it('should emit events for cleared state', () => {
+    it('should notify subscribers of cleared state', async () => {
+      // Set up some state first so clearing actually changes values
+      const versions = [createVersion('v1', 1)];
+      const state = { test: 'data' };
+
+      vi.mocked(mockAPI.listVersions).mockResolvedValue(versions);
+      vi.mocked(mockAPI.getVersionState).mockResolvedValue({ state, rev: 1 });
+
+      await client.listVersions();
+      await client.getVersionState('v1');
+
       const versionsSpy = vi.fn();
       const stateSpy = vi.fn();
 
-      client.onVersionsChange(versionsSpy);
-      client.onStateChange(stateSpy);
+      client.versions.subscribe(versionsSpy, false);
+      client.historyState.subscribe(stateSpy, false);
 
       client.clear();
 
@@ -425,17 +439,17 @@ describe('PatchesHistoryClient', () => {
     });
   });
 
-  describe('event signals', () => {
-    it('should provide onVersionsChange signal', () => {
+  describe('stores', () => {
+    it('should provide versions store with subscribe', () => {
       const callback = vi.fn();
-      const unsubscribe = client.onVersionsChange(callback);
+      const unsubscribe = client.versions.subscribe(callback, false);
 
       expect(typeof unsubscribe).toBe('function');
     });
 
-    it('should provide onStateChange signal', () => {
+    it('should provide historyState store with subscribe', () => {
       const callback = vi.fn();
-      const unsubscribe = client.onStateChange(callback);
+      const unsubscribe = client.historyState.subscribe(callback, false);
 
       expect(typeof unsubscribe).toBe('function');
     });

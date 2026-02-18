@@ -1,6 +1,6 @@
 import type { PatchesSnapshot, PatchesState } from '../types.js';
 import { deferred, type Deferred } from '../utils/deferred.js';
-import { signal } from '../event-signal.js';
+import { signal } from 'easy-signal';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
 /**

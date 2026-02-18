@@ -15,7 +15,7 @@ import { BaseDoc } from './BaseDoc.js';
  * ## State Model
  * - `_committedState`: Base state from server (at `_committedRev`)
  * - `_pendingChanges`: Local changes not yet committed by server
- * - `_state` (from BaseDoc): Live state = committedState + pendingChanges applied
+ * - `state` (getter from BaseDoc): Live state = committedState + pendingChanges applied
  *
  * ## Wire Efficiency
  * For Worker-Tab communication, only changes are sent over the wire (not full state).
@@ -37,13 +37,13 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
   constructor(id: string, snapshot?: PatchesSnapshot<T>) {
     const initialState = snapshot?.state ?? ({} as T);
     super(id, initialState);
-    this._committedState = this._state;
+    this._committedState = this.state;
     this._committedRev = snapshot?.rev ?? 0;
     this._pendingChanges = snapshot?.changes ?? [];
 
     // If pending changes provided, recompute live state
     if (this._pendingChanges.length > 0) {
-      this._state = applyChangesToState(this._committedState, this._pendingChanges);
+      this.state = applyChangesToState(this._committedState, this._pendingChanges);
     }
     this._checkLoaded();
   }
@@ -74,9 +74,8 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
     this._committedState = snapshot.state;
     this._committedRev = snapshot.rev;
     this._pendingChanges = snapshot.changes;
-    this._state = createStateFromSnapshot(snapshot);
     this._checkLoaded();
-    this.onUpdate.emit(this._state);
+    this.state = createStateFromSnapshot(snapshot);
   }
 
   /**
@@ -114,15 +113,14 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       this._pendingChanges = rebasedPending;
 
       // Recalculate the live state
-      this._state = applyChangesToState(this._committedState, this._pendingChanges);
+      this._checkLoaded();
+      this.state = applyChangesToState(this._committedState, this._pendingChanges);
     } else {
       // These are local changes - apply to live state and add to pending
-      this._state = applyChangesToState(this._state, changes);
       this._pendingChanges.push(...changes);
+      this._checkLoaded();
+      this.state = applyChangesToState(this.state, changes);
     }
-
-    this._checkLoaded();
-    this.onUpdate.emit(this._state);
   }
 
   /**

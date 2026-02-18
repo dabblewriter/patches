@@ -1,4 +1,4 @@
-import { signal } from '../../event-signal.js';
+import { signal } from 'easy-signal';
 import type { ClientTransport, JsonRpcRequest } from '../protocol/types.js';
 import { rpcError } from '../protocol/utils.js';
 

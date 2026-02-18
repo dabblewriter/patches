@@ -1,5 +1,5 @@
 import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
-import { signal } from '../event-signal.js';
+import { store, type Store } from 'easy-signal';
 import type { PatchesAPI } from '../net/protocol/types.js';
 import type { Change, EditableVersionMetadata, ListVersionsOptions, VersionMetadata } from '../types.js';
 
@@ -43,13 +43,11 @@ class LRUCache<K, V> {
 export class PatchesHistoryClient<T = any> {
   /** Document ID */
   readonly id: string;
-  /** Event signal for versions changes */
-  readonly onVersionsChange = signal<(versions: VersionMetadata[]) => void>();
-  /** Event signal for state changes */
-  readonly onStateChange = signal<(state: T) => void>();
+  /** Store for versions list */
+  readonly versions: Store<VersionMetadata[]>;
+  /** Store for history state (scrubbing) */
+  readonly historyState: Store<T>;
 
-  private _versions: VersionMetadata[] = [];
-  private _state: any = null;
   private cache = new LRUCache<string, VersionData>(6);
 
   constructor(
@@ -57,23 +55,14 @@ export class PatchesHistoryClient<T = any> {
     private readonly api: PatchesAPI
   ) {
     this.id = id;
-  }
-
-  /** List of loaded versions */
-  get versions() {
-    return this._versions;
-  }
-
-  /** Current state (for scrubbing) */
-  get state() {
-    return this._state;
+    this.versions = store<VersionMetadata[]>([]);
+    this.historyState = store<T>(null as any);
   }
 
   /** List version metadata for this document (with options) */
   async listVersions(options?: ListVersionsOptions): Promise<VersionMetadata[]> {
-    this._versions = await this.api.listVersions(this.id, options);
-    this.onVersionsChange.emit(this._versions);
-    return this._versions;
+    this.versions.state = await this.api.listVersions(this.id, options);
+    return this.versions.state;
   }
 
   /** Create a new named version snapshot of the document's current state. */
@@ -97,8 +86,7 @@ export class PatchesHistoryClient<T = any> {
       data = { ...data, state };
       this.cache.set(versionId, data);
     }
-    this._state = data.state;
-    this.onStateChange.emit(this._state);
+    this.historyState.state = data.state;
     return data.state;
   }
 
@@ -115,7 +103,7 @@ export class PatchesHistoryClient<T = any> {
 
   /** Scrub to a specific change within a version where changeIndex is 1-based and 0 is the parent version */
   async scrubTo(versionId: string, changeIndex: number): Promise<void> {
-    const version = this.versions.find(v => v.id === versionId);
+    const version = this.versions.state.find(v => v.id === versionId);
 
     // Load state and changes for the version
     const [state, changes] = await Promise.all([
@@ -124,19 +112,14 @@ export class PatchesHistoryClient<T = any> {
     ]);
     // Apply changes up to changeIndex to the state (if needed)
     if (changeIndex > 0) {
-      this._state = applyChanges(state, changes.slice(0, changeIndex));
+      this.historyState.state = applyChanges(state, changes.slice(0, changeIndex));
     }
-    this.onStateChange.emit(this._state);
   }
 
   /** Clear caches and listeners */
   clear() {
-    this._versions = [];
-    this._state = null;
-    this.onVersionsChange.emit(this._versions);
-    this.onStateChange.emit(this._state);
+    this.versions.state = [];
+    this.historyState.state = null as any;
     this.cache.clear();
-    this.onVersionsChange.clear();
-    this.onStateChange.clear();
   }
 }

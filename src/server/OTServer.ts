@@ -4,7 +4,7 @@ import { getSnapshotAtRevision } from '../algorithms/ot/server/getSnapshotAtRevi
 import { getStateAtRevision } from '../algorithms/ot/server/getStateAtRevision.js';
 import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
 import { createChange } from '../data/change.js';
-import { signal } from '../event-signal.js';
+import { signal } from 'easy-signal';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import { getClientId } from '../net/serverContext.js';

@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createApp, defineComponent, h, nextTick, ref } from 'vue';
+import { store } from 'easy-signal';
 import { Patches } from '../../src/client/Patches.js';
 import { createOTPatches } from '../../src/client/factories.js';
 import { providePatchesContext } from '../../src/vue/provider.js';
 import { usePatchesDoc, usePatchesSync, providePatchesDoc, useCurrentDoc } from '../../src/vue/composables.js';
 import { getDocManager } from '../../src/vue/doc-manager.js';
+import type { PatchesSyncState } from '../../src/net/PatchesSync.js';
 
 describe('Vue Composables', () => {
   let patches: Patches;
@@ -137,8 +139,8 @@ describe('Vue Composables', () => {
       await patches.openDoc('doc-1');
       const doc = patches.getOpenDoc<any>('doc-1')!;
 
-      const subscribeSpy = vi.spyOn(doc, 'subscribe');
-      const onSyncStatusSpy = vi.spyOn(doc, 'onSyncStatus');
+      const stateSubscribeSpy = vi.spyOn(doc, 'subscribe');
+      const syncStatusSubscribeSpy = vi.spyOn(doc.syncStatus, 'subscribe');
 
       const TestComponent = defineComponent({
         setup() {
@@ -153,19 +155,19 @@ describe('Vue Composables', () => {
       const el = document.createElement('div');
       app.mount(el);
 
-      expect(subscribeSpy).toHaveBeenCalled();
-      expect(onSyncStatusSpy).toHaveBeenCalled();
+      expect(stateSubscribeSpy).toHaveBeenCalled();
+      expect(syncStatusSubscribeSpy).toHaveBeenCalled();
 
       // Get unsubscribe functions
-      const unsubState = subscribeSpy.mock.results[0].value;
-      const unsubSync = onSyncStatusSpy.mock.results[0].value;
+      const unsubState = stateSubscribeSpy.mock.results[0].value;
+      const unsubSync = syncStatusSubscribeSpy.mock.results[0].value;
 
       const unsubStateSpy = vi.fn(unsubState);
       const unsubSyncSpy = vi.fn(unsubSync);
 
       // Replace with spies
-      subscribeSpy.mockReturnValue(unsubStateSpy as any);
-      onSyncStatusSpy.mockReturnValue(unsubSyncSpy as any);
+      stateSubscribeSpy.mockReturnValue(unsubStateSpy as any);
+      syncStatusSubscribeSpy.mockReturnValue(unsubSyncSpy as any);
 
       app.unmount();
 
@@ -654,14 +656,11 @@ describe('Vue Composables', () => {
     });
 
     it('should return reactive sync state', () => {
-      const mockSync = {
-        state: {
-          connected: true,
-          syncStatus: 'syncing' as const,
-          online: true,
-        },
-        onStateChange: vi.fn().mockReturnValue(vi.fn()),
-      };
+      const mockSync = store<PatchesSyncState>({
+        connected: true,
+        syncStatus: 'syncing' as const,
+        online: true,
+      });
 
       let capturedConnected: any;
       let capturedSyncing: any;
@@ -691,15 +690,13 @@ describe('Vue Composables', () => {
     });
 
     it('should subscribe to sync state changes', () => {
-      const mockUnsubscribe = vi.fn();
-      const mockSync = {
-        state: {
-          connected: false,
-          syncStatus: 'unsynced',
-          online: false,
-        },
-        onStateChange: vi.fn().mockReturnValue(mockUnsubscribe),
-      };
+      const mockSync = store<PatchesSyncState>({
+        connected: false,
+        syncStatus: 'unsynced' as const,
+        online: false,
+      });
+
+      const subscribeSpy = vi.spyOn(mockSync, 'subscribe');
 
       const TestComponent = defineComponent({
         setup() {
@@ -714,7 +711,7 @@ describe('Vue Composables', () => {
       const el = document.createElement('div');
       app.mount(el);
 
-      expect(mockSync.onStateChange).toHaveBeenCalled();
+      expect(subscribeSpy).toHaveBeenCalled();
 
       app.unmount();
 

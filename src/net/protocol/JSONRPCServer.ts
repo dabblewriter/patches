@@ -1,4 +1,4 @@
-import { signal, type Signal, type Unsubscriber } from '../../event-signal.js';
+import { signal, type Signal, type Unsubscriber } from 'easy-signal';
 import { StatusError } from '../error.js';
 import { clearAuthContext, getAuthContext, setAuthContext } from '../serverContext.js';
 import type { AuthContext, AuthorizationProvider } from '../websocket/AuthorizationProvider.js';

@@ -1,4 +1,4 @@
-import { signal, type Signal, type SignalSubscriber, type Unsubscriber } from '../../event-signal.js';
+import { signal, type Signal, type SignalSubscriber, type Unsubscriber } from 'easy-signal';
 import { JSONRPCParseError } from '../error.js';
 import type { ClientTransport, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from './types.js';
 

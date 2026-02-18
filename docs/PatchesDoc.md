@@ -94,7 +94,11 @@ Local edits waiting for server confirmation. The `doc.hasPending` boolean tells 
 
 ### Syncing Status
 
-The `doc.syncStatus` property tells you the current sync state: `'unsynced'` when not yet synced, `'syncing'` when actively syncing, `'synced'` when up to date, or `'error'` if something went wrong (check `doc.syncError` for details). The `doc.isLoaded` boolean tells you whether the document has completed its initial load — once true, it stays true.
+The `doc.syncStatus`, `doc.syncError`, and `doc.isLoaded` properties are reactive stores. Read their current value via `.state` and subscribe to changes via `.subscribe()`:
+
+- `doc.syncStatus.state` — `'unsynced'` | `'syncing'` | `'synced'` | `'error'`
+- `doc.syncError.state` — `Error | undefined`
+- `doc.isLoaded.state` — `boolean` (sticky: once true, stays true)
 
 You don't need to manage this complexity directly. Make changes, check status, and let the system handle the rest.
 
@@ -159,78 +163,51 @@ if (doc.hasPending) {
 
 ### `syncStatus`
 
+A reactive `Store<DocSyncStatus>`. Read the current value via `.state`, subscribe via `.subscribe()`:
+
 ```typescript
-if (doc.syncStatus === 'syncing') {
+if (doc.syncStatus.state === 'syncing') {
   // Currently syncing with server
-} else if (doc.syncStatus === 'error') {
+} else if (doc.syncStatus.state === 'error') {
   // Sync error occurred - check doc.syncError for details
-} else if (doc.syncStatus === 'synced') {
+} else if (doc.syncStatus.state === 'synced') {
   // Up to date with the server
 } else {
   // 'unsynced' - not yet synced
 }
+
+// Subscribe to sync status changes
+doc.syncStatus.subscribe(status => {
+  updateStatusIndicator(status);
+});
 ```
 
 ### `syncError`
 
+A reactive `Store<Error | undefined>`:
+
 ```typescript
-if (doc.syncError) {
-  console.error('Last sync error:', doc.syncError.message);
+if (doc.syncError.state) {
+  console.error('Last sync error:', doc.syncError.state.message);
 }
 ```
 
 ### `isLoaded`
 
+A reactive `Store<boolean>`:
+
 ```typescript
-if (doc.isLoaded) {
+if (doc.isLoaded.state) {
   // Document has data to display (server data, cached data, or local changes)
   // Once true, this never reverts to false within a sync lifecycle
 }
 ```
 
-## Events
+## Events and Subscriptions
 
-### `onUpdate` - State Changes
+### `subscribe` - State Changes
 
-Called whenever the document state changes, from any source (local changes, server updates, imports):
-
-```typescript
-doc.onUpdate(newState => {
-  console.log('Document updated:', newState);
-  renderUI(newState);
-});
-```
-
-### `onChange` - Local Changes
-
-Called when `change()` captures local edits. Emits the raw JSON Patch ops:
-
-```typescript
-doc.onChange(ops => {
-  console.log('Local changes captured:', ops);
-  // ops is an array of JSONPatchOp objects
-});
-```
-
-### `onSyncStatus` - Sync Status Changes
-
-Called when the sync status changes:
-
-```typescript
-doc.onSyncStatus(status => {
-  if (status === 'syncing') {
-    showSpinner();
-  } else if (status === 'error') {
-    showError(doc.syncError?.message);
-  } else {
-    hideSpinner();
-  }
-});
-```
-
-### `subscribe` - Immediate + Ongoing Updates
-
-Like `onUpdate`, but calls immediately with the current state, then on every subsequent change. Returns an unsubscribe function:
+Subscribe to document state changes. Calls immediately with the current state, then on every subsequent change. Returns an unsubscribe function:
 
 ```typescript
 const unsub = doc.subscribe(state => {
@@ -243,7 +220,34 @@ const unsub = doc.subscribe(state => {
 unsub();
 ```
 
-This is particularly useful for reactive frameworks that need the current value right away.
+This is the primary way to react to state changes. It's particularly useful for reactive frameworks that need the current value right away.
+
+### `onChange` - Local Changes
+
+Called when `change()` captures local edits. Emits the raw JSON Patch ops:
+
+```typescript
+doc.onChange(ops => {
+  console.log('Local changes captured:', ops);
+  // ops is an array of JSONPatchOp objects
+});
+```
+
+### `syncStatus` - Sync Status Store
+
+A reactive `Store<DocSyncStatus>`. Subscribe to react when sync status changes:
+
+```typescript
+doc.syncStatus.subscribe(status => {
+  if (status === 'syncing') {
+    showSpinner();
+  } else if (status === 'error') {
+    showError(doc.syncError.state?.message);
+  } else {
+    hideSpinner();
+  }
+});
+```
 
 ## OT vs LWW: Two Implementations
 
@@ -313,8 +317,8 @@ function TodoApp() {
         setHasUnsaved(todoDoc.hasPending);
       });
 
-      todoDoc.onSyncStatus(status => {
-        setSyncError(status === 'error' ? todoDoc.syncError : null);
+      todoDoc.syncStatus.subscribe(status => {
+        setSyncError(status === 'error' ? todoDoc.syncError.state : null);
         setHasUnsaved(todoDoc.hasPending);
       });
 

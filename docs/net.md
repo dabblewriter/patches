@@ -118,11 +118,11 @@ For the full protocol reference, see [json-rpc.md](json-rpc.md).
 
 ## Working with Connection State
 
-Your app should react to connection changes. `PatchesSync` provides an `onStateChange` signal:
+Your app should react to connection changes. `PatchesSync` implements `ReadonlyStore<PatchesSyncState>`, so you can subscribe directly:
 
 ```typescript
-sync.onStateChange(state => {
-  // state: { online: boolean, connected: boolean, syncStatus: DocSyncStatus, syncError: Error | null }
+sync.subscribe(state => {
+  // state: { online: boolean, connected: boolean, syncStatus: DocSyncStatus, syncError?: Error }
   // where DocSyncStatus = 'unsynced' | 'syncing' | 'synced' | 'error'
 
   if (state.connected) {

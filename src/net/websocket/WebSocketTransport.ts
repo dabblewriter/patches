@@ -1,4 +1,4 @@
-import { signal, type Unsubscriber } from '../../event-signal.js';
+import { signal, type Unsubscriber } from 'easy-signal';
 import { deferred, type Deferred } from '../../utils/deferred.js';
 import type { ClientTransport, ConnectionState } from '../protocol/types.js';
 import { onlineState } from './onlineState.js';

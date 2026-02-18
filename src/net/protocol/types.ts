@@ -1,4 +1,4 @@
-import type { Unsubscriber } from '../../event-signal.js';
+import type { Unsubscriber } from 'easy-signal';
 import type {
   Change,
   ChangeInput,

@@ -36,11 +36,13 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
 
     // Apply any pending changes from snapshot to get current state
     if (snapshot?.changes && snapshot.changes.length > 0) {
+      let currentState = this.state;
       for (const change of snapshot.changes) {
         for (const op of change.ops) {
-          this._state = applyPatch(this._state, [op], { partial: true });
+          currentState = applyPatch(currentState, [op], { partial: true });
         }
       }
+      this.state = currentState;
     }
     this._checkLoaded();
   }
@@ -60,26 +62,26 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
    * Resets state completely from the snapshot.
    */
   import(snapshot: PatchesSnapshot<T>): void {
-    this._state = snapshot.state;
     this._committedRev = snapshot.rev;
     this._hasPending = (snapshot.changes?.length ?? 0) > 0;
 
     // Apply any pending changes from snapshot
+    let currentState = snapshot.state;
     if (snapshot.changes && snapshot.changes.length > 0) {
       for (const change of snapshot.changes) {
         for (const op of change.ops) {
-          this._state = applyPatch(this._state, [op], { partial: true });
+          currentState = applyPatch(currentState, [op], { partial: true });
         }
       }
     }
 
     this._checkLoaded();
-    this.onUpdate.emit(this._state);
+    this.state = currentState;
   }
 
   /**
    * Applies changes to the document state.
-   * Used for Worker→Tab communication where only changes are sent over the wire.
+   * Used for Worker-Tab communication where only changes are sent over the wire.
    *
    * For LWW, all ops are applied in order. The method distinguishes between
    * committed and pending changes using `committedAt`:
@@ -94,9 +96,10 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
     if (changes.length === 0) return;
 
     // Apply all ops from all changes
+    let currentState = this.state;
     for (const change of changes) {
       for (const op of change.ops) {
-        this._state = applyPatch(this._state, [op], { partial: true });
+        currentState = applyPatch(currentState, [op], { partial: true });
       }
     }
 
@@ -117,6 +120,6 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
     this._hasPending = hasPending ?? hasPendingChanges;
 
     this._checkLoaded();
-    this.onUpdate.emit(this._state);
+    this.state = currentState;
   }
 }

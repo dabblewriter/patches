@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRoot, createSignal, type JSX } from 'solid-js';
+import { store } from 'easy-signal';
 import { Patches } from '../../src/client/Patches.js';
 import { createOTPatches } from '../../src/client/factories.js';
 import { PatchesProvider } from '../../src/solid/context.js';
 import { usePatchesDoc, usePatchesSync, createPatchesDoc } from '../../src/solid/primitives.js';
 import { getDocManager } from '../../src/solid/doc-manager.js';
+import type { PatchesSyncState } from '../../src/net/PatchesSync.js';
 
 // Helper to wait for Solid effects to run
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -689,10 +691,7 @@ describe('Solid Primitives', () => {
     });
 
     it('should return reactive sync state', () => {
-      const mockSync: any = {
-        state: { connected: true, syncStatus: 'syncing', online: true },
-        onStateChange: vi.fn(() => () => {}),
-      };
+      const mockSync: any = store<PatchesSyncState>({ connected: true, syncStatus: 'syncing', online: true });
 
       createRoot(dispose => {
         let connected: any;
@@ -719,21 +718,13 @@ describe('Solid Primitives', () => {
         expect(connected()).toBe(true);
         expect(syncing()).toBe(true); // 'syncing' → true
         expect(online()).toBe(true);
-        expect(mockSync.onStateChange).toHaveBeenCalled();
 
         dispose();
       });
     });
 
     it('should update reactively on state changes', () => {
-      let stateChangeCallback: any;
-      const mockSync: any = {
-        state: { connected: false, syncStatus: 'unsynced', online: false },
-        onStateChange: vi.fn((cb: any) => {
-          stateChangeCallback = cb;
-          return () => {};
-        }),
-      };
+      const mockSync: any = store<PatchesSyncState>({ connected: false, syncStatus: 'unsynced', online: false });
 
       createRoot(dispose => {
         let connected: any;
@@ -755,8 +746,8 @@ describe('Solid Primitives', () => {
 
         expect(connected()).toBe(false);
 
-        // Trigger state change
-        stateChangeCallback({ connected: true, syncStatus: 'synced', online: true });
+        // Trigger state change via store mutation
+        mockSync.state = { connected: true, syncStatus: 'synced', online: true };
 
         expect(connected()).toBe(true);
 

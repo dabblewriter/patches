@@ -1,7 +1,7 @@
 import { shallowRef, watchEffect, type Ref, type ShallowRef } from 'vue';
 import type { OpenDocOptions } from '../client/Patches.js';
 import type { PatchesDoc } from '../client/PatchesDoc.js';
-import type { Unsubscriber } from '../event-signal.js';
+import type { Unsubscriber } from 'easy-signal';
 import { usePatchesContext } from './provider.js';
 import { areSetsEqual } from './utils.js';
 
@@ -137,7 +137,7 @@ export function useManagedDocs<TDoc extends object, TData>(
               }
               data.value = reducer(data.value, path, newState);
             }
-          })
+          }, false)
         );
       } else {
         // Path was removed while opening — close immediately

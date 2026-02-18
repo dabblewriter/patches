@@ -114,7 +114,7 @@ await sync.connect();
 const doc = await patches.openDoc<MyDoc>('my-doc-1');
 
 // 5. React to updates
-doc.onUpdate(newState => {
+doc.subscribe(newState => {
   console.log('Document updated:', newState);
   // Update your UI here
 });
@@ -265,7 +265,7 @@ See [Awareness documentation](./docs/awareness.md) for implementation details.
 1. Create a `Patches` instance with strategies
 2. Connect `PatchesSync` to your server
 3. Open documents with `patches.openDoc(docId)`
-4. Subscribe to updates with `doc.onUpdate()`
+4. Subscribe to updates with `doc.subscribe()`
 5. Make changes with `doc.change()` - they sync automatically
 
 ### Server
@@ -297,7 +297,7 @@ const patches = new Patches({
 const sync = new PatchesSync(patches, 'wss://api.example.com/sync');
 
 // Handle connection state
-sync.onStateChange(state => {
+sync.subscribe(state => {
   if (state.connected) {
     console.log('Connected and syncing');
   } else if (!state.online) {
@@ -315,7 +315,7 @@ await sync.connect();
 // Open and use a document
 const doc = await patches.openDoc<MyDoc>('doc-123');
 
-doc.onUpdate(state => {
+doc.subscribe(state => {
   renderUI(state);
 });
 

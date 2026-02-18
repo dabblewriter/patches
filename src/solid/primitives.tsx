@@ -12,7 +12,7 @@ import type { OpenDocOptions } from '../client/Patches.js';
 import type { PatchesDoc } from '../client/PatchesDoc.js';
 import { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { DocSyncStatus, ChangeMutator } from '../types.js';
-import type { Unsubscriber } from '../event-signal.js';
+import type { Unsubscriber } from 'easy-signal';
 import type { PatchesSyncState } from '../net/PatchesSync.js';
 import { usePatchesContext } from './context.js';
 import { getDocManager } from './doc-manager.js';
@@ -164,10 +164,10 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
     function updateLoading(): void {
       if (loaded) return;
 
-      if (patchesDoc.isLoaded) {
+      if (patchesDoc.isLoaded.state) {
         loaded = true;
         setLoading(false);
-      } else if (patchesDoc.syncStatus === 'syncing') {
+      } else if (patchesDoc.syncStatus.state === 'syncing') {
         setLoading(true);
       } else if (!hasSyncContext) {
         // No sync configured — doc is as loaded as it'll get
@@ -187,10 +187,10 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
       updateLoading();
     });
 
-    const unsubSync = patchesDoc.onSyncStatus((status: DocSyncStatus) => {
+    const unsubSync = patchesDoc.syncStatus.subscribe((status: DocSyncStatus) => {
       updateLoading();
-      setError(status === 'error' ? patchesDoc.syncError : undefined);
-    });
+      setError(status === 'error' ? patchesDoc.syncError.state : undefined);
+    }, false);
 
     return () => {
       unsubState();
@@ -488,11 +488,11 @@ export function usePatchesSync(): UsePatchesSyncReturn {
   const [syncing, setSyncing] = createSignal(sync.state.syncStatus === 'syncing');
   const [online, setOnline] = createSignal(sync.state.online);
 
-  const unsubscribe = sync.onStateChange((state: PatchesSyncState) => {
+  const unsubscribe = sync.subscribe((state: PatchesSyncState) => {
     setConnected(state.connected);
     setSyncing(state.syncStatus === 'syncing');
     setOnline(state.online);
-  });
+  }, false);
 
   onCleanup(() => {
     unsubscribe();

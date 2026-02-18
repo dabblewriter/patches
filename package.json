@@ -78,6 +78,7 @@
     "@dabble/delta": "^1.2.4",
     "alphacounter": "^2.1.1",
     "crypto-id": "^0.3.1",
+    "easy-signal": "^5.0.2",
     "simple-peer": "^9.11.1",
     "simplified-concurrency": "^0.2.0"
   },

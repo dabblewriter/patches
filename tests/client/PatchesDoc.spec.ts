@@ -1,24 +1,27 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Change, PatchesSnapshot } from '../../src/types';
 
-// Mock the event-signal module
-vi.mock('../../src/event-signal', () => ({
-  signal: vi.fn().mockImplementation(() => {
-    const subscribers = new Set();
-    const mockSignal = vi.fn().mockImplementation((callback: any) => {
-      subscribers.add(callback);
-      return () => subscribers.delete(callback);
-    }) as any;
-    mockSignal.emit = vi.fn().mockImplementation(async (...args: any[]) => {
-      for (const callback of subscribers) {
-        await (callback as any)(...args);
-      }
-    });
-    mockSignal.error = vi.fn().mockReturnValue(vi.fn());
-    mockSignal.clear = vi.fn().mockImplementation(() => subscribers.clear());
-    return mockSignal;
-  }),
-}));
+vi.mock('easy-signal', async () => {
+  const actual = await vi.importActual<typeof import('easy-signal')>('easy-signal');
+  return {
+    ...actual,
+    signal: vi.fn().mockImplementation(() => {
+      const subscribers = new Set();
+      const mockSignal = vi.fn().mockImplementation((callback: any) => {
+        subscribers.add(callback);
+        return () => subscribers.delete(callback);
+      }) as any;
+      mockSignal.emit = vi.fn().mockImplementation(async (...args: any[]) => {
+        for (const callback of subscribers) {
+          await (callback as any)(...args);
+        }
+      });
+      mockSignal.emitError = vi.fn();
+      mockSignal.clear = vi.fn().mockImplementation(() => subscribers.clear());
+      return mockSignal;
+    }),
+  };
+});
 
 // Now import after mocking
 const { OTDoc } = await import('../../src/client/OTDoc');
@@ -46,12 +49,6 @@ describe('OTDoc', () => {
     doc = new OTDoc('test-doc', { state: { text: 'hello' }, rev: 0, changes: [] });
   });
 
-  afterEach(() => {
-    doc.onChange.clear();
-    doc.onUpdate.clear();
-    doc.onSyncStatus.clear();
-  });
-
   describe('constructor', () => {
     it('should initialize with default values', () => {
       const emptyDoc = new OTDoc('empty-doc');
@@ -60,7 +57,7 @@ describe('OTDoc', () => {
       expect(emptyDoc.id).toBe('empty-doc');
       expect(emptyDoc.committedRev).toBe(0);
       expect(emptyDoc.hasPending).toBe(false);
-      expect(emptyDoc.syncStatus).toBe('unsynced');
+      expect(emptyDoc.syncStatus.state).toBe('unsynced');
     });
 
     it('should initialize with provided snapshot', () => {
@@ -84,10 +81,10 @@ describe('OTDoc', () => {
     });
 
     it('should return sync status', () => {
-      expect(doc.syncStatus).toBe('unsynced');
+      expect(doc.syncStatus.state).toBe('unsynced');
 
       doc.updateSyncStatus('syncing');
-      expect(doc.syncStatus).toBe('syncing');
+      expect(doc.syncStatus.state).toBe('syncing');
     });
 
     it('should return committed revision', () => {
@@ -110,7 +107,7 @@ describe('OTDoc', () => {
   // Metadata is now passed to algorithm when opening doc, not stored in doc.
 
   describe('subscribe', () => {
-    it('should call callback immediately with current state', () => {
+    it('should call callback immediately with current state via store subscribe', () => {
       const subscribeDoc = new OTDoc('sub-doc', { state: { text: 'hello' }, rev: 0, changes: [] });
       const callback = vi.fn();
 
@@ -160,11 +157,14 @@ describe('OTDoc', () => {
       expect(doc.hasPending).toBe(true);
     });
 
-    it('should emit onUpdate when importing', () => {
+    it('should notify subscribers when importing', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
       const snapshot = createSnapshot({ imported: true }, 3);
       doc.import(snapshot);
 
-      expect(doc.onUpdate.emit).toHaveBeenCalled();
+      expect(callback).toHaveBeenCalled();
     });
   });
 
@@ -220,18 +220,23 @@ describe('OTDoc', () => {
       expect(doc.getPendingChanges()).toHaveLength(1);
     });
 
-    it('should emit onUpdate when applying local changes', () => {
-      const localChange: Change = { ...createChange('c1', 1), committedAt: 0 };
+    it('should notify subscribers when applying local changes', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
 
+      const localChange: Change = { ...createChange('c1', 1), committedAt: 0 };
       doc.applyChanges([localChange]);
 
-      expect(doc.onUpdate.emit).toHaveBeenCalled();
+      expect(callback).toHaveBeenCalled();
     });
 
-    it('should not emit for empty changes array', () => {
+    it('should not notify for empty changes array', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
       doc.applyChanges([]);
 
-      expect(doc.onUpdate.emit).not.toHaveBeenCalled();
+      expect(callback).not.toHaveBeenCalled();
     });
 
     it('should apply server changes (committed) and update revision', () => {
@@ -268,11 +273,14 @@ describe('OTDoc', () => {
       expect(doc.getPendingChanges()[0].id).toBe('p1-rebased');
     });
 
-    it('should emit onUpdate after applying server changes', () => {
+    it('should notify subscribers after applying server changes', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
       const serverChanges = [createChange('s1', 1)];
       doc.applyChanges(serverChanges);
 
-      expect(doc.onUpdate.emit).toHaveBeenCalled();
+      expect(callback).toHaveBeenCalled();
     });
   });
 
@@ -290,78 +298,86 @@ describe('OTDoc', () => {
   });
 
   describe('updateSyncStatus', () => {
-    it('should update sync status and emit event', () => {
+    it('should update sync status', () => {
       doc.updateSyncStatus('syncing');
 
-      expect(doc.syncStatus).toBe('syncing');
-      expect(doc.onSyncStatus.emit).toHaveBeenCalledWith('syncing');
+      expect(doc.syncStatus.state).toBe('syncing');
+    });
+
+    it('should notify syncStatus subscribers', () => {
+      const callback = vi.fn();
+      doc.syncStatus.subscribe(callback, false);
+
+      doc.updateSyncStatus('syncing');
+
+      expect(callback).toHaveBeenCalledWith('syncing');
     });
 
     it('should handle synced state', () => {
       doc.updateSyncStatus('syncing');
       doc.updateSyncStatus('synced');
 
-      expect(doc.syncStatus).toBe('synced');
+      expect(doc.syncStatus.state).toBe('synced');
     });
 
     it('should handle error state with syncError', () => {
       const error = new Error('Sync failed');
       doc.updateSyncStatus('error', error);
 
-      expect(doc.syncStatus).toBe('error');
-      expect(doc.syncError).toBe(error);
+      expect(doc.syncStatus.state).toBe('error');
+      expect(doc.syncError.state).toBe(error);
     });
 
     it('should clear syncError when transitioning away from error', () => {
       const error = new Error('Sync failed');
       doc.updateSyncStatus('error', error);
-      expect(doc.syncError).toBe(error);
+      expect(doc.syncError.state).toBe(error);
 
       doc.updateSyncStatus('syncing');
-      expect(doc.syncStatus).toBe('syncing');
-      expect(doc.syncError).toBeUndefined();
+      expect(doc.syncStatus.state).toBe('syncing');
+      expect(doc.syncError.state).toBeUndefined();
     });
   });
 
   describe('isLoaded', () => {
     it('should default to false', () => {
-      expect(doc.isLoaded).toBe(false);
+      expect(doc.isLoaded.state).toBe(false);
     });
 
     it('should become true when constructed with committedRev > 0', () => {
       const loadedDoc = new OTDoc('loaded', createSnapshot({ text: 'hi' }, 5));
-      expect(loadedDoc.isLoaded).toBe(true);
+      expect(loadedDoc.isLoaded.state).toBe(true);
     });
 
     it('should become true when constructed with pending changes', () => {
       const change = createChange('c1', 1, 0);
       change.committedAt = 0; // pending
       const loadedDoc = new OTDoc('loaded', createSnapshot({ text: 'hi' }, 0, [change]));
-      expect(loadedDoc.isLoaded).toBe(true);
+      expect(loadedDoc.isLoaded.state).toBe(true);
     });
 
     it('should become true after updateSyncStatus synced', () => {
       doc.updateSyncStatus('synced');
-      expect(doc.isLoaded).toBe(true);
+      expect(doc.isLoaded.state).toBe(true);
     });
 
     it('should stay true after transitioning back to syncing', () => {
       doc.updateSyncStatus('synced');
-      expect(doc.isLoaded).toBe(true);
+      expect(doc.isLoaded.state).toBe(true);
 
       doc.updateSyncStatus('syncing');
-      expect(doc.isLoaded).toBe(true);
+      expect(doc.isLoaded.state).toBe(true);
     });
 
     it('should become true after applyChanges with committed changes', () => {
       const change = createChange('c1', 1, 0);
       doc.applyChanges([change]);
-      expect(doc.isLoaded).toBe(true);
+      expect(doc.isLoaded.state).toBe(true);
     });
 
     it('should become true after import with rev > 0', () => {
       doc.import(createSnapshot({ text: 'imported' }, 3));
-      expect(doc.isLoaded).toBe(true);
+      expect(doc.isLoaded.state).toBe(true);
     });
   });
 
@@ -385,18 +401,20 @@ describe('OTDoc', () => {
       expect(typeof unsubscribe).toBe('function');
     });
 
-    it('should provide onUpdate signal', () => {
+    it('should provide state store with subscribe', () => {
       const callback = vi.fn();
-      const unsubscribe = doc.onUpdate(callback);
+      const unsubscribe = doc.subscribe(callback);
 
       expect(typeof unsubscribe).toBe('function');
+      expect(callback).toHaveBeenCalledWith({ text: 'hello' });
     });
 
-    it('should provide onSyncStatus signal', () => {
+    it('should provide syncStatus store with subscribe', () => {
       const callback = vi.fn();
-      const unsubscribe = doc.onSyncStatus(callback);
+      const unsubscribe = doc.syncStatus.subscribe(callback);
 
       expect(typeof unsubscribe).toBe('function');
+      expect(callback).toHaveBeenCalledWith('unsynced');
     });
   });
 

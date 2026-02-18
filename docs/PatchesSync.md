@@ -132,7 +132,7 @@ interface PatchesSyncState {
   online: boolean; // Is the browser online?
   connected: boolean; // Is the WebSocket connected?
   syncStatus: DocSyncStatus; // 'unsynced' | 'syncing' | 'synced' | 'error'
-  syncError: Error | null; // Error details when syncStatus is 'error'
+  syncError?: Error; // Error details when syncStatus is 'error'
 }
 ```
 
@@ -143,13 +143,15 @@ The `syncStatus` property tells you:
 - `'synced'` - Up to date with the server
 - `'error'` - Sync failed (check `syncError` for details)
 
+`PatchesSync` implements `ReadonlyStore<PatchesSyncState>`, so you can read and subscribe to state directly:
+
 ```typescript
 // Check current state
 console.log(sync.state);
-// { online: true, connected: true, syncStatus: 'synced', syncError: null }
+// { online: true, connected: true, syncStatus: 'synced' }
 
-// React to state changes
-sync.onStateChange(state => {
+// Subscribe to state changes (calls immediately with current state)
+sync.subscribe(state => {
   if (state.syncStatus === 'error') {
     showError('Sync failed: ' + state.syncError?.message);
   } else if (state.syncStatus === 'syncing') {
@@ -162,7 +164,7 @@ sync.onStateChange(state => {
 
 ## Per-Document Sync Status
 
-The `state` property tells you about the connection. The `syncedDocs` property tells you about each document. It's a `Record<string, SyncedDoc>` — one entry per tracked document, updated in real time as sync events happen.
+The `state` property tells you about the connection. The `syncedDocs` property tells you about each document. It's a `Store<Record<string, SyncedDoc>>` — one entry per tracked document, updated in real time as sync events happen.
 
 ```typescript
 type DocSyncStatus = 'unsynced' | 'syncing' | 'synced' | 'error';
@@ -180,7 +182,7 @@ interface SyncedDoc {
 
 ```typescript
 // Get the full map
-const syncedDocs = sync.syncedDocs;
+const syncedDocs = sync.syncedDocs.state;
 
 // Check a specific document
 const docStatus = syncedDocs['project-notes'];
@@ -189,19 +191,19 @@ if (docStatus?.syncStatus === 'error') {
 }
 
 // Show an indicator per document
-for (const [docId, info] of Object.entries(sync.syncedDocs)) {
+for (const [docId, info] of Object.entries(sync.syncedDocs.state)) {
   console.log(`${docId}: rev=${info.committedRev}, pending=${info.hasPending}, status=${info.syncStatus}`);
 }
 ```
 
-The `syncedDocs` object is immutable. Every change produces a new reference, so shallow comparison works for change detection.
+The `syncedDocs` store's state is immutable. Every change produces a new reference, so shallow comparison works for change detection.
 
 ### Listening for Changes
 
-Use `onSyncedChange` to react when any document's sync status changes:
+Subscribe to the `syncedDocs` store to react when any document's sync status changes:
 
 ```typescript
-sync.onSyncedChange(syncedDocs => {
+sync.syncedDocs.subscribe(syncedDocs => {
   for (const [docId, info] of Object.entries(syncedDocs)) {
     updateDocIndicator(docId, info.syncStatus, info.hasPending);
   }
@@ -228,7 +230,7 @@ Here's exactly when each field changes:
 ### Practical Example: Per-Document Save Indicator
 
 ```typescript
-sync.onSyncedChange(syncedDocs => {
+sync.syncedDocs.subscribe(syncedDocs => {
   for (const [docId, info] of Object.entries(syncedDocs)) {
     const el = document.getElementById(`status-${docId}`);
     if (!el) continue;
@@ -257,8 +259,14 @@ The difference between `state.syncStatus` and `syncedDocs`: `state.syncStatus` t
 
 ```typescript
 // State changes (connection, online status, sync status)
-sync.onStateChange(state => {
+// PatchesSync implements ReadonlyStore<PatchesSyncState>
+sync.subscribe(state => {
   updateConnectionIndicator(state);
+});
+
+// Per-document sync status changes
+sync.syncedDocs.subscribe(syncedDocs => {
+  updateDocIndicators(syncedDocs);
 });
 
 // Errors (network issues, server errors)
@@ -279,14 +287,14 @@ sync.onRemoteDocDeleted((docId, pendingChanges) => {
 });
 ```
 
-### Available Events
+### Available Reactive Interfaces
 
-| Event                | Parameters                                     | Description                        |
-| -------------------- | ---------------------------------------------- | ---------------------------------- |
-| `onStateChange`      | `(state: PatchesSyncState)`                    | Connection/sync state changed      |
-| `onSyncedChange`     | `(synced: Record<string, SyncedDoc>)`          | Per-document sync status changed   |
-| `onError`            | `(error: Error, context?: { docId?: string })` | An error occurred                  |
-| `onRemoteDocDeleted` | `(docId: string, pendingChanges: Change[])`    | Document deleted by another client |
+| Interface             | Type                                                           | Description                                      |
+| --------------------- | -------------------------------------------------------------- | ------------------------------------------------ |
+| `state` / `subscribe` | `ReadonlyStore<PatchesSyncState>`                              | Connection/sync state (implements ReadonlyStore) |
+| `syncedDocs`          | `Store<Record<string, SyncedDoc>>`                             | Per-document sync status                         |
+| `onError`             | `Signal<(error: Error, context?: { docId?: string }) => void>` | An error occurred                                |
+| `onRemoteDocDeleted`  | `Signal<(docId: string, pendingChanges: Change[]) => void>`    | Document deleted by another client               |
 
 ## Configuration Options
 
@@ -369,12 +377,12 @@ class CollaborativeApp {
   }
 
   private setupEventListeners() {
-    this.sync.onStateChange(state => {
+    this.sync.subscribe(state => {
       this.updateUI({
         isOnline: state.online,
         isConnected: state.connected,
         isSyncing: state.syncStatus === 'syncing',
-        syncError: state.syncStatus === 'error' ? state.syncError : null,
+        syncError: state.syncStatus === 'error' ? state.syncError : undefined,
       });
     });
 
@@ -410,7 +418,7 @@ class CollaborativeApp {
   async openDocument(docId: string) {
     const doc = await this.patches.openDoc(docId);
 
-    doc.onUpdate(state => {
+    doc.subscribe(state => {
       this.renderDocument(docId, state);
     });
 
@@ -459,7 +467,7 @@ doc.change(draft => {
 `PatchesSync` handles reconnection automatically with exponential backoff:
 
 ```typescript
-sync.onStateChange(state => {
+sync.subscribe(state => {
   if (!state.connected && state.online) {
     // PatchesSync is attempting to reconnect
     showMessage('Reconnecting...');
@@ -474,7 +482,7 @@ The WebSocket transport starts with a 1-second delay and backs off up to 30 seco
 Changes made while offline are stored locally and sent when you reconnect:
 
 ```typescript
-sync.onStateChange(state => {
+sync.subscribe(state => {
   if (!state.online) {
     showMessage('Offline - changes will sync when reconnected');
   } else if (state.connected) {

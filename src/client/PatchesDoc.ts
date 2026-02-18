@@ -1,6 +1,6 @@
-import type { Signal, Unsubscriber } from '../event-signal.js';
+import type { ReadonlyStore, Signal, Store } from 'easy-signal';
 import type { JSONPatchOp } from '../json-patch/types.js';
-import type { ChangeMutator, DocSyncStatus, SyncedDoc } from '../types.js';
+import type { ChangeMutator, DocSyncStatus } from '../types.js';
 
 /**
  * Options for creating a PatchesDoc instance
@@ -35,12 +35,9 @@ export interface PatchesDocOptions {
  *
  * Internal methods (updateSyncStatus, applyChanges, import) are on BaseDoc, not this interface.
  */
-export interface PatchesDoc<T extends object = object> extends SyncedDoc {
+export interface PatchesDoc<T extends object = object> extends ReadonlyStore<T> {
   /** The unique identifier for this document. */
   readonly id: string;
-
-  /** Current local state (committed + pending merged). */
-  readonly state: T;
 
   /** Last committed revision number from the server. */
   readonly committedRev: number;
@@ -49,13 +46,13 @@ export interface PatchesDoc<T extends object = object> extends SyncedDoc {
   readonly hasPending: boolean;
 
   /** Current sync status of this document. */
-  readonly syncStatus: DocSyncStatus;
+  readonly syncStatus: Store<DocSyncStatus>;
 
   /** Error from the last failed sync attempt, if any. */
-  readonly syncError?: Error;
+  readonly syncError: Store<Error | undefined>;
 
   /** Whether the document has completed its initial load. Sticky: once true, never reverts to false. */
-  readonly isLoaded: boolean;
+  readonly isLoaded: Store<boolean>;
 
   /**
    * Subscribe to be notified when the user makes local changes.
@@ -63,15 +60,6 @@ export interface PatchesDoc<T extends object = object> extends SyncedDoc {
    * The algorithm handles packaging these into Changes.
    */
   readonly onChange: Signal<(ops: JSONPatchOp[]) => void>;
-
-  /** Subscribe to be notified whenever state changes from any source. */
-  readonly onUpdate: Signal<(newState: T) => void>;
-
-  /** Subscribe to be notified when sync status changes. */
-  readonly onSyncStatus: Signal<(newStatus: DocSyncStatus) => void>;
-
-  /** Subscribe to be notified whenever the state changes (calls immediately with current state). */
-  subscribe(onUpdate: (newValue: T) => void): Unsubscriber;
 
   /**
    * Captures an update to the document, emitting JSON Patch ops via onChange.

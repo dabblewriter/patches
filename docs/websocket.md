@@ -116,12 +116,14 @@ doc.change(draft => {
 
 ### Handling Connection State
 
+`PatchesSync` implements `ReadonlyStore<PatchesSyncState>`, so subscribe directly:
+
 ```typescript
-sync.onStateChange(state => {
+sync.subscribe(state => {
   // state.online - browser online/offline
   // state.connected - WebSocket connected
   // state.syncStatus - 'unsynced', 'syncing', 'synced', or 'error'
-  // state.syncError - Error | null (details when syncStatus is 'error')
+  // state.syncError - Error | undefined (details when syncStatus is 'error')
 
   if (!state.online) {
     showOfflineBanner();

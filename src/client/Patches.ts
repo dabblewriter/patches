@@ -1,4 +1,4 @@
-import { type Unsubscriber, signal } from '../event-signal.js';
+import { type Unsubscriber, signal } from 'easy-signal';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change } from '../types.js';
 import { singleInvocation } from '../utils/concurrency.js';
@@ -92,7 +92,10 @@ export class Patches {
     Promise.all(
       entries.map(([name, algorithm]) =>
         algorithm.listDocs().then(docs => {
-          this.trackDocs(docs.map(({ docId }) => docId), name);
+          this.trackDocs(
+            docs.map(({ docId }) => docId),
+            name
+          );
         })
       )
     ).catch(err => {

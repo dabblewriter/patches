@@ -1,6 +1,6 @@
 import { createSignal, createEffect, onCleanup, type Accessor } from 'solid-js';
 import type { PatchesDoc } from '../client/PatchesDoc.js';
-import type { Unsubscriber } from '../event-signal.js';
+import type { Unsubscriber } from 'easy-signal';
 import { usePatchesContext } from './context.js';
 import { areSetsEqual } from './utils.js';
 
@@ -140,7 +140,7 @@ export function createManagedDocs<TDoc extends object, TData>(
             }
             setData(prev => reducer(prev, path, newState));
           }
-        })
+        }, false)
       );
     } catch (error) {
       console.error(`Failed to open doc at path: ${path}`, error);

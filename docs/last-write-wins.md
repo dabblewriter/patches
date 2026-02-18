@@ -209,7 +209,7 @@ doc.change((patch, path) => {
 4. Algorithm calls `consolidateOps` to merge with any existing pending ops for that path
 5. Algorithm saves consolidated ops via `store.savePendingOps()`
 6. Algorithm creates a Change and calls `doc.applyChanges()` to update local state
-7. Doc emits `onUpdate` for UI updates
+7. Doc state store updates, notifying subscribers
 
 ### 2. Client Sends to Server
 

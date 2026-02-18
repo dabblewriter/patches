@@ -15,8 +15,8 @@ import type { OpenDocOptions } from '../client/Patches.js';
 import type { PatchesDoc } from '../client/PatchesDoc.js';
 import { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { DocSyncStatus, ChangeMutator } from '../types.js';
-import type { Unsubscriber } from '../event-signal.js';
 import type { PatchesSyncState } from '../net/PatchesSync.js';
+import type { Unsubscriber } from 'easy-signal';
 import { usePatchesContext } from './provider.js';
 import { getDocManager } from './doc-manager.js';
 
@@ -167,10 +167,10 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
     function updateLoading(): void {
       if (loaded) return;
 
-      if (patchesDoc.isLoaded) {
+      if (patchesDoc.isLoaded.state) {
         loaded = true;
         loading.value = false;
-      } else if (patchesDoc.syncStatus === 'syncing') {
+      } else if (patchesDoc.syncStatus.state === 'syncing') {
         loading.value = true;
       } else if (!hasSyncContext) {
         // No sync configured — doc is as loaded as it'll get
@@ -190,10 +190,10 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
       updateLoading();
     });
 
-    const unsubSync = patchesDoc.onSyncStatus((status: DocSyncStatus) => {
+    const unsubSync = patchesDoc.syncStatus.subscribe((status: DocSyncStatus) => {
       updateLoading();
-      error.value = status === 'error' ? patchesDoc.syncError : undefined;
-    });
+      error.value = status === 'error' ? patchesDoc.syncError.state : undefined;
+    }, false);
 
     return () => {
       unsubState();
@@ -457,11 +457,11 @@ export function usePatchesSync(): UsePatchesSyncReturn {
   const syncing = ref(sync.state.syncStatus === 'syncing');
   const online = ref(sync.state.online);
 
-  const unsubscribe = sync.onStateChange((state: PatchesSyncState) => {
+  const unsubscribe = sync.subscribe((state: PatchesSyncState) => {
     connected.value = state.connected;
     syncing.value = state.syncStatus === 'syncing';
     online.value = state.online;
-  });
+  }, false);
 
   onBeforeUnmount(() => {
     unsubscribe();

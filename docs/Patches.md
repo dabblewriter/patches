@@ -252,7 +252,7 @@ class CollaborativeApp {
     this.sync = new PatchesSync(this.patches, 'wss://collab.example.com');
 
     // Handle connection state
-    this.sync.onConnectionStateChange(state => {
+    this.sync.subscribe(state => {
       this.updateConnectionUI(state);
     });
   }
@@ -272,7 +272,7 @@ class CollaborativeApp {
     const doc = await this.patches.openDoc(docId);
 
     // Set up UI updates
-    doc.onUpdate(state => {
+    doc.subscribe(state => {
       this.updateDocumentUI(docId, state);
     });
 

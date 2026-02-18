@@ -1,5 +1,5 @@
 import Peer from 'simple-peer';
-import { signal, type Unsubscriber } from '../../event-signal.js';
+import { signal, type Unsubscriber } from 'easy-signal';
 import { JSONRPCClient } from '../../net/protocol/JSONRPCClient.js';
 import type { ClientTransport } from '../protocol/types.js';
 import { rpcError } from '../protocol/utils.js';

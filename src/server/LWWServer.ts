@@ -1,7 +1,7 @@
 import { createVersionMetadata } from '../data/version.js';
 import { consolidateOps, convertDeltaOps } from '../algorithms/lww/consolidateOps.js';
 import { createChange } from '../data/change.js';
-import { signal } from '../event-signal.js';
+import { signal } from 'easy-signal';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';

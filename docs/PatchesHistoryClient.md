@@ -10,7 +10,7 @@ A client-side interface for exploring document history. Read-only by design, so 
 - Load the state at any version
 - Scrub through individual changes within a version (think video timeline scrubbing)
 - Create and update named versions (snapshots)
-- React to changes via event signals
+- React to changes via reactive stores
 
 This is the foundation for building version history UIs, restore functionality, and change diff viewers.
 
@@ -48,19 +48,17 @@ new PatchesHistoryClient<T>(id: string, api: PatchesAPI)
 
 ### Properties
 
-| Property           | Type                | Description                                                |
-| ------------------ | ------------------- | ---------------------------------------------------------- |
-| `id`               | `string`            | Document ID                                                |
-| `versions`         | `VersionMetadata[]` | Currently loaded version list                              |
-| `state`            | `T`                 | Current state (updated by `getVersionState` and `scrubTo`) |
-| `onVersionsChange` | `Signal`            | Fires when version list changes                            |
-| `onStateChange`    | `Signal`            | Fires when state changes (including during scrubbing)      |
+| Property       | Type                       | Description                                                                           |
+| -------------- | -------------------------- | ------------------------------------------------------------------------------------- |
+| `id`           | `string`                   | Document ID                                                                           |
+| `versions`     | `Store<VersionMetadata[]>` | Reactive store for the version list (read via `.state`, subscribe via `.subscribe()`) |
+| `historyState` | `Store<T>`                 | Reactive store for current state (updated by `getVersionState` and `scrubTo`)         |
 
 ### Methods
 
 #### `listVersions(options?)`
 
-Fetches version metadata from the server. Emits `onVersionsChange`.
+Fetches version metadata from the server. Updates the `versions` store.
 
 ```typescript
 const versions = await history.listVersions({
@@ -78,7 +76,7 @@ See [ListVersionsOptions](../src/types.ts) for all options.
 
 #### `getVersionState(versionId)`
 
-Loads and caches the document state at a specific version. Emits `onStateChange`.
+Loads and caches the document state at a specific version. Updates the `historyState` store.
 
 ```typescript
 const state = await history.getVersionState('version-123');
@@ -102,7 +100,7 @@ Scrubs to a specific change within a version. The `changeIndex` is **1-based**:
 - `1` shows state after the first change
 - `n` shows state after the nth change
 
-Emits `onStateChange`.
+Updates the `historyState` store.
 
 ```typescript
 // Get changes first to know the range
@@ -111,7 +109,7 @@ const changes = await history.getVersionChanges('version-123');
 // Scrub through each change
 for (let i = 0; i <= changes.length; i++) {
   await history.scrubTo('version-123', i);
-  // UI updates via onStateChange
+  // UI updates via historyState.subscribe()
 }
 ```
 
@@ -168,7 +166,7 @@ interface MyDoc {
 
 const history = new PatchesHistoryClient<MyDoc>('doc-id', ws);
 
-history.onStateChange(state => {
+history.historyState.subscribe(state => {
   // state is typed as MyDoc
   console.log(state.title);
 });
@@ -191,12 +189,12 @@ class VersionHistoryBrowser {
     this.ws = new PatchesWebSocket(serverUrl);
     this.history = new PatchesHistoryClient(docId, this.ws);
 
-    // Wire up reactive updates
-    this.history.onVersionsChange(versions => {
+    // Wire up reactive updates via stores
+    this.history.versions.subscribe(versions => {
       this.renderVersionList(versions);
     });
 
-    this.history.onStateChange(state => {
+    this.history.historyState.subscribe(state => {
       this.renderPreview(state);
     });
   }
@@ -246,7 +244,7 @@ class VersionHistoryBrowser {
 ## Best Practices
 
 1. **Always call `clear()` when done** - Frees memory and removes listeners
-2. **Use event signals for reactive UIs** - Don't poll; subscribe to `onVersionsChange` and `onStateChange`
+2. **Use store subscriptions for reactive UIs** - Don't poll; subscribe to `versions` and `historyState` stores
 3. **Paginate large histories** - Use `limit` and cursor options in `listVersions()`
 4. **Handle errors** - Wrap API calls in try/catch for network failures
 5. **Load versions list before scrubbing** - `scrubTo` needs the versions array to find parent relationships

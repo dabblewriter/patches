@@ -127,6 +127,7 @@ describe('Patches', () => {
       getCommittedRev: vi.fn().mockImplementation((docId: string) => mockStore.getCommittedRev(docId)),
       deleteDoc: vi.fn().mockImplementation((docId: string) => mockStore.deleteDoc(docId)),
       confirmDeleteDoc: vi.fn().mockImplementation((docId: string) => mockStore.confirmDeleteDoc(docId)),
+      hasPending: vi.fn().mockResolvedValue(false),
       close: vi.fn().mockImplementation(() => mockStore.close()),
     };
 

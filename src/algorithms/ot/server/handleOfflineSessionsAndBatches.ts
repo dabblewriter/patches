@@ -8,12 +8,16 @@ import { getStateAtRevision } from './getStateAtRevision.js';
 /**
  * Handles offline/large batch versioning logic for multi-batch uploads.
  * Groups changes into sessions, merges with previous batch if needed, and creates/extends versions.
+ *
+ * Each session's `isOffline` metadata is determined per-session by comparing `committedAt` and
+ * `createdAt` on the first change — if the gap exceeds `sessionTimeoutMillis`, the session is
+ * marked offline.
+ *
  * @param docId Document ID
  * @param changes The incoming changes (all with the same batchId)
  * @param baseRev The base revision for the batch
  * @param batchId The batch identifier
  * @param origin The origin to use for created versions (default: 'offline-branch')
- * @param isOffline Whether these changes were created offline (metadata flag)
  * @param maxStorageBytes If set, break collapsed changes that exceed this size
  * @returns The changes (collapsed into one if divergent, unchanged if fast-forward)
  */
@@ -25,7 +29,6 @@ export async function handleOfflineSessionsAndBatches(
   baseRev: number,
   batchId?: string,
   origin: 'main' | 'offline-branch' = 'offline-branch',
-  isOffline: boolean = true,
   maxStorageBytes?: number
 ) {
   // Find the last version for this groupId (if any)
@@ -75,11 +78,13 @@ export async function handleOfflineSessionsAndBatches(
           // Create a new version for this session
           offlineBaseState = applyChanges(offlineBaseState, sessionChanges);
 
+          const isOffline = sessionChanges[0].committedAt - sessionChanges[0].createdAt > sessionTimeoutMillis;
+
           const sessionMetadata = createVersionMetadata({
             parentId,
             groupId: batchId,
             origin,
-            isOffline,
+            ...(isOffline ? { isOffline } : {}),
             startedAt: sessionChanges[0].createdAt,
             endedAt: sessionChanges[sessionChanges.length - 1].createdAt,
             endRev: sessionChanges[sessionChanges.length - 1].rev,

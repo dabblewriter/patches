@@ -224,6 +224,65 @@ describe('handleOfflineSessionsAndBatches', () => {
     });
   });
 
+  it('should infer isOffline as true when committedAt - createdAt exceeds timeout', async () => {
+    const changes: Change[] = [
+      { id: '1', rev: 6, baseRev: 5, ops: [{ op: 'add', path: '/a', value: 1 }], createdAt: 1000, committedAt: 500000 },
+      { id: '2', rev: 7, baseRev: 6, ops: [{ op: 'add', path: '/b', value: 2 }], createdAt: 2000, committedAt: 500000 },
+    ];
+
+    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
+
+    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
+
+    const { createVersionMetadata: createVersion } = await import('../../../../src/data/version');
+    expect(createVersion).toHaveBeenCalledWith(
+      expect.objectContaining({ isOffline: true })
+    );
+  });
+
+  it('should not set isOffline when committedAt - createdAt is within timeout', async () => {
+    const changes: Change[] = [
+      { id: '1', rev: 6, baseRev: 5, ops: [{ op: 'add', path: '/a', value: 1 }], createdAt: 1000, committedAt: 2000 },
+      { id: '2', rev: 7, baseRev: 6, ops: [{ op: 'add', path: '/b', value: 2 }], createdAt: 1100, committedAt: 2000 },
+    ];
+
+    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
+
+    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
+
+    const { createVersionMetadata: createVersion } = await import('../../../../src/data/version');
+    expect(createVersion).toHaveBeenCalledWith(
+      expect.not.objectContaining({ isOffline: expect.anything() })
+    );
+  });
+
+  it('should infer different isOffline values for different sessions', async () => {
+    // Session 1: committedAt - createdAt = 1000 (within timeout) → not offline
+    // Session 2: committedAt - createdAt = 500000 (exceeds timeout) → offline
+    const changes: Change[] = [
+      { id: '1', rev: 6, baseRev: 5, ops: [{ op: 'add', path: '/a', value: 1 }], createdAt: 1000, committedAt: 2000 },
+      { id: '2', rev: 7, baseRev: 6, ops: [{ op: 'add', path: '/b', value: 2 }], createdAt: 1100, committedAt: 2000 },
+      // Large gap in createdAt → new session
+      { id: '3', rev: 8, baseRev: 7, ops: [{ op: 'add', path: '/c', value: 3 }], createdAt: 400000, committedAt: 900000 },
+      { id: '4', rev: 9, baseRev: 8, ops: [{ op: 'add', path: '/d', value: 4 }], createdAt: 400100, committedAt: 900000 },
+    ];
+
+    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
+
+    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
+
+    const { createVersionMetadata: createVersion } = await import('../../../../src/data/version');
+    expect(createVersion).toHaveBeenCalledTimes(2);
+    // First session: not offline (committedAt 2000 - createdAt 1000 = 1000ms < 300000ms)
+    expect(createVersion).toHaveBeenNthCalledWith(1,
+      expect.not.objectContaining({ isOffline: expect.anything() })
+    );
+    // Second session: offline (committedAt 900000 - createdAt 400000 = 500000ms > 300000ms)
+    expect(createVersion).toHaveBeenNthCalledWith(2,
+      expect.objectContaining({ isOffline: true })
+    );
+  });
+
   it('should break collapsed changes when maxPayloadBytes is set and exceeded', async () => {
     // Create changes with large ops that when collapsed will exceed the limit
     const createLargeChange = (id: string, rev: number, createdAtMs: number): Change => ({
@@ -249,7 +308,6 @@ describe('handleOfflineSessionsAndBatches', () => {
       5,
       undefined,
       'offline-branch',
-      true,
       maxPayloadBytes
     );
 
@@ -295,8 +353,7 @@ describe('handleOfflineSessionsAndBatches', () => {
       changes,
       5,
       undefined,
-      'main', // Fast-forward case
-      true
+      'main' // Fast-forward case
     );
 
     // Should return unchanged changes (not collapsed)

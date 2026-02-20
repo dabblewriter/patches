@@ -211,8 +211,7 @@ describe('OTServer', () => {
         1,
         'batch1',
         'main', // Fast-forward: origin is 'main'
-        true, // isOffline
-        undefined // maxPayloadBytes
+        undefined // maxStorageBytes
       );
     });
 
@@ -233,8 +232,7 @@ describe('OTServer', () => {
         1,
         'batch1',
         'offline-branch', // Divergent: origin is 'offline-branch'
-        true, // isOffline
-        undefined // maxPayloadBytes
+        undefined // maxStorageBytes
       );
     });
 

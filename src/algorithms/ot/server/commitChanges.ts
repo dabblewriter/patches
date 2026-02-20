@@ -166,7 +166,6 @@ export async function commitChanges(
       baseRev,
       batchId,
       origin,
-      true, // isOffline
       maxStorageBytes
     );
 

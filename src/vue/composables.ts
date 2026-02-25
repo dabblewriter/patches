@@ -96,7 +96,7 @@ export interface UsePatchesDocReturn<T extends object> {
    * The underlying PatchesDoc instance.
    * Useful for advanced operations.
    */
-  doc: Ref<PatchesDoc<T> | undefined>;
+  doc: ShallowRef<PatchesDoc<T> | undefined>;
 }
 
 /**
@@ -151,7 +151,7 @@ interface DocReactiveStateOptions<T extends object> {
 function createDocReactiveState<T extends object>(options: DocReactiveStateOptions<T>) {
   const { initialLoading = true, hasSyncContext = false, transformState, changeBehavior } = options;
 
-  const doc = ref<PatchesDoc<T> | undefined>(undefined) as Ref<PatchesDoc<T> | undefined>;
+  const doc = shallowRef<PatchesDoc<T> | undefined>(undefined) as ShallowRef<PatchesDoc<T> | undefined>;
   const data = shallowRef<T | undefined>(undefined) as ShallowRef<T | undefined>;
   const loading = ref<boolean>(initialLoading);
   const error = ref<Error | undefined>();

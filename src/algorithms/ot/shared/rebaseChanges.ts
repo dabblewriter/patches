@@ -46,7 +46,7 @@ export function rebaseChanges(serverChanges: Change[], localChanges: Change[]): 
   // Rebase local changes against server changes
   const baseRev = lastChange.rev;
   let rev = lastChange.rev;
-  return filteredLocalChanges
+  const result = filteredLocalChanges
     .map(change => {
       rev++;
       const ops = transformPatch.transform(change.ops).ops;
@@ -54,4 +54,6 @@ export function rebaseChanges(serverChanges: Change[], localChanges: Change[]): 
       return { ...change, baseRev, rev, ops };
     })
     .filter(Boolean) as Change[];
+
+  return result;
 }

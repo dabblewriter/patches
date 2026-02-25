@@ -62,8 +62,8 @@ export interface PatchesDoc<T extends object = object> extends ReadonlyStore<T> 
   readonly onChange: Signal<(ops: JSONPatchOp[]) => void>;
 
   /**
-   * Captures an update to the document, emitting JSON Patch ops via onChange.
-   * Does NOT apply locally - the algorithm handles state updates.
+   * Captures an update to the document, applies it optimistically to state,
+   * and emits the ops via onChange for async persistence.
    * @param mutator Function that uses JSONPatch methods with type-safe paths.
    */
   change(mutator: ChangeMutator<T>): void;

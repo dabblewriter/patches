@@ -127,13 +127,12 @@ describe('LWWDoc', () => {
       expect(emittedOps).toEqual([{ op: 'replace', path: '/text', value: 'world' }]);
     });
 
-    it('should NOT apply changes locally (thin doc)', async () => {
+    it('should apply changes optimistically to state', async () => {
       doc.change((patch, path) => {
         patch.replace(path.text, 'world');
       });
 
-      // State should not change - algorithm handles state updates
-      expect(doc.state).toEqual({ text: 'hello', count: 0 });
+      expect(doc.state).toEqual({ text: 'world', count: 0 });
     });
 
     it('should not emit for no-op changes', async () => {

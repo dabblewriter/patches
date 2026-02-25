@@ -2,6 +2,7 @@ import { type Unsubscriber, signal } from 'easy-signal';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change } from '../types.js';
 import { singleInvocation } from '../utils/concurrency.js';
+import type { BaseDoc } from './BaseDoc.js';
 import type { ClientAlgorithm } from './ClientAlgorithm.js';
 import type { PatchesDoc, PatchesDocOptions } from './PatchesDoc.js';
 import type { AlgorithmName } from './PatchesStore.js';
@@ -48,6 +49,7 @@ interface ManagedDoc<T extends object> {
 export class Patches {
   protected options: PatchesOptions;
   protected docs: Map<string, ManagedDoc<any>> = new Map();
+  private _changeQueues: Map<string, Promise<void>> = new Map();
 
   readonly docOptions: PatchesDocOptions;
   readonly algorithms: Partial<Record<AlgorithmName, ClientAlgorithm>>;
@@ -289,9 +291,24 @@ export class Patches {
 
   /**
    * Internal handler for doc changes. Called when doc.onChange emits ops.
-   * Delegates to algorithm for packaging and persisting.
+   * Serializes calls per docId to prevent concurrent handleDocChange from
+   * creating changes with the same rev (which would overwrite each other
+   * in IndexedDB's [docId, rev] keyed pendingChanges store).
    */
-  protected async _handleDocChange<T extends object>(
+  protected _handleDocChange<T extends object>(
+    docId: string,
+    ops: JSONPatchOp[],
+    doc: PatchesDoc<T>,
+    algorithm: ClientAlgorithm,
+    metadata: Record<string, any>
+  ): Promise<void> {
+    const prev = this._changeQueues.get(docId) ?? Promise.resolve();
+    const current = prev.then(() => this._processDocChange(docId, ops, doc, algorithm, metadata));
+    this._changeQueues.set(docId, current.catch(() => {}));
+    return current;
+  }
+
+  private async _processDocChange<T extends object>(
     docId: string,
     ops: JSONPatchOp[],
     doc: PatchesDoc<T>,
@@ -299,12 +316,14 @@ export class Patches {
     metadata: Record<string, any>
   ): Promise<void> {
     try {
-      // Algorithm packages ops, saves to store, and updates doc state
       await algorithm.handleDocChange(docId, ops, doc, metadata);
-      // Notify listeners that this doc has pending changes
       this.onChange.emit(docId);
     } catch (err) {
       console.error(`Error handling doc change for ${docId}:`, err);
+      const baseDoc = doc as unknown as BaseDoc<T>;
+      if (typeof baseDoc.rollbackOptimistic === 'function') {
+        baseDoc.rollbackOptimistic();
+      }
       this.onError.emit(err as Error, { docId });
     }
   }

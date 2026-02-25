@@ -1,5 +1,6 @@
 import { createStateFromSnapshot } from '../algorithms/ot/client/createStateFromSnapshot.js';
 import { applyChanges as applyChangesToState } from '../algorithms/ot/shared/applyChanges.js';
+import { applyPatch } from '../json-patch/applyPatch.js';
 import type { Change, PatchesSnapshot } from '../types.js';
 import { BaseDoc } from './BaseDoc.js';
 
@@ -8,14 +9,16 @@ import { BaseDoc } from './BaseDoc.js';
  * Uses a snapshot-based approach with revision tracking and rebasing
  * for handling concurrent edits.
  *
- * The `change()` method (inherited from BaseDoc) captures ops and emits them
- * via `onChange` - it does NOT apply locally. The OTAlgorithm handles packaging
- * ops into Changes, persisting them, and calling `applyChanges()` to update state.
+ * The `change()` method (inherited from BaseDoc) applies ops optimistically
+ * to `state` and emits them via `onChange`. The OTAlgorithm packages ops into
+ * Changes, persists them, and calls `applyChanges()` to confirm the optimistic
+ * update (shifting from the FIFO queue and skipping the state setter).
  *
  * ## State Model
  * - `_committedState`: Base state from server (at `_committedRev`)
  * - `_pendingChanges`: Local changes not yet committed by server
- * - `state` (getter from BaseDoc): Live state = committedState + pendingChanges applied
+ * - `_optimisticOps` (from BaseDoc): Ops applied by change() but not yet confirmed
+ * - `state`: Live state = committedState + pendingChanges + optimistic ops applied
  *
  * ## Wire Efficiency
  * For Worker-Tab communication, only changes are sent over the wire (not full state).
@@ -43,7 +46,25 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
 
     // If pending changes provided, recompute live state
     if (this._pendingChanges.length > 0) {
-      this.state = applyChangesToState(this._committedState, this._pendingChanges);
+      try {
+        this.state = applyChangesToState(this._committedState, this._pendingChanges);
+      } catch {
+        // Pending changes are corrupt (conflicting ops from accumulated sessions).
+        // Apply one-by-one, skipping changes that fail. Later changes created on
+        // committed state may still apply even when earlier ones conflict.
+        let state = this._committedState;
+        const valid: Change[] = [];
+        for (const c of this._pendingChanges) {
+          try {
+            state = applyPatch(state, c.ops, { strict: true });
+            valid.push(c);
+          } catch {
+            // Skip this corrupt change
+          }
+        }
+        this._pendingChanges = valid;
+        this.state = state;
+      }
     }
     this._checkLoaded();
   }
@@ -74,17 +95,30 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
     this._committedState = snapshot.state;
     this._committedRev = snapshot.rev;
     this._pendingChanges = snapshot.changes;
+    this._optimisticOps = [];
     this._checkLoaded();
     this.state = createStateFromSnapshot(snapshot);
   }
 
   /**
-   * Unified entry point for applying changes.
-   * Used for Worker→Tab communication where only changes are sent over the wire.
+   * Recomputes state from committed + pending + remaining optimistic ops.
+   */
+  protected _recomputeState(): void {
+    let newState: T = applyChangesToState(this._committedState, this._pendingChanges);
+    for (const ops of this._optimisticOps) {
+      newState = applyPatch(newState, ops, { strict: true });
+    }
+    this.state = newState;
+  }
+
+  /**
+   * Confirms changes from the algorithm pipeline.
    *
-   * The method distinguishes between committed and pending changes using `committedAt`:
-   * - `committedAt > 0`: Server-committed change (apply to committed state)
-   * - `committedAt === 0`: Pending local change (append to pending)
+   * Distinguishes between committed and pending changes using `committedAt`:
+   * - `committedAt > 0`: Server-committed change (updates committed state, recomputes
+   *   with remaining optimistic ops preserved)
+   * - `committedAt === 0`: Local change confirmation (shifts from optimistic queue,
+   *   skips state update since change() already applied the ops)
    *
    * For server changes, all committed changes come first, followed by rebased pending.
    *
@@ -93,33 +127,30 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
   applyChanges(changes: Change[]): void {
     if (changes.length === 0) return;
 
-    // Check if these are server changes (first change is committed)
     if (changes[0].committedAt > 0) {
-      // Split into committed and rebased pending
       const serverEndIndex = changes.findIndex(c => c.committedAt === 0);
       const serverChanges = serverEndIndex === -1 ? changes : changes.slice(0, serverEndIndex);
       const rebasedPending = serverEndIndex === -1 ? [] : changes.slice(serverEndIndex);
 
-      // Ensure server changes are sequential to the current committed revision
       if (this._committedRev !== serverChanges[0].rev - 1) {
         throw new Error('Cannot apply committed changes to a doc that is not at the correct revision');
       }
 
-      // Apply server changes to the committed state
       this._committedState = applyChangesToState(this._committedState, serverChanges);
       this._committedRev = serverChanges[serverChanges.length - 1].rev;
-
-      // The rebasedPendingChanges are the new complete set of pending changes
       this._pendingChanges = rebasedPending;
-
-      // Recalculate the live state
       this._checkLoaded();
-      this.state = applyChangesToState(this._committedState, this._pendingChanges);
+      this._recomputeState();
     } else {
-      // These are local changes - apply to live state and add to pending
       this._pendingChanges.push(...changes);
       this._checkLoaded();
-      this.state = applyChangesToState(this.state, changes);
+
+      if (this._optimisticOps.length > 0) {
+        this._optimisticOps.shift();
+      } else {
+        // No prior optimistic apply (Worker-Tab sync or direct call).
+        this.state = applyChangesToState(this.state, changes);
+      }
     }
   }
 

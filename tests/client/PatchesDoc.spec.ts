@@ -179,13 +179,12 @@ describe('OTDoc', () => {
       expect(emittedOps).toEqual([{ op: 'replace', path: '/text', value: 'world' }]);
     });
 
-    it('should NOT apply changes locally (thin doc)', () => {
+    it('should apply changes optimistically to state', () => {
       doc.change((patch, path) => {
         patch.replace(path.text, 'world');
       });
 
-      // State should not change - algorithm handles state updates via applyChanges
-      expect(doc.state).toEqual({ text: 'hello' });
+      expect(doc.state).toEqual({ text: 'world' });
     });
 
     it('should not emit for no-op changes', () => {

@@ -1,4 +1,5 @@
 import { ReadonlyStoreClass, signal, store, type Store } from 'easy-signal';
+import { applyPatch } from '../json-patch/applyPatch.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import { isDocLoaded } from '../shared/utils.js';
@@ -9,15 +10,30 @@ import type { PatchesDoc } from './PatchesDoc.js';
  * Abstract base class for document implementations.
  * Contains shared state and methods used by both OTDoc and LWWDoc.
  *
- * The `change()` method captures ops and emits them via `onChange` - it does NOT
- * apply locally. The algorithm handles packaging ops, persisting them, and updating
- * the doc's state via `applyChanges()`.
+ * The `change()` method captures ops, applies them optimistically to `state`,
+ * and emits them via `onChange`. The algorithm handles packaging ops into Changes,
+ * persisting them, and confirming the optimistic update via `applyChanges()`.
  *
- * Internal methods (updateSyncStatus, applyChanges, import) are on this class but not
- * on the PatchesDoc interface, as they're only used by Algorithm and PatchesSync.
+ * The mapping is strictly 1:1: one `change()` call produces one `applyChanges()`
+ * confirmation. A FIFO queue tracks outstanding optimistic ops so that
+ * `_recomputeState()` can reconstruct the full state (committed + pending +
+ * optimistic) when server changes arrive or during error recovery.
+ *
+ * Internal methods (updateSyncStatus, applyChanges, import, rollbackOptimistic)
+ * are on this class but not on the PatchesDoc interface, as they're only used
+ * by Algorithm and PatchesSync.
  */
 export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreClass<T> implements PatchesDoc<T> {
   protected _id: string;
+
+  /**
+   * FIFO queue of ops applied optimistically by change() but not yet confirmed
+   * by applyChanges(). The 1:1 mapping between change() and applyChanges()
+   * means confirmation simply shifts from the front. The ops are stored (not
+   * just counted) so _recomputeState() can reconstruct the full state when
+   * server changes arrive during the optimistic window.
+   */
+  protected _optimisticOps: JSONPatchOp[][] = [];
 
   /** Current sync status of this document. */
   readonly syncStatus = store<DocSyncStatus>('unsynced');
@@ -57,8 +73,14 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
   abstract get hasPending(): boolean;
 
   /**
-   * Captures an update to the document, emitting JSON Patch ops via onChange.
-   * Does NOT apply locally - the algorithm handles state updates via applyChanges.
+   * Captures an update to the document, applies it optimistically to state,
+   * and emits the ops via onChange for async persistence.
+   *
+   * State is updated synchronously (easy-signal's store.set() drains
+   * subscribers synchronously) so the UI sees changes immediately.
+   * The algorithm later confirms via applyChanges(), which shifts from
+   * the FIFO queue and skips the state update (avoiding double notifications).
+   *
    * @param mutator Function that uses JSONPatch methods with type-safe paths.
    */
   change(mutator: ChangeMutator<T>): void {
@@ -66,8 +88,28 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
     if (patch.ops.length === 0) {
       return;
     }
+    this.state = applyPatch(this.state, patch.ops, { strict: true });
+    this._optimisticOps.push(patch.ops);
     this.onChange.emit(patch.ops);
   }
+
+  /**
+   * Rolls back all outstanding optimistic applies and recomputes state from
+   * confirmed state only. Called by Patches._handleDocChange when the
+   * algorithm rejects ops. Any remaining in-flight changes will apply
+   * normally via the fallback path in applyChanges().
+   */
+  rollbackOptimistic(): void {
+    this._optimisticOps = [];
+    this._recomputeState();
+  }
+
+  /**
+   * Recomputes state from confirmed state (committed + pending) plus any
+   * remaining optimistic ops. Subclass-specific because each algorithm
+   * tracks committed/pending state differently.
+   */
+  protected abstract _recomputeState(): void;
 
   // --- Internal methods (not on PatchesDoc interface) ---
 
@@ -91,11 +133,11 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
   }
 
   /**
-   * Applies changes to the document state.
-   * Called by Algorithm for local changes and broadcasts - not part of PatchesDoc interface.
-   *
-   * For OT: Distinguishes committed (committedAt > 0) vs pending (committedAt === 0) changes.
-   * For LWW: Applies all ops from changes and updates metadata.
+   * Confirms changes from the algorithm pipeline.
+   * For local changes (committedAt === 0): shifts from the optimistic queue
+   * and skips the state update since change() already applied them.
+   * For server changes (committedAt > 0): updates committed state and
+   * recomputes with any remaining optimistic ops.
    *
    * @param changes Array of changes to apply.
    */

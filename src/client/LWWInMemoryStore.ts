@@ -225,11 +225,6 @@ export class LWWInMemoryStore implements LWWClientStore {
       buf.committedFields.set(op.path, op.value);
     }
 
-    // Update committed rev
-    if (buf.sendingChange.rev > buf.committedRev) {
-      buf.committedRev = buf.sendingChange.rev;
-    }
-
     buf.sendingChange = null;
   }
 

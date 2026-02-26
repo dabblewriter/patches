@@ -230,6 +230,7 @@ export class Patches {
     if (managed) {
       managed.unsubscribe();
       this.docs.delete(docId);
+      this._changeQueues.delete(docId);
       if (untrack) {
         await this.untrackDocs([docId]);
       }
@@ -277,6 +278,7 @@ export class Patches {
     // Clean up local PatchesDoc listeners
     this.docs.forEach(managed => managed.unsubscribe());
     this.docs.clear();
+    this._changeQueues.clear();
 
     // Close all algorithms (each closes its store)
     await Promise.all(Object.values(this.algorithms).map(s => s?.close()));

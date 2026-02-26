@@ -2,7 +2,7 @@
 
 The central authority for your [LWW](last-write-wins.md) system.
 
-`LWWServer` is the server-side implementation for Last-Write-Wins conflict resolution. Think of it as a referee who doesn't care about technique - just timestamps. Whoever has the later timestamp wins. Period. It's simpler than [OT](operational-transformation.md) because there's no transformation, no rebasing, no algorithmic gymnastics. Just timestamps.
+`LWWServer` is the server-side implementation for Last-Write-Wins conflict resolution. Think of it as a referee who doesn't care about technique - just timestamps. Whoever has the later timestamp wins. Period. It's simpler than [OT](operational-transformation.md) because there's no transformation, no rebasing, no algorithmic gymnastics. Just timestamps. And when you need collaborative rich text on specific fields, `@txt` ops give you Delta-based OT scoped to individual fields - no need to switch your whole document to full OT.
 
 **Table of Contents**
 
@@ -10,6 +10,7 @@ The central authority for your [LWW](last-write-wins.md) system.
 - [When to Use LWW vs OT](#when-to-use-lww-vs-ot)
 - [Initialization](#initialization)
 - [Core Method: `commitChanges()`](#core-method-commitchanges)
+- [Rich Text Support (`@txt`)](#rich-text-support-txt)
 - [Server-Side Changes with `change()`](#server-side-changes-with-change)
 - [State Retrieval](#state-retrieval)
 - [Document Lifecycle](#document-lifecycle)
@@ -25,12 +26,13 @@ The central authority for your [LWW](last-write-wins.md) system.
 
 Key differences from [OTServer](OTServer.md):
 
-| OTServer                         | LWWServer                              |
-| -------------------------------- | -------------------------------------- |
-| Stores change history            | Stores current field values            |
-| Transforms concurrent operations | Compares timestamps                    |
-| Complex rebasing logic           | Simple: later timestamp wins           |
-| Best for collaborative editing   | Best for settings, preferences, status |
+| OTServer                         | LWWServer                                          |
+| -------------------------------- | -------------------------------------------------- |
+| Stores change history            | Stores current field values                        |
+| Transforms concurrent operations | Compares timestamps (+ Delta OT for `@txt` fields) |
+| Complex rebasing logic           | Simple: later timestamp wins                       |
+| Best for collaborative editing   | Best for settings, preferences, status             |
+| Full-document OT                 | Field-level LWW with opt-in rich text via `@txt`   |
 
 What `LWWServer` does:
 
@@ -38,8 +40,9 @@ What `LWWServer` does:
 2. **Field Storage:** Keeps track of field values and their timestamps
 3. **LWW Resolution:** Uses the [`consolidateOps`](algorithms.md#consolidateops) algorithm to determine winners
 4. **Delta Operations:** Converts special ops like `@inc` and `@bit` to concrete values
-5. **Automatic Compaction:** Creates snapshots every N revisions to keep storage efficient
-6. **Catchup Support:** Returns ops the client missed since their last known revision
+5. **Rich Text (`@txt`):** Supports collaborative rich text editing via Delta OT when the store implements `TextDeltaStoreBackend`
+6. **Automatic Compaction:** Creates snapshots every N revisions to keep storage efficient
+7. **Catchup Support:** Returns ops the client missed since their last known revision
 
 ## When to Use LWW vs OT
 
@@ -51,12 +54,15 @@ For the full breakdown, see [Last-Write-Wins: Simple Sync That Actually Works](l
 - "Last one to save wins" is the correct behavior
 - You want simpler server logic and debugging
 - Conflicts are rare or acceptable to resolve by timestamp
+- You need collaborative rich text on specific fields while keeping the rest of the document simple (use `@txt` ops - see [Rich Text Support](#rich-text-support-txt))
 
 **Use [OT](operational-transformation.md) when:**
 
 - Users edit the same content simultaneously (collaborative documents)
 - You need to merge concurrent changes intelligently
 - Conflict resolution needs to preserve everyone's work
+
+> **Note:** LWW now supports collaborative rich text editing via `@txt` ops, so you don't need to switch to full OT just because some fields require character-level merging. If your document is mostly settings/preferences with a few rich text fields, LWW with `@txt` gives you the best of both worlds.
 
 ## Initialization
 
@@ -124,32 +130,45 @@ const change: ChangeInput = {
 2. **Load Existing Ops**
    - Fetches all current field values from storage via `listOps()`
 
-3. **Consolidate Using LWW Rules**
+3. **Separate `@txt` Ops**
+   - `@txt` ops are pulled out of the incoming change before LWW consolidation
+   - Non-text ops proceed through standard LWW timestamp resolution
+   - `@txt` ops are handled separately via Delta OT (see [Rich Text Support](#rich-text-support-txt))
+
+4. **Consolidate Using LWW Rules**
    - Uses the [`consolidateOps`](algorithms.md#consolidateops) algorithm
    - For each incoming op, compares timestamps with existing values
    - Later timestamp wins. On ties, incoming wins.
    - Special handling for combinable ops (`@inc`, `@bit`, `@max`, `@min`)
 
-4. **Parent Hierarchy Validation**
+5. **Parent Hierarchy Validation**
    - If you try to set `/user/name` but `/user` is a primitive, returns a correction op
    - Prevents invalid hierarchies (you can't have children under a string)
 
-5. **Convert Delta Ops**
+6. **Convert Delta Ops**
    - `@inc` ops become `replace` with computed sum
    - `@bit` ops become `replace` with combined bitmask
    - `@max`/`@min` ops become `replace` with the winning value
 
-6. **Save Winning Ops**
+7. **Save Winning Ops**
    - Persists ops that won the timestamp comparison
    - Deletes child paths when parent is overwritten
 
-7. **Compact if Needed**
-   - Every `snapshotInterval` revisions, saves a snapshot
-   - Keeps state reconstruction fast
+8. **Process `@txt` Ops (if present)**
+   - Transforms incoming deltas against concurrent server deltas from the delta log using Delta OT
+   - Composes the transformed delta into the field store (which always holds the full composed text as a `replace` op)
+   - Appends the transformed delta to the delta log for future transforms and client catchup
+   - If a text field was deleted or overwritten by a non-`@txt` op in this commit, stale `@txt` ops fall back to LWW timestamp comparison
+   - Requires [`TextDeltaStoreBackend`](#textdeltastorebackend-optional) -- without it, `@txt` ops fall back to regular LWW (timestamp-based replace, no character-level merge)
 
-8. **Build Catchup Response**
-   - Returns ops the client missed since their `rev`
-   - Filters out ops the client just sent (and their children)
+9. **Compact if Needed**
+   - Every `snapshotInterval` revisions, saves a snapshot
+   - Also prunes the text delta log (delta log isn't needed for state reconstruction since the field store has composed text)
+
+10. **Build Catchup Response**
+    - Returns ops the client missed since their `rev`
+    - For text fields, returns `@txt` ops (composed deltas from the delta log) instead of full text values, so clients can transform against their local pending state
+    - Filters out ops the client just sent (and their children)
 
 ### What Comes Out
 
@@ -201,6 +220,86 @@ These ops always combine regardless of timestamp:
 
 For more on these operations, see the [algorithms documentation](algorithms.md#lww-algorithms).
 
+## Rich Text Support (`@txt`)
+
+LWW is great for settings and preferences, but what about rich text? You don't want "last write wins" on an entire paragraph - you want character-level merging so two people can type in the same document without stomping on each other.
+
+That's what `@txt` ops provide. While standard LWW fields use timestamp-based conflict resolution, `@txt` fields use **Delta-based Operational Transformation** for character-level merge of concurrent edits. You get the simplicity of LWW for most of your data, with real collaborative editing where you need it.
+
+### How It Works
+
+`@txt` ops carry a [Delta](https://quilljs.com/docs/delta/) (the same format used by Quill) describing text insertions, deletions, and formatting changes. Instead of replacing the entire field value, the server transforms concurrent deltas against each other - just like OT, but scoped to individual fields within an LWW document.
+
+Here's the flow:
+
+1. Client sends a change containing `@txt` ops (with a `rev` indicating the client's last known server revision)
+2. Server separates `@txt` ops from regular LWW ops
+3. Regular ops go through normal timestamp-based consolidation
+4. `@txt` ops are transformed against any concurrent server deltas (deltas committed since the client's `rev`) using Delta OT
+5. The transformed delta is composed into the field store (which always holds the current full text as a `replace` op)
+6. The transformed delta is also appended to a delta log, used for future transforms and client catchup
+7. The broadcast sends `@txt` ops (not the composed `replace`) so other clients can transform against their own local pending state
+
+### The Two Storage Layers
+
+For text fields, the server maintains two representations:
+
+- **Field store** (via `LWWStoreBackend`): Always contains the current composed text as a `replace` op. This is the source of truth for state reconstruction - `getDoc()` just reads it like any other field.
+- **Delta log** (via `TextDeltaStoreBackend`): Stores individual deltas with their revision numbers. Used for transforming incoming `@txt` ops and for `getChangesSince()` catchup.
+
+The delta log is not required for state reconstruction. It's an optimization for collaborative editing. If you lose it, you lose the ability to transform concurrent edits and do incremental catchup, but the document state itself is safe in the field store.
+
+### Enabling `@txt` Support
+
+`@txt` support requires your store to implement [`TextDeltaStoreBackend`](#textdeltastorebackend-optional). If it doesn't, `@txt` ops silently fall back to regular LWW - the entire delta replaces the field value based on timestamps, with no character-level merging. This means you can start without text support and add it later without changing your client code.
+
+```typescript
+// Store WITHOUT TextDeltaStoreBackend:
+// @txt ops treated as regular LWW replace ops (no merge)
+
+// Store WITH TextDeltaStoreBackend:
+// @txt ops get Delta OT transformation and character-level merge
+```
+
+### Text Field Deletion
+
+When a text field is deleted or overwritten by a non-`@txt` op, the delta log for that field is pruned. If a stale `@txt` op arrives after the field has been deleted, it falls back to LWW timestamp comparison rather than attempting a delta transform against a field that no longer exists.
+
+### Example: Collaborative Rich Text
+
+```typescript
+// Client A sends:
+const changeA: ChangeInput = {
+  id: 'change-a',
+  rev: 5,
+  ops: [
+    { op: '@txt', path: '/content', value: [{ retain: 10 }, { insert: 'Hello ' }] },
+  ],
+};
+
+// Client B sends concurrently:
+const changeB: ChangeInput = {
+  id: 'change-b',
+  rev: 5, // Same base revision - these are concurrent
+  ops: [
+    { op: '@txt', path: '/content', value: [{ retain: 10 }, { insert: 'World ' }] },
+  ],
+};
+
+// Server processes change A first:
+// - No concurrent deltas since rev 5, so delta is applied as-is
+// - Field store updated with composed text
+// - Delta appended to log at rev 6
+
+// Server processes change B:
+// - Finds delta from rev 6 in the log (change A's delta)
+// - Transforms change B's delta against it
+// - Both insertions are preserved at the correct positions
+// - Field store updated, delta appended at rev 7
+```
+
+Both edits are preserved. No one's work is lost. That's the whole point.
+
 ## Server-Side Changes with `change()`
 
 Need to make changes from the server itself? Use the `change()` method:
@@ -246,6 +345,8 @@ const changes = await server.getChangesSince('doc-123', 40);
 ```
 
 This is useful for clients reconnecting after being offline - they get one change with everything they missed. The ops in the returned change are sorted by timestamp so older ops apply first.
+
+**Text field handling:** For fields with `@txt` history, `getChangesSince()` returns composed deltas from the delta log instead of the full text `replace` values from the field store. This allows reconnecting clients to transform those deltas against their own local pending state, preserving any edits they made while offline. Non-text fields still come from the field store as usual.
 
 ## Document Lifecycle
 
@@ -405,6 +506,59 @@ interface VersioningStoreBackend {
 }
 ```
 
+### `TextDeltaStoreBackend` (Optional)
+
+To enable collaborative rich text editing via `@txt` ops, your store can implement `TextDeltaStoreBackend`. Without it, `@txt` ops fall back to regular LWW (timestamp-based replace, no character-level merge).
+
+```typescript
+interface TextDeltaStoreBackend {
+  // Append a transformed delta to the log
+  appendTextDelta(docId: string, path: string, delta: any[], rev: number): Promise<void>;
+
+  // Get deltas for a specific path since a revision (for transforming incoming ops)
+  getTextDeltasSince(docId: string, path: string, sinceRev: number): Promise<TextDeltaEntry[]>;
+
+  // Get all deltas across all paths since a revision (for getChangesSince catchup)
+  getAllTextDeltasSince(docId: string, sinceRev: number): Promise<TextDeltaEntry[]>;
+
+  // Prune deltas at or before a revision (called during compaction)
+  // If paths provided, only prune those paths (used when a text field is deleted)
+  pruneTextDeltas(docId: string, atOrBeforeRev: number, paths?: string[]): Promise<void>;
+}
+
+interface TextDeltaEntry {
+  path: string;
+  delta: any[];
+  rev: number;
+}
+```
+
+#### SQL Schema
+
+If you're implementing this with a relational database, here's a reference schema:
+
+```sql
+CREATE TABLE text_deltas (
+  doc_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  rev INTEGER NOT NULL,
+  delta JSON NOT NULL,
+  PRIMARY KEY (doc_id, path, rev)
+);
+
+-- Index for getAllTextDeltasSince queries
+CREATE INDEX idx_text_deltas_since ON text_deltas (doc_id, rev);
+```
+
+The primary key on `(doc_id, path, rev)` ensures one delta per path per revision. The index on `(doc_id, rev)` speeds up the `getAllTextDeltasSince` query used during client catchup.
+
+#### Implementation Notes
+
+- **`appendTextDelta`**: Called after each `@txt` op is transformed and applied. The `rev` is the revision assigned to the commit containing this delta.
+- **`getTextDeltasSince`**: Must return deltas ordered by `rev` ascending. Used to transform incoming `@txt` ops against concurrent server history.
+- **`getAllTextDeltasSince`**: Returns deltas across all paths, ordered by `rev`. Used by `getChangesSince()` to build catchup responses with `@txt` ops instead of full text values.
+- **`pruneTextDeltas`**: Called during automatic compaction (snapshot creation) and when text fields are deleted. With `paths` specified, only those paths are pruned (e.g., when a text field is overwritten by a non-`@txt` op). Without `paths`, all deltas at or before the revision are pruned.
+
 ### Tombstone Support (Optional)
 
 For soft-delete capabilities, your store can also implement `TombstoneStoreBackend`:
@@ -490,6 +644,49 @@ rpc.register(server, LWWServer.api);
 ```
 
 The `api` definition maps method names to access levels. "read" methods can be called by any authenticated client; "write" methods may require additional authorization depending on your setup.
+
+### LWW with Rich Text (`@txt`)
+
+A document that mixes regular LWW fields with collaborative rich text:
+
+```typescript
+import { LWWServer } from '@dabble/patches/server';
+import { MyLWWStoreWithTextDeltas } from './my-store';
+
+// Store implements both LWWStoreBackend and TextDeltaStoreBackend
+const store = new MyLWWStoreWithTextDeltas({ connectionString: '...' });
+const server = new LWWServer(store);
+
+// Regular LWW fields + rich text in the same document
+const change: ChangeInput = {
+  id: 'change-1',
+  rev: 0,
+  ops: [
+    // Regular LWW fields - timestamp-based conflict resolution
+    { op: 'replace', path: '/title', value: 'My Document', ts: Date.now() },
+    { op: 'replace', path: '/status', value: 'draft', ts: Date.now() },
+
+    // Rich text field - Delta OT for character-level merge
+    { op: '@txt', path: '/body', value: [{ insert: 'Hello, world!' }] },
+  ],
+};
+
+const result = await server.commitChanges('doc-1', [change]);
+// /title and /status use LWW timestamps
+// /body uses Delta OT - concurrent edits are merged character-by-character
+```
+
+When a client reconnects after being offline:
+
+```typescript
+// Client was last at revision 5, now server is at revision 12
+const changes = await server.getChangesSince('doc-1', 5);
+
+// changes[0].ops contains:
+// - Regular fields: replace ops with current values (from field store)
+// - Text fields: @txt ops with composed deltas (from delta log)
+// The client can transform text deltas against its local pending state
+```
 
 ## Related Documentation
 

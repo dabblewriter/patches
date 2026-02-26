@@ -1,3 +1,4 @@
+import { Delta } from '@dabble/delta';
 import { createVersionMetadata } from '../data/version.js';
 import { consolidateOps, convertDeltaOps } from '../algorithms/lww/consolidateOps.js';
 import { createChange } from '../data/change.js';
@@ -17,7 +18,7 @@ import type {
 } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
 import { createTombstoneIfSupported, removeTombstoneIfExists } from './tombstone.js';
-import type { LWWStoreBackend, VersioningStoreBackend } from './types.js';
+import type { LWWStoreBackend, TextDeltaStoreBackend, VersioningStoreBackend } from './types.js';
 import { assertVersionMetadata } from './utils.js';
 
 /**
@@ -32,29 +33,44 @@ export interface LWWServerOptions {
 }
 
 /**
- * Last-Write-Wins (LWW) server implementation.
+ * Last-Write-Wins (LWW) server implementation with rich text support.
  *
- * Unlike OTServer which stores changes and uses Operational Transformation,
  * LWWServer stores fields with timestamps. Conflicts are resolved by comparing
- * timestamps - the later timestamp wins.
+ * timestamps — the later timestamp wins. Rich text fields (`@txt` operations)
+ * are additionally supported via Delta-based OT: concurrent text edits are
+ * transformed and merged character-by-character rather than using timestamp
+ * comparison.
  *
- * Key differences from OT:
- * - Stores fields, not changes
- * - No transformation needed
- * - Simpler conflict resolution
- * - Better suited for settings, preferences, status data
+ * ## Rich Text Support
+ *
+ * To enable collaborative rich text editing, the store must implement
+ * `TextDeltaStoreBackend` in addition to `LWWStoreBackend`. When enabled:
+ *
+ * - `@txt` ops are transformed against concurrent edits using Delta OT
+ * - The field store always contains the current composed text (for state reconstruction)
+ * - A separate delta log stores individual deltas (for transforms and client catchup)
+ * - Deltas are pruned automatically after snapshots and when text fields are deleted
+ *
+ * If the store does not implement `TextDeltaStoreBackend`, `@txt` ops are treated
+ * like regular `replace` operations (last timestamp wins, no character-level merge).
  *
  * @example
  * ```typescript
  * import { LWWServer } from '@dabble/patches/server';
  *
- * const store = new MyLWWStoreBackend();
+ * const store = new MyLWWStoreBackend(); // optionally implements TextDeltaStoreBackend
  * const server = new LWWServer(store);
  *
  * // Commit changes with timestamps
  * const changes = await server.commitChanges('doc1', [{
  *   id: 'change1',
  *   ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: Date.now() }],
+ * }]);
+ *
+ * // Rich text changes (requires TextDeltaStoreBackend)
+ * const textChanges = await server.commitChanges('doc1', [{
+ *   id: 'change2',
+ *   ops: [{ op: '@txt', path: '/body', value: [{ retain: 5 }, { insert: ' World' }], ts: Date.now() }],
  * }]);
  * ```
  */
@@ -113,32 +129,62 @@ export class LWWServer implements PatchesServer {
    * Get changes that occurred after a specific revision.
    * LWW doesn't store changes, so this synthesizes a change from ops.
    *
+   * For text fields (when TextDeltaStoreBackend is available), returns composed
+   * deltas from the delta log instead of the full text value from the field store.
+   * This allows clients to transform the deltas against their local pending state.
+   *
    * @param docId - The document ID.
    * @param rev - The revision number to get changes after.
    * @returns Array containing 0 or 1 synthesized changes.
    */
   async getChangesSince(docId: string, rev: number): Promise<Change[]> {
-    const ops = await this.store.listOps(docId, { sinceRev: rev });
-    if (ops.length === 0) {
+    const fieldOps = await this.store.listOps(docId, { sinceRev: rev });
+    const textDeltaStore = this.getTextDeltaStore();
+
+    // Get text deltas since rev (if text delta store is available)
+    let textCatchupOps: { op: string; path: string; value: any }[] = [];
+    const textPaths = new Set<string>();
+
+    if (textDeltaStore) {
+      const allTextDeltas = await textDeltaStore.getAllTextDeltasSince(docId, rev);
+      textCatchupOps = composeTextDeltasByPath(allTextDeltas);
+      for (const op of textCatchupOps) {
+        textPaths.add(op.path);
+      }
+    }
+
+    // Filter out text paths from field ops (they're covered by text deltas)
+    const nonTextOps = fieldOps.filter(op => !textPaths.has(op.path));
+
+    const allOps = [...nonTextOps, ...textCatchupOps];
+    if (allOps.length === 0) {
       return [];
     }
 
-    // Sort by ts so older ops apply first
-    const sortedOps = [...ops].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
-    const maxRev = Math.max(...ops.map(op => op.rev ?? 0));
-    // Use max timestamp from ops as committedAt (these are already-committed changes)
-    const maxTs = Math.max(...ops.map(op => op.ts ?? 0));
+    // Sort non-text ops by ts so older ops apply first (text ops are already composed)
+    const sortedOps = [...nonTextOps].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+    sortedOps.push(...textCatchupOps);
 
-    return [createChange(rev, maxRev, sortedOps, { committedAt: maxTs || Date.now() })];
+    const maxRev = Math.max(
+      ...fieldOps.map(op => op.rev ?? 0),
+      ...textCatchupOps.map(() => 0), // text ops don't carry rev individually
+      0
+    );
+    const actualMaxRev = textDeltaStore
+      ? Math.max(maxRev, ...(await textDeltaStore.getAllTextDeltasSince(docId, rev)).map(d => d.rev))
+      : maxRev;
+    const maxTs = Math.max(...fieldOps.map(op => op.ts ?? 0), 0);
+
+    return [createChange(rev, actualMaxRev || rev, sortedOps, { committedAt: maxTs || Date.now() })];
   }
 
   /**
-   * Commit changes to a document using LWW conflict resolution.
+   * Commit changes to a document using LWW conflict resolution with rich text support.
    *
-   * Uses the consolidateOps algorithm to:
-   * 1. Handle parent hierarchy validation (returns correction ops)
-   * 2. Consolidate incoming ops with existing ops using LWW rules
-   * 3. Convert delta ops (@inc, @bit, etc.) to concrete replace ops
+   * Non-text ops use the consolidateOps algorithm for LWW conflict resolution.
+   * `@txt` ops (when TextDeltaStoreBackend is available) use revision-based Delta OT:
+   * incoming text deltas are transformed against concurrent server deltas, then composed
+   * with the current text to produce the new field value.
    *
    * @param docId - The document ID.
    * @param changes - The changes to commit (always 1 for LWW).
@@ -153,33 +199,110 @@ export class LWWServer implements PatchesServer {
     const change = changes[0]; // LWW always receives 1 change
     const serverNow = Date.now();
     const clientRev = change.rev; // Client's last known rev (for catchup)
+    const baseRev = change.baseRev ?? clientRev ?? 0;
+    const textDeltaStore = this.getTextDeltaStore();
 
     // Add timestamps to ops that don't have them
     // Prefer change.createdAt if available, fallback to server time
     const newOps = change.ops.map(op => (op.ts ? op : { ...op, ts: change.createdAt ?? serverNow }));
 
+    // Separate @txt ops from non-text ops when text delta store is available.
+    // @txt ops use revision-based OT (transform against concurrent deltas),
+    // while all other ops use timestamp-based LWW conflict resolution.
+    const textOps = textDeltaStore ? newOps.filter(op => op.op === '@txt') : [];
+    const nonTextOps = textDeltaStore ? newOps.filter(op => op.op !== '@txt') : newOps;
+
     // Load all existing ops for this doc
     const existingOps = await this.store.listOps(docId);
 
-    // Use the consolidateOps algorithm
-    const { opsToSave, pathsToDelete, opsToReturn } = consolidateOps(existingOps, newOps);
+    // Process non-text ops through standard LWW consolidation
+    const { opsToSave, pathsToDelete, opsToReturn } = consolidateOps(existingOps, nonTextOps);
 
     // Convert delta ops (@inc, @bit, etc.) to replace ops with concrete values
     const opsToStore = convertDeltaOps(opsToSave);
 
-    // Get current rev before saving (efficient - doesn't reconstruct full state)
+    // Process @txt ops: transform against concurrent server deltas, compose with current text
+    const textOpsToStore: { op: string; path: string; value: any; ts?: number }[] = [];
+    const transformedTextDeltas: { path: string; delta: any[] }[] = [];
+
+    for (const textOp of textOps) {
+      // Get recent text deltas for this path since the client's base revision
+      const recentDeltas = await textDeltaStore!.getTextDeltasSince(docId, textOp.path, baseRev);
+
+      // Transform the incoming delta against all concurrent server deltas
+      let incomingDelta = new Delta(textOp.value);
+      for (const recent of recentDeltas) {
+        const serverDelta = new Delta(recent.delta);
+        incomingDelta = serverDelta.transform(incomingDelta, true);
+      }
+
+      // Get the current text content from the field store and compose
+      const existingOp = existingOps.find(op => op.path === textOp.path);
+      const currentText = existingOp?.value ? new Delta(existingOp.value) : new Delta().insert('\n');
+      const newText = currentText.compose(incomingDelta);
+
+      // Store the full composed text in the field store (as replace for state reconstruction)
+      textOpsToStore.push({
+        op: 'replace',
+        path: textOp.path,
+        value: newText,
+        ts: textOp.ts,
+      });
+
+      // Track the transformed delta for the delta log and broadcast
+      transformedTextDeltas.push({ path: textOp.path, delta: incomingDelta.ops });
+    }
+
+    // Collect all paths being deleted or overwritten (for text delta cleanup)
+    const allPathsToDelete = [...pathsToDelete];
+    // If a non-text op overwrites a text field path, include it for delta cleanup
+    for (const op of opsToStore) {
+      if (textDeltaStore && op.op === 'replace') {
+        // Check if this path or any parent overwrites a text field
+        for (const existing of existingOps) {
+          if (existing.path === op.path || existing.path.startsWith(op.path + '/')) {
+            // Check if it was a text field being overwritten by non-text
+            if (!textOps.some(t => t.path === existing.path)) {
+              allPathsToDelete.push(existing.path);
+            }
+          }
+        }
+      }
+    }
+
+    // Combine all ops to store
+    const allOpsToStore = [...opsToStore, ...textOpsToStore];
+
+    // Get current rev before saving
     const currentRev = await this.store.getCurrentRev(docId);
     let newRev = currentRev;
 
     // Save ops and delete paths atomically
-    if (opsToStore.length > 0 || pathsToDelete.length > 0) {
-      newRev = await this.store.saveOps(docId, opsToStore, pathsToDelete);
+    if (allOpsToStore.length > 0 || pathsToDelete.length > 0) {
+      newRev = await this.store.saveOps(docId, allOpsToStore, pathsToDelete);
+    }
+
+    // Save text deltas to the delta log (for future transforms and catchup)
+    if (textDeltaStore) {
+      for (const { path, delta } of transformedTextDeltas) {
+        await textDeltaStore.appendTextDelta(docId, path, delta, newRev);
+      }
+
+      // Clean up text deltas for deleted/overwritten paths
+      const textPathsToClean = allPathsToDelete.filter(p => !transformedTextDeltas.some(t => t.path === p));
+      if (textPathsToClean.length > 0) {
+        await textDeltaStore.pruneTextDeltas(docId, newRev, textPathsToClean);
+      }
     }
 
     // Compact if needed (save snapshot every N revisions)
     if (newRev > 0 && newRev % this.snapshotInterval === 0) {
       const { state } = await this.getDoc(docId);
       await this.store.saveSnapshot(docId, state, newRev);
+      // Prune text deltas up to snapshot rev
+      if (textDeltaStore) {
+        await textDeltaStore.pruneTextDeltas(docId, newRev);
+      }
     }
 
     // Build catchup ops - start with correction ops from opsToReturn
@@ -188,11 +311,19 @@ export class LWWServer implements PatchesServer {
       const opsSince = await this.store.listOps(docId, { sinceRev: clientRev });
       const sentPaths = new Set(change.ops.map(o => o.path));
 
-      // Filter out ops client just sent (and their children), sort by ts
+      // Non-text catchup: field values the client hasn't seen, excluding sent paths and text paths
+      const textSentPaths = new Set(textOps.map(o => o.path));
       const catchupOps = opsSince
-        .filter(op => !isPathOrChild(op.path, sentPaths))
+        .filter(op => !isPathOrChild(op.path, sentPaths) && !textSentPaths.has(op.path))
         .sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
       responseOps.push(...catchupOps);
+
+      // Text catchup: composed deltas for text fields the client missed (excluding paths they sent)
+      if (textDeltaStore) {
+        const allTextDeltas = await textDeltaStore.getAllTextDeltasSince(docId, clientRev);
+        const textCatchup = composeTextDeltasByPath(allTextDeltas, textSentPaths);
+        responseOps.push(...textCatchup);
+      }
     }
 
     // Build response using createChange
@@ -202,9 +333,17 @@ export class LWWServer implements PatchesServer {
     });
 
     // Emit notification for committed changes (if any updates were made)
-    if (opsToStore.length > 0) {
+    const broadcastOps = [
+      ...opsToStore,
+      ...transformedTextDeltas.map(({ path, delta }) => ({
+        op: '@txt' as const,
+        path,
+        value: delta,
+      })),
+    ];
+    if (broadcastOps.length > 0) {
       try {
-        const broadcastChange = createChange(currentRev, newRev, opsToStore, {
+        const broadcastChange = createChange(currentRev, newRev, broadcastOps, {
           id: change.id,
           committedAt: serverNow,
         });
@@ -312,9 +451,28 @@ export class LWWServer implements PatchesServer {
   private isVersioningStore(store: LWWStoreBackend): store is LWWStoreBackend & VersioningStoreBackend {
     return 'createVersion' in store;
   }
+
+  /**
+   * Returns the TextDeltaStoreBackend if the store implements it, or null.
+   * Cached after first check for performance.
+   */
+  private _textDeltaStore: TextDeltaStoreBackend | null | undefined;
+  private getTextDeltaStore(): TextDeltaStoreBackend | null {
+    if (this._textDeltaStore === undefined) {
+      this._textDeltaStore = isTextDeltaStore(this.store) ? this.store : null;
+    }
+    return this._textDeltaStore;
+  }
 }
 
 // === Helper Functions ===
+
+/**
+ * Type guard to check if a store implements TextDeltaStoreBackend.
+ */
+function isTextDeltaStore(store: LWWStoreBackend): store is LWWStoreBackend & TextDeltaStoreBackend {
+  return 'appendTextDelta' in store && 'getTextDeltasSince' in store;
+}
 
 /**
  * Check if a path equals or is a child of any sent path.
@@ -326,4 +484,32 @@ function isPathOrChild(path: string, sentPaths: Set<string>): boolean {
     }
   }
   return false;
+}
+
+/**
+ * Composes text deltas by path into `@txt` ops for client catchup.
+ * Groups deltas by path and composes all deltas for each path into a single delta.
+ * Optionally excludes specific paths (e.g., paths the client just sent).
+ */
+function composeTextDeltasByPath(
+  deltas: { path: string; delta: any[]; rev: number }[],
+  excludePaths?: Set<string>
+): { op: string; path: string; value: any }[] {
+  const byPath = new Map<string, Delta>();
+
+  for (const { path, delta } of deltas) {
+    if (excludePaths?.has(path)) continue;
+    const existing = byPath.get(path);
+    if (existing) {
+      byPath.set(path, existing.compose(new Delta(delta)));
+    } else {
+      byPath.set(path, new Delta(delta));
+    }
+  }
+
+  return Array.from(byPath.entries()).map(([path, delta]) => ({
+    op: '@txt',
+    path,
+    value: delta.ops,
+  }));
 }

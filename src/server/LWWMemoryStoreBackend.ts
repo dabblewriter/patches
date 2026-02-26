@@ -11,6 +11,8 @@ import type {
   BranchingStoreBackend,
   ListFieldsOptions,
   LWWStoreBackend,
+  TextDeltaEntry,
+  TextDeltaStoreBackend,
   TombstoneStoreBackend,
   VersioningStoreBackend,
 } from './types.js';
@@ -41,12 +43,18 @@ interface VersionData {
  * ```
  */
 export class LWWMemoryStoreBackend
-  implements LWWStoreBackend, VersioningStoreBackend, TombstoneStoreBackend, BranchingStoreBackend
+  implements
+    LWWStoreBackend,
+    TextDeltaStoreBackend,
+    VersioningStoreBackend,
+    TombstoneStoreBackend,
+    BranchingStoreBackend
 {
   private docs = new Map<string, DocData>();
   private tombstones = new Map<string, DocumentTombstone>();
   private versions = new Map<string, VersionData[]>();
   private branches = new Map<string, Branch>();
+  private textDeltas = new Map<string, TextDeltaEntry[]>();
 
   private getOrCreateDoc(docId: string): DocData {
     let doc = this.docs.get(docId);
@@ -133,6 +141,7 @@ export class LWWMemoryStoreBackend
 
   async deleteDoc(docId: string): Promise<void> {
     this.docs.delete(docId);
+    this.textDeltas.delete(docId);
   }
 
   // === Tombstones ===
@@ -249,6 +258,42 @@ export class LWWMemoryStoreBackend
     await this.updateBranch(branchId, { status: 'closed' });
   }
 
+  // === Text Delta Log ===
+
+  async appendTextDelta(docId: string, path: string, delta: any[], rev: number): Promise<void> {
+    const deltas = this.textDeltas.get(docId) ?? [];
+    deltas.push({ path, delta, rev });
+    this.textDeltas.set(docId, deltas);
+  }
+
+  async getTextDeltasSince(docId: string, path: string, sinceRev: number): Promise<TextDeltaEntry[]> {
+    const deltas = this.textDeltas.get(docId) ?? [];
+    return deltas.filter(d => d.path === path && d.rev > sinceRev).sort((a, b) => a.rev - b.rev);
+  }
+
+  async getAllTextDeltasSince(docId: string, sinceRev: number): Promise<TextDeltaEntry[]> {
+    const deltas = this.textDeltas.get(docId) ?? [];
+    return deltas.filter(d => d.rev > sinceRev).sort((a, b) => a.rev - b.rev);
+  }
+
+  async pruneTextDeltas(docId: string, atOrBeforeRev: number, paths?: string[]): Promise<void> {
+    const deltas = this.textDeltas.get(docId);
+    if (!deltas) return;
+
+    if (paths) {
+      const pathSet = new Set(paths);
+      this.textDeltas.set(
+        docId,
+        deltas.filter(d => !(pathSet.has(d.path) && d.rev <= atOrBeforeRev))
+      );
+    } else {
+      this.textDeltas.set(
+        docId,
+        deltas.filter(d => d.rev > atOrBeforeRev)
+      );
+    }
+  }
+
   // === Testing utilities ===
 
   /**
@@ -259,6 +304,7 @@ export class LWWMemoryStoreBackend
     this.tombstones.clear();
     this.versions.clear();
     this.branches.clear();
+    this.textDeltas.clear();
   }
 
   /**

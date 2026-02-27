@@ -30,7 +30,7 @@ export function mergeServerWithLocal(serverChanges: Change[], localOps: JSONPatc
       if (!local) return serverOp;
 
       const combiner = combinableOps[local.op];
-      if (!combiner) return serverOp; // Non-delta local op - server value already committed
+      if (!combiner) return { ...serverOp, op: local.op, value: local.value }; // Non-delta pending op — preserve newer local value
 
       // Apply local delta to server value
       const mergedValue = combiner.apply(serverOp.value ?? 0, local.value ?? 0);

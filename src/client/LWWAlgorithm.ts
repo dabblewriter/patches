@@ -116,14 +116,17 @@ export class LWWAlgorithm implements ClientAlgorithm {
     // Apply server changes to store (preserves sendingChange and pendingOps)
     await this.store.applyServerChanges(docId, serverChanges);
 
-    // Compute merged changes
+    // Merge server changes with pending ops only (not sending ops, which the
+    // server just committed). Sending ops are already reflected in serverChanges;
+    // including them would cause mergeServerWithLocal to shadow newer pending
+    // ops at the same path (non-delta ops like "replace" drop local values
+    // when the server touches the same path).
     const sendingChange = await this.store.getSendingChange(docId);
     const pendingOps = await this.store.getPendingOps(docId);
-    const localOps = [...(sendingChange?.ops ?? []), ...pendingOps];
-    const mergedChanges = mergeServerWithLocal(serverChanges, localOps);
+    const mergedChanges = mergeServerWithLocal(serverChanges, pendingOps);
 
     if (doc) {
-      const hasPending = localOps.length > 0;
+      const hasPending = pendingOps.length > 0 || !!sendingChange;
       (doc as LWWDoc<T>).applyChanges(mergedChanges, hasPending);
     }
 

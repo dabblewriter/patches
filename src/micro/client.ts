@@ -1,7 +1,7 @@
-import { signal } from 'easy-signal';
 import type { Signal } from 'easy-signal';
-import type { FieldMap, Change, CommitResult, DocState } from './types.js';
+import { signal } from 'easy-signal';
 import { MicroDoc } from './doc.js';
+import type { CommitResult, DocState, FieldMap } from './types.js';
 
 export interface ClientOptions {
   /** Base URL for REST API, e.g. "https://api.example.com" */
@@ -223,7 +223,7 @@ export class MicroClient {
     } catch { return null; }
   }
 
-  private async _idbSave(docId: string, doc: MicroDoc) {
+  private async _idbSave(docId: string, doc: MicroDoc<any>) {
     try {
       const db = await this._idbOpen();
       const tx = db.transaction(['docs', 'pending'], 'readwrite');

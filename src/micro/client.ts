@@ -1,5 +1,4 @@
-import type { Signal } from 'easy-signal';
-import { signal } from 'easy-signal';
+import { signal, type Signal } from 'easy-signal';
 import { MicroDoc } from './doc.js';
 import type { CommitResult, DocState, FieldMap } from './types.js';
 

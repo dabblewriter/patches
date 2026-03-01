@@ -1,14 +1,13 @@
 import { Delta } from '@dabble/delta';
-import type { Field, FieldMap, Change, CommitResult, DocState, DbBackend, ObjectStore, TextLogEntry, ChangeLogEntry } from './types.js';
-import { INC, BIT, TXT, MAX, parseSuffix, REF_THRESHOLD } from './types.js';
-import { applyBitmask, mergeField } from './ops.js';
+import { applyBitmask } from './ops.js';
+import { BIT, INC, MAX, parseSuffix, REF_THRESHOLD, TXT, type Change, type ChangeLogEntry, type CommitResult, type DbBackend, type DocState, type Field, type FieldMap, type ObjectStore, type TextLogEntry } from './types.js';
 
 type Subscriber = (fields: FieldMap, rev: number) => void;
 
 export class MicroServer {
   private _subs = new Map<string, Set<Subscriber>>();
 
-  constructor(private _db: DbBackend, private _objects?: ObjectStore) {}
+  constructor(private _db: DbBackend, private _objects?: ObjectStore) { }
 
   /** Get full document state. */
   async getDoc(docId: string): Promise<DocState> {

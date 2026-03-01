@@ -12,13 +12,13 @@ npm install @dabble/delta easy-signal
 
 Fields use dot-notation paths with optional suffix encoding for special operations:
 
-| Suffix | Type | Behavior |
-|--------|------|----------|
-| _(none)_ | set/del | Last-Write-Wins by timestamp |
-| `+` | increment | Additive — always adds to current value |
-| `~` | bitmask | Combinable — applies on/off mask (15 bits each) |
-| `#` | text | Rich text — OT via Delta compose/transform |
-| `^` | max | Idempotent — keeps the larger value |
+| Suffix   | Type      | Behavior                                        |
+| -------- | --------- | ----------------------------------------------- |
+| _(none)_ | set/del   | Last-Write-Wins by timestamp                    |
+| `+`      | increment | Additive — always adds to current value         |
+| `~`      | bitmask   | Combinable — applies on/off mask (15 bits each) |
+| `#`      | text      | Rich text — OT via Delta compose/transform      |
+| `^`      | max       | Idempotent — keeps the larger value             |
 
 Every field is stored as `{ val: any, ts: number }`.
 
@@ -49,10 +49,10 @@ doc.subscribe(state => {
 // Proxy-based updates
 doc.update(d => {
   d.user.name.set('Alice');
-  d.stats.views.inc();          // +1
-  d.stats.views.inc(10);        // +10
+  d.stats.views.inc(); // +1
+  d.stats.views.inc(10); // +10
   d.flags.bit(bitmask(2, true)); // set bit 2
-  d.content.txt(delta);         // rich text edit
+  d.content.txt(delta); // rich text edit
 });
 
 // Close when done
@@ -77,14 +77,16 @@ app.post('/docs/:id/changes', async (req, res) => {
 });
 
 // WebSocket handler
-wss.on('connection', (ws) => {
+wss.on('connection', ws => {
   let unsubs: (() => void)[] = [];
-  ws.on('message', (data) => {
+  ws.on('message', data => {
     const msg = JSON.parse(data);
     if (msg.type === 'sub') {
-      unsubs.push(server.subscribe(msg.docId, (fields, rev) => {
-        ws.send(JSON.stringify({ type: 'change', docId: msg.docId, fields, rev }));
-      }));
+      unsubs.push(
+        server.subscribe(msg.docId, (fields, rev) => {
+          ws.send(JSON.stringify({ type: 'change', docId: msg.docId, fields, rev }));
+        })
+      );
     }
   });
   ws.on('close', () => unsubs.forEach(fn => fn()));
@@ -118,11 +120,13 @@ interface DbBackend {
 ## Wire Protocol
 
 **REST:**
+
 - `GET /docs/:id` → `{ rev, fields }`
 - `GET /docs/:id/changes?since=rev` → `{ rev, fields }`
 - `POST /docs/:id/changes` ← `{ id, rev, fields }` → `{ rev, fields }`
 
 **WebSocket:**
+
 - Client → Server: `{ type: 'sub', docId }`, `{ type: 'unsub', docId }`
 - Server → Client: `{ type: 'change', docId, fields, rev }`
 

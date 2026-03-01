@@ -1,6 +1,5 @@
 import { Delta } from '@dabble/delta';
-import type { Field, FieldMap } from './types.js';
-import { INC, BIT, TXT, MAX, parseSuffix } from './types.js';
+import { BIT, INC, MAX, parseSuffix, TXT, type Field, type FieldMap } from './types.js';
 
 // --- Bitmask operations (copied from patches) ---
 

@@ -1,9 +1,7 @@
 import { Delta } from '@dabble/delta';
-import { store, batch } from 'easy-signal';
-import type { Store, Unsubscriber, Subscriber } from 'easy-signal';
-import type { Field, FieldMap, Change } from './types.js';
-import { TXT, parseSuffix } from './types.js';
-import { generateId, consolidateOps, mergeField, buildState, effectiveFields } from './ops.js';
+import { batch, store, type Store, type Subscriber, type Unsubscriber } from 'easy-signal';
+import { buildState, consolidateOps, effectiveFields, generateId, mergeField } from './ops.js';
+import { TXT, parseSuffix, type Change, type FieldMap } from './types.js';
 
 // --- Proxy-based updater types ---
 
@@ -25,7 +23,7 @@ interface DeltaUpdates extends BaseUpdates<Delta> {
 export type Updatable<T> = T extends Delta ? DeltaUpdates
   : T extends number ? NumberUpdates
   : T extends string ? StringUpdates
-  : T extends object ? { [K in keyof T]: Updatable<T[K]> } & BaseUpdates<T>
+  : T extends object ? { [K in keyof T]-?: Updatable<NonNullable<T[K]>> } & BaseUpdates<T>
   : BaseUpdates<T>;
 
 function createUpdater<T>(emit: (path: string, suffix: string, val: any) => void, path = ''): Updatable<T> {

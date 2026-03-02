@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JSONPatchOp } from '../../src/json-patch/types';
 import { clearAuthContext, setAuthContext } from '../../src/net/serverContext';
+import { jsonReadable, readStreamAsString } from '../../src/server/jsonReadable';
 import { LWWServer } from '../../src/server/LWWServer';
 import type { LWWStoreBackend, ListFieldsOptions, VersioningStoreBackend } from '../../src/server/types';
 import type { ChangeInput, EditableVersionMetadata } from '../../src/types';
@@ -28,7 +29,9 @@ function createMockStore(): LWWStoreBackend & {
     }),
 
     getSnapshot: vi.fn(async (docId: string) => {
-      return snapshots.get(docId) || null;
+      const snapshot = snapshots.get(docId);
+      if (!snapshot) return null;
+      return { rev: snapshot.rev, state: jsonReadable(JSON.stringify(snapshot.state)) };
     }),
 
     saveSnapshot: vi.fn(async (docId: string, state: any, rev: number) => {
@@ -159,26 +162,35 @@ describe('LWWServer', () => {
 
   describe('getDoc', () => {
     it('should return empty state for non-existent document', async () => {
-      const result = await server.getDoc('nonexistent');
-      expect(result).toEqual({ state: {}, rev: 0 });
+      const json = await readStreamAsString(await server.getDoc('nonexistent'));
+      const result = JSON.parse(json);
+      expect(result.state).toEqual({});
+      expect(result.rev).toBe(0);
     });
 
     it('should return state from snapshot when no fields', async () => {
       mockStore.snapshots.set('doc1', { state: { name: 'Alice' }, rev: 5 });
 
-      const result = await server.getDoc('doc1');
+      const json = await readStreamAsString(await server.getDoc('doc1'));
+      const result = JSON.parse(json);
 
-      expect(result).toEqual({ state: { name: 'Alice' }, rev: 5 });
+      expect(result.state).toEqual({ name: 'Alice' });
+      expect(result.rev).toBe(5);
     });
 
     it('should reconstruct state from snapshot + fields', async () => {
       mockStore.snapshots.set('doc1', { state: { name: 'Alice' }, rev: 5 });
       mockStore.ops.set('doc1:/age', { op: 'replace', path: '/age', ts: 1000, rev: 6, value: 30 });
 
-      const result = await server.getDoc('doc1');
+      const json = await readStreamAsString(await server.getDoc('doc1'));
+      const result = JSON.parse(json);
 
-      expect(result.state).toEqual({ name: 'Alice', age: 30 });
-      expect(result.rev).toBe(6);
+      // State is the snapshot state (not applied with changes yet — changes come separately)
+      expect(result.state).toEqual({ name: 'Alice' });
+      expect(result.rev).toBe(5);
+      // Changes include the ops since snapshot
+      expect(result.changes).toHaveLength(1);
+      expect(result.changes[0].ops).toContainEqual(expect.objectContaining({ path: '/age', value: 30 }));
     });
   });
 
@@ -655,29 +667,27 @@ describe('LWWServer', () => {
         expect(result).toBeNull();
       });
 
-      it('should create version with state', async () => {
-        mockStore.snapshots.set('doc1', { state: { name: 'Alice' }, rev: 2 });
+      it('should create version with metadata only', async () => {
+        mockStore.revs.set('doc1', 2);
 
         const versionId = await versioningServer.captureCurrentVersion('doc1');
 
         expect(versionId).toBeDefined();
         expect(versioningStore.createVersion).toHaveBeenCalledWith(
           'doc1',
-          expect.objectContaining({ id: versionId, origin: 'main', startRev: 2, endRev: 2 }),
-          { name: 'Alice' }
+          expect.objectContaining({ id: versionId, origin: 'main', startRev: 2, endRev: 2 })
         );
       });
 
       it('should accept optional metadata', async () => {
-        mockStore.snapshots.set('doc1', { state: { name: 'Alice' }, rev: 1 });
+        mockStore.revs.set('doc1', 1);
 
         const metadata: EditableVersionMetadata = { name: 'My Version' };
         await versioningServer.captureCurrentVersion('doc1', metadata);
 
         expect(versioningStore.createVersion).toHaveBeenCalledWith(
           'doc1',
-          expect.objectContaining({ origin: 'main', name: 'My Version' }),
-          expect.any(Object)
+          expect.objectContaining({ origin: 'main', name: 'My Version' })
         );
       });
     });
@@ -720,25 +730,6 @@ describe('LWWServer', () => {
 
       expect(mockStore.ops.get('doc1:/name')?.value).toBe('Alice');
       expect(mockStore.ops.get('doc1:/age')?.value).toBe(30);
-    });
-  });
-
-  describe('compaction', () => {
-    it('should save snapshot every N revisions', async () => {
-      const serverWith10 = new LWWServer(mockStore, { snapshotInterval: 10 });
-
-      // Make 10 commits
-      for (let i = 1; i <= 10; i++) {
-        await serverWith10.commitChanges('doc1', [
-          {
-            id: `change${i}`,
-            ops: [{ op: 'replace', path: `/field${i}`, value: i, ts: i * 1000 }],
-          },
-        ]);
-      }
-
-      // Should have saved snapshot at rev 10
-      expect(mockStore.saveSnapshot).toHaveBeenCalledWith('doc1', expect.any(Object), 10);
     });
   });
 

@@ -4,10 +4,6 @@ import type { OTStoreBackend } from '../../../../src/server/types';
 import type { Change } from '../../../../src/types';
 
 // Mock the dependencies
-vi.mock('../../../../src/algorithms/ot/shared/applyChanges');
-vi.mock('../../../../src/algorithms/ot/server/createVersion');
-vi.mock('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-vi.mock('../../../../src/algorithms/ot/server/getStateAtRevision');
 vi.mock('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
 vi.mock('../../../../src/algorithms/ot/server/transformIncomingChanges');
 
@@ -32,40 +28,14 @@ describe('commitChanges', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
 
-    // Mock applyChanges
-    const { applyChanges } = await import('../../../../src/algorithms/ot/shared/applyChanges');
-    vi.mocked(applyChanges).mockImplementation((state: any, changes: any) => ({
-      ...(state || {}),
-      appliedChanges: changes.length,
-    }));
-
-    // Mock createVersion
-    const { createVersion } = await import('../../../../src/algorithms/ot/server/createVersion');
-    vi.mocked(createVersion).mockResolvedValue(undefined);
-
-    // Mock getSnapshotAtRevision
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [],
-    });
-
-    // Mock getStateAtRevision
-    const { getStateAtRevision } = await import('../../../../src/algorithms/ot/server/getStateAtRevision');
-    vi.mocked(getStateAtRevision).mockResolvedValue({
-      state: { stateAtBaseRev: true },
-      rev: 0,
-    });
-
     // Mock handleOfflineSessionsAndBatches
     const { handleOfflineSessionsAndBatches } =
       await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
-    vi.mocked(handleOfflineSessionsAndBatches).mockImplementation(async (store, timeout, docId, changes) => changes);
+    vi.mocked(handleOfflineSessionsAndBatches).mockImplementation(async () => {});
 
     // Mock transformIncomingChanges
     const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
-    vi.mocked(transformIncomingChanges).mockImplementation((changes, state, committed, currentRev) => {
+    vi.mocked(transformIncomingChanges).mockImplementation((changes, committed, currentRev) => {
       return changes.map((change, index) => ({
         ...change,
         rev: currentRev + index + 1,
@@ -73,8 +43,15 @@ describe('commitChanges', () => {
     });
 
     mockStore = {
-      listChanges: vi.fn(),
+      getCurrentRev: vi.fn().mockResolvedValue(0),
+      listChanges: vi.fn().mockResolvedValue([]),
       saveChanges: vi.fn(),
+      // Versioning methods (not used in commitChanges but required by interface)
+      createVersion: vi.fn(),
+      listVersions: vi.fn(),
+      loadVersionState: vi.fn(),
+      updateVersion: vi.fn(),
+      deleteDoc: vi.fn(),
     } as any;
   });
 
@@ -87,17 +64,10 @@ describe('commitChanges', () => {
   });
 
   it('should fill in baseRev when missing (apply to latest)', async () => {
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [createChange('existing', 5, 0)], // Server is at rev 5
-    });
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(5);
 
     // Change without baseRev
     const changes = [{ id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: Date.now() }] as Change[];
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
@@ -107,20 +77,13 @@ describe('commitChanges', () => {
   });
 
   it('should fill in baseRev for multiple changes when all omit it', async () => {
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [createChange('existing', 3, 0)], // Server is at rev 3
-    });
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(3);
 
     // Multiple changes without baseRev
     const changes = [
       { id: '1', ops: [{ op: 'add', path: '/foo', value: 'bar' }], createdAt: Date.now() },
       { id: '2', ops: [{ op: 'add', path: '/baz', value: 'qux' }], createdAt: Date.now() },
     ] as Change[];
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
@@ -142,12 +105,7 @@ describe('commitChanges', () => {
   });
 
   it('should throw error when baseRev is ahead of server', async () => {
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [createChange('existing', 1, 0)],
-    });
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(1);
 
     const changes = [createChange('1', 1, 5)]; // baseRev ahead of server
 
@@ -157,12 +115,7 @@ describe('commitChanges', () => {
   });
 
   it('should throw error when trying to create document that already exists', async () => {
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [createChange('existing', 1, 0)],
-    });
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(1);
 
     const changes = [createChange('1', 1, 0)];
     changes[0].ops = [{ op: 'add', path: '', value: {} }]; // Root creation
@@ -173,18 +126,11 @@ describe('commitChanges', () => {
   });
 
   it('should allow root creation when part of initial batch', async () => {
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [createChange('existing', 1, 0)],
-    });
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(1);
 
     const changes = [createChange('1', 2, 0)]; // rev > 1 indicates part of initial batch
     changes[0].batchId = 'initial-batch';
     changes[0].ops = [{ op: 'add', path: '', value: {} }];
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
@@ -192,54 +138,21 @@ describe('commitChanges', () => {
   });
 
   it('should rebase baseRev:0 granular changes to head on existing docs', async () => {
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    const { getStateAtRevision } = await import('../../../../src/algorithms/ot/server/getStateAtRevision');
-
-    // Document exists with 5 revisions
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [
-        createChange('c1', 1, 0),
-        createChange('c2', 2, 1),
-        createChange('c3', 3, 2),
-        createChange('c4', 4, 3),
-        createChange('c5', 5, 4),
-      ],
-    });
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(5);
 
     // Granular change with explicit baseRev: 0 (never-synced client)
     const changes = [createChange('new', 1, 0)];
     changes[0].ops = [{ op: 'replace', path: '/darkMode', value: true }];
 
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
-
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    // Should rebase to head (rev 5) - getStateAtRevision called with currentRev, not 0
-    expect(getStateAtRevision).toHaveBeenCalledWith(mockStore, 'doc1', 5);
-
-    // Returned change should have baseRev rebased to 5
+    // Should rebase to head (rev 5)
     expect(result.newChanges).toHaveLength(1);
     expect(result.newChanges[0].baseRev).toBe(5);
-
-    // Should return a synthetic catchup change with full state (root replace)
-    // so the client can jump from rev 0 to rev 5 without receiving 5 individual changes
-    expect(result.catchupChanges).toHaveLength(1);
-    expect(result.catchupChanges[0].ops).toHaveLength(1);
-    expect(result.catchupChanges[0].ops[0].op).toBe('replace');
-    expect(result.catchupChanges[0].ops[0].path).toBe('');
-    expect(result.catchupChanges[0].rev).toBe(5);
-    expect(result.catchupChanges[0].baseRev).toBe(0);
   });
 
   it('should still throw error for root replace with baseRev:0 on existing docs', async () => {
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [createChange('existing', 5, 0)],
-    });
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(5);
 
     // Root replace with explicit baseRev: 0
     const changes = [createChange('1', 1, 0)];
@@ -250,179 +163,9 @@ describe('commitChanges', () => {
     );
   });
 
-  it('should assign correct rev numbers to rebased changes', async () => {
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [createChange('existing', 10, 0)], // Server at rev 10
-    });
-
-    // Multiple granular changes with baseRev: 0
-    const changes = [
-      { id: '1', baseRev: 0, ops: [{ op: 'replace', path: '/a', value: 1 }], createdAt: Date.now() },
-      { id: '2', baseRev: 0, ops: [{ op: 'replace', path: '/b', value: 2 }], createdAt: Date.now() },
-    ] as Change[];
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
-
-    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
-
-    // Revs should be based on rebased baseRev (10), so 11 and 12
-    expect(result.newChanges[0].rev).toBe(11);
-    expect(result.newChanges[1].rev).toBe(12);
-    expect(result.newChanges[0].baseRev).toBe(10);
-    expect(result.newChanges[1].baseRev).toBe(10);
-  });
-
-  it('should filter soft empty container adds when rebasing baseRev:0 on existing docs', async () => {
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    const { applyChanges } = await import('../../../../src/algorithms/ot/shared/applyChanges');
-
-    // Mock state that has data at /settings
-    vi.mocked(applyChanges).mockReturnValue({ settings: { theme: 'dark' } });
-
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: {},
-      rev: 0,
-      changes: [createChange('existing', 5, 0)],
-    });
-
-    // Change with empty object add to existing path (implicit soft write)
-    const changes = [
-      {
-        id: '1',
-        baseRev: 0,
-        ops: [
-          { op: 'add', path: '/settings', value: {} }, // Should be filtered - path exists
-          { op: 'add', path: '/settings/newProp', value: 'test' }, // Should remain
-        ],
-        createdAt: Date.now(),
-      },
-    ] as Change[];
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
-
-    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
-
-    // Only the non-soft op should remain
-    expect(result.newChanges).toHaveLength(1);
-    expect(result.newChanges[0].ops).toHaveLength(1);
-    expect(result.newChanges[0].ops[0].path).toBe('/settings/newProp');
-  });
-
-  it('should filter explicit soft ops when rebasing baseRev:0 on existing docs', async () => {
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    const { applyChanges } = await import('../../../../src/algorithms/ot/shared/applyChanges');
-
-    // Mock state that has data at /config
-    vi.mocked(applyChanges).mockReturnValue({ config: 'existing' });
-
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: {},
-      rev: 0,
-      changes: [createChange('existing', 3, 0)],
-    });
-
-    // Change with explicit soft flag
-    const changes = [
-      {
-        id: '1',
-        baseRev: 0,
-        ops: [
-          { op: 'replace', path: '/config', value: 'new', soft: true }, // Should be filtered
-          { op: 'add', path: '/other', value: 'data' }, // Should remain
-        ],
-        createdAt: Date.now(),
-      },
-    ] as Change[];
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
-
-    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
-
-    expect(result.newChanges).toHaveLength(1);
-    expect(result.newChanges[0].ops).toHaveLength(1);
-    expect(result.newChanges[0].ops[0].path).toBe('/other');
-  });
-
-  it('should keep soft writes to non-existent paths when rebasing baseRev:0', async () => {
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    const { applyChanges } = await import('../../../../src/algorithms/ot/shared/applyChanges');
-
-    // Mock state without the target paths
-    vi.mocked(applyChanges).mockReturnValue({ existingData: true });
-
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: {},
-      rev: 0,
-      changes: [createChange('existing', 2, 0)],
-    });
-
-    // Soft writes to paths that don't exist
-    const changes = [
-      {
-        id: '1',
-        baseRev: 0,
-        ops: [
-          { op: 'add', path: '/newContainer', value: {} }, // Should remain - path doesn't exist
-          { op: 'add', path: '/anotherNew', value: [], soft: true }, // Should remain - path doesn't exist
-        ],
-        createdAt: Date.now(),
-      },
-    ] as Change[];
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
-
-    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
-
-    expect(result.newChanges).toHaveLength(1);
-    expect(result.newChanges[0].ops).toHaveLength(2);
-  });
-
-  it('should remove changes with no ops after soft write filtering', async () => {
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    const { applyChanges } = await import('../../../../src/algorithms/ot/shared/applyChanges');
-
-    // Mock state that has data at the target path
-    vi.mocked(applyChanges).mockReturnValue({ settings: {} });
-
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: {},
-      rev: 0,
-      changes: [createChange('existing', 1, 0)],
-    });
-
-    // Change with only soft ops that will all be filtered
-    const changes = [
-      {
-        id: '1',
-        baseRev: 0,
-        ops: [{ op: 'add', path: '/settings', value: {} }], // Will be filtered
-        createdAt: Date.now(),
-      },
-      {
-        id: '2',
-        baseRev: 0,
-        ops: [{ op: 'add', path: '/newPath', value: 'data' }], // Will remain
-        createdAt: Date.now(),
-      },
-    ] as Change[];
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
-
-    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
-
-    // Only the second change should remain
-    expect(result.newChanges).toHaveLength(1);
-    expect(result.newChanges[0].id).toBe('2');
-  });
-
   it('should normalize createdAt timestamps to be in the past', async () => {
     const futureTime = createTimestamp(10000); // 10 seconds in the future
     const changes = [createChange('1', 1, 0, futureTime)];
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
@@ -430,26 +173,20 @@ describe('commitChanges', () => {
     expect(result.newChanges[0].createdAt).toBeLessThanOrEqual(Date.now());
   });
 
-  it('should create version when last change is older than session timeout', async () => {
+  it('should call store.createVersion when last change is older than session timeout', async () => {
     const oldTime = createTimestamp(-sessionTimeoutMillis - 1000);
     const lastChange = createChange('old', 1, 0, oldTime);
 
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [lastChange],
-    });
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(1);
+    vi.mocked(mockStore.listChanges)
+      .mockResolvedValueOnce([lastChange]) // First call: reverse/limit for session check
+      .mockResolvedValueOnce([]); // Second call: committed changes for transformation
 
     const changes = [createChange('1', 2, 1)];
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
-    const { createVersion } = await import('../../../../src/algorithms/ot/server/createVersion');
-    expect(createVersion).toHaveBeenCalledWith(mockStore, 'doc1', expect.objectContaining({ appliedChanges: 1 }), [
-      lastChange,
-    ]);
+    expect(mockStore.createVersion).toHaveBeenCalledWith('doc1', expect.any(Object), [lastChange]);
   });
 
   it('should filter out already committed changes', async () => {
@@ -458,15 +195,10 @@ describe('commitChanges', () => {
 
     const changes = [existingChange, newChange];
 
-    // Mock server state to have existing changes up to rev 2
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [createChange('server1', 1, 0), existingChange],
-    });
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([existingChange]);
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(2);
+    vi.mocked(mockStore.listChanges)
+      .mockResolvedValueOnce([]) // First call: reverse/limit for session check
+      .mockResolvedValueOnce([existingChange]); // Second call: committed changes
 
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
@@ -479,15 +211,10 @@ describe('commitChanges', () => {
     const existingChange = createChange('existing', 2, 1);
     const changes = [existingChange];
 
-    // Mock server state to have existing changes up to rev 2
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [createChange('server1', 1, 0), existingChange],
-    });
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([existingChange]);
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(2);
+    vi.mocked(mockStore.listChanges)
+      .mockResolvedValueOnce([]) // First call: reverse/limit for session check
+      .mockResolvedValueOnce([existingChange]); // Second call: committed changes
 
     const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
@@ -512,10 +239,7 @@ describe('commitChanges', () => {
       sessionTimeoutMillis,
       'doc1',
       changes,
-      0,
-      'offline-batch',
-      'main', // Fast-forward: origin is 'main'
-      undefined // maxStorageBytes
+      'main' // Fast-forward: origin is 'main'
     );
   });
 
@@ -525,7 +249,9 @@ describe('commitChanges', () => {
     const committedChange = createChange('committed', 1, 0);
 
     // Has committed changes = divergent with origin 'offline-branch'
-    vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
+    vi.mocked(mockStore.listChanges)
+      .mockResolvedValueOnce([]) // First call: reverse/limit for session check
+      .mockResolvedValueOnce([committedChange]); // Second call: committed changes
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
@@ -536,10 +262,7 @@ describe('commitChanges', () => {
       sessionTimeoutMillis,
       'doc1',
       changes,
-      0,
-      'offline-batch',
-      'offline-branch', // Divergent: origin is 'offline-branch'
-      undefined // maxStorageBytes
+      'offline-branch' // Divergent: origin is 'offline-branch'
     );
   });
 
@@ -559,77 +282,38 @@ describe('commitChanges', () => {
       sessionTimeoutMillis,
       'doc1',
       changes,
-      0,
-      undefined,
-      'main', // Fast-forward: origin is 'main'
-      undefined // maxStorageBytes
+      'main' // Fast-forward: origin is 'main'
     );
   });
 
-  it('should handle offline changes when timestamp is older than session timeout (divergent)', async () => {
-    const oldTime = createTimestamp(-sessionTimeoutMillis - 1000);
-    const changes = [createChange('1', 1, 0, oldTime)];
-    const committedChange = createChange('committed', 1, 0);
-
-    // Has committed changes = divergent with origin 'offline-branch'
-    vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
-
-    await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
-
-    const { handleOfflineSessionsAndBatches } =
-      await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
-    expect(handleOfflineSessionsAndBatches).toHaveBeenCalledWith(
-      mockStore,
-      sessionTimeoutMillis,
-      'doc1',
-      changes,
-      0,
-      undefined,
-      'offline-branch', // Divergent: origin is 'offline-branch'
-      undefined // maxStorageBytes
-    );
-  });
-
-  it('should transform changes against committed changes', async () => {
+  it('should transform changes against committed changes (stateless)', async () => {
     const committedChange = createChange('committed', 2, 0);
     const incomingChanges = [createChange('incoming', 1, 0)];
 
-    vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
-
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [committedChange],
-    });
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(2);
+    vi.mocked(mockStore.listChanges)
+      .mockResolvedValueOnce([]) // First call: reverse/limit for session check
+      .mockResolvedValueOnce([committedChange]); // Second call: committed changes
 
     await commitChanges(mockStore, 'doc1', incomingChanges, sessionTimeoutMillis);
 
     const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
-    expect(transformIncomingChanges).toHaveBeenCalledWith(
-      incomingChanges,
-      expect.objectContaining({ stateAtBaseRev: true }),
-      [committedChange],
-      2,
-      undefined
-    );
+    // Stateless: no state parameter, just changes, committed, currentRev, forceCommit
+    expect(transformIncomingChanges).toHaveBeenCalledWith(incomingChanges, [committedChange], 2, undefined);
   });
 
   it('should pass forceCommit option to transformIncomingChanges', async () => {
     const changes = [createChange('1', 1, 0)];
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis, { forceCommit: true });
 
     const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
-    expect(transformIncomingChanges).toHaveBeenCalledWith(changes, expect.any(Object), [], 0, true);
+    expect(transformIncomingChanges).toHaveBeenCalledWith(changes, [], 0, true);
   });
 
   it('should save transformed changes to store', async () => {
     const changes = [createChange('1', 1, 0)];
     const transformedChanges = [{ ...changes[0], rev: 1 }];
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
     vi.mocked(transformIncomingChanges).mockReturnValue(transformedChanges);
@@ -641,8 +325,6 @@ describe('commitChanges', () => {
 
   it('should not save when no transformed changes', async () => {
     const changes = [createChange('1', 1, 0)];
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
     vi.mocked(transformIncomingChanges).mockReturnValue([]);
@@ -657,7 +339,10 @@ describe('commitChanges', () => {
     const incomingChange = createChange('incoming', 1, 0);
     const transformedChange = { ...incomingChange, rev: 3 };
 
-    vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(2);
+    vi.mocked(mockStore.listChanges)
+      .mockResolvedValueOnce([]) // First call: reverse/limit for session check
+      .mockResolvedValueOnce([committedChange]); // Second call: committed changes
 
     const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
     vi.mocked(transformIncomingChanges).mockReturnValue([transformedChange]);
@@ -672,56 +357,12 @@ describe('commitChanges', () => {
     const changes = [createChange('1', 1, 0)];
     changes[0].batchId = 'test-batch';
 
-    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
-
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
+    // The second listChanges call should filter by batchId
     expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', {
       startAfter: 0,
       withoutBatchId: 'test-batch',
     });
-  });
-
-  it('should handle complex scenario with multiple changes and offline processing', async () => {
-    const oldTime = createTimestamp(-sessionTimeoutMillis - 1000);
-    const recentTime = createTimestamp(-1000);
-
-    const committedChange = createChange('committed', 2, 0, oldTime);
-    // Use baseRev: 2 to avoid triggering the synthetic catchup optimization
-    // (which happens when baseRev === 0 && currentRev > 0)
-    const incomingChanges = [createChange('incoming1', 3, 2, oldTime), createChange('incoming2', 4, 2, recentTime)];
-
-    const processedChanges = [createChange('processed', 3, 2, oldTime)];
-    const transformedChanges = [{ ...processedChanges[0], rev: 3 }];
-
-    const { getSnapshotAtRevision } = await import('../../../../src/algorithms/ot/server/getSnapshotAtRevision');
-    vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 0,
-      changes: [committedChange],
-    });
-
-    vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
-
-    const { handleOfflineSessionsAndBatches } =
-      await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
-    vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue(processedChanges);
-
-    const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
-    vi.mocked(transformIncomingChanges).mockReturnValue(transformedChanges);
-
-    const result = await commitChanges(mockStore, 'doc1', incomingChanges, sessionTimeoutMillis);
-
-    expect(handleOfflineSessionsAndBatches).toHaveBeenCalled();
-    expect(transformIncomingChanges).toHaveBeenCalledWith(
-      processedChanges,
-      expect.any(Object),
-      [committedChange],
-      2,
-      undefined
-    );
-    expect(mockStore.saveChanges).toHaveBeenCalledWith('doc1', transformedChanges);
-    expect(result.catchupChanges).toEqual([committedChange]);
-    expect(result.newChanges).toEqual(transformedChanges);
   });
 });

@@ -68,9 +68,16 @@ export class OTBranchManager implements BranchManager {
     const branchDocId = await generateBranchId(this.store, docId);
     const now = Date.now();
 
-    // Create an initial version at the branch point rev (for snapshotting/large docs)
+    // Initialize the branch document with a root-replace change containing the source state
+    const initialChange = createChange(0, 1, [{ op: 'replace' as const, path: '', value: stateAtRev }], {
+      createdAt: now,
+      committedAt: now,
+    });
+    await this.store.saveChanges(branchDocId, [initialChange]);
+
+    // Create an initial version at the branch point rev (metadata + changes only, no state)
     const initialVersionMetadata = createVersionMetadata({
-      origin: 'main', // Branch doc versions are 'main' until merged
+      origin: 'main',
       startedAt: now,
       endedAt: now,
       endRev: rev,
@@ -79,7 +86,7 @@ export class OTBranchManager implements BranchManager {
       groupId: branchDocId,
       branchName: metadata?.name,
     });
-    await this.store.createVersion(branchDocId, initialVersionMetadata, stateAtRev, []);
+    await this.store.createVersion(branchDocId, initialVersionMetadata, [initialChange]);
 
     // Create the branch metadata record
     const branch = createBranchRecord(branchDocId, docId, rev, metadata);
@@ -155,9 +162,8 @@ export class OTBranchManager implements BranchManager {
         branchName: branch.name, // Keep branchName for traceability
         parentId: lastVersionId,
       });
-      const state = await this.store.loadVersionState(branchId, v.id);
       const changes = await this.store.loadVersionChanges?.(branchId, v.id);
-      await this.store.createVersion(sourceDocId, newVersionMetadata, state, changes);
+      await this.store.createVersion(sourceDocId, newVersionMetadata, changes);
       lastVersionId = newVersionMetadata.id;
     }
 

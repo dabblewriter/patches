@@ -1,3 +1,4 @@
+import { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { Branch, BranchStatus, Change, EditableBranchMetadata } from '../types.js';
 import type { BranchManager } from './BranchManager.js';
 import {
@@ -9,6 +10,7 @@ import {
   generateBranchId,
   wrapMergeCommit,
 } from './branchUtils.js';
+import { readStreamAsString } from './jsonReadable.js';
 import type { LWWServer } from './LWWServer.js';
 import type { BranchingStoreBackend, LWWStoreBackend } from './types.js';
 
@@ -63,15 +65,23 @@ export class LWWBranchManager implements BranchManager {
   async createBranch(docId: string, atPoint: number, metadata?: EditableBranchMetadata): Promise<string> {
     await assertNotABranch(this.store, docId);
 
-    // Get current state and all ops metadata
-    const doc = await this.lwwServer.getDoc(docId);
+    // Build state directly from store (no streaming round-trip)
+    const snapshot = await this.store.getSnapshot(docId);
+    const baseRev = snapshot?.rev ?? 0;
+    let state: any = snapshot ? JSON.parse(await readStreamAsString(snapshot.state)) : {};
+
     const ops = await this.store.listOps(docId);
+    const opsAfterSnapshot = ops.filter(op => (op.rev ?? 0) > baseRev);
+    if (opsAfterSnapshot.length > 0) {
+      state = new JSONPatch(opsAfterSnapshot).apply(state);
+    }
+    const rev = ops.length > 0 ? Math.max(baseRev, ...ops.map(op => op.rev ?? 0)) : baseRev;
 
     // Generate branch document ID
     const branchDocId = await generateBranchId(this.store, docId);
 
     // Initialize the branch document with current state as snapshot
-    await this.store.saveSnapshot(branchDocId, doc.state, doc.rev);
+    await this.store.saveSnapshot(branchDocId, state, rev);
 
     // Copy ops metadata to the branch document (preserving timestamps)
     if (ops.length > 0) {

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { readStreamAsString } from '../../src/server/jsonReadable.js';
 import { LWWMemoryStoreBackend } from '../../src/server/LWWMemoryStoreBackend.js';
 import type { Branch, VersionMetadata } from '../../src/types.js';
 
@@ -22,14 +23,20 @@ describe('LWWMemoryStoreBackend', () => {
     it('saves and retrieves a snapshot', async () => {
       await store.saveSnapshot('doc1', { name: 'Alice' }, 5);
       const snapshot = await store.getSnapshot('doc1');
-      expect(snapshot).toEqual({ state: { name: 'Alice' }, rev: 5 });
+      expect(snapshot).not.toBeNull();
+      expect(snapshot!.rev).toBe(5);
+      const state = JSON.parse(await readStreamAsString(snapshot!.state));
+      expect(state).toEqual({ name: 'Alice' });
     });
 
     it('overwrites previous snapshot', async () => {
       await store.saveSnapshot('doc1', { name: 'Alice' }, 5);
       await store.saveSnapshot('doc1', { name: 'Bob' }, 10);
       const snapshot = await store.getSnapshot('doc1');
-      expect(snapshot).toEqual({ state: { name: 'Bob' }, rev: 10 });
+      expect(snapshot).not.toBeNull();
+      expect(snapshot!.rev).toBe(10);
+      const state = JSON.parse(await readStreamAsString(snapshot!.state));
+      expect(state).toEqual({ name: 'Bob' });
     });
 
     it('removes fields up to snapshot rev after save', async () => {
@@ -284,7 +291,10 @@ describe('LWWMemoryStoreBackend', () => {
 
       // getDoc flow: load snapshot, then fields since snapshot
       const snapshot = await store.getSnapshot('doc1');
-      expect(snapshot).toEqual({ state: { name: 'Alice', email: 'alice@example.com' }, rev: 2 });
+      expect(snapshot).not.toBeNull();
+      expect(snapshot!.rev).toBe(2);
+      const snapshotState = JSON.parse(await readStreamAsString(snapshot!.state));
+      expect(snapshotState).toEqual({ name: 'Alice', email: 'alice@example.com' });
 
       const fieldsSince = await store.listOps('doc1', { sinceRev: snapshot!.rev });
       expect(fieldsSince).toHaveLength(1);
@@ -335,26 +345,25 @@ describe('LWWMemoryStoreBackend', () => {
 
   describe('versioning', () => {
     describe('createVersion', () => {
-      it('stores version metadata and state', async () => {
-        await store.createVersion('doc1', versionMetadata('v1', 5), { name: 'Alice' });
+      it('stores version metadata', async () => {
+        await store.createVersion('doc1', versionMetadata('v1', 5));
 
         const versions = store.getVersions('doc1');
         expect(versions).toHaveLength(1);
         expect(versions![0].metadata.id).toBe('v1');
         expect(versions![0].metadata.endRev).toBe(5);
-        expect(versions![0].state).toEqual({ name: 'Alice' });
       });
 
       it('stores multiple versions', async () => {
-        await store.createVersion('doc1', versionMetadata('v1', 5), { name: 'Alice' });
-        await store.createVersion('doc1', versionMetadata('v2', 10), { name: 'Bob' });
+        await store.createVersion('doc1', versionMetadata('v1', 5));
+        await store.createVersion('doc1', versionMetadata('v2', 10));
 
         const versions = store.getVersions('doc1');
         expect(versions).toHaveLength(2);
       });
 
       it('accepts optional metadata', async () => {
-        await store.createVersion('doc1', versionMetadata('v1', 5, { name: 'My Version' }), { name: 'Alice' });
+        await store.createVersion('doc1', versionMetadata('v1', 5, { name: 'My Version' }));
 
         const versions = store.getVersions('doc1');
         expect(versions![0].metadata.name).toBe('My Version');
@@ -364,9 +373,9 @@ describe('LWWMemoryStoreBackend', () => {
     describe('listVersions', () => {
       beforeEach(async () => {
         // Create versions at different revs
-        await store.createVersion('doc1', versionMetadata('v1', 5, { name: 'Version 1' }), { v: 1 });
-        await store.createVersion('doc1', versionMetadata('v2', 10, { name: 'Version 2' }), { v: 2 });
-        await store.createVersion('doc1', versionMetadata('v3', 15, { name: 'Version 3' }), { v: 3 });
+        await store.createVersion('doc1', versionMetadata('v1', 5, { name: 'Version 1' }));
+        await store.createVersion('doc1', versionMetadata('v2', 10, { name: 'Version 2' }));
+        await store.createVersion('doc1', versionMetadata('v3', 15, { name: 'Version 3' }));
       });
 
       it('returns all versions for a document', async () => {
@@ -440,11 +449,11 @@ describe('LWWMemoryStoreBackend', () => {
     });
 
     describe('loadVersionState', () => {
-      it('returns state for existing version', async () => {
-        await store.createVersion('doc1', versionMetadata('v1', 5), { name: 'Alice' });
+      it('returns undefined since state is not stored', async () => {
+        await store.createVersion('doc1', versionMetadata('v1', 5));
 
         const state = await store.loadVersionState('doc1', 'v1');
-        expect(state).toEqual({ name: 'Alice' });
+        expect(state).toBeUndefined();
       });
 
       it('returns undefined for non-existent version', async () => {
@@ -460,7 +469,7 @@ describe('LWWMemoryStoreBackend', () => {
 
     describe('updateVersion', () => {
       it('modifies version metadata', async () => {
-        await store.createVersion('doc1', versionMetadata('v1', 5), { name: 'Alice' });
+        await store.createVersion('doc1', versionMetadata('v1', 5));
 
         await store.updateVersion('doc1', 'v1', { name: 'Updated Name' });
 
@@ -566,7 +575,7 @@ describe('LWWMemoryStoreBackend', () => {
 
   describe('testing utilities (extended)', () => {
     it('clear() also removes versions and branches', async () => {
-      await store.createVersion('doc1', versionMetadata('v1', 5), { name: 'Alice' });
+      await store.createVersion('doc1', versionMetadata('v1', 5));
       await store.createBranch({
         id: 'branch1',
         docId: 'doc1',
@@ -585,7 +594,7 @@ describe('LWWMemoryStoreBackend', () => {
     });
 
     it('getVersions() returns versions for inspection', async () => {
-      await store.createVersion('doc1', versionMetadata('v1', 5), { name: 'Alice' });
+      await store.createVersion('doc1', versionMetadata('v1', 5));
 
       const versions = store.getVersions('doc1');
       expect(versions).toHaveLength(1);

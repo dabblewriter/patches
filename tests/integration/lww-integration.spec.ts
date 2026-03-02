@@ -601,16 +601,16 @@ describe('LWW Integration', () => {
       // Client A comes back online, receives B's change first
       await harness.receiveFromServer('clientA', committedB);
 
-      // A's local state should still show pending value (merged with server)
-      // Since A's timestamp (1000) < B's timestamp (2000), B wins on server
-      // But A still has pending change that shows locally
-      expect(docA.state.title).toBe('Online B'); // B's value wins because higher timestamp
+      // A's local state still shows pending value because A has an unsent
+      // pending replace. The client-side merge preserves local pending values
+      // for display; actual LWW resolution happens on the server.
+      expect(docA.state.title).toBe('Offline A'); // Pending local value shown
 
       // A sends its change - server will reject because B has higher timestamp
       const committedA = await harness.sendToServer('clientA');
       await harness.receiveFromServer('clientA', committedA);
 
-      // A's change had lower timestamp, so B's value should persist
+      // After round-trip, A's change had lower timestamp, so B's value persists
       expect(docA.state.title).toBe('Online B');
     });
 

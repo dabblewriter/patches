@@ -306,7 +306,10 @@ export class Patches {
   ): Promise<void> {
     const prev = this._changeQueues.get(docId) ?? Promise.resolve();
     const current = prev.then(() => this._processDocChange(docId, ops, doc, algorithm, metadata));
-    this._changeQueues.set(docId, current.catch(() => {}));
+    this._changeQueues.set(
+      docId,
+      current.catch(() => {})
+    );
     return current;
   }
 

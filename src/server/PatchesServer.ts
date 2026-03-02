@@ -5,7 +5,6 @@ import type {
   CommitChangesOptions,
   DeleteDocOptions,
   EditableVersionMetadata,
-  PatchesState,
 } from '../types.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 
@@ -30,17 +29,18 @@ export interface CommitResult {
  */
 export interface PatchesServer {
   /**
-   * Get the current state of a document.
+   * Get the current state of a document as a ReadableStream of JSON.
+   * The stream contains the full JSON envelope: `{"state":...,"rev":N,"changes":[...]}`.
    * @param docId - The document ID.
-   * @returns The document state and revision, or `{ state: {}, rev: 0 }` if not found.
+   * @returns A ReadableStream of JSON string chunks.
    */
-  getDoc(docId: string): Promise<PatchesState>;
+  getDoc(docId: string): Promise<ReadableStream<string>>;
 
   /**
    * Get changes that occurred after a specific revision.
    * @param docId - The document ID.
    * @param rev - The revision number to get changes after.
-   * @returns Array of changes after the specified revision, in revision order.
+   * @returns Array of changes after the given revision.
    */
   getChangesSince(docId: string, rev: number): Promise<Change[]>;
 

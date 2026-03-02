@@ -40,10 +40,10 @@ describe('createVersion', () => {
     const mockVersion = { ...expectedVersionData, id: 'version-123' };
     mockCreateVersionMetadata.mockReturnValue(mockVersion);
 
-    const result = await createVersion(mockStore, 'doc1', { text: 'world' }, changes);
+    const result = await createVersion(mockStore, 'doc1', changes);
 
     expect(mockCreateVersionMetadata).toHaveBeenCalledWith(expectedVersionData);
-    expect(mockStore.createVersion).toHaveBeenCalledWith('doc1', mockVersion, { text: 'world' }, changes);
+    expect(mockStore.createVersion).toHaveBeenCalledWith('doc1', mockVersion, changes);
     expect(result).toBe(mockVersion);
   });
 
@@ -72,15 +72,37 @@ describe('createVersion', () => {
     const mockVersion = { ...expectedVersionData, id: 'version-456' };
     mockCreateVersionMetadata.mockReturnValue(mockVersion);
 
-    const result = await createVersion(mockStore, 'doc2', { title: 'Document' }, changes, additionalMetadata);
+    const result = await createVersion(mockStore, 'doc2', changes, { metadata: additionalMetadata });
 
     expect(mockCreateVersionMetadata).toHaveBeenCalledWith(expectedVersionData);
-    expect(mockStore.createVersion).toHaveBeenCalledWith('doc2', mockVersion, { title: 'Document' }, changes);
+    expect(mockStore.createVersion).toHaveBeenCalledWith('doc2', mockVersion, changes);
+    expect(result).toBe(mockVersion);
+  });
+
+  it('should include parentId in version metadata when provided', async () => {
+    const changes = [createChange(4, 5, [{ op: 'add', path: '/x', value: 1 }])];
+    changes[0].createdAt = 3000;
+
+    const expectedVersionData = {
+      origin: main,
+      startedAt: 3000,
+      endedAt: 3000,
+      endRev: 5,
+      startRev: 5,
+      parentId: 'parent-version-id',
+    };
+
+    const mockVersion = { ...expectedVersionData, id: 'version-child' };
+    mockCreateVersionMetadata.mockReturnValue(mockVersion);
+
+    const result = await createVersion(mockStore, 'doc1', changes, { parentId: 'parent-version-id' });
+
+    expect(mockCreateVersionMetadata).toHaveBeenCalledWith(expectedVersionData);
     expect(result).toBe(mockVersion);
   });
 
   it('should return undefined for empty changes array', async () => {
-    const result = await createVersion(mockStore, 'doc1', { text: 'hello' }, []);
+    const result = await createVersion(mockStore, 'doc1', []);
 
     expect(result).toBeUndefined();
     expect(mockCreateVersionMetadata).not.toHaveBeenCalled();
@@ -91,7 +113,7 @@ describe('createVersion', () => {
     const changes = [createChange(0, 1, [{ op: 'add', path: '/text', value: 'hello' }])];
     changes[0].rev = undefined as any;
 
-    await expect(createVersion(mockStore, 'doc1', { text: 'hello' }, changes)).rejects.toThrow(
+    await expect(createVersion(mockStore, 'doc1', changes)).rejects.toThrow(
       'Client changes must include rev for doc doc1.'
     );
 
@@ -115,10 +137,10 @@ describe('createVersion', () => {
     const mockVersion = { ...expectedVersionData, id: 'version-789' };
     mockCreateVersionMetadata.mockReturnValue(mockVersion);
 
-    const result = await createVersion(mockStore, 'doc3', { status: 'complete' }, changes);
+    const result = await createVersion(mockStore, 'doc3', changes);
 
     expect(mockCreateVersionMetadata).toHaveBeenCalledWith(expectedVersionData);
-    expect(mockStore.createVersion).toHaveBeenCalledWith('doc3', mockVersion, { status: 'complete' }, changes);
+    expect(mockStore.createVersion).toHaveBeenCalledWith('doc3', mockVersion, changes);
     expect(result).toBe(mockVersion);
   });
 
@@ -147,11 +169,10 @@ describe('createVersion', () => {
     const mockVersion = { ...expectedVersionData, id: 'version-multi' };
     mockCreateVersionMetadata.mockReturnValue(mockVersion);
 
-    const state = { a: '1', b: '2', c: '3', d: '4' };
-    const result = await createVersion(mockStore, 'doc4', state, changes);
+    const result = await createVersion(mockStore, 'doc4', changes);
 
     expect(mockCreateVersionMetadata).toHaveBeenCalledWith(expectedVersionData);
-    expect(mockStore.createVersion).toHaveBeenCalledWith('doc4', mockVersion, state, changes);
+    expect(mockStore.createVersion).toHaveBeenCalledWith('doc4', mockVersion, changes);
     expect(result).toBe(mockVersion);
   });
 
@@ -177,10 +198,10 @@ describe('createVersion', () => {
     const mockVersion = { ...expectedVersionData, id: 'version-override' };
     mockCreateVersionMetadata.mockReturnValue(mockVersion);
 
-    const result = await createVersion(mockStore, 'doc5', { test: 'value' }, changes, metadata);
+    const result = await createVersion(mockStore, 'doc5', changes, { metadata });
 
     expect(mockCreateVersionMetadata).toHaveBeenCalledWith(expectedVersionData);
-    expect(mockStore.createVersion).toHaveBeenCalledWith('doc5', mockVersion, { test: 'value' }, changes);
+    expect(mockStore.createVersion).toHaveBeenCalledWith('doc5', mockVersion, changes);
     expect(result).toBe(mockVersion);
   });
 
@@ -201,7 +222,7 @@ describe('createVersion', () => {
     const storeError = new Error('Storage failure');
     vi.mocked(mockStore.createVersion).mockRejectedValue(storeError);
 
-    await expect(createVersion(mockStore, 'doc1', { text: 'hello' }, changes)).rejects.toThrow('Storage failure');
+    await expect(createVersion(mockStore, 'doc1', changes)).rejects.toThrow('Storage failure');
 
     expect(mockCreateVersionMetadata).toHaveBeenCalled();
     expect(mockStore.createVersion).toHaveBeenCalled();

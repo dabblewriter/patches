@@ -13,6 +13,12 @@ export { LWWMemoryStoreBackend } from './LWWMemoryStoreBackend.js';
 // History manager
 export { PatchesHistoryManager } from './PatchesHistoryManager.js';
 
+// Version state building utilities
+export { buildVersionState, getBaseStateBeforeVersion } from '../algorithms/ot/server/buildVersionState.js';
+
+// Stream utilities
+export { concatStreams, jsonReadable, parseVersionState, readStreamAsString } from './jsonReadable.js';
+
 // Utilities
 export {
   assertBranchMetadata,
@@ -38,6 +44,7 @@ export type {
   LWWStoreBackend,
   OTStoreBackend,
   ServerStoreBackend,
+  SnapshotResult,
   TombstoneStoreBackend,
   VersioningStoreBackend,
 } from './types.js';

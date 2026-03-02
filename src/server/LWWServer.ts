@@ -3,7 +3,6 @@ import { consolidateOps, convertDeltaOps } from '../algorithms/lww/consolidateOp
 import { createChange } from '../data/change.js';
 import { signal } from 'easy-signal';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
-import { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import { getClientId } from '../net/serverContext.js';
 import type {
@@ -13,8 +12,8 @@ import type {
   CommitChangesOptions,
   DeleteDocOptions,
   EditableVersionMetadata,
-  PatchesState,
 } from '../types.js';
+import { concatStreams } from './jsonReadable.js';
 import type { PatchesServer } from './PatchesServer.js';
 import { createTombstoneIfSupported, removeTombstoneIfExists } from './tombstone.js';
 import type { LWWStoreBackend, VersioningStoreBackend } from './types.js';
@@ -23,13 +22,8 @@ import { assertVersionMetadata } from './utils.js';
 /**
  * Configuration options for LWWServer.
  */
-export interface LWWServerOptions {
-  /**
-   * Number of revisions between automatic snapshots.
-   * Defaults to 200.
-   */
-  snapshotInterval?: number;
-}
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface LWWServerOptions {}
 
 /**
  * Last-Write-Wins (LWW) server implementation.
@@ -72,7 +66,6 @@ export class LWWServer implements PatchesServer {
   } as const;
 
   readonly store: LWWStoreBackend;
-  private readonly snapshotInterval: number;
 
   /** Notifies listeners whenever a batch of changes is successfully committed. */
   public readonly onChangesCommitted =
@@ -81,32 +74,36 @@ export class LWWServer implements PatchesServer {
   /** Notifies listeners when a document is deleted. */
   public readonly onDocDeleted = signal<(docId: string, options?: DeleteDocOptions, originClientId?: string) => void>();
 
-  constructor(store: LWWStoreBackend, options: LWWServerOptions = {}) {
+  constructor(store: LWWStoreBackend, _options: LWWServerOptions = {}) {
     this.store = store;
-    this.snapshotInterval = options.snapshotInterval ?? 200;
   }
 
   /**
-   * Get the current state of a document.
-   * Reconstructs state from snapshot + ops changed since snapshot.
+   * Get the current state of a document as a ReadableStream of JSON.
+   * Streams `{"state":...,"rev":N,"changes":[...]}` with the snapshot state
+   * flowing through without parsing.
    *
    * @param docId - The document ID.
-   * @returns The document state and revision, or `{ state: {}, rev: 0 }` if not found.
+   * @returns A ReadableStream of JSON string chunks.
    */
-  async getDoc(docId: string): Promise<PatchesState> {
+  async getDoc(docId: string): Promise<ReadableStream<string>> {
     const snapshot = await this.store.getSnapshot(docId);
-    const baseState = snapshot?.state ?? {};
     const baseRev = snapshot?.rev ?? 0;
 
     const ops = await this.store.listOps(docId, { sinceRev: baseRev });
-    if (ops.length === 0) {
-      return { state: baseState, rev: baseRev };
+
+    // Synthesize a change from ops (if any)
+    let changes: Change[] = [];
+    if (ops.length > 0) {
+      const sortedOps = [...ops].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+      const maxRev = Math.max(baseRev, ...ops.map(op => op.rev ?? 0));
+      const maxTs = Math.max(...ops.map(op => op.ts ?? 0));
+      changes = [createChange(baseRev, maxRev, sortedOps, { committedAt: maxTs || Date.now() })];
     }
 
-    // Apply ops to reconstruct current state
-    const state = new JSONPatch(ops).apply(baseState);
-    const rev = Math.max(baseRev, ...ops.map(op => op.rev ?? 0));
-    return { state, rev };
+    // Stream: snapshot state flows through without parsing, changes are stringified
+    const statePayload: string | ReadableStream<string> = snapshot?.state ?? '{}';
+    return concatStreams(`{"state":`, statePayload, `,"rev":${baseRev},"changes":`, JSON.stringify(changes), '}');
   }
 
   /**
@@ -115,7 +112,7 @@ export class LWWServer implements PatchesServer {
    *
    * @param docId - The document ID.
    * @param rev - The revision number to get changes after.
-   * @returns Array containing 0 or 1 synthesized changes.
+   * @returns Array of synthesized changes (0 or 1 elements).
    */
   async getChangesSince(docId: string, rev: number): Promise<Change[]> {
     const ops = await this.store.listOps(docId, { sinceRev: rev });
@@ -174,12 +171,6 @@ export class LWWServer implements PatchesServer {
     // Save ops and delete paths atomically
     if (opsToStore.length > 0 || pathsToDelete.length > 0) {
       newRev = await this.store.saveOps(docId, opsToStore, pathsToDelete);
-    }
-
-    // Compact if needed (save snapshot every N revisions)
-    if (newRev > 0 && newRev % this.snapshotInterval === 0) {
-      const { state } = await this.getDoc(docId);
-      await this.store.saveSnapshot(docId, state, newRev);
     }
 
     // Build catchup ops - start with correction ops from opsToReturn
@@ -243,6 +234,7 @@ export class LWWServer implements PatchesServer {
 
   /**
    * Make a server-side change to a document.
+   * Stateless — uses getCurrentRev instead of loading document state.
    * @param docId - The document ID.
    * @param mutator - A function that receives a JSONPatch and PathProxy to define the changes.
    * @param metadata - Optional metadata for the change.
@@ -253,7 +245,7 @@ export class LWWServer implements PatchesServer {
     mutator: ChangeMutator<T>,
     metadata?: Record<string, any>
   ): Promise<Change | null> {
-    const { state, rev } = await this.getDoc(docId);
+    const rev = await this.store.getCurrentRev(docId);
     const patch = createJSONPatch<T>(mutator);
     if (patch.ops.length === 0) {
       return null;
@@ -266,9 +258,7 @@ export class LWWServer implements PatchesServer {
     // Provide rev like a client would; commitChanges handles conflicts
     const change = createChange(rev, rev + 1, opsWithTs, metadata);
 
-    // Apply to local state to ensure no errors are thrown
-    patch.apply(state);
-
+    // No patch.apply(state) — bad ops become noops at apply time (resilient state building)
     await this.commitChanges(docId, [change]);
     return change;
   }
@@ -276,6 +266,8 @@ export class LWWServer implements PatchesServer {
   /**
    * Captures the current state of a document as a new version.
    * Only works if store implements VersioningStoreBackend.
+   * Does NOT build state — creates version metadata, then emits `onVersionCreated`
+   * so subscribers can build and persist state out of band.
    *
    * @param docId - The document ID.
    * @param metadata - Optional metadata for the version.
@@ -288,21 +280,23 @@ export class LWWServer implements PatchesServer {
       throw new Error('LWW versioning requires a store that implements VersioningStoreBackend');
     }
 
-    const { state, rev } = await this.getDoc(docId);
+    const rev = await this.store.getCurrentRev(docId);
     if (rev === 0) {
       return null; // No document to version
     }
 
+    const now = Date.now();
     const versionMetadata = createVersionMetadata({
       origin: 'main',
-      startedAt: Date.now(),
-      endedAt: Date.now(),
+      startedAt: now,
+      endedAt: now,
       startRev: rev,
       endRev: rev,
       ...metadata,
     });
 
-    await this.store.createVersion(docId, versionMetadata, state);
+    await this.store.createVersion(docId, versionMetadata);
+
     return versionMetadata.id;
   }
 

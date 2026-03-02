@@ -1,7 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { JSONPatch } from '../../src/json-patch/JSONPatch';
 import { LWWBranchManager } from '../../src/server/LWWBranchManager';
+import { readStreamAsString } from '../../src/server/jsonReadable';
 import { LWWMemoryStoreBackend } from '../../src/server/LWWMemoryStoreBackend';
 import { LWWServer } from '../../src/server/LWWServer';
+
+/**
+ * Helper to get the full materialized state from a LWWServer.getDoc() stream.
+ * Consumes the stream, parses JSON, and applies any changes to the snapshot state.
+ */
+async function getDocState(server: LWWServer, docId: string): Promise<{ state: any; rev: number }> {
+  const json = await readStreamAsString(await server.getDoc(docId));
+  const { state: baseState, rev: baseRev, changes } = JSON.parse(json);
+  let state = baseState ?? {};
+  let rev = baseRev;
+  if (changes && changes.length > 0) {
+    state = new JSONPatch(changes[0].ops).apply(state);
+    rev = changes[0].rev;
+  }
+  return { state, rev };
+}
 
 // Mock createId for predictable branch IDs
 vi.mock('crypto-id', () => ({
@@ -89,7 +107,7 @@ describe('LWWBranchManager', () => {
       const branchId = await branchManager.createBranch('doc1', 1);
 
       // Branch should have same state as source
-      const branchDoc = await server.getDoc(branchId);
+      const branchDoc = await getDocState(server, branchId);
       expect(branchDoc.state).toEqual({ name: 'Alice' });
     });
 
@@ -232,7 +250,7 @@ describe('LWWBranchManager', () => {
       expect(result).toHaveLength(1);
 
       // Verify source document updated
-      const sourceDoc = await server.getDoc('doc1');
+      const sourceDoc = await getDocState(server, 'doc1');
       expect(sourceDoc.state.name).toBe('Bob');
 
       // Verify branch closed
@@ -262,7 +280,7 @@ describe('LWWBranchManager', () => {
       // Merge branch - source's later timestamp should win
       await branchManager.mergeBranch(branchId);
 
-      const sourceDoc = await server.getDoc('doc1');
+      const sourceDoc = await getDocState(server, 'doc1');
       expect(sourceDoc.state.name).toBe('SourceValue'); // ts=3000 > ts=2000
     });
 
@@ -296,7 +314,7 @@ describe('LWWBranchManager', () => {
       await branchManager.mergeBranch(branchId);
 
       // Verify source document updated
-      const sourceDoc = await server.getDoc('doc1');
+      const sourceDoc = await getDocState(server, 'doc1');
       expect(sourceDoc.state).toEqual({
         name: 'Bob',
         age: 30,
@@ -322,7 +340,7 @@ describe('LWWBranchManager', () => {
       const branchId = await branchManager.createBranch('doc1', 1, { name: 'Feature' });
 
       // Verify branch state
-      let branchDoc = await server.getDoc(branchId);
+      let branchDoc = await getDocState(server, branchId);
       expect(branchDoc.state).toEqual({ title: 'Original', count: 0 });
 
       // 3. Make changes on branch
@@ -330,7 +348,7 @@ describe('LWWBranchManager', () => {
         { id: 'c2', ops: [{ op: 'replace', path: '/title', value: 'Modified', ts: 2000 }] },
       ]);
 
-      branchDoc = await server.getDoc(branchId);
+      branchDoc = await getDocState(server, branchId);
       expect(branchDoc.state.title).toBe('Modified');
 
       // 4. Make concurrent changes on source
@@ -340,7 +358,7 @@ describe('LWWBranchManager', () => {
       await branchManager.mergeBranch(branchId);
 
       // 6. Verify final state
-      const sourceDoc = await server.getDoc('doc1');
+      const sourceDoc = await getDocState(server, 'doc1');
       expect(sourceDoc.state).toEqual({
         title: 'Modified', // From branch (ts=2000)
         count: 5, // From concurrent source change (ts=1500)

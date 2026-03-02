@@ -1,7 +1,9 @@
+import { getStateBeforeVersionAsStream } from '../algorithms/ot/server/buildVersionState.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import type { Change, EditableVersionMetadata, ListVersionsOptions, VersionMetadata } from '../types.js';
+import { jsonReadable } from './jsonReadable.js';
 import type { PatchesServer } from './PatchesServer.js';
-import type { VersioningStoreBackend } from './types.js';
+import type { OTStoreBackend, VersioningStoreBackend } from './types.js';
 import { assertVersionMetadata } from './utils.js';
 
 /**
@@ -18,6 +20,7 @@ export class PatchesHistoryManager {
     updateVersion: 'write',
     getVersionState: 'read',
     getVersionChanges: 'read',
+    getStateBeforeVersion: 'read',
   } as const;
 
   protected readonly store: VersioningStoreBackend;
@@ -66,18 +69,52 @@ export class PatchesHistoryManager {
 
   /**
    * Loads the full document state snapshot for a specific version by its ID.
+   * Returns a ReadableStream so the state can be streamed to clients via RPC.
    * @param docId - The ID of the document.
    * @param versionId - The unique ID of the version.
-   * @returns The document state at that version.
-   * @throws Error if the version ID is not found or state loading fails.
+   * @returns A ReadableStream of the JSON state, or a stream of 'null' if not found.
+   * @throws Error if state loading fails.
    */
-  async getStateAtVersion(docId: string, versionId: string): Promise<any> {
+  async getStateAtVersion(docId: string, versionId: string): Promise<ReadableStream<string>> {
     try {
-      return await this.store.loadVersionState(docId, versionId);
+      const rawState = await this.store.loadVersionState(docId, versionId);
+      if (rawState === undefined) {
+        return jsonReadable('null');
+      }
+      // rawState is already string or ReadableStream<string> — wrap string if needed
+      return typeof rawState === 'string' ? jsonReadable(rawState) : rawState;
     } catch (error) {
       console.error(`Failed to load state for version ${versionId} of doc ${docId}.`, error);
       throw new Error(`Could not load state for version ${versionId}.`);
     }
+  }
+
+  /**
+   * Returns the document state immediately before a version's changes begin.
+   *
+   * Uses the version's `parentId` chain to find the correct baseline — so
+   * offline-branch session 2 returns the state after session 1, not after the
+   * last main-timeline version. Bridges any gap between the parent's `endRev`
+   * and the version's `startRev` by applying intermediate changes.
+   *
+   * Use this as the baseline when scrubbing through a version's individual changes.
+   *
+   * Only available for OT stores.
+   *
+   * @param docId - The document ID.
+   * @param versionId - The version whose pre-state to compute.
+   * @returns A ReadableStream of the JSON state at `version.startRev - 1`.
+   */
+  async getStateBeforeVersion(docId: string, versionId: string): Promise<ReadableStream<string>> {
+    if (!('listChanges' in this.store)) {
+      throw new Error('getStateBeforeVersion is only supported for OT stores.');
+    }
+    const otStore = this.store as OTStoreBackend;
+    const version = await otStore.loadVersion(docId, versionId);
+    if (!version) {
+      throw new Error(`Version ${versionId} not found for doc ${docId}.`);
+    }
+    return getStateBeforeVersionAsStream(otStore, docId, version);
   }
 
   /**
@@ -103,8 +140,9 @@ export class PatchesHistoryManager {
 
   /**
    * Alias for getStateAtVersion for RPC API compatibility.
+   * Returns a ReadableStream for efficient JSON-RPC streaming.
    */
-  async getVersionState(docId: string, versionId: string): Promise<any> {
+  async getVersionState(docId: string, versionId: string): Promise<ReadableStream<string>> {
     return this.getStateAtVersion(docId, versionId);
   }
 

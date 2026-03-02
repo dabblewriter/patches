@@ -1,8 +1,6 @@
 import { commitChanges, type CommitChangesOptions } from '../algorithms/ot/server/commitChanges.js';
 import { createVersion } from '../algorithms/ot/server/createVersion.js';
-import { getSnapshotAtRevision } from '../algorithms/ot/server/getSnapshotAtRevision.js';
-import { getStateAtRevision } from '../algorithms/ot/server/getStateAtRevision.js';
-import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
+import { getSnapshotAtRevision, getSnapshotStream } from '../algorithms/ot/server/getSnapshotAtRevision.js';
 import { createChange } from '../data/change.js';
 import { signal } from 'easy-signal';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
@@ -14,7 +12,6 @@ import type {
   ChangeMutator,
   DeleteDocOptions,
   EditableVersionMetadata,
-  PatchesState,
 } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
 import type { OTStoreBackend } from './types.js';
@@ -32,11 +29,6 @@ export interface OTServerOptions {
    * Defaults to 30 minutes.
    */
   sessionTimeoutMinutes?: number;
-  /**
-   * Maximum size in bytes for a single change's storage representation.
-   * Useful for databases with row size limits.
-   */
-  maxStorageBytes?: number;
 }
 
 /**
@@ -66,7 +58,6 @@ export class OTServer implements PatchesServer {
   } as const;
 
   private readonly sessionTimeoutMillis: number;
-  private readonly maxStorageBytes?: number;
   readonly store: OTStoreBackend;
 
   /** Notifies listeners whenever a batch of changes is *successfully* committed. */
@@ -78,26 +69,27 @@ export class OTServer implements PatchesServer {
 
   constructor(store: OTStoreBackend, options: OTServerOptions = {}) {
     this.sessionTimeoutMillis = (options.sessionTimeoutMinutes ?? 30) * 60 * 1000;
-    this.maxStorageBytes = options.maxStorageBytes;
     this.store = store;
   }
 
   /**
-   * Get the current state of a document.
+   * Get the current state of a document as a ReadableStream of JSON.
+   * Streams `{"state":...,"rev":N,"changes":[...]}` with the version state
+   * flowing through without parsing.
    * @param docId - The ID of the document.
-   * @returns The current state of the document.
+   * @returns A ReadableStream of JSON string chunks.
    */
-  async getDoc(docId: string): Promise<PatchesState> {
-    return getStateAtRevision(this.store, docId);
+  async getDoc(docId: string): Promise<ReadableStream<string>> {
+    return getSnapshotStream(this.store, docId);
   }
 
   /**
    * Get changes that occurred after a specific revision.
    * @param docId - The ID of the document.
    * @param rev - The revision number.
-   * @returns The changes that occurred after the specified revision.
+   * @returns Array of changes after the given revision.
    */
-  getChangesSince(docId: string, rev: number): Promise<Change[]> {
+  async getChangesSince(docId: string, rev: number): Promise<Change[]> {
     return this.store.listChanges(docId, { startAfter: rev });
   }
 
@@ -119,19 +111,14 @@ export class OTServer implements PatchesServer {
       docId,
       changes,
       this.sessionTimeoutMillis,
-      options,
-      this.maxStorageBytes
+      options
     );
 
     // Notify about newly committed changes (broadcast to other clients)
     if (newChanges.length > 0) {
       try {
-        // Fire event for realtime transports (WebSocket, etc.)
-        // Use clientId from request context for broadcast filtering
         await this.onChangesCommitted.emit(docId, newChanges, options, getClientId());
       } catch (error) {
-        // If notification fails after saving, log error but don't fail the operation
-        // The changes are already committed to storage, so we can't roll back
         console.error(`Failed to notify clients about committed changes for doc ${docId}:`, error);
       }
     }
@@ -142,15 +129,14 @@ export class OTServer implements PatchesServer {
 
   /**
    * Make a server-side change to a document.
-   * @param mutator
-   * @returns
+   * Stateless — uses getCurrentRev instead of loading document state.
    */
   async change<T = Record<string, any>>(
     docId: string,
     mutator: ChangeMutator<T>,
     metadata?: Record<string, any>
   ): Promise<Change | null> {
-    const { state, rev } = await this.getDoc(docId);
+    const rev = await this.store.getCurrentRev(docId);
     const patch = createJSONPatch<T>(mutator);
     if (patch.ops.length === 0) {
       return null;
@@ -159,20 +145,20 @@ export class OTServer implements PatchesServer {
     // Provide rev like a client would; commitChanges handles conflicts
     const change = createChange(rev, rev + 1, patch.ops, metadata);
 
-    // Apply to local state to ensure no errors are thrown
-    patch.apply(state);
+    // No patch.apply(state) — bad ops become noops at apply time (resilient state building)
     await this.commitChanges(docId, [change]);
     return change;
   }
 
   /**
    * Deletes a document.
+   * Stateless — uses getCurrentRev instead of loading document state.
    * @param docId The document ID.
    * @param options - Optional deletion settings (e.g., skipTombstone for testing).
    */
   async deleteDoc(docId: string, options?: DeleteDocOptions): Promise<void> {
     const clientId = getClientId();
-    const { rev } = await this.getDoc(docId);
+    const rev = await this.store.getCurrentRev(docId);
     await createTombstoneIfSupported(this.store, docId, rev, clientId, options?.skipTombstone);
     await this.store.deleteDoc(docId);
     await this.onDocDeleted.emit(docId, options, clientId);
@@ -191,15 +177,17 @@ export class OTServer implements PatchesServer {
 
   /**
    * Captures the current state of a document as a new version.
+   * Does NOT build state — creates version metadata + changes, then emits
+   * `onVersionCreated` so subscribers can build and persist state out of band.
+   *
    * @param docId The document ID.
    * @param metadata Optional metadata for the version.
-   * @returns The ID of the created version.
+   * @returns The ID of the created version, or null if no changes to capture.
    */
   async captureCurrentVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string | null> {
     assertVersionMetadata(metadata);
-    const { state: initialState, changes } = await getSnapshotAtRevision(this.store, docId);
-    const state = applyChanges(initialState, changes);
-    const version = await createVersion(this.store, docId, state, changes, metadata);
+    const { changes } = await getSnapshotAtRevision(this.store, docId);
+    const version = await createVersion(this.store, docId, changes, { metadata });
     if (!version) {
       return null;
     }

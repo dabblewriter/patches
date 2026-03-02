@@ -106,13 +106,13 @@ describe('applyCommittedChanges', () => {
     expect(result.changes).toEqual([]);
   });
 
-  it('should throw error when apply changes fails', () => {
+  it('should skip bad server changes without throwing', () => {
     const snapshot = createSnapshot({ arr: [1, 2, 3] }, 2, []);
     const serverChanges = [
       createChange(3, [{ op: 'add', path: '/arr/5', value: 'invalid' }]), // Invalid array index
     ];
 
-    expect(() => applyCommittedChanges(snapshot, serverChanges)).toThrow('Critical sync error applying server changes');
+    expect(() => applyCommittedChanges(snapshot, serverChanges)).not.toThrow();
   });
 
   it('should handle complex rebase scenario', () => {

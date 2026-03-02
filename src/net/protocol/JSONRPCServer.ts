@@ -177,6 +177,27 @@ export class JSONRPCServer {
       // -> Request ----------------------------------------------------------------
       try {
         const result = await this._dispatch(message.method, (message as JsonRpcRequest).params, ctx);
+
+        // Handle ReadableStream results (streaming server methods like getDoc)
+        if (result && typeof result === 'object' && typeof result.getReader === 'function') {
+          const reader = (result as ReadableStream<string>).getReader();
+          const chunks: string[] = [];
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+          }
+          const json = chunks.join('');
+
+          if (typeof raw === 'string') {
+            // Fast path: embed raw JSON directly without parse/re-stringify
+            return `{"jsonrpc":"2.0","id":${JSON.stringify(message.id)},"result":${json}}`;
+          } else {
+            // Object path: parse for structured response
+            return { jsonrpc: '2.0' as const, id: message.id, result: JSON.parse(json) } as JsonRpcResponse;
+          }
+        }
+
         const response = rpcResponse(result, message.id);
         return respond(response);
       } catch (err: any) {

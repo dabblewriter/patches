@@ -42,7 +42,7 @@ describe('OTBranchManager', () => {
       saveChanges: vi.fn(),
       listChanges: vi.fn(),
       loadVersionChanges: vi.fn(),
-      appendVersionChanges: vi.fn(),
+      getCurrentRev: vi.fn().mockResolvedValue(0),
       createVersion: vi.fn(),
       listVersions: vi.fn(),
       loadVersionState: vi.fn(),
@@ -131,11 +131,20 @@ describe('OTBranchManager', () => {
       vi.mocked(mockStore.loadBranch).mockResolvedValue(null);
       // Mock store methods needed by getStateAtRevision
       vi.mocked(mockStore.listVersions).mockResolvedValue([sourceVersion]);
-      vi.mocked(mockStore.loadVersionState).mockResolvedValue(mockState);
+      vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify(mockState));
       vi.mocked(mockStore.listChanges).mockResolvedValue([]);
       vi.mocked(createId).mockReturnValue('generated-id');
+      vi.mocked(createChange).mockReturnValue({
+        id: 'initial-change',
+        baseRev: 0,
+        rev: 1,
+        ops: [{ op: 'replace', path: '', value: mockState }],
+        createdAt: Date.now(),
+        committedAt: Date.now(),
+      });
       vi.mocked(createVersionMetadata).mockReturnValue(mockVersion);
       vi.mocked(mockStore.createVersion).mockResolvedValue();
+      vi.mocked(mockStore.saveChanges).mockResolvedValue();
       vi.mocked(mockStore.createBranch).mockResolvedValue();
     });
 
@@ -160,7 +169,8 @@ describe('OTBranchManager', () => {
         groupId: 'generated-id',
         branchName: 'Test Branch',
       });
-      expect(mockStore.createVersion).toHaveBeenCalledWith('generated-id', mockVersion, mockState, []);
+      expect(mockStore.saveChanges).toHaveBeenCalledWith('generated-id', expect.any(Array));
+      expect(mockStore.createVersion).toHaveBeenCalledWith('generated-id', mockVersion, expect.any(Array));
       expect(mockStore.createBranch).toHaveBeenCalledWith({
         name: 'Test Branch',
         description: 'A test branch',
@@ -222,7 +232,7 @@ describe('OTBranchManager', () => {
 
       expect(mockStore.createBranchId).toHaveBeenCalledWith('doc1');
       expect(createId).not.toHaveBeenCalled();
-      expect(mockStore.createVersion).toHaveBeenCalledWith(customBranchId, customVersion, mockState, []);
+      expect(mockStore.createVersion).toHaveBeenCalledWith(customBranchId, customVersion, expect.any(Array));
       expect(mockStore.createBranch).toHaveBeenCalledWith(expect.objectContaining({ id: customBranchId }));
       expect(result).toBe(customBranchId);
     });
@@ -333,7 +343,9 @@ describe('OTBranchManager', () => {
       vi.mocked(mockStore.loadBranch).mockResolvedValue(mockBranch);
       vi.mocked(mockStore.listChanges).mockResolvedValue(mockBranchChanges);
       vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
-      vi.mocked(mockStore.loadVersionState).mockResolvedValue({ title: 'New Title', section: 'New Section' });
+      vi.mocked(mockStore.loadVersionState).mockResolvedValue(
+        JSON.stringify({ title: 'New Title', section: 'New Section' })
+      );
       vi.mocked(mockStore.loadVersionChanges!).mockResolvedValue(mockBranchChanges);
       vi.mocked(mockStore.createVersion).mockResolvedValue();
       vi.mocked(mockStore.updateBranch).mockResolvedValue();

@@ -114,8 +114,11 @@ export function consolidateOps(
       const consolidated = consolidateFieldOp(existing, newOp);
       if (consolidated !== null) {
         opsToSave.push(consolidated);
+      } else if (!isSoftOp(newOp) && !combinableOps[newOp.op]) {
+        // Non-combinable, non-soft op was rejected by LWW (existing has higher ts).
+        // Include existing value as correction so caller learns the current value.
+        if (!opsToReturnMap.has(existing.path)) opsToReturnMap.set(existing.path, existing);
       }
-      // If null, existing wins - no change needed
     } else {
       // Soft ops should not overwrite when data already exists at this path
       if (isSoftOp(newOp)) {

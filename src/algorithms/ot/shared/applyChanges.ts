@@ -12,7 +12,11 @@ import type { Change } from '../../../types.js';
 export function applyChanges<T>(state: T, changes: Change[]): T {
   if (!changes.length) return state;
   for (const change of changes) {
-    state = applyPatch(state, change.ops, { strict: true });
+    try {
+      state = applyPatch(state, change.ops, { strict: true });
+    } catch (e) {
+      console.error(`applyChanges: skipping bad change ${change.id} (rev ${change.rev}):`, e);
+    }
   }
   return state;
 }

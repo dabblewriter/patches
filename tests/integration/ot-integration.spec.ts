@@ -41,7 +41,7 @@ interface TestDoc {
 class OTMemoryStoreBackend implements OTStoreBackend {
   private docs: Map<
     string,
-    { changes: Change[]; versions: Map<string, { metadata: VersionMetadata; state: any; changes: Change[] }> }
+    { changes: Change[]; versions: Map<string, { metadata: VersionMetadata; state?: any; changes: Change[] }> }
   > = new Map();
 
   private getOrCreateDoc(docId: string) {
@@ -76,6 +76,20 @@ class OTMemoryStoreBackend implements OTStoreBackend {
     });
   }
 
+  async getCurrentRev(docId: string): Promise<number> {
+    const doc = this.docs.get(docId);
+    if (!doc) return 0;
+    if (doc.changes.length > 0) {
+      return doc.changes[doc.changes.length - 1].rev;
+    }
+    // Check versions for initial state
+    const versions = Array.from(doc.versions.values());
+    if (versions.length > 0) {
+      return Math.max(...versions.map(v => v.metadata.endRev));
+    }
+    return 0;
+  }
+
   async saveChanges(docId: string, changes: Change[]): Promise<void> {
     const doc = this.getOrCreateDoc(docId);
     doc.changes.push(...changes);
@@ -99,9 +113,9 @@ class OTMemoryStoreBackend implements OTStoreBackend {
     this.docs.delete(docId);
   }
 
-  async createVersion(docId: string, metadata: VersionMetadata, state: any, changes?: Change[]): Promise<void> {
+  async createVersion(docId: string, metadata: VersionMetadata, changes?: Change[]): Promise<void> {
     const doc = this.getOrCreateDoc(docId);
-    doc.versions.set(metadata.id, { metadata, state, changes: changes ?? [] });
+    doc.versions.set(metadata.id, { metadata, changes: changes ?? [] });
   }
 
   async listVersions(docId: string, options: ListVersionsOptions): Promise<VersionMetadata[]> {
@@ -123,9 +137,10 @@ class OTMemoryStoreBackend implements OTStoreBackend {
     return versions;
   }
 
-  async loadVersionState(docId: string, versionId: string): Promise<any | undefined> {
+  async loadVersionState(docId: string, versionId: string): Promise<string | undefined> {
     const doc = this.docs.get(docId);
-    return doc?.versions.get(versionId)?.state;
+    const state = doc?.versions.get(versionId)?.state;
+    return state !== undefined ? JSON.stringify(state) : undefined;
   }
 
   async loadVersionChanges(docId: string, versionId: string): Promise<Change[]> {
@@ -133,29 +148,16 @@ class OTMemoryStoreBackend implements OTStoreBackend {
     return doc?.versions.get(versionId)?.changes ?? [];
   }
 
+  async loadVersion(docId: string, versionId: string): Promise<VersionMetadata | undefined> {
+    const doc = this.docs.get(docId);
+    return doc?.versions.get(versionId)?.metadata;
+  }
+
   async updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void> {
     const doc = this.docs.get(docId);
     const version = doc?.versions.get(versionId);
     if (version) {
       version.metadata = { ...version.metadata, ...metadata };
-    }
-  }
-
-  async appendVersionChanges(
-    docId: string,
-    versionId: string,
-    changes: Change[],
-    newEndedAt: number,
-    newEndRev: number,
-    newState: any
-  ): Promise<void> {
-    const doc = this.docs.get(docId);
-    const version = doc?.versions.get(versionId);
-    if (version) {
-      version.changes.push(...changes);
-      version.metadata.endedAt = newEndedAt;
-      version.metadata.endRev = newEndRev;
-      version.state = newState;
     }
   }
 }
@@ -262,7 +264,7 @@ class OTTestHarness {
     const responseChanges = await this.server.commitChanges(docId, pendingChanges);
 
     // Apply server response to sending client (includes catchup + committed changes)
-    await algorithm.applyServerChanges(docId, responseChanges, doc);
+    await algorithm.applyServerChanges(docId, responseChanges.changes, doc);
 
     // Return the broadcast change (contains the newly committed ops)
     // This is what should be sent to OTHER clients
@@ -410,13 +412,15 @@ describe('OT Integration', () => {
       const broadcastA = await harness.sendToServer('clientA');
       expect(broadcastA).toHaveLength(1);
 
+      // B receives A's broadcast before sending (as would happen in production)
+      await harness.receiveFromServer('clientB', broadcastA);
+
       // B sends second - needs to be transformed against A's change
       const broadcastB = await harness.sendToServer('clientB');
       expect(broadcastB).toHaveLength(1);
 
-      // Cross-apply broadcasts so both clients converge
+      // A receives B's broadcast
       await harness.receiveFromServer('clientA', broadcastB);
-      await harness.receiveFromServer('clientB', broadcastA);
 
       // Both clients should have same final state
       expect(docA.state).toEqual({ title: 'World', count: 5 });
@@ -450,6 +454,9 @@ describe('OT Integration', () => {
       const broadcastA = await harness.sendToServer('clientA');
       expect(docA.state.title).toBe('From A');
       expect(docA.committedRev).toBe(1);
+
+      // B receives A's broadcast before sending (as would happen in production)
+      await harness.receiveFromServer('clientB', broadcastA);
 
       // B commits second - B's change transforms against A's
       // For replace operations, B's change will override A's (last writer wins in OT)

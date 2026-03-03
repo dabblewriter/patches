@@ -10,7 +10,7 @@ type CompressibleStore = OTStoreBackend & Partial<TombstoneStoreBackend>;
 describe('CompressedStoreBackend', () => {
   let mockStore: CompressibleStore;
   let savedChanges: any[];
-  let savedVersionChanges: { changes: any[]; state: any }[];
+  let savedVersionChanges: { changes: any[] }[];
 
   const createChange = (id: string, rev: number, ops: any[]): Change => ({
     id,
@@ -26,21 +26,20 @@ describe('CompressedStoreBackend', () => {
     savedVersionChanges = [];
 
     mockStore = {
+      getCurrentRev: vi.fn().mockResolvedValue(0),
       saveChanges: vi.fn().mockImplementation(async (_docId, changes) => {
         savedChanges.push(...changes);
       }),
       listChanges: vi.fn().mockImplementation(async () => savedChanges),
-      createVersion: vi.fn().mockImplementation(async (_docId, _metadata, state, changes) => {
-        savedVersionChanges.push({ changes, state });
-      }),
-      appendVersionChanges: vi.fn().mockImplementation(async (_docId, _versionId, changes, _endedAt, _rev, state) => {
-        savedVersionChanges.push({ changes, state });
+      createVersion: vi.fn().mockImplementation(async (_docId, _metadata, changes) => {
+        savedVersionChanges.push({ changes });
       }),
       loadVersionChanges: vi.fn().mockImplementation(async () => {
         return savedVersionChanges.length > 0 ? savedVersionChanges[0].changes : [];
       }),
       updateVersion: vi.fn(),
       listVersions: vi.fn().mockResolvedValue([]),
+      loadVersion: vi.fn().mockResolvedValue(undefined),
       loadVersionState: vi.fn().mockResolvedValue(undefined),
       deleteDoc: vi.fn(),
       createTombstone: vi.fn(),
@@ -178,41 +177,11 @@ describe('CompressedStoreBackend', () => {
         endedAt: 3600000,
       };
 
-      await backend.createVersion('doc1', metadata, { state: 'data' }, changes);
+      await backend.createVersion('doc1', metadata, changes);
 
       expect(mockStore.createVersion).toHaveBeenCalled();
       const savedVersionChange = savedVersionChanges[0];
       expect(base64Compressor.isCompressed(savedVersionChange.changes[0].ops)).toBe(true);
-    });
-
-    it('should preserve state uncompressed', async () => {
-      const backend = new CompressedStoreBackend(mockStore, base64Compressor);
-      const state = { text: 'hello', count: 42 };
-      const metadata: VersionMetadata = {
-        id: 'v1',
-        endRev: 1,
-        startRev: 1,
-        origin: 'main' as const,
-        startedAt: 0,
-        endedAt: 3600000,
-      };
-
-      await backend.createVersion('doc1', metadata, state, []);
-
-      expect(savedVersionChanges[0].state).toEqual(state);
-    });
-  });
-
-  describe('appendVersionChanges', () => {
-    it('should compress changes when appending to version', async () => {
-      const backend = new CompressedStoreBackend(mockStore, base64Compressor);
-      const changes = [createChange('c2', 2, [{ op: 'replace', path: '/test', value: 'updated' }])];
-
-      await backend.appendVersionChanges('doc1', 'v1', changes, 7200000, 2, { updated: true });
-
-      expect(mockStore.appendVersionChanges).toHaveBeenCalled();
-      const appendedChanges = savedVersionChanges[0].changes;
-      expect(base64Compressor.isCompressed(appendedChanges[0].ops)).toBe(true);
     });
   });
 
@@ -228,7 +197,6 @@ describe('CompressedStoreBackend', () => {
             ops: base64Compressor.compress(originalOps),
           },
         ],
-        state: {},
       });
 
       const result = await backend.loadVersionChanges('doc1', 'v1');
@@ -258,7 +226,7 @@ describe('CompressedStoreBackend', () => {
 
     it('should delegate loadVersionState without modification', async () => {
       const backend = new CompressedStoreBackend(mockStore, base64Compressor);
-      const expectedState = { data: 'test' };
+      const expectedState = JSON.stringify({ data: 'test' });
       vi.mocked(mockStore.loadVersionState).mockResolvedValue(expectedState);
 
       const result = await backend.loadVersionState('doc1', 'v1');

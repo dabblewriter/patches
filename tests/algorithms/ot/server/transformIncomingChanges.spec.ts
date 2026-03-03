@@ -2,25 +2,18 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { transformIncomingChanges } from '../../../../src/algorithms/ot/server/transformIncomingChanges';
 import { createChange } from '../../../../src/data/change';
 import * as transformPatchModule from '../../../../src/json-patch/transformPatch';
-import * as applyPatchModule from '../../../../src/json-patch/applyPatch';
 
 // Mock the dependencies
 vi.mock('../../../../src/json-patch/transformPatch');
-vi.mock('../../../../src/json-patch/applyPatch');
 
 describe('transformIncomingChanges', () => {
   const mockTransformPatch = vi.mocked(transformPatchModule.transformPatch);
-  const mockApplyPatch = vi.mocked(applyPatchModule.applyPatch);
 
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   it('should transform changes and assign sequential revision numbers', () => {
-    const initialState = { text: 'hello', count: 0 };
-    const state1 = { text: 'hello world', count: 0 };
-    const state2 = { text: 'hello world', count: 5 };
-
     const incomingChanges = [
       createChange(2, 0, [{ op: 'replace', path: '/text', value: 'hello world' }]),
       createChange(2, 0, [{ op: 'replace', path: '/count', value: 5 }]),
@@ -33,9 +26,7 @@ describe('transformIncomingChanges', () => {
 
     mockTransformPatch.mockReturnValueOnce(transformedOps1).mockReturnValueOnce(transformedOps2);
 
-    mockApplyPatch.mockReturnValueOnce(state1).mockReturnValueOnce(state2);
-
-    const result = transformIncomingChanges(incomingChanges, initialState, committedChanges, 3);
+    const result = transformIncomingChanges(incomingChanges, committedChanges, 3);
 
     expect(result).toHaveLength(2);
     expect(result[0].rev).toBe(4);
@@ -47,7 +38,6 @@ describe('transformIncomingChanges', () => {
   });
 
   it('should filter out obsolete changes (empty ops after transformation)', () => {
-    const initialState = { text: 'hello' };
     const incomingChanges = [
       createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }]),
       createChange(1, 0, [{ op: 'replace', path: '/count', value: 5 }]),
@@ -60,125 +50,48 @@ describe('transformIncomingChanges', () => {
       .mockReturnValueOnce([]) // Obsolete change
       .mockReturnValueOnce([{ op: 'replace', path: '/count', value: 5 }]);
 
-    mockApplyPatch.mockReturnValue({ text: 'hello', count: 5 });
-
-    const result = transformIncomingChanges(incomingChanges, initialState, committedChanges, 2);
+    const result = transformIncomingChanges(incomingChanges, committedChanges, 2);
 
     expect(result).toHaveLength(1);
     expect(result[0].rev).toBe(3);
     expect(result[0].ops).toEqual([{ op: 'replace', path: '/count', value: 5 }]);
   });
 
-  it('should filter out no-op changes (state unchanged after apply)', () => {
-    const initialState = { text: 'hello', count: 0 };
-    const incomingChanges = [
-      createChange(1, 0, [{ op: 'replace', path: '/text', value: 'hello' }]), // No-op
-      createChange(1, 0, [{ op: 'replace', path: '/count', value: 5 }]),
-    ];
-
-    const transformedOps = [{ op: 'replace', path: '/text', value: 'hello' }];
-    mockTransformPatch
-      .mockReturnValueOnce(transformedOps)
-      .mockReturnValueOnce([{ op: 'replace', path: '/count', value: 5 }]);
-
-    // First apply returns same state (no-op), second apply changes state
-    mockApplyPatch
-      .mockReturnValueOnce(initialState) // Same state = no-op
-      .mockReturnValueOnce({ text: 'hello', count: 5 });
-
-    const result = transformIncomingChanges(incomingChanges, initialState, [], 1);
-
-    expect(result).toHaveLength(1);
-    expect(result[0].rev).toBe(2);
-    expect(result[0].ops).toEqual([{ op: 'replace', path: '/count', value: 5 }]);
-  });
-
-  it('should handle apply errors gracefully', () => {
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const initialState = { text: 'hello' };
-    const incomingChanges = [
-      createChange(1, 0, [{ op: 'replace', path: '/invalid', value: 'test' }]),
-      createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }]),
-    ];
-
-    mockTransformPatch
-      .mockReturnValueOnce([{ op: 'replace', path: '/invalid', value: 'test' }])
-      .mockReturnValueOnce([{ op: 'replace', path: '/text', value: 'world' }]);
-
-    const applyError = new Error('Invalid path');
-    mockApplyPatch
-      .mockImplementationOnce(() => {
-        throw applyError;
-      })
-      .mockReturnValueOnce({ text: 'world' });
-
-    const result = transformIncomingChanges(incomingChanges, initialState, [], 1);
-
-    expect(result).toHaveLength(1);
-    expect(result[0].rev).toBe(2);
-    expect(result[0].ops).toEqual([{ op: 'replace', path: '/text', value: 'world' }]);
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      `Error applying change ${incomingChanges[0].id} to state:`,
-      applyError
-    );
-
-    consoleErrorSpy.mockRestore();
-  });
-
   it('should handle empty incoming changes', () => {
-    const result = transformIncomingChanges([], { text: 'hello' }, [], 1);
+    const result = transformIncomingChanges([], [], 1);
     expect(result).toEqual([]);
     expect(mockTransformPatch).not.toHaveBeenCalled();
-    expect(mockApplyPatch).not.toHaveBeenCalled();
   });
 
   it('should handle empty committed changes', () => {
-    const initialState = { text: 'hello' };
     const incomingChanges = [createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }])];
 
     mockTransformPatch.mockReturnValue([{ op: 'replace', path: '/text', value: 'world' }]);
-    mockApplyPatch.mockReturnValue({ text: 'world' });
 
-    const result = transformIncomingChanges(incomingChanges, initialState, [], 1);
+    const result = transformIncomingChanges(incomingChanges, [], 1);
 
     expect(result).toHaveLength(1);
     expect(result[0].rev).toBe(2);
-    expect(mockTransformPatch).toHaveBeenCalledWith(initialState, [], incomingChanges[0].ops);
+    // Stateless: passes null as state to transformPatch
+    expect(mockTransformPatch).toHaveBeenCalledWith(null, [], incomingChanges[0].ops);
   });
 
   it('should preserve change metadata during transformation', () => {
-    const initialState = { text: 'hello' };
     const metadata = { author: 'user1', timestamp: 12345 };
     const incomingChanges = [
       { ...createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }]), ...metadata },
     ];
 
     mockTransformPatch.mockReturnValue([{ op: 'replace', path: '/text', value: 'world' }]);
-    mockApplyPatch.mockReturnValue({ text: 'world' });
 
-    const result = transformIncomingChanges(incomingChanges, initialState, [], 1);
+    const result = transformIncomingChanges(incomingChanges, [], 1);
 
     expect(result).toHaveLength(1);
     expect(result[0].author).toBe('user1');
     expect(result[0].timestamp).toBe(12345);
   });
 
-  it('should not mutate original state parameter', () => {
-    const originalState = { text: 'hello', count: 0 };
-    const stateAtBaseRev = { ...originalState };
-    const incomingChanges = [createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }])];
-
-    mockTransformPatch.mockReturnValue([{ op: 'replace', path: '/text', value: 'world' }]);
-    mockApplyPatch.mockReturnValue({ text: 'world', count: 0 });
-
-    transformIncomingChanges(incomingChanges, stateAtBaseRev, [], 1);
-
-    // Original state should remain unchanged
-    expect(stateAtBaseRev).toEqual(originalState);
-  });
-
   it('should flatten committed changes ops correctly', () => {
-    const initialState = { text: 'hello' };
     const incomingChanges = [createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }])];
 
     const committedChanges = [
@@ -196,42 +109,15 @@ describe('transformIncomingChanges', () => {
     ];
 
     mockTransformPatch.mockReturnValue([{ op: 'replace', path: '/text', value: 'world' }]);
-    mockApplyPatch.mockReturnValue({ text: 'world' });
 
-    transformIncomingChanges(incomingChanges, initialState, committedChanges, 3);
+    transformIncomingChanges(incomingChanges, committedChanges, 3);
 
-    expect(mockTransformPatch).toHaveBeenCalledWith(initialState, expectedCommittedOps, incomingChanges[0].ops);
+    // Stateless: passes null as state to transformPatch
+    expect(mockTransformPatch).toHaveBeenCalledWith(null, expectedCommittedOps, incomingChanges[0].ops);
   });
 
   describe('forceCommit option', () => {
-    it('should preserve no-op changes when forceCommit is true', () => {
-      const initialState = { text: 'hello', count: 0 };
-      const incomingChanges = [
-        createChange(1, 0, [{ op: 'replace', path: '/text', value: 'hello' }]), // No-op
-        createChange(1, 0, [{ op: 'replace', path: '/count', value: 5 }]),
-      ];
-
-      const transformedOps = [{ op: 'replace', path: '/text', value: 'hello' }];
-      mockTransformPatch
-        .mockReturnValueOnce(transformedOps)
-        .mockReturnValueOnce([{ op: 'replace', path: '/count', value: 5 }]);
-
-      // First apply returns same state (no-op), second apply changes state
-      mockApplyPatch
-        .mockReturnValueOnce(initialState) // Same state = no-op
-        .mockReturnValueOnce({ text: 'hello', count: 5 });
-
-      const result = transformIncomingChanges(incomingChanges, initialState, [], 1, true);
-
-      // Both changes should be preserved with forceCommit
-      expect(result).toHaveLength(2);
-      expect(result[0].rev).toBe(2);
-      expect(result[0].ops).toEqual(transformedOps);
-      expect(result[1].rev).toBe(3);
-    });
-
     it('should preserve changes with empty ops when forceCommit is true', () => {
-      const initialState = { text: 'hello' };
       const incomingChanges = [
         createChange(1, 0, []), // Empty ops
         createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }]),
@@ -242,9 +128,7 @@ describe('transformIncomingChanges', () => {
         .mockReturnValueOnce([]) // Empty ops
         .mockReturnValueOnce([{ op: 'replace', path: '/text', value: 'world' }]);
 
-      mockApplyPatch.mockReturnValue({ text: 'world' });
-
-      const result = transformIncomingChanges(incomingChanges, initialState, [], 1, true);
+      const result = transformIncomingChanges(incomingChanges, [], 1, true);
 
       // Both changes should be preserved with forceCommit
       expect(result).toHaveLength(2);
@@ -255,7 +139,6 @@ describe('transformIncomingChanges', () => {
     });
 
     it('should still filter out changes with empty ops when forceCommit is false', () => {
-      const initialState = { text: 'hello' };
       const incomingChanges = [
         createChange(1, 0, []), // Empty ops
         createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }]),
@@ -265,32 +148,11 @@ describe('transformIncomingChanges', () => {
         .mockReturnValueOnce([])
         .mockReturnValueOnce([{ op: 'replace', path: '/text', value: 'world' }]);
 
-      mockApplyPatch.mockReturnValue({ text: 'world' });
-
-      const result = transformIncomingChanges(incomingChanges, initialState, [], 1, false);
+      const result = transformIncomingChanges(incomingChanges, [], 1, false);
 
       // Only the second change should be included
       expect(result).toHaveLength(1);
       expect(result[0].rev).toBe(2);
-    });
-
-    it('should still apply errors cause changes to be filtered even with forceCommit', () => {
-      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      const initialState = { text: 'hello' };
-      const incomingChanges = [createChange(1, 0, [{ op: 'replace', path: '/invalid', value: 'test' }])];
-
-      mockTransformPatch.mockReturnValue([{ op: 'replace', path: '/invalid', value: 'test' }]);
-      mockApplyPatch.mockImplementation(() => {
-        throw new Error('Invalid path');
-      });
-
-      const result = transformIncomingChanges(incomingChanges, initialState, [], 1, true);
-
-      // Even with forceCommit, apply errors should filter out the change
-      expect(result).toHaveLength(0);
-      expect(consoleErrorSpy).toHaveBeenCalled();
-
-      consoleErrorSpy.mockRestore();
     });
   });
 });

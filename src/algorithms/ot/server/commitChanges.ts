@@ -1,12 +1,8 @@
-import { createId } from 'crypto-id';
 import type { CommitResult } from '../../../server/PatchesServer.js';
+import { RevConflictError } from '../../../server/RevConflictError.js';
 import type { OTStoreBackend } from '../../../server/types.js';
 import type { Change, ChangeInput, CommitChangesOptions } from '../../../types.js';
-import { filterSoftWritesAgainstState } from '../../../json-patch/utils/softWrites.js';
-import { applyChanges } from '../shared/applyChanges.js';
-import { createVersion } from './createVersion.js';
-import { getSnapshotAtRevision } from './getSnapshotAtRevision.js';
-import { getStateAtRevision } from './getStateAtRevision.js';
+import { createVersionAtRev } from './createVersion.js';
 import { handleOfflineSessionsAndBatches } from './handleOfflineSessionsAndBatches.js';
 import { transformIncomingChanges } from './transformIncomingChanges.js';
 
@@ -14,33 +10,37 @@ import { transformIncomingChanges } from './transformIncomingChanges.js';
 export type { CommitChangesOptions } from '../../../types.js';
 export type { CommitResult } from '../../../server/PatchesServer.js';
 
+const MAX_CONFLICT_RETRIES = 5;
+
 /**
  * Commits a set of changes to a document, applying operational transformation as needed.
  *
- * ## Offline-First Catchup Optimization
+ * ## Stateless Design
  *
- * When a client that has never synced (baseRev: 0) commits changes to an existing document,
- * the server applies an optimization to avoid expensive transformation through potentially
- * thousands of historical changes. Instead of:
+ * This function never loads or builds document state. It uses `getCurrentRev` to get the
+ * current revision and transforms changes against committed changes only (no state parameter
+ * passed to transformPatch). Bad ops become noops during transformation.
  *
- * 1. Transforming the client's changes against all N existing changes
- * 2. Returning all N changes as catchup for the client to apply
+ * ## Version Creation
  *
- * The server:
- * 1. Rebases the client's baseRev to the current revision (treats changes as if made at head)
- * 2. Returns a synthetic catchup change with `{ op: 'replace', path: '', value: currentState }`
+ * Versions are created (metadata + changes saved to store) when session timeouts are
+ * detected. After saving, `onVersionCreated` is emitted so subscribers can build and
+ * persist state out of band.
  *
- * This single root-level replace gives the client the full current document state efficiently.
- * The client's `applyCommittedChanges` recognizes this pattern and allows the revision jump.
+ * ## Conflict Retry
+ *
+ * When a store's `saveChanges` throws `RevConflictError` (e.g. because another server
+ * instance committed the same revision), the function retries: re-reads `currentRev`,
+ * re-fetches committed changes, re-transforms, and re-saves. The retry naturally resolves
+ * because the fresh `currentRev` includes the conflicting commit.
  *
  * @param store - The backend store for persistence.
  * @param docId - The ID of the document.
  * @param changes - The changes to commit.
  * @param sessionTimeoutMillis - Timeout for session-based versioning.
  * @param options - Optional commit settings.
- * @param maxStorageBytes - Optional max bytes per change for storage limits.
  * @returns A CommitResult containing:
- *   - catchupChanges: Changes the client missed (or a synthetic root-replace for offline-first clients)
+ *   - catchupChanges: Changes the client missed
  *   - newChanges: The client's changes after transformation
  */
 export async function commitChanges(
@@ -48,8 +48,7 @@ export async function commitChanges(
   docId: string,
   changes: ChangeInput[],
   sessionTimeoutMillis: number,
-  options?: CommitChangesOptions,
-  maxStorageBytes?: number
+  options?: CommitChangesOptions
 ): Promise<CommitResult> {
   if (changes.length === 0) {
     return { catchupChanges: [], newChanges: [] };
@@ -57,37 +56,24 @@ export async function commitChanges(
 
   const batchId = changes[0].batchId;
 
-  // 1. Load server state details (needed before we can fill in missing baseRev)
-  const { state: initialState, rev: initialRev, changes: currentChanges } = await getSnapshotAtRevision(store, docId);
-  const currentState = applyChanges(initialState, currentChanges);
-  const currentRev = currentChanges.at(-1)?.rev ?? initialRev;
-  let baseRev = changes[0].baseRev ?? currentRev;
+  // 1. Get current revision for baseRev setup
+  const initialRev = await store.getCurrentRev(docId);
+  let baseRev = changes[0].baseRev ?? initialRev;
 
   // Check if this is a batched continuation (later part of an initial batch upload)
   const batchedContinuation = batchId && changes[0].rev! > 1;
 
-  // Track original client baseRev for catchup change generation
-  const clientBaseRev = changes[0].baseRev ?? currentRev;
-
-  // Rebase explicit baseRev: 0 on existing docs to current revision for granular changes.
-  // This avoids expensive transformation through full history when a never-synced client
-  // makes changes to an existing document. Root-level ops are excluded (handled below).
-  //
-  // When this optimization triggers, the client needs to receive the current document state
-  // since they're jumping from rev 0 to currentRev. We create a synthetic catchup change
-  // with a root-level replace containing the full state (see end of function).
-  let needsSyntheticCatchup = false;
-  if (changes[0].baseRev === 0 && currentRev > 0 && !batchedContinuation) {
+  // Rebase explicit baseRev: 0 on existing docs to current revision.
+  // The caller signals docReloadRequired so the client knows to call getDoc.
+  let docReloadRequired: true | undefined;
+  if (changes[0].baseRev === 0 && initialRev > 0 && !batchedContinuation) {
     const hasRootOp = changes.some(c => c.ops.some(op => op.path === ''));
     if (!hasRootOp) {
-      needsSyntheticCatchup = true;
-      baseRev = currentRev;
-      // Update baseRev, filter soft writes, and remove empty changes in one pass
-      changes = changes.filter(c => {
+      docReloadRequired = true;
+      baseRev = initialRev;
+      for (const c of changes) {
         c.baseRev = baseRev;
-        c.ops = filterSoftWritesAgainstState(c.ops, currentState);
-        return c.ops.length > 0;
-      });
+      }
     }
   }
 
@@ -110,104 +96,96 @@ export async function commitChanges(
   });
 
   // Basic validation
-  if (baseRev > currentRev) {
+  if (baseRev > initialRev) {
     throw new Error(
-      `Client baseRev (${baseRev}) is ahead of server revision (${currentRev}) for doc ${docId}. Client needs to reload the document.`
+      `Client baseRev (${baseRev}) is ahead of server revision (${initialRev}) for doc ${docId}. Client needs to reload the document.`
     );
   }
 
   // Prevent stale clients from wiping existing data with a root creation op (unless it's a batched continuation)
-  if (changes[0].baseRev === 0 && currentRev > 0 && !batchedContinuation && changes[0].ops[0]?.path === '') {
+  if (changes[0].baseRev === 0 && initialRev > 0 && !batchedContinuation && changes[0].ops[0]?.path === '') {
     throw new Error(
-      `Document ${docId} already exists (rev ${currentRev}). ` +
+      `Document ${docId} already exists (rev ${initialRev}). ` +
         `Cannot apply root-level replace (path: '') with baseRev 0 - this would overwrite the existing document. ` +
         `Load the existing document first, or use nested paths instead of replacing at root.`
     );
   }
 
-  // 2. Check if we need to create a new version - if the last change was created more than a session ago
-  // In historicalImport mode, use incoming change timestamp instead of serverNow for accurate gap detection
-  const lastChange = currentChanges[currentChanges.length - 1];
+  // 2. Check if we need to create a version - if the last committed change
+  //    was created more than a session ago. Use listChanges with limit:1 + reverse.
+  const [lastChange] = await store.listChanges(docId, { reverse: true, limit: 1 });
   const compareTime = options?.historicalImport ? (changes[0].createdAt ?? serverNow) : serverNow;
   if (lastChange && compareTime - lastChange.createdAt > sessionTimeoutMillis) {
-    await createVersion(store, docId, currentState, currentChanges);
+    // Create version for the previous session covering all changes since the last version
+    await createVersionAtRev(store, docId, lastChange.rev);
   }
 
-  // 3. Load committed changes *after* the client's baseRev for transformation and idempotency checks
-  const committedChanges = await store.listChanges(docId, {
-    startAfter: baseRev,
-    withoutBatchId: batchId,
-  });
+  // 3. Retry loop: read current state, transform, and save. On RevConflictError
+  //    (another instance committed the same rev), re-read and retry.
+  let offlineSessionsHandled = false;
 
-  const committedIds = new Set(committedChanges.map(c => c.id));
-  let incomingChanges = changes.filter(c => !committedIds.has(c.id)) as Change[];
+  for (let attempt = 0; attempt < MAX_CONFLICT_RETRIES; attempt++) {
+    try {
+      // Re-read currentRev on retry to pick up the conflicting commit
+      const currentRev = attempt === 0 ? initialRev : await store.getCurrentRev(docId);
 
-  // If all incoming changes were already committed, return the committed changes found
-  if (incomingChanges.length === 0) {
-    return { catchupChanges: committedChanges, newChanges: [] };
-  }
+      // Load committed changes *after* the client's baseRev for transformation and idempotency checks
+      const committedChanges = await store.listChanges(docId, {
+        startAfter: baseRev,
+        withoutBatchId: batchId,
+      });
 
-  // 4. Handle offline-session versioning:
-  // - batchId present (multi-batch uploads)
-  // - or the first change is older than the session timeout (single-batch offline)
-  const isOfflineTimestamp = serverNow - incomingChanges[0].createdAt > sessionTimeoutMillis;
-  if (isOfflineTimestamp || batchId) {
-    // Determine if we can fast-forward (no concurrent changes to transform over)
-    const canFastForward = committedChanges.length === 0;
-    // In historicalImport mode, always use 'main' origin
-    const origin = options?.historicalImport ? 'main' : canFastForward ? 'main' : 'offline-branch';
+      const committedIds = new Set(committedChanges.map(c => c.id));
+      const incomingChanges = changes.filter(c => !committedIds.has(c.id)) as Change[];
 
-    // Create versions for offline sessions (with isOffline metadata)
-    incomingChanges = await handleOfflineSessionsAndBatches(
-      store,
-      sessionTimeoutMillis,
-      docId,
-      incomingChanges,
-      baseRev,
-      batchId,
-      origin,
-      maxStorageBytes
-    );
+      // If all incoming changes were already committed, return the committed changes found
+      if (incomingChanges.length === 0) {
+        return { catchupChanges: committedChanges, newChanges: [], docReloadRequired };
+      }
 
-    // Fast-forward: no transformation needed, save changes directly
-    if (canFastForward) {
-      await store.saveChanges(docId, incomingChanges);
-      return { catchupChanges: [], newChanges: incomingChanges };
+      // 4. Handle offline-session versioning (once — version creation is not idempotent):
+      // - batchId present (multi-batch uploads)
+      // - or the first change is older than the session timeout (single-batch offline)
+      const isOfflineTimestamp = serverNow - incomingChanges[0].createdAt > sessionTimeoutMillis;
+      if (isOfflineTimestamp || batchId) {
+        const canFastForward = committedChanges.length === 0;
+
+        if (!offlineSessionsHandled) {
+          // In historicalImport mode, always use 'main' origin
+          const origin = options?.historicalImport ? 'main' : canFastForward ? 'main' : 'offline-branch';
+
+          // Create versions for offline sessions (metadata + changes, no state)
+          await handleOfflineSessionsAndBatches(store, sessionTimeoutMillis, docId, incomingChanges, origin);
+          offlineSessionsHandled = true;
+        }
+
+        // Fast-forward: no transformation needed, save changes directly
+        if (canFastForward) {
+          await store.saveChanges(docId, incomingChanges);
+          return { catchupChanges: [], newChanges: incomingChanges, docReloadRequired };
+        }
+      }
+
+      // 5. Transform the incoming changes against committed changes (stateless — no state loaded)
+      const transformedChanges = transformIncomingChanges(
+        incomingChanges,
+        committedChanges,
+        currentRev,
+        options?.forceCommit
+      );
+
+      if (transformedChanges.length > 0) {
+        await store.saveChanges(docId, transformedChanges);
+      }
+
+      // Return catchup changes and newly transformed changes separately
+      return { catchupChanges: committedChanges, newChanges: transformedChanges, docReloadRequired };
+    } catch (error) {
+      if (error instanceof RevConflictError && attempt < MAX_CONFLICT_RETRIES - 1) continue;
+      throw error;
     }
   }
 
-  // 5. Transform the *entire batch* of incoming (and potentially collapsed offline) changes
-  //    against committed changes that happened *after* the client's baseRev.
-  //    The state used for transformation should be the server state *at the client's baseRev*.
-  const stateAtBaseRev = (await getStateAtRevision(store, docId, baseRev)).state;
-  const transformedChanges = transformIncomingChanges(
-    incomingChanges,
-    stateAtBaseRev,
-    committedChanges,
-    currentRev,
-    options?.forceCommit
-  );
-
-  if (transformedChanges.length > 0) {
-    await store.saveChanges(docId, transformedChanges);
-  }
-
-  // If we applied the baseRev optimization (jumping from rev 0 to currentRev), the client
-  // needs to receive the full document state since they missed all changes in between.
-  // Create a synthetic catchup change with a root-level replace containing the full state.
-  // This is more efficient than returning potentially thousands of individual changes.
-  if (needsSyntheticCatchup && clientBaseRev === 0) {
-    const syntheticCatchup: Change = {
-      id: `catchup-${createId(8)}`,
-      baseRev: clientBaseRev,
-      rev: currentRev,
-      ops: [{ op: 'replace', path: '', value: currentState }],
-      createdAt: serverNow,
-      committedAt: serverNow,
-    };
-    return { catchupChanges: [syntheticCatchup], newChanges: transformedChanges };
-  }
-
-  // Return catchup changes and newly transformed changes separately
-  return { catchupChanges: committedChanges, newChanges: transformedChanges };
+  // Unreachable — the last iteration always re-throws
+  throw new Error(`commitChanges: exhausted ${MAX_CONFLICT_RETRIES} retries for doc ${docId}`);
 }

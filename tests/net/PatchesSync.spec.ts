@@ -91,7 +91,7 @@ describe('PatchesSync', () => {
         rev: 10,
       }),
       getChangesSince: vi.fn().mockResolvedValue([]),
-      commitChanges: vi.fn().mockResolvedValue([]),
+      commitChanges: vi.fn().mockResolvedValue({ changes: [] }),
       deleteDoc: vi.fn().mockResolvedValue(undefined),
       onStateChange: vi.fn(),
       onChangesCommitted: vi.fn(),
@@ -463,7 +463,7 @@ describe('PatchesSync', () => {
         .mockResolvedValueOnce(null); // After flush
 
       const committed = pendingChanges.map(c => ({ ...c, rev: c.rev + 10 }));
-      mockWebSocket.commitChanges.mockResolvedValue(committed);
+      mockWebSocket.commitChanges.mockResolvedValue({ changes: committed });
 
       const applySpy = vi.spyOn(sync as any, '_applyServerChangesToDoc').mockResolvedValue(undefined);
 
@@ -1074,7 +1074,7 @@ describe('PatchesSync', () => {
       it('should set hasPending false and status synced after successful flush', async () => {
         const pending = [{ id: 'c1', rev: 4, baseRev: 3, ops: [], createdAt: 0, committedAt: 0 }];
         const committed = [{ id: 'c1', rev: 4, baseRev: 3, ops: [], createdAt: 0, committedAt: 0 }];
-        mockWebSocket.commitChanges.mockResolvedValue(committed);
+        mockWebSocket.commitChanges.mockResolvedValue({ changes: committed });
         mockAlgorithm.hasPending.mockResolvedValueOnce(false); // After confirm — no more pending
 
         await sync['flushDoc']('doc1', pending as Change[]);
@@ -1086,7 +1086,7 @@ describe('PatchesSync', () => {
       it('should keep hasPending true if more pending remain after flush', async () => {
         const pending = [{ id: 'c1', rev: 4, baseRev: 3, ops: [], createdAt: 0, committedAt: 0 }];
         const committed = [{ id: 'c1', rev: 4, baseRev: 3, ops: [], createdAt: 0, committedAt: 0 }];
-        mockWebSocket.commitChanges.mockResolvedValue(committed);
+        mockWebSocket.commitChanges.mockResolvedValue({ changes: committed });
         mockAlgorithm.hasPending.mockResolvedValueOnce(true); // More pending
 
         await sync['flushDoc']('doc1', pending as Change[]);

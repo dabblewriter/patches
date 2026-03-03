@@ -388,6 +388,15 @@ export class LWWIndexedDBStore implements LWWClientStore {
     // Move ops to committed (store op directly) - batch for performance
     await Promise.all(sending.change.ops.map(op => committedOps.put<CommittedOp>({ ...op, docId })));
 
+    // Update committed rev
+    const changeRev = sending.change.rev;
+    if (changeRev !== undefined) {
+      const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0, algorithm: 'lww' as const };
+      if (changeRev > docMeta.committedRev) {
+        await docsStore.put({ ...docMeta, committedRev: changeRev });
+      }
+    }
+
     await sendingChanges.delete(docId);
     await tx.complete();
   }

@@ -77,28 +77,9 @@ export class CompressedStoreBackend implements OTStoreBackend, Partial<Tombstone
 
   // === Version Operations (compress changes and state ops) ===
 
-  async createVersion(docId: string, metadata: VersionMetadata, state: any, changes?: Change[]): Promise<void> {
+  async createVersion(docId: string, metadata: VersionMetadata, changes?: Change[]): Promise<void> {
     const compressedChanges = changes?.map(c => this.compressChange(c));
-    return this.store.createVersion(docId, metadata, state, compressedChanges as unknown as Change[]);
-  }
-
-  async appendVersionChanges(
-    docId: string,
-    versionId: string,
-    changes: Change[],
-    newEndedAt: number,
-    newRev: number,
-    newState: any
-  ): Promise<void> {
-    const compressedChanges = changes.map(c => this.compressChange(c));
-    return this.store.appendVersionChanges?.(
-      docId,
-      versionId,
-      compressedChanges as unknown as Change[],
-      newEndedAt,
-      newRev,
-      newState
-    );
+    return this.store.createVersion(docId, metadata, compressedChanges as unknown as Change[]);
   }
 
   async loadVersionChanges(docId: string, versionId: string): Promise<Change[]> {
@@ -108,6 +89,10 @@ export class CompressedStoreBackend implements OTStoreBackend, Partial<Tombstone
 
   // === Pass-through Operations (no compression needed) ===
 
+  async getCurrentRev(docId: string): Promise<number> {
+    return this.store.getCurrentRev(docId);
+  }
+
   async updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void> {
     return this.store.updateVersion(docId, versionId, metadata);
   }
@@ -116,7 +101,11 @@ export class CompressedStoreBackend implements OTStoreBackend, Partial<Tombstone
     return this.store.listVersions(docId, options);
   }
 
-  async loadVersionState(docId: string, versionId: string): Promise<any | undefined> {
+  async loadVersion(docId: string, versionId: string): Promise<VersionMetadata | undefined> {
+    return this.store.loadVersion(docId, versionId);
+  }
+
+  async loadVersionState(docId: string, versionId: string): Promise<string | ReadableStream<string> | undefined> {
     return this.store.loadVersionState(docId, versionId);
   }
 

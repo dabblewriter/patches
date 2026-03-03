@@ -150,7 +150,7 @@ describe('applyChanges', () => {
     expect(result).toBe(state3);
   });
 
-  it('should pass through errors from applyPatch', () => {
+  it('should skip bad changes and log an error instead of throwing', () => {
     const initialState = { text: 'hello' };
     const changes = [createChange(1, [{ op: 'replace', path: '/invalid', value: 'world' }])];
 
@@ -159,7 +159,10 @@ describe('applyChanges', () => {
       throw error;
     });
 
-    expect(() => applyChanges(initialState, changes)).toThrow(error);
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() => applyChanges(initialState, changes)).not.toThrow();
+    expect(consoleSpy).toHaveBeenCalled();
+    consoleSpy.mockRestore();
   });
 
   it('should use strict mode for all patches', () => {

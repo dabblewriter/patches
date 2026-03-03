@@ -100,7 +100,11 @@ export class PatchesClient implements PatchesAPI {
    * @param options - Optional commit settings (e.g., forceCommit for migrations).
    * @returns A promise resolving with the changes as committed by the server (potentially transformed).
    */
-  async commitChanges(docId: string, changes: ChangeInput[], options?: CommitChangesOptions): Promise<Change[]> {
+  async commitChanges(
+    docId: string,
+    changes: ChangeInput[],
+    options?: CommitChangesOptions
+  ): Promise<{ changes: Change[]; docReloadRequired?: true }> {
     return this.rpc.call('commitChanges', docId, changes, options);
   }
 

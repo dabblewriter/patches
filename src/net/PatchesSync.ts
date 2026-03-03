@@ -380,13 +380,25 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           throw new Error('Disconnected during flush');
         }
 
-        const committed = await this.ws.commitChanges(docId, changeBatch);
+        const { changes: committed, docReloadRequired } = await this.ws.commitChanges(docId, changeBatch);
 
-        // Apply the committed changes via algorithm
-        await this._applyServerChangesToDoc(docId, committed);
-
-        // Confirm the sent changes
-        await algorithm.confirmSent(docId, changeBatch);
+        if (docReloadRequired) {
+          // Our local state is stale (baseRev:0 on existing doc). Confirm the sent
+          // changes (they were committed), then reload the full state from the server.
+          await algorithm.confirmSent(docId, changeBatch);
+          const snapshot = await this.ws.getDoc(docId);
+          await algorithm.store.saveDoc(docId, snapshot);
+          this._updateDocSyncState(docId, { committedRev: snapshot.rev });
+          const openDoc = this.patches.getOpenDoc(docId) as BaseDoc | undefined;
+          if (openDoc) {
+            openDoc.import({ ...snapshot, changes: [] });
+          }
+        } else {
+          // Apply the committed changes via algorithm
+          await this._applyServerChangesToDoc(docId, committed);
+          // Confirm the sent changes
+          await algorithm.confirmSent(docId, changeBatch);
+        }
 
         // Fetch remaining pending for next batch or check completion
         pending = (await algorithm.getPendingToSend(docId)) ?? [];

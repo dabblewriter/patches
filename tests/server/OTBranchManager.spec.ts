@@ -45,6 +45,7 @@ describe('OTBranchManager', () => {
       getCurrentRev: vi.fn().mockResolvedValue(0),
       createVersion: vi.fn(),
       listVersions: vi.fn(),
+      loadVersion: vi.fn(),
       loadVersionState: vi.fn(),
       updateVersion: vi.fn(),
     } as OTBranchStore;
@@ -368,7 +369,7 @@ describe('OTBranchManager', () => {
       const committedChanges: Change[] = [flattenedChange];
 
       vi.mocked(createChange).mockReturnValue(flattenedChange);
-      vi.mocked(mockServer.commitChanges).mockResolvedValue(committedChanges);
+      vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: committedChanges });
 
       const result = await branchManager.mergeBranch('branch1');
 
@@ -490,7 +491,7 @@ describe('OTBranchManager', () => {
         committedAt: Date.now(),
         metadata: {},
       });
-      vi.mocked(mockServer.commitChanges).mockResolvedValue([]);
+      vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: [] });
 
       await branchManager.mergeBranch('branch1');
 

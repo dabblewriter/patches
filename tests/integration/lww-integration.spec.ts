@@ -139,10 +139,10 @@ class LWWTestHarness {
     const responseChanges = await this.server.commitChanges(docId, pendingChanges);
 
     // Confirm sent to client
-    await algorithm.confirmSent(docId, responseChanges);
+    await algorithm.confirmSent(docId, responseChanges.changes);
 
     // Apply server response to sending client (updates committedRev, applies catchup ops)
-    await algorithm.applyServerChanges(docId, responseChanges, doc);
+    await algorithm.applyServerChanges(docId, responseChanges.changes, doc);
 
     // Return the broadcast change (contains the actual committed ops)
     // This is what should be sent to OTHER clients

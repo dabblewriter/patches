@@ -15,6 +15,45 @@ export interface CreateVersionOptions {
 }
 
 /**
+ * Creates a version for all changes since the last version up to (and including) `endRev`.
+ *
+ * Looks up the last existing version to determine `startRev`, then loads all
+ * changes from there to `endRev` from the change log. This ensures the version
+ * covers the complete session, not just a single change.
+ *
+ * @param store The storage backend.
+ * @param docId The document ID.
+ * @param endRev The revision to end the version at (inclusive).
+ * @param options Options including origin and metadata.
+ * @returns The created version metadata, or undefined if no changes were found.
+ */
+export async function createVersionAtRev(
+  store: OTStoreBackend,
+  docId: string,
+  endRev: number,
+  options?: CreateVersionOptions
+): Promise<VersionMetadata | undefined> {
+  const [lastVersion] = await store.listVersions(docId, {
+    limit: 1,
+    reverse: true,
+    orderBy: 'endRev',
+  });
+  const startAfterRev = lastVersion?.endRev ?? 0;
+
+  const changes = await store.listChanges(docId, {
+    startAfter: startAfterRev,
+    endBefore: endRev + 1,
+  });
+
+  if (changes.length === 0) return undefined;
+
+  return createVersion(store, docId, changes, {
+    ...options,
+    parentId: options?.parentId ?? lastVersion?.id,
+  });
+}
+
+/**
  * Creates a new version record from changes.
  *
  * Saves metadata and changes to the store via `store.createVersion`. The store

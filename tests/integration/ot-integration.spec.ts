@@ -148,6 +148,11 @@ class OTMemoryStoreBackend implements OTStoreBackend {
     return doc?.versions.get(versionId)?.changes ?? [];
   }
 
+  async loadVersion(docId: string, versionId: string): Promise<VersionMetadata | undefined> {
+    const doc = this.docs.get(docId);
+    return doc?.versions.get(versionId)?.metadata;
+  }
+
   async updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void> {
     const doc = this.docs.get(docId);
     const version = doc?.versions.get(versionId);
@@ -259,7 +264,7 @@ class OTTestHarness {
     const responseChanges = await this.server.commitChanges(docId, pendingChanges);
 
     // Apply server response to sending client (includes catchup + committed changes)
-    await algorithm.applyServerChanges(docId, responseChanges, doc);
+    await algorithm.applyServerChanges(docId, responseChanges.changes, doc);
 
     // Return the broadcast change (contains the newly committed ops)
     // This is what should be sent to OTHER clients

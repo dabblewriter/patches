@@ -39,6 +39,7 @@ describe('CompressedStoreBackend', () => {
       }),
       updateVersion: vi.fn(),
       listVersions: vi.fn().mockResolvedValue([]),
+      loadVersion: vi.fn().mockResolvedValue(undefined),
       loadVersionState: vi.fn().mockResolvedValue(undefined),
       deleteDoc: vi.fn(),
       createTombstone: vi.fn(),

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { commitChanges } from '../../../../src/algorithms/ot/server/commitChanges';
+import { RevConflictError } from '../../../../src/server/RevConflictError';
 import type { OTStoreBackend } from '../../../../src/server/types';
 import type { Change } from '../../../../src/types';
 
@@ -48,7 +49,7 @@ describe('commitChanges', () => {
       saveChanges: vi.fn(),
       // Versioning methods (not used in commitChanges but required by interface)
       createVersion: vi.fn(),
-      listVersions: vi.fn(),
+      listVersions: vi.fn().mockResolvedValue([]),
       loadVersionState: vi.fn(),
       updateVersion: vi.fn(),
       deleteDoc: vi.fn(),
@@ -180,12 +181,14 @@ describe('commitChanges', () => {
     vi.mocked(mockStore.getCurrentRev).mockResolvedValue(1);
     vi.mocked(mockStore.listChanges)
       .mockResolvedValueOnce([lastChange]) // First call: reverse/limit for session check
-      .mockResolvedValueOnce([]); // Second call: committed changes for transformation
+      .mockResolvedValueOnce([lastChange]) // Second call: createVersionAtRev loads all changes since last version
+      .mockResolvedValueOnce([]); // Third call: committed changes for transformation
 
     const changes = [createChange('1', 2, 1)];
 
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
 
+    // createVersionAtRev passes all changes since last version (not just the last change)
     expect(mockStore.createVersion).toHaveBeenCalledWith('doc1', expect.any(Object), [lastChange]);
   });
 
@@ -363,6 +366,79 @@ describe('commitChanges', () => {
     expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', {
       startAfter: 0,
       withoutBatchId: 'test-batch',
+    });
+  });
+
+  describe('RevConflictError retry', () => {
+    it('should retry on RevConflictError and succeed on second attempt', async () => {
+      const changes = [createChange('1', 1, 0)];
+
+      // First saveChanges throws RevConflictError, second succeeds
+      vi.mocked(mockStore.saveChanges).mockRejectedValueOnce(new RevConflictError()).mockResolvedValueOnce(undefined);
+
+      // First getCurrentRev returns 0 (used for baseRev setup + first attempt)
+      // Second getCurrentRev returns 1 (retry picks up the conflicting commit)
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+
+      // First listChanges: session check (reverse/limit)
+      // Second listChanges: committed changes for first attempt (empty)
+      // Third listChanges: committed changes for retry (includes the conflicting change)
+      const conflictingChange = createChange('other', 1, 0);
+      vi.mocked(mockStore.listChanges)
+        .mockResolvedValueOnce([]) // session check
+        .mockResolvedValueOnce([]) // first attempt: no committed changes
+        .mockResolvedValueOnce([conflictingChange]); // retry: conflicting change now visible
+
+      const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+
+      expect(mockStore.saveChanges).toHaveBeenCalledTimes(2);
+      expect(mockStore.getCurrentRev).toHaveBeenCalledTimes(2);
+      expect(result.newChanges).toHaveLength(1);
+      expect(result.catchupChanges).toEqual([conflictingChange]);
+    });
+
+    it('should throw after exhausting all retries', async () => {
+      const changes = [createChange('1', 1, 0)];
+
+      // All saveChanges attempts throw RevConflictError
+      vi.mocked(mockStore.saveChanges).mockRejectedValue(new RevConflictError());
+
+      await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis)).rejects.toThrow(RevConflictError);
+
+      expect(mockStore.saveChanges).toHaveBeenCalledTimes(5);
+    });
+
+    it('should not retry on non-RevConflictError errors', async () => {
+      const changes = [createChange('1', 1, 0)];
+
+      vi.mocked(mockStore.saveChanges).mockRejectedValue(new Error('disk full'));
+
+      await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis)).rejects.toThrow('disk full');
+
+      expect(mockStore.saveChanges).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not re-create offline session versions on retry', async () => {
+      const oldTime = Date.now() - sessionTimeoutMillis - 1000;
+      const changes = [createChange('1', 1, 0, oldTime)];
+
+      // First save fails (fast-forward path), second succeeds (transform path)
+      vi.mocked(mockStore.saveChanges).mockRejectedValueOnce(new RevConflictError()).mockResolvedValueOnce(undefined);
+
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+
+      const conflictingChange = createChange('other', 1, 0);
+      vi.mocked(mockStore.listChanges)
+        .mockResolvedValueOnce([]) // session check
+        .mockResolvedValueOnce([]) // first attempt: no committed changes (fast-forward)
+        .mockResolvedValueOnce([conflictingChange]); // retry: now has committed changes
+
+      await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+
+      const { handleOfflineSessionsAndBatches } =
+        await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
+      // Should only be called once despite retry
+      expect(handleOfflineSessionsAndBatches).toHaveBeenCalledTimes(1);
     });
   });
 });

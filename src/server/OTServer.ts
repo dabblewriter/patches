@@ -96,17 +96,23 @@ export class OTServer implements PatchesServer {
   /**
    * Commits a set of changes to a document, applying operational transformation as needed.
    *
-   * Returns all changes the client needs to apply: both catchup changes (from other
-   * clients) and the client's own transformed changes. Only the new changes are
-   * broadcast to other clients.
+   * Returns all changes the client needs to apply (catchup changes from others, followed
+   * by the client's own transformed changes), plus an optional `docReloadRequired` flag.
+   *
+   * When `docReloadRequired` is true, the client must call `getDoc` to reload the full
+   * current state before continuing — its local state is stale.
    *
    * @param docId - The ID of the document.
    * @param changes - The changes to commit.
    * @param options - Optional commit settings (e.g., forceCommit for migrations).
-   * @returns Combined array of catchup changes followed by the client's committed changes.
+   * @returns An object with the committed changes and an optional reload flag.
    */
-  async commitChanges(docId: string, changes: ChangeInput[], options?: CommitChangesOptions): Promise<Change[]> {
-    const { catchupChanges, newChanges } = await commitChanges(
+  async commitChanges(
+    docId: string,
+    changes: ChangeInput[],
+    options?: CommitChangesOptions
+  ): Promise<{ changes: Change[]; docReloadRequired?: true }> {
+    const { catchupChanges, newChanges, docReloadRequired } = await commitChanges(
       this.store,
       docId,
       changes,
@@ -123,8 +129,11 @@ export class OTServer implements PatchesServer {
       }
     }
 
-    // Return combined changes: catchup first, then new changes
-    return [...catchupChanges, ...newChanges];
+    const result: { changes: Change[]; docReloadRequired?: true } = {
+      changes: [...catchupChanges, ...newChanges],
+    };
+    if (docReloadRequired) result.docReloadRequired = true;
+    return result;
   }
 
   /**

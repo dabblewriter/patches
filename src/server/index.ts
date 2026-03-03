@@ -22,6 +22,9 @@ export { concatStreams, jsonReadable, parseVersionState, readStreamAsString } fr
 // Concurrency utilities
 export { blockable, blockableResponse, blocking, singleInvocation } from '../utils/concurrency.js';
 
+// Errors
+export { RevConflictError } from './RevConflictError.js';
+
 // Utilities
 export {
   assertBranchMetadata,

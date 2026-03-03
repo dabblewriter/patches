@@ -176,7 +176,7 @@ export class OTBranchManager implements BranchManager {
           baseRev: branchStartRevOnSource,
           rev: undefined, // Let commitChanges assign sequential revs
         }));
-        return this.patchesServer.commitChanges(sourceDocId, adjustedChanges);
+        return (await this.patchesServer.commitChanges(sourceDocId, adjustedChanges)).changes;
       } else {
         // Divergent: flatten and transform (current behavior)
         const rev = branchStartRevOnSource + branchChanges.length;
@@ -192,7 +192,7 @@ export class OTBranchManager implements BranchManager {
           changesToCommit = breakChanges(changesToCommit, this.maxPayloadBytes);
         }
 
-        return this.patchesServer.commitChanges(sourceDocId, changesToCommit);
+        return (await this.patchesServer.commitChanges(sourceDocId, changesToCommit)).changes;
       }
     });
 

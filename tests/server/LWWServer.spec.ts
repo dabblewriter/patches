@@ -187,7 +187,7 @@ describe('LWWServer', () => {
 
       // State is the snapshot state (not applied with changes yet — changes come separately)
       expect(result.state).toEqual({ name: 'Alice' });
-      expect(result.rev).toBe(5);
+      expect(result.rev).toBe(6); // current rev = max op rev, not snapshot rev
       // Changes include the ops since snapshot
       expect(result.changes).toHaveLength(1);
       expect(result.changes[0].ops).toContainEqual(expect.objectContaining({ path: '/age', value: 30 }));
@@ -226,7 +226,7 @@ describe('LWWServer', () => {
   describe('commitChanges - LWW conflict resolution', () => {
     it('should return empty array for empty changes', async () => {
       const result = await server.commitChanges('doc1', []);
-      expect(result).toEqual([]);
+      expect(result.changes).toEqual([]);
     });
 
     it('should apply first write when no existing field', async () => {
@@ -237,8 +237,8 @@ describe('LWWServer', () => {
 
       const result = await server.commitChanges('doc1', [change]);
 
-      expect(result).toHaveLength(1);
-      expect(result[0].rev).toBe(1);
+      expect(result.changes).toHaveLength(1);
+      expect(result.changes[0].rev).toBe(1);
       expect(mockStore.ops.get('doc1:/name')?.value).toBe('Alice');
     });
 
@@ -253,7 +253,7 @@ describe('LWWServer', () => {
 
       const result = await server.commitChanges('doc1', [change]);
 
-      expect(result).toHaveLength(1);
+      expect(result.changes).toHaveLength(1);
       expect(mockStore.ops.get('doc1:/name')?.value).toBe('Bob');
     });
 
@@ -268,9 +268,9 @@ describe('LWWServer', () => {
 
       const result = await server.commitChanges('doc1', [change]);
 
-      expect(result).toHaveLength(1);
+      expect(result.changes).toHaveLength(1);
       // Rev should not change since no updates were made
-      expect(result[0].rev).toBe(1);
+      expect(result.changes[0].rev).toBe(1);
       // State should remain unchanged
       expect(mockStore.ops.get('doc1:/name')?.value).toBe('Bob');
     });
@@ -286,7 +286,7 @@ describe('LWWServer', () => {
 
       const result = await server.commitChanges('doc1', [change]);
 
-      expect(result).toHaveLength(1);
+      expect(result.changes).toHaveLength(1);
       expect(mockStore.ops.get('doc1:/name')?.value).toBe('Bob');
     });
 
@@ -331,7 +331,7 @@ describe('LWWServer', () => {
 
         const result = await server.commitChanges('doc1', [change]);
 
-        expect(result).toHaveLength(1);
+        expect(result.changes).toHaveLength(1);
         expect(mockStore.ops.get('doc1:/count')?.value).toBe(15);
       });
 
@@ -459,7 +459,7 @@ describe('LWWServer', () => {
       const result = await server.commitChanges('doc1', [change]);
 
       // Op should be skipped, but parent should be in response for correction
-      expect(result[0].ops).toContainEqual(expect.objectContaining({ path: '/obj', value: 'primitive' }));
+      expect(result.changes[0].ops).toContainEqual(expect.objectContaining({ path: '/obj', value: 'primitive' }));
     });
   });
 
@@ -478,8 +478,8 @@ describe('LWWServer', () => {
       const result = await server.commitChanges('doc1', [change]);
 
       // Response should include /name and /age as catchup ops
-      expect(result[0].ops).toContainEqual(expect.objectContaining({ path: '/name' }));
-      expect(result[0].ops).toContainEqual(expect.objectContaining({ path: '/age' }));
+      expect(result.changes[0].ops).toContainEqual(expect.objectContaining({ path: '/name' }));
+      expect(result.changes[0].ops).toContainEqual(expect.objectContaining({ path: '/age' }));
     });
 
     it('should filter out paths client just sent', async () => {
@@ -495,7 +495,7 @@ describe('LWWServer', () => {
       const result = await server.commitChanges('doc1', [change]);
 
       // /name should not be in response since client just sent it
-      expect(result[0].ops).not.toContainEqual(expect.objectContaining({ path: '/name' }));
+      expect(result.changes[0].ops).not.toContainEqual(expect.objectContaining({ path: '/name' }));
     });
 
     it('should filter out children of paths client sent', async () => {
@@ -511,7 +511,7 @@ describe('LWWServer', () => {
       const result = await server.commitChanges('doc1', [change]);
 
       // /obj/child should not be in response since client sent parent
-      expect(result[0].ops).not.toContainEqual(expect.objectContaining({ path: '/obj/child' }));
+      expect(result.changes[0].ops).not.toContainEqual(expect.objectContaining({ path: '/obj/child' }));
     });
   });
 
@@ -656,6 +656,7 @@ describe('LWWServer', () => {
           ...mockStore,
           createVersion: vi.fn(),
           listVersions: vi.fn(),
+          loadVersion: vi.fn(),
           loadVersionState: vi.fn(),
           updateVersion: vi.fn(),
         };
@@ -746,9 +747,9 @@ describe('LWWServer', () => {
 
       const after = Date.now();
 
-      expect(result).toHaveLength(1);
-      expect(result[0].committedAt).toBeGreaterThanOrEqual(before);
-      expect(result[0].committedAt).toBeLessThanOrEqual(after);
+      expect(result.changes).toHaveLength(1);
+      expect(result.changes[0].committedAt).toBeGreaterThanOrEqual(before);
+      expect(result.changes[0].committedAt).toBeLessThanOrEqual(after);
     });
 
     it('should set committedAt on broadcast changes', async () => {

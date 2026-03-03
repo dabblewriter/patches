@@ -142,7 +142,7 @@ export class LWWBranchManager implements BranchManager {
 
     // LWW merge: commit the branch changes to the source document
     // Timestamps will automatically resolve any conflicts
-    const committedChanges = await wrapMergeCommit(branchId, sourceDocId, () =>
+    const { changes: committedChanges } = await wrapMergeCommit(branchId, sourceDocId, () =>
       this.lwwServer.commitChanges(sourceDocId, branchChanges)
     );
 

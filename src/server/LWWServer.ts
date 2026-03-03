@@ -103,7 +103,8 @@ export class LWWServer implements PatchesServer {
 
     // Stream: snapshot state flows through without parsing, changes are stringified
     const statePayload: string | ReadableStream<string> = snapshot?.state ?? '{}';
-    return concatStreams(`{"state":`, statePayload, `,"rev":${baseRev},"changes":`, JSON.stringify(changes), '}');
+    const rev = changes[changes.length - 1]?.rev || baseRev;
+    return concatStreams(`{"state":`, statePayload, `,"rev":${rev},"changes":`, JSON.stringify(changes), '}');
   }
 
   /**
@@ -140,11 +141,15 @@ export class LWWServer implements PatchesServer {
    * @param docId - The document ID.
    * @param changes - The changes to commit (always 1 for LWW).
    * @param options - Optional commit options (ignored for LWW).
-   * @returns Array containing 0-1 changes with catchup ops and new rev.
+   * @returns An object with the committed changes (0-1 elements).
    */
-  async commitChanges(docId: string, changes: ChangeInput[], options?: CommitChangesOptions): Promise<Change[]> {
+  async commitChanges(
+    docId: string,
+    changes: ChangeInput[],
+    options?: CommitChangesOptions
+  ): Promise<{ changes: Change[]; docReloadRequired?: true }> {
     if (changes.length === 0) {
-      return [];
+      return { changes: [] };
     }
 
     const change = changes[0]; // LWW always receives 1 change
@@ -205,7 +210,7 @@ export class LWWServer implements PatchesServer {
       }
     }
 
-    return [responseChange];
+    return { changes: [responseChange] };
   }
 
   /**

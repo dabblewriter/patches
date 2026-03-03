@@ -136,7 +136,7 @@ describe('OTServer', () => {
 
     it('should return empty array for empty changes', async () => {
       const result = await server.commitChanges('doc1', []);
-      expect(result).toEqual([]);
+      expect(result.changes).toEqual([]);
     });
 
     it('should fill in baseRev when missing (apply to latest)', async () => {
@@ -151,8 +151,8 @@ describe('OTServer', () => {
       } as any;
       const result = await server.commitChanges('doc1', [changeWithoutBaseRev]);
       // Should succeed, not throw - baseRev gets filled in with current revision
-      expect(result).toHaveLength(1);
-      expect(result[0].baseRev).toBe(1); // Current rev from mock
+      expect(result.changes).toHaveLength(1);
+      expect(result.changes[0].baseRev).toBe(1); // Current rev from mock
     });
 
     it('should throw error for inconsistent baseRev in batch', async () => {
@@ -194,7 +194,7 @@ describe('OTServer', () => {
         ])
       );
       // Result is combined: catchup + new changes
-      expect(result).toHaveLength(1); // One transformed change, no catchup
+      expect(result.changes).toHaveLength(1); // One transformed change, no catchup
     });
 
     it('should filter out already committed changes', async () => {
@@ -204,7 +204,7 @@ describe('OTServer', () => {
       const result = await server.commitChanges('doc1', [existingChange]);
 
       // Result contains catchup changes only (no new changes)
-      expect(result).toEqual([existingChange]);
+      expect(result.changes).toEqual([existingChange]);
       expect(mockStore.saveChanges).not.toHaveBeenCalled();
     });
 
@@ -252,7 +252,7 @@ describe('OTServer', () => {
       const result = await server.commitChanges('doc1', [changeWithoutBatch]);
 
       // Result contains only catchup changes (no new transformed changes)
-      expect(result).toEqual([committedChange]);
+      expect(result.changes).toEqual([committedChange]);
       expect(mockStore.saveChanges).not.toHaveBeenCalled();
     });
 
@@ -267,8 +267,8 @@ describe('OTServer', () => {
       const result = await server.commitChanges('doc1', [changeWithoutBatch]);
 
       // Result contains catchup changes + transformed new changes
-      expect(result).toHaveLength(2);
-      expect(result[0]).toEqual(committedChange);
+      expect(result.changes).toHaveLength(2);
+      expect(result.changes[0]).toEqual(committedChange);
       expect(mockStore.saveChanges).toHaveBeenCalled();
     });
 
@@ -313,7 +313,7 @@ describe('OTServer', () => {
         committedAt: Date.now(),
       } as Change);
 
-      const commitSpy = vi.spyOn(server, 'commitChanges').mockResolvedValue([]);
+      const commitSpy = vi.spyOn(server, 'commitChanges').mockResolvedValue({ changes: [] });
 
       const result = await server.change(
         'doc1',

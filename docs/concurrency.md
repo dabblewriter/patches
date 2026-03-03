@@ -39,7 +39,7 @@ class MyOTStore implements OTStoreBackend {
   // This blocks all blockable operations until it completes
   @blocking
   async commitChanges(docId: string, changes: Change[]) {
-    await this.db.transaction(async (tx) => {
+    await this.db.transaction(async tx => {
       await tx.appendChanges(docId, changes);
       await tx.updateRevision(docId, changes.at(-1)!.rev);
     });
@@ -133,20 +133,18 @@ export class PostgresOTStore implements OTStoreBackend {
 
   @blockable
   async getChangesSince(docId: string, rev: number) {
-    return this.db.query(
-      'SELECT * FROM changes WHERE doc_id = $1 AND rev > $2 ORDER BY rev',
-      [docId, rev]
-    );
+    return this.db.query('SELECT * FROM changes WHERE doc_id = $1 AND rev > $2 ORDER BY rev', [docId, rev]);
   }
 
   @blocking
   async commitChanges(docId: string, changes: Change[]) {
-    await this.db.transaction(async (client) => {
+    await this.db.transaction(async client => {
       for (const change of changes) {
-        await client.query(
-          'INSERT INTO changes (doc_id, rev, ops) VALUES ($1, $2, $3)',
-          [docId, change.rev, change.ops]
-        );
+        await client.query('INSERT INTO changes (doc_id, rev, ops) VALUES ($1, $2, $3)', [
+          docId,
+          change.rev,
+          change.ops,
+        ]);
       }
     });
   }

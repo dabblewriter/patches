@@ -26,7 +26,7 @@ export function getJSONByteSize(data: unknown): number {
   } catch (e) {
     // Handle circular structures (from JSON.stringify) or other errors.
     console.error('Error calculating JSON size:', e);
-    throw new Error('Error calculating JSON size: ' + e);
+    throw new Error('Error calculating JSON size', { cause: e });
   }
 }
 
@@ -412,14 +412,14 @@ function breakLargeValueOp(
         chunkOp.path = op.path;
         chunkOp.appendArray = currentChunk;
       }
-      results.push(deriveNewChange(origChange, rev++, [chunkOp]));
+      results.push(deriveNewChange(origChange, rev, [chunkOp]));
     }
     return results;
   }
   console.warn(
     `Warning: Single operation of type ${op.op} (path: ${op.path}) could not be split further by breakLargeValueOp despite exceeding maxBytes. Including as is.`
   );
-  return [deriveNewChange(origChange, rev++, [op])]; // Return original op in a new change if not splittable by this func
+  return [deriveNewChange(origChange, rev, [op])]; // Return original op in a new change if not splittable by this func
 }
 
 function deriveNewChange(origChange: Change, rev: number, ops: JSONPatchOp[]) {

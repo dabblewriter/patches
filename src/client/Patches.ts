@@ -308,6 +308,7 @@ export class Patches {
     const current = prev.then(() => this._processDocChange(docId, ops, doc, algorithm, metadata));
     this._changeQueues.set(
       docId,
+      // eslint-disable-next-line @typescript-eslint/no-empty-function
       current.catch(() => {})
     );
     return current;

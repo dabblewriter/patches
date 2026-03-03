@@ -108,8 +108,8 @@ function _compress(uncompressed: string | null, bitsPerChar: number, getCharFrom
   let value: number;
   const context_dictionary: Record<string, number> = {};
   const context_dictionaryToCreate: Record<string, boolean> = {};
-  let context_c = '';
-  let context_wc = '';
+  let context_c: string;
+  let context_wc: string;
   let context_w = '';
   let context_enlargeIn = 2; // Compensate for the first entry which should not count
   let context_dictSize = 3;
@@ -284,7 +284,6 @@ function _compress(uncompressed: string | null, bitsPerChar: number, getCharFrom
     }
     context_enlargeIn--;
     if (context_enlargeIn === 0) {
-      context_enlargeIn = Math.pow(2, context_numBits);
       context_numBits++;
     }
   }
@@ -325,7 +324,7 @@ function _decompress(length: number, resetValue: number, getNextValue: (index: n
   let enlargeIn = 4;
   let dictSize = 4;
   let numBits = 3;
-  let entry = '';
+  let entry: string;
   const result: string[] = [];
   let w: string;
   let bits: number;

@@ -125,7 +125,7 @@ export async function wrapMergeCommit<T>(
     return await commitFn();
   } catch (error) {
     console.error(`Failed to merge branch ${branchId} into ${sourceDocId}:`, error);
-    throw new Error(`Merge failed: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Merge failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 }
 

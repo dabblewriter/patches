@@ -6,13 +6,7 @@ import { signal } from 'easy-signal';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import { getClientId } from '../net/serverContext.js';
-import type {
-  Change,
-  ChangeInput,
-  ChangeMutator,
-  DeleteDocOptions,
-  EditableVersionMetadata,
-} from '../types.js';
+import type { Change, ChangeInput, ChangeMutator, DeleteDocOptions, EditableVersionMetadata } from '../types.js';
 import type { PatchesServer } from './PatchesServer.js';
 import type { OTStoreBackend } from './types.js';
 import { createTombstoneIfSupported, removeTombstoneIfExists } from './tombstone.js';

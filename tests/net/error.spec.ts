@@ -132,7 +132,7 @@ describe('StatusError', () => {
           expect(error.code).toBe(429);
           expect(error.message).toBe('Too Many Requests');
         } else {
-          throw new Error('Expected StatusError');
+          throw new Error('Expected StatusError', { cause: error });
         }
       }
     });

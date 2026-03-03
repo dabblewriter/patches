@@ -327,9 +327,11 @@ describe('PatchesHistoryManager', () => {
       const otStore = {
         ...mockStore,
         listChanges: vi.fn().mockResolvedValue([]),
-        loadVersion: vi.fn().mockImplementation((_: string, id: string) =>
-          Promise.resolve(id === 'v1' ? targetVersion : id === 'parent-v' ? parentVersion : undefined)
-        ),
+        loadVersion: vi
+          .fn()
+          .mockImplementation((_: string, id: string) =>
+            Promise.resolve(id === 'v1' ? targetVersion : id === 'parent-v' ? parentVersion : undefined)
+          ),
         loadVersionState: vi.fn().mockResolvedValue(JSON.stringify(parentState)),
         listVersions: vi.fn().mockResolvedValue([]),
       } as any;

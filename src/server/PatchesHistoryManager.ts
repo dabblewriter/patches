@@ -85,7 +85,7 @@ export class PatchesHistoryManager {
       return typeof rawState === 'string' ? jsonReadable(rawState) : rawState;
     } catch (error) {
       console.error(`Failed to load state for version ${versionId} of doc ${docId}.`, error);
-      throw new Error(`Could not load state for version ${versionId}.`);
+      throw new Error(`Could not load state for version ${versionId}.`, { cause: error });
     }
   }
 
@@ -130,7 +130,7 @@ export class PatchesHistoryManager {
       return (await this.store.loadVersionChanges?.(docId, versionId)) ?? [];
     } catch (error) {
       console.error(`Failed to load changes for version ${versionId} of doc ${docId}.`, error);
-      throw new Error(`Could not load changes for version ${versionId}.`);
+      throw new Error(`Could not load changes for version ${versionId}.`, { cause: error });
     }
   }
 

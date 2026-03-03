@@ -174,10 +174,6 @@ describe('handleOfflineSessionsAndBatches', () => {
     await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 'main');
 
     expect(mockStore.listVersions).not.toHaveBeenCalled();
-    expect(mockStore.createVersion).toHaveBeenCalledWith(
-      'doc1',
-      expect.objectContaining({ origin: 'main' }),
-      changes
-    );
+    expect(mockStore.createVersion).toHaveBeenCalledWith('doc1', expect.objectContaining({ origin: 'main' }), changes);
   });
 });

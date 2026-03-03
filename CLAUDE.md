@@ -63,6 +63,7 @@ Read these when working in a specific area:
 | `docs/branching.md` | Branching concepts and workflows |
 | `docs/net.md` | Transport layer |
 | `docs/websocket.md` | WebSocket protocol |
+| `docs/concurrency.md` | Concurrency utilities for custom backends |
 | `docs/json-patch.md` | JSON Patch format |
 | `src/vue/README.md` | Vue 3 integration |
 | `src/solid/README.md` | Solid.js integration |

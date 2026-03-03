@@ -19,6 +19,9 @@ export { buildVersionState, getBaseStateBeforeVersion } from '../algorithms/ot/s
 // Stream utilities
 export { concatStreams, jsonReadable, parseVersionState, readStreamAsString } from './jsonReadable.js';
 
+// Concurrency utilities
+export { blockable, blockableResponse, blocking, singleInvocation } from '../utils/concurrency.js';
+
 // Utilities
 export {
   assertBranchMetadata,

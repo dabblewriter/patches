@@ -129,7 +129,7 @@ describe('SSEServer', () => {
       const stream = server.connect('client1');
       await server.subscribe('client1', ['doc1']);
 
-      server.notify('changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
 
       const chunks = await readStream(stream, 1);
       expect(chunks[0]).toContain('event: changesCommitted');
@@ -143,12 +143,25 @@ describe('SSEServer', () => {
       const stream2 = server.connect('client2');
       await server.subscribe('client2', ['doc1']);
 
-      server.notify('changesCommitted', { docId: 'doc1', changes: [] });
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [] });
 
       // client2 receives the event, client1 does not
       const chunks2 = await readStream(stream2, 1);
       expect(chunks2).toHaveLength(1);
       expect(chunks2[0]).toContain('event: changesCommitted');
+    });
+
+    it('should route by docId parameter, not params.docId', async () => {
+      const stream = server.connect('client1');
+      // Client subscribes to root path
+      await server.subscribe('client1', ['users/abc']);
+
+      // Notification for a sub-path, routed via root path
+      server.notify('users/abc', 'changesCommitted', { docId: 'users/abc/settings', changes: [{ id: 'c1' }] });
+
+      const chunks = await readStream(stream, 1);
+      expect(chunks[0]).toContain('event: changesCommitted');
+      expect(chunks[0]).toContain('"docId":"users/abc/settings"');
     });
 
     it('should not send to the originating client', async () => {
@@ -158,7 +171,7 @@ describe('SSEServer', () => {
       await server.subscribe('client1', ['doc1']);
       await server.subscribe('client2', ['doc1']);
 
-      server.notify('changesCommitted', { docId: 'doc1', changes: [] }, 'client1');
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [] }, 'client1');
 
       // client2 receives, client1 (the origin) does not
       const chunks2 = await readStream(stream2, 1);
@@ -172,8 +185,8 @@ describe('SSEServer', () => {
       server.disconnect('client1');
 
       // Send while disconnected
-      server.notify('changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
-      server.notify('changesCommitted', { docId: 'doc1', changes: [{ id: 'c2' }] });
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c2' }] });
 
       // Reconnect and replay
       const stream = server.connect('client1', '0');
@@ -205,9 +218,9 @@ describe('SSEServer', () => {
       const stream = server.connect('client1');
       await server.subscribe('client1', ['doc1']);
 
-      server.notify('changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
-      server.notify('changesCommitted', { docId: 'doc1', changes: [{ id: 'c2' }] });
-      server.notify('docDeleted', { docId: 'doc1' });
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c2' }] });
+      server.notify('doc1', 'docDeleted', { docId: 'doc1' });
 
       const chunks = await readStream(stream, 3);
       expect(chunks[0]).toContain('id: 1');
@@ -222,9 +235,9 @@ describe('SSEServer', () => {
       await server.subscribe('client1', ['doc1']);
 
       // Events sent while "connected" — written to stream AND buffered
-      server.notify('changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
-      server.notify('changesCommitted', { docId: 'doc1', changes: [{ id: 'c2' }] });
-      server.notify('changesCommitted', { docId: 'doc1', changes: [{ id: 'c3' }] });
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c2' }] });
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c3' }] });
 
       // Network dies silently. Heartbeat detects it after ~15s.
       // Simulate: disconnect detected, then immediate reconnect.
@@ -251,13 +264,13 @@ describe('SSEServer', () => {
       await shortServer.subscribe('client1', ['doc1']);
 
       // Event at T=0
-      shortServer.notify('changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
+      shortServer.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
 
       // Advance past the buffer window
       vi.advanceTimersByTime(6_000);
 
       // Event at T=6s — should trim the old event
-      shortServer.notify('changesCommitted', { docId: 'doc1', changes: [{ id: 'c2' }] });
+      shortServer.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c2' }] });
 
       // Disconnect and reconnect — only event 2 should be available
       shortServer.disconnect('client1');
@@ -279,9 +292,9 @@ describe('SSEServer', () => {
       server.disconnect('client1');
 
       // Buffer 3 events
-      server.notify('changesCommitted', { docId: 'doc1', changes: [{ id: 'a' }] });
-      server.notify('changesCommitted', { docId: 'doc1', changes: [{ id: 'b' }] });
-      server.notify('changesCommitted', { docId: 'doc1', changes: [{ id: 'c' }] });
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'a' }] });
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'b' }] });
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c' }] });
 
       // Reconnect having received event 1 — should get events 2 and 3 only
       const stream = server.connect('client1', '1');

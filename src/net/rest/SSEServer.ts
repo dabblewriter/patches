@@ -233,12 +233,15 @@ export class SSEServer {
    * Connected clients receive the event immediately via their SSE stream.
    * Disconnected clients (within buffer TTL) get the event buffered for replay.
    *
+   * @param docId - The document ID used for subscription routing. This may differ
+   *   from `params.docId` — for example, when subscriptions are stored by root
+   *   document path (e.g. `users/abc`) but the event payload contains a sub-path
+   *   (e.g. `users/abc/settings`).
    * @param event - The SSE event type (e.g. 'changesCommitted', 'docDeleted').
-   * @param params - Event data. Must include `docId` for subscription routing.
+   * @param params - Event data sent to clients.
    * @param exceptClientId - Client ID to exclude (typically the one who made the change).
    */
-  notify(event: string, params: { docId: string; [k: string]: any }, exceptClientId?: string): void {
-    const { docId } = params;
+  notify(docId: string, event: string, params: Record<string, any>, exceptClientId?: string): void {
     const data = JSON.stringify(params);
 
     for (const [clientId, client] of this.clients) {

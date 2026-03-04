@@ -1,10 +1,14 @@
-/** A field value with LWW timestamp. */
+/** Operation type for a field. */
+export type Op = '=' | '!' | '+' | '~' | '^' | '#';
+
+/** A field value with operation type and LWW timestamp. */
 export interface Field {
+  op: Op;
   val: any;
   ts: number;
 }
 
-/** Map of dot-notation field keys (with optional suffix) to values. */
+/** Map of dot-notation field paths to field values. */
 export type FieldMap = Record<string, Field>;
 
 /** A change sent from client to server. */
@@ -26,19 +30,6 @@ export interface DocState {
   fields: FieldMap;
 }
 
-/** Suffix constants for special field types. */
-export const INC = '+',
-  BIT = '~',
-  TXT = '#',
-  MAX = '^';
-const SUFFIXES = new Set([INC, BIT, TXT, MAX]);
-
-/** Parse a field key into its path and suffix (if any). */
-export function parseSuffix(key: string): { path: string; suffix: string } {
-  const last = key[key.length - 1];
-  return SUFFIXES.has(last) ? { path: key.slice(0, -1), suffix: last } : { path: key, suffix: '' };
-}
-
 /** Server-side text log entry for OT. */
 export interface TextLogEntry {
   key: string;
@@ -50,6 +41,30 @@ export interface TextLogEntry {
 export interface ChangeLogEntry {
   changeId: string;
   ts: number;
+}
+
+/** Data for an atomic commit operation. */
+export interface CommitWrite {
+  fields: FieldMap;
+  textLogEntries?: TextLogEntry[];
+  changeLogEntry?: ChangeLogEntry;
+  expectedRev: number;
+}
+
+/** Thrown when an atomic commit fails due to a revision conflict. */
+export class RevConflictError extends Error {
+  constructor(
+    public expectedRev: number,
+    public actualRev: number
+  ) {
+    super(`Rev conflict: expected ${expectedRev}, got ${actualRev}`);
+    this.name = 'RevConflictError';
+  }
+}
+
+/** Sync result including text log for TXT field rebasing. */
+export interface SyncResult extends DocState {
+  textLog: Record<string, any[]>;
 }
 
 /** Pluggable server-side database backend. */
@@ -65,6 +80,17 @@ export interface DbBackend {
   pruneChanges(docId: string, beforeTs: number): Promise<void>;
   getRev(docId: string): Promise<number>;
   setRev(docId: string, rev: number): Promise<void>;
+
+  /**
+   * Atomically set fields, append text log entries, log the change ID,
+   * and increment rev. Throws RevConflictError if current rev !== expectedRev.
+   * Returns the new rev.
+   *
+   * Optional. If not implemented, MicroServer falls back to non-atomic writes
+   * (safe for single-server deployments). Multi-server deployments must either
+   * implement this method or route all requests for a document to the same server.
+   */
+  commit?(docId: string, write: CommitWrite): Promise<number>;
 }
 
 /** Pluggable object storage for large values (S3/R2). */

@@ -1,5 +1,5 @@
 import { Delta } from '@dabble/delta';
-import { BIT, INC, MAX, parseSuffix, TXT, type Field, type FieldMap } from './types.js';
+import { type Field, type FieldMap } from './types.js';
 
 // --- Bitmask operations (copied from patches) ---
 
@@ -32,17 +32,17 @@ export function generateId(): string {
 
 // --- Field merge ---
 
-/** Merge a single incoming field with an existing value, based on suffix type. */
-export function mergeField(existing: Field | undefined, incoming: Field, suffix: string): Field {
+/** Merge a single incoming field with an existing value, based on op type. */
+export function mergeField(existing: Field | undefined, incoming: Field): Field {
   const ev = existing?.val ?? 0;
-  switch (suffix) {
-    case INC:
-      return { val: ev + incoming.val, ts: incoming.ts };
-    case BIT:
-      return { val: applyBitmask(ev, incoming.val), ts: incoming.ts };
-    case MAX:
+  switch (incoming.op) {
+    case '+':
+      return { op: '+', val: ev + incoming.val, ts: incoming.ts };
+    case '~':
+      return { op: '~', val: applyBitmask(ev, incoming.val), ts: incoming.ts };
+    case '^':
       return incoming.val >= ev ? incoming : existing!;
-    case TXT:
+    case '#':
       return incoming; // text composed separately
     default:
       return incoming.ts >= (existing?.ts ?? 0) ? incoming : existing!;
@@ -60,19 +60,18 @@ export function consolidateOps(pending: FieldMap, newOps: FieldMap): FieldMap {
       result[key] = field;
       continue;
     }
-    const { suffix } = parseSuffix(key);
-    switch (suffix) {
-      case INC:
-        result[key] = { val: ex.val + field.val, ts: field.ts };
+    switch (field.op) {
+      case '+':
+        result[key] = { op: '+', val: ex.val + field.val, ts: field.ts };
         break;
-      case BIT:
-        result[key] = { val: combineBitmasks(ex.val, field.val), ts: field.ts };
+      case '~':
+        result[key] = { op: '~', val: combineBitmasks(ex.val, field.val), ts: field.ts };
         break;
-      case MAX:
+      case '^':
         result[key] = field.val >= ex.val ? field : ex;
         break;
-      case TXT:
-        result[key] = { val: new Delta(ex.val).compose(new Delta(field.val)).ops, ts: field.ts };
+      case '#':
+        result[key] = { op: '#', val: new Delta(ex.val).compose(new Delta(field.val)).ops, ts: field.ts };
         break;
       default:
         result[key] = field;
@@ -81,15 +80,30 @@ export function consolidateOps(pending: FieldMap, newOps: FieldMap): FieldMap {
   return result;
 }
 
+// --- Pending TXT rebase ---
+
+/** Transform pending TXT field deltas against server text log entries (for reconnection). */
+export function transformPendingTxt(pending: FieldMap, textLog: Record<string, any[]>): FieldMap {
+  const result = { ...pending };
+  for (const [key, deltas] of Object.entries(textLog)) {
+    if (!result[key]) continue;
+    let p = new Delta(result[key].val);
+    for (const delta of deltas) {
+      p = new Delta(delta).transform(p, true); // server has priority
+    }
+    result[key] = { op: '#', val: p.ops, ts: result[key].ts };
+  }
+  return result;
+}
+
 // --- State building ---
 
-/** Convert flat dot-notation FieldMap to a nested object. Strips suffixes from keys. */
+/** Convert flat dot-notation FieldMap to a nested object. */
 export function buildState<T = Record<string, any>>(fields: FieldMap): T {
   const obj: any = {};
   for (const [key, field] of Object.entries(fields)) {
     if (field.val == null) continue;
-    const { path } = parseSuffix(key);
-    const parts = path.split('.');
+    const parts = key.split('.');
     let cur = obj;
     for (let i = 0; i < parts.length - 1; i++) cur = cur[parts[i]] ??= {};
     cur[parts[parts.length - 1]] = field.val;
@@ -103,12 +117,11 @@ export function effectiveFields(confirmed: FieldMap, sending: FieldMap | null, p
   const layers = sending ? [sending, pending] : [pending];
   for (const layer of layers) {
     for (const [key, field] of Object.entries(layer)) {
-      const { suffix } = parseSuffix(key);
-      if (suffix === TXT) {
+      if (field.op === '#') {
         const base = result[key]?.val ? new Delta(result[key].val) : new Delta();
-        result[key] = { val: base.compose(new Delta(field.val)).ops, ts: field.ts };
+        result[key] = { op: '#', val: base.compose(new Delta(field.val)).ops, ts: field.ts };
       } else {
-        result[key] = mergeField(result[key], field, suffix);
+        result[key] = mergeField(result[key], field);
       }
     }
   }

@@ -1,6 +1,7 @@
 import { signal, type Signal } from 'easy-signal';
 import { MicroDoc } from './doc.js';
-import type { CommitResult, DocState, FieldMap } from './types.js';
+import { transformPendingTxt } from './ops.js';
+import type { CommitResult, DocState, FieldMap, SyncResult } from './types.js';
 
 export interface ClientOptions {
   /** Base URL for REST API, e.g. "https://api.example.com" */
@@ -51,10 +52,29 @@ export class MicroClient {
     }
 
     try {
-      const remote = await this._fetch<DocState>(`/docs/${docId}`);
-      if (remote.rev > state.rev) {
-        state = remote;
-        pending = {}; // server is newer, discard stale pending
+      if (state.rev > 0 && Object.keys(pending).length) {
+        // Have cached state with pending ops — try incremental sync to preserve them
+        try {
+          const sync = await this._fetch<SyncResult>(`/docs/${docId}/sync?since=${state.rev}`);
+          if (sync.rev > state.rev) {
+            Object.assign(state.fields, sync.fields);
+            pending = transformPendingTxt(pending, sync.textLog);
+            state.rev = sync.rev;
+          }
+        } catch {
+          // Incremental sync unavailable, fall back to full fetch
+          const remote = await this._fetch<DocState>(`/docs/${docId}`);
+          if (remote.rev > state.rev) {
+            state = remote;
+            pending = {};
+          }
+        }
+      } else {
+        const remote = await this._fetch<DocState>(`/docs/${docId}`);
+        if (remote.rev > state.rev) {
+          state = remote;
+          pending = {};
+        }
       }
     } catch {
       // Offline — use cached state
@@ -92,10 +112,10 @@ export class MicroClient {
 
   /** Disconnect WebSocket and clean up. */
   destroy() {
-    for (const [id, entry] of this._docs) {
+    for (const entry of this._docs.values()) {
       if (entry.timer) clearTimeout(entry.timer);
-      this._docs.delete(id);
     }
+    this._docs.clear();
     if (this._wsTimer) clearTimeout(this._wsTimer);
     this._ws?.close();
     this._ws = null;

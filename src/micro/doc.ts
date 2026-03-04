@@ -1,7 +1,7 @@
 import { Delta } from '@dabble/delta';
 import { batch, store, type Store, type Subscriber, type Unsubscriber } from 'easy-signal';
 import { buildState, consolidateOps, effectiveFields, generateId, mergeField } from './ops.js';
-import { TXT, parseSuffix, type Change, type FieldMap } from './types.js';
+import { type Change, type FieldMap, type Op } from './types.js';
 
 // --- Proxy-based updater types ---
 
@@ -30,15 +30,15 @@ export type Updatable<T> = T extends Delta
         ? { [K in keyof T]-?: Updatable<NonNullable<T[K]>> } & BaseUpdates<T>
         : BaseUpdates<T>;
 
-function createUpdater<T>(emit: (path: string, suffix: string, val: any) => void, path = ''): Updatable<T> {
+function createUpdater<T>(emit: (path: string, op: Op, val: any) => void, path = ''): Updatable<T> {
   return new Proxy({} as any, {
     get(_, prop: string) {
       const p = path ? `${path}.${prop}` : prop;
       switch (prop) {
         case 'set':
-          return (val: any) => emit(path, '', val);
+          return (val: any) => emit(path, '=', val);
         case 'del':
-          return () => emit(path, '', null);
+          return () => emit(path, '!', null);
         case 'inc':
           return (val = 1) => emit(path, '+', val);
         case 'bit':
@@ -97,8 +97,8 @@ export class MicroDoc<T = Record<string, any>> {
   update(fn: (doc: Updatable<T>) => void) {
     const ops: FieldMap = {};
     const ts = Date.now();
-    const emit = (path: string, suffix: string, val: any) => {
-      ops[suffix ? path + suffix : path] = { val, ts };
+    const emit = (path: string, op: Op, val: any) => {
+      ops[path] = { op, val, ts };
     };
     fn(createUpdater<T>(emit));
     if (!Object.keys(ops).length) return;
@@ -120,12 +120,11 @@ export class MicroDoc<T = Record<string, any>> {
   _confirmSend(rev: number) {
     if (!this._sending) return;
     for (const [key, field] of Object.entries(this._sending)) {
-      const { suffix } = parseSuffix(key);
-      if (suffix === TXT) {
+      if (field.op === '#') {
         const base = this._confirmed[key]?.val ? new Delta(this._confirmed[key].val) : new Delta();
-        this._confirmed[key] = { val: base.compose(new Delta(field.val)).ops, ts: field.ts };
+        this._confirmed[key] = { op: '#', val: base.compose(new Delta(field.val)).ops, ts: field.ts };
       } else {
-        this._confirmed[key] = mergeField(this._confirmed[key], field, suffix);
+        this._confirmed[key] = mergeField(this._confirmed[key], field);
       }
     }
     this._sending = null;
@@ -146,26 +145,25 @@ export class MicroDoc<T = Record<string, any>> {
   applyRemote(fields: FieldMap, rev: number) {
     batch(() => {
       for (const [key, field] of Object.entries(fields)) {
-        const { suffix } = parseSuffix(key);
-        if (suffix === TXT) {
+        if (field.op === '#') {
           const remote = new Delta(field.val);
-          // Transform sending against remote
+          // Transform sending and pending against remote using OT
           if (this._sending?.[key]) {
             const s = new Delta(this._sending[key].val);
-            this._sending[key] = { val: s.transform(remote, false).ops, ts: this._sending[key].ts };
-            const rPrime = remote.transform(s, true);
-            // Transform pending against transformed remote
+            const sPrime = remote.transform(s, true); // sending rebased after remote (server priority)
+            const rPrime = s.transform(remote, false); // remote passed through sending layer
+            this._sending[key] = { op: '#', val: sPrime.ops, ts: this._sending[key].ts };
             if (this._pending[key]) {
               const p = new Delta(this._pending[key].val);
-              this._pending[key] = { val: p.transform(rPrime, false).ops, ts: this._pending[key].ts };
+              this._pending[key] = { op: '#', val: rPrime.transform(p, true).ops, ts: this._pending[key].ts };
             }
           } else if (this._pending[key]) {
             const p = new Delta(this._pending[key].val);
-            this._pending[key] = { val: p.transform(remote, false).ops, ts: this._pending[key].ts };
+            this._pending[key] = { op: '#', val: remote.transform(p, true).ops, ts: this._pending[key].ts };
           }
           // Compose remote into confirmed
           const base = this._confirmed[key]?.val ? new Delta(this._confirmed[key].val) : new Delta();
-          this._confirmed[key] = { val: base.compose(remote).ops, ts: field.ts };
+          this._confirmed[key] = { op: '#', val: base.compose(remote).ops, ts: field.ts };
         } else {
           this._confirmed[key] = field;
         }

@@ -1,24 +1,24 @@
 import { Delta } from '@dabble/delta';
 import { applyBitmask } from './ops.js';
 import {
-  BIT,
-  INC,
-  MAX,
-  parseSuffix,
+  RevConflictError,
   REF_THRESHOLD,
-  TXT,
   type Change,
   type ChangeLogEntry,
   type CommitResult,
+  type CommitWrite,
   type DbBackend,
   type DocState,
   type Field,
   type FieldMap,
   type ObjectStore,
+  type SyncResult,
   type TextLogEntry,
 } from './types.js';
 
 type Subscriber = (fields: FieldMap, rev: number) => void;
+
+const MAX_RETRIES = 3;
 
 export class MicroServer {
   private _subs = new Map<string, Set<Subscriber>>();
@@ -34,54 +34,61 @@ export class MicroServer {
     return { fields, rev };
   }
 
-  /** Get fields changed since a given revision (for reconnection). */
-  async getChangesSince(docId: string, sinceRev: number): Promise<CommitResult> {
-    // For simplicity, return full doc if sinceRev is 0
+  /** Get fields changed since a given revision, including text log for TXT field rebasing. */
+  async getChangesSince(docId: string, sinceRev: number): Promise<SyncResult> {
     const { fields, rev } = await this.getDoc(docId);
-    if (sinceRev === 0) return { fields, rev };
-    // The DB backend could optimize this, but for now return all fields
-    // A production backend would track per-field revisions
-    return { fields, rev };
+    const textLog: Record<string, any[]> = {};
+
+    // Collect text log entries for TXT fields so clients can rebase pending ops
+    for (const [key, field] of Object.entries(fields)) {
+      if (field.op === '#') {
+        const entries = await this._db.getTextLog(docId, key, sinceRev);
+        textLog[key] = entries.map(e => e.delta);
+      }
+    }
+
+    return { fields, rev, textLog };
   }
 
   /** Process an incoming change from a client. */
-  async commitChanges(docId: string, change: Change): Promise<CommitResult> {
+  async commitChanges(docId: string, change: Change, _retries = MAX_RETRIES): Promise<CommitResult> {
     // Idempotency check
     if (await this._db.hasChange(docId, change.id)) {
       const rev = await this._db.getRev(docId);
       return { rev, fields: {} };
     }
 
+    const rev = await this._db.getRev(docId);
     const resultFields: FieldMap = {};
-    let rev = await this._db.getRev(docId);
+    const fieldsToSave: FieldMap = {};
+    const textLogEntries: TextLogEntry[] = [];
     let hasCombinableOps = false;
 
     for (const [key, incoming] of Object.entries(change.fields)) {
-      const { suffix } = parseSuffix(key);
       const existing = await this._db.getField(docId, key);
 
       let resolved: Field;
 
-      switch (suffix) {
-        case INC: {
+      switch (incoming.op) {
+        case '+': {
           const ev = existing?.val ?? 0;
-          resolved = { val: ev + incoming.val, ts: incoming.ts };
+          resolved = { op: '+', val: ev + incoming.val, ts: incoming.ts };
           hasCombinableOps = true;
           break;
         }
-        case BIT: {
+        case '~': {
           const ev = existing?.val ?? 0;
-          resolved = { val: applyBitmask(ev, incoming.val), ts: incoming.ts };
+          resolved = { op: '~', val: applyBitmask(ev, incoming.val), ts: incoming.ts };
           hasCombinableOps = true;
           break;
         }
-        case MAX: {
+        case '^': {
           const ev = existing?.val ?? 0;
           resolved = incoming.val >= ev ? incoming : existing!;
           if (resolved === existing) continue; // no change
           break;
         }
-        case TXT: {
+        case '#': {
           hasCombinableOps = true;
           // Get text log entries since client's rev for OT
           const log = await this._db.getTextLog(docId, key, change.rev);
@@ -95,19 +102,16 @@ export class MicroServer {
 
           // Compose transformed delta into current full text
           const base = existing?.val ? new Delta(existing.val) : new Delta();
-          resolved = { val: base.compose(delta).ops, ts: incoming.ts };
+          resolved = { op: '#', val: base.compose(delta).ops, ts: incoming.ts };
 
-          // Append to text log
-          await this._db.appendTextLog(docId, { key, delta: delta.ops, rev: rev + 1 });
+          textLogEntries.push({ key, delta: delta.ops, rev: rev + 1 });
 
           // Store the transformed delta (not full text) in result for broadcast
-          resultFields[key] = { val: delta.ops, ts: incoming.ts };
-          // Still need to save full text to DB
+          resultFields[key] = { op: '#', val: delta.ops, ts: incoming.ts };
+          // Save full text to DB
           await this._handleLargeValue(docId, key, resolved);
-          const toSave: FieldMap = {};
-          toSave[key] = resolved;
-          await this._db.setFields(docId, toSave);
-          continue; // skip the common save below
+          fieldsToSave[key] = resolved;
+          continue; // skip the common handling below
         }
         default: {
           // LWW: incoming wins if ts >= existing
@@ -120,26 +124,31 @@ export class MicroServer {
       await this._handleLargeValue(docId, key, resolved);
 
       resultFields[key] = resolved;
-      const toSave: FieldMap = {};
-      toSave[key] = resolved;
-      await this._db.setFields(docId, toSave);
+      fieldsToSave[key] = resolved;
     }
 
-    // Log change ID for idempotency (only needed for combinable ops)
-    if (hasCombinableOps) {
-      await this._db.addChange(docId, { changeId: change.id, ts: Date.now() });
+    if (!Object.keys(resultFields).length) {
+      return { rev, fields: {} };
     }
 
-    // Increment revision
-    rev++;
-    await this._db.setRev(docId, rev);
+    const changeLogEntry = hasCombinableOps ? { changeId: change.id, ts: Date.now() } : undefined;
 
-    // Broadcast to other subscribers
-    if (Object.keys(resultFields).length) {
-      this._broadcast(docId, resultFields, rev);
+    // Commit all writes, atomically if the backend supports it
+    const newRev = await this._commit(docId, {
+      fields: fieldsToSave,
+      textLogEntries: textLogEntries.length ? textLogEntries : undefined,
+      changeLogEntry,
+      expectedRev: rev,
+    });
+
+    if (newRev === null) {
+      // CAS conflict — retry
+      if (_retries <= 0) throw new RevConflictError(rev, -1);
+      return this.commitChanges(docId, change, _retries - 1);
     }
 
-    return { rev, fields: resultFields };
+    this._broadcast(docId, resultFields, newRev);
+    return { rev: newRev, fields: resultFields };
   }
 
   /** Compact text log entries up to a revision. */
@@ -185,6 +194,34 @@ export class MicroServer {
     for (const cb of subs) {
       if (cb !== exclude) cb(fields, rev);
     }
+  }
+
+  /** Commit writes, using atomic commit if available. Returns new rev or null on CAS conflict. */
+  private async _commit(docId: string, write: CommitWrite): Promise<number | null> {
+    if (this._db.commit) {
+      try {
+        return await this._db.commit(docId, write);
+      } catch (e) {
+        if (e instanceof RevConflictError) return null;
+        throw e;
+      }
+    }
+
+    // Non-atomic fallback (safe for single-server deployments)
+    if (Object.keys(write.fields).length) {
+      await this._db.setFields(docId, write.fields);
+    }
+    if (write.textLogEntries) {
+      for (const entry of write.textLogEntries) {
+        await this._db.appendTextLog(docId, entry);
+      }
+    }
+    if (write.changeLogEntry) {
+      await this._db.addChange(docId, write.changeLogEntry);
+    }
+    const newRev = write.expectedRev + 1;
+    await this._db.setRev(docId, newRev);
+    return newRev;
   }
 
   private async _handleLargeValue(docId: string, key: string, field: Field) {
@@ -251,5 +288,32 @@ export class MemoryDbBackend implements DbBackend {
   }
   async setRev(docId: string, rev: number): Promise<void> {
     this._revs.set(docId, rev);
+  }
+
+  async commit(docId: string, write: CommitWrite): Promise<number> {
+    const currentRev = this._revs.get(docId) ?? 0;
+    if (currentRev !== write.expectedRev) {
+      throw new RevConflictError(write.expectedRev, currentRev);
+    }
+    const newRev = currentRev + 1;
+    if (Object.keys(write.fields).length) {
+      const existing = this._fields.get(docId) ?? {};
+      this._fields.set(docId, { ...existing, ...write.fields });
+    }
+    if (write.textLogEntries) {
+      for (const entry of write.textLogEntries) {
+        const k = `${docId}:${entry.key}`;
+        const log = this._textLog.get(k) ?? [];
+        log.push(entry);
+        this._textLog.set(k, log);
+      }
+    }
+    if (write.changeLogEntry) {
+      const log = this._changeLog.get(docId) ?? [];
+      log.push(write.changeLogEntry);
+      this._changeLog.set(docId, log);
+    }
+    this._revs.set(docId, newRev);
+    return newRev;
   }
 }

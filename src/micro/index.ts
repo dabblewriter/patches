@@ -11,17 +11,21 @@ export {
   effectiveFields,
   generateId,
   mergeField,
+  transformPendingTxt,
 } from './ops.js';
 export { MemoryDbBackend, MicroServer } from './server.js';
-export { BIT, INC, MAX, parseSuffix, REF_THRESHOLD, TXT } from './types.js';
+export { RevConflictError, REF_THRESHOLD } from './types.js';
 export type {
   Change,
   ChangeLogEntry,
   CommitResult,
+  CommitWrite,
   DbBackend,
   DocState,
   Field,
   FieldMap,
+  Op,
   ObjectStore,
+  SyncResult,
   TextLogEntry,
 } from './types.js';

@@ -157,11 +157,11 @@ const sse = new SSEServer({
 
 // Wire up notifications when changes are committed
 otServer.onChangesCommitted((docId, changes, options, originClientId) => {
-  sse.notify('changesCommitted', { docId, changes, options }, originClientId);
+  sse.notify(docId, 'changesCommitted', { docId, changes, options }, originClientId);
 });
 
 otServer.onDocDeleted((docId, originClientId) => {
-  sse.notify('docDeleted', { docId }, originClientId);
+  sse.notify(docId, 'docDeleted', { docId }, originClientId);
 });
 ```
 

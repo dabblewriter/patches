@@ -23,6 +23,7 @@ export default [
         clearTimeout: 'readonly',
         addEventListener: 'readonly',
         navigator: 'readonly',
+        fetch: 'readonly',
         global: 'readonly',
       },
     },

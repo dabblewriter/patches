@@ -25,6 +25,7 @@ Patches is a TypeScript library for real-time collaborative apps. It implements 
 @dabble/patches/webrtc    — WebRTC
 @dabble/patches/vue       — Vue 3 integration
 @dabble/patches/solid     — Solid.js integration
+@dabble/patches/micro     — Micro sync (standalone LWW + Delta text)
 ```
 
 ## Code Structure
@@ -38,6 +39,7 @@ src/
     ot/server/  — OT server algorithms
     ot/shared/  — shared OT logic
     lww/        — LWW algorithms
+  micro/        — standalone minimal LWW sync with special field types
   net/          — transport layer (WebSocket, SSE+REST, WebRTC)
   json-patch/   — JSON Patch operations
 tests/          — mirrors src/ structure
@@ -68,6 +70,7 @@ Read these when working in a specific area:
 | `docs/json-patch.md` | JSON Patch format |
 | `src/vue/README.md` | Vue 3 integration |
 | `src/solid/README.md` | Solid.js integration |
+| `src/micro/README.md` | Micro sync system |
 
 ## Testing
 

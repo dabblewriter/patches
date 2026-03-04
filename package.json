@@ -41,6 +41,10 @@
     "./solid": {
       "import": "./dist/solid/index.js",
       "types": "./dist/solid/index.d.ts"
+    },
+    "./micro": {
+      "import": "./dist/micro/index.js",
+      "types": "./dist/micro/index.d.ts"
     }
   },
   "files": [

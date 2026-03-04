@@ -20,24 +20,35 @@ interface StringUpdates extends BaseUpdates<string> {
 interface DeltaUpdates extends BaseUpdates<Delta> {
   txt(delta: Delta): void;
 }
-export type Updatable<T> = T extends Delta ? DeltaUpdates
-  : T extends number ? NumberUpdates
-  : T extends string ? StringUpdates
-  : T extends object ? { [K in keyof T]-?: Updatable<NonNullable<T[K]>> } & BaseUpdates<T>
-  : BaseUpdates<T>;
+export type Updatable<T> = T extends Delta
+  ? DeltaUpdates
+  : T extends number
+    ? NumberUpdates
+    : T extends string
+      ? StringUpdates
+      : T extends object
+        ? { [K in keyof T]-?: Updatable<NonNullable<T[K]>> } & BaseUpdates<T>
+        : BaseUpdates<T>;
 
 function createUpdater<T>(emit: (path: string, suffix: string, val: any) => void, path = ''): Updatable<T> {
   return new Proxy({} as any, {
     get(_, prop: string) {
       const p = path ? `${path}.${prop}` : prop;
       switch (prop) {
-        case 'set': return (val: any) => emit(path, '', val);
-        case 'del': return () => emit(path, '', null);
-        case 'inc': return (val = 1) => emit(path, '+', val);
-        case 'bit': return (val: number) => emit(path, '~', val);
-        case 'max': return (val: any) => emit(path, '^', val);
-        case 'txt': return (delta: Delta) => emit(path, '#', delta.ops);
-        default: return createUpdater(emit, p);
+        case 'set':
+          return (val: any) => emit(path, '', val);
+        case 'del':
+          return () => emit(path, '', null);
+        case 'inc':
+          return (val = 1) => emit(path, '+', val);
+        case 'bit':
+          return (val: number) => emit(path, '~', val);
+        case 'max':
+          return (val: any) => emit(path, '^', val);
+        case 'txt':
+          return (delta: Delta) => emit(path, '#', delta.ops);
+        default:
+          return createUpdater(emit, p);
       }
     },
   });
@@ -55,16 +66,28 @@ export class MicroDoc<T = Record<string, any>> {
   /** Called by client when ops are queued. */
   _onUpdate?: () => void;
 
-  constructor(confirmed: FieldMap = {}, pending: FieldMap = {}, public rev = 0) {
+  constructor(
+    confirmed: FieldMap = {},
+    pending: FieldMap = {},
+    public rev = 0
+  ) {
     this._confirmed = { ...confirmed };
     this._pending = { ...pending };
     this._store = store<T>(this._rebuild());
   }
 
-  get state(): T { return this._store.state; }
-  get pending(): FieldMap { return this._pending; }
-  get confirmed(): FieldMap { return this._confirmed; }
-  get isSending(): boolean { return this._sending !== null; }
+  get state(): T {
+    return this._store.state;
+  }
+  get pending(): FieldMap {
+    return this._pending;
+  }
+  get confirmed(): FieldMap {
+    return this._confirmed;
+  }
+  get isSending(): boolean {
+    return this._sending !== null;
+  }
 
   subscribe(cb: Subscriber<T>, noInit?: false): Unsubscriber {
     return this._store.subscribe(cb, noInit);

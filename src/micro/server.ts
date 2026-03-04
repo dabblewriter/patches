@@ -1,13 +1,32 @@
 import { Delta } from '@dabble/delta';
 import { applyBitmask } from './ops.js';
-import { BIT, INC, MAX, parseSuffix, REF_THRESHOLD, TXT, type Change, type ChangeLogEntry, type CommitResult, type DbBackend, type DocState, type Field, type FieldMap, type ObjectStore, type TextLogEntry } from './types.js';
+import {
+  BIT,
+  INC,
+  MAX,
+  parseSuffix,
+  REF_THRESHOLD,
+  TXT,
+  type Change,
+  type ChangeLogEntry,
+  type CommitResult,
+  type DbBackend,
+  type DocState,
+  type Field,
+  type FieldMap,
+  type ObjectStore,
+  type TextLogEntry,
+} from './types.js';
 
 type Subscriber = (fields: FieldMap, rev: number) => void;
 
 export class MicroServer {
   private _subs = new Map<string, Set<Subscriber>>();
 
-  constructor(private _db: DbBackend, private _objects?: ObjectStore) { }
+  constructor(
+    private _db: DbBackend,
+    private _objects?: ObjectStore
+  ) {}
 
   /** Get full document state. */
   async getDoc(docId: string): Promise<DocState> {
@@ -144,9 +163,15 @@ export class MicroServer {
   /** Subscribe to changes for a document. */
   subscribe(docId: string, cb: Subscriber) {
     let subs = this._subs.get(docId);
-    if (!subs) { subs = new Set(); this._subs.set(docId, subs); }
+    if (!subs) {
+      subs = new Set();
+      this._subs.set(docId, subs);
+    }
     subs.add(cb);
-    return () => { subs!.delete(cb); if (!subs!.size) this._subs.delete(docId); };
+    return () => {
+      subs!.delete(cb);
+      if (!subs!.size) this._subs.delete(docId);
+    };
   }
 
   /** Get subscriber count for a document. */
@@ -216,7 +241,10 @@ export class MemoryDbBackend implements DbBackend {
   }
   async pruneChanges(docId: string, beforeTs: number): Promise<void> {
     const log = this._changeLog.get(docId) ?? [];
-    this._changeLog.set(docId, log.filter(e => e.ts >= beforeTs));
+    this._changeLog.set(
+      docId,
+      log.filter(e => e.ts >= beforeTs)
+    );
   }
   async getRev(docId: string): Promise<number> {
     return this._revs.get(docId) ?? 0;

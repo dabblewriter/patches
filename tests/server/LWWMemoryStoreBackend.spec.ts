@@ -561,11 +561,11 @@ describe('LWWMemoryStoreBackend', () => {
       });
     });
 
-    describe('closeBranch', () => {
+    describe('closeBranch via updateBranch', () => {
       it('sets status to closed', async () => {
         await store.createBranch(createTestBranch('branch1', 'doc1'));
 
-        await store.closeBranch('branch1');
+        await store.updateBranch('branch1', { status: 'closed' });
 
         const branch = await store.loadBranch('branch1');
         expect(branch?.status).toBe('closed');

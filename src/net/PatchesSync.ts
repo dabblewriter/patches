@@ -1,5 +1,5 @@
 import { isEqual } from '@dabble/delta';
-import { batch, ReadonlyStoreClass, signal, store, type Store } from 'easy-signal';
+import { batch, ReadonlyStoreClass, signal, store, type Store, type Unsubscriber } from 'easy-signal';
 import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/ot/shared/changeBatching.js';
 import { BaseDoc } from '../client/BaseDoc.js';
 import type { ClientAlgorithm } from '../client/ClientAlgorithm.js';
@@ -105,17 +105,19 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.trackedDocs = new Set(patches.trackedDocs);
 
     // --- Event Listeners ---
-    onlineState.onOnlineChange(online => this.updateState({ online }));
-    this.connection.onStateChange(this._handleConnectionChange.bind(this));
-    this.connection.onChangesCommitted(this._receiveCommittedChanges.bind(this));
-    this.connection.onDocDeleted(docId => this._handleRemoteDocDeleted(docId));
-
-    // Listen to Patches for tracking changes
-    patches.onTrackDocs(this._handleDocsTracked.bind(this));
-    patches.onUntrackDocs(this._handleDocsUntracked.bind(this));
-    patches.onDeleteDoc(this._handleDocDeleted.bind(this));
-    patches.onChange(this._handleDocChange.bind(this));
+    this._unsubs = [
+      onlineState.onOnlineChange(online => this.updateState({ online })),
+      this.connection.onStateChange(this._handleConnectionChange.bind(this)),
+      this.connection.onChangesCommitted(this._receiveCommittedChanges.bind(this)),
+      this.connection.onDocDeleted(docId => this._handleRemoteDocDeleted(docId)),
+      patches.onTrackDocs(this._handleDocsTracked.bind(this)),
+      patches.onUntrackDocs(this._handleDocsUntracked.bind(this)),
+      patches.onDeleteDoc(this._handleDocDeleted.bind(this)),
+      patches.onChange(this._handleDocChange.bind(this)),
+    ];
   }
+
+  private _unsubs: Unsubscriber[] = [];
 
   /**
    * Gets the algorithm for a document. Uses the open doc's algorithm if available,
@@ -202,6 +204,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.connection.disconnect();
     this.updateState({ connected: false, syncStatus: 'unsynced' });
     this._resetSyncingStatuses();
+  }
+
+  /**
+   * Disconnects and removes all event listeners.
+   * After calling destroy(), this instance should not be reused.
+   */
+  destroy(): void {
+    this.disconnect();
+    for (const unsub of this._unsubs) unsub();
+    this._unsubs.length = 0;
   }
 
   /**

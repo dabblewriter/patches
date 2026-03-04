@@ -39,13 +39,8 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
     this._hasPending = (snapshot?.changes?.length ?? 0) > 0;
 
     if (snapshot?.changes && snapshot.changes.length > 0) {
-      let currentState = this.state;
-      for (const change of snapshot.changes) {
-        for (const op of change.ops) {
-          currentState = applyPatch(currentState, [op], { partial: true });
-        }
-      }
-      this.state = currentState;
+      const allOps = snapshot.changes.flatMap(c => c.ops);
+      this.state = applyPatch(this.state, allOps, { partial: true });
     }
     this._baseState = this.state;
     this._checkLoaded();
@@ -72,11 +67,11 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
 
     let currentState = snapshot.state;
     if (snapshot.changes && snapshot.changes.length > 0) {
-      for (const change of snapshot.changes) {
-        for (const op of change.ops) {
-          currentState = applyPatch(currentState, [op], { partial: true });
-        }
-      }
+      currentState = applyPatch(
+        currentState,
+        snapshot.changes.flatMap(c => c.ops),
+        { partial: true }
+      );
     }
 
     this._baseState = currentState;
@@ -130,20 +125,12 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
     this._checkLoaded();
 
     if (hasServerChanges) {
-      let newBaseState = this._baseState;
-      for (const change of changes) {
-        for (const op of change.ops) {
-          newBaseState = applyPatch(newBaseState, [op], { partial: true });
-        }
-      }
-      this._baseState = newBaseState;
+      const allOps = changes.flatMap(c => c.ops);
+      this._baseState = applyPatch(this._baseState, allOps, { partial: true });
       this._recomputeState();
     } else {
-      for (const change of changes) {
-        for (const op of change.ops) {
-          this._baseState = applyPatch(this._baseState, [op], { partial: true });
-        }
-      }
+      const allOps = changes.flatMap(c => c.ops);
+      this._baseState = applyPatch(this._baseState, allOps, { partial: true });
 
       if (this._optimisticOps.length > 0) {
         this._optimisticOps.shift();

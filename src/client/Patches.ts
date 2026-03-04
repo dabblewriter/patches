@@ -153,12 +153,7 @@ export class Patches {
     docIds.forEach(this.trackedDocs.delete, this.trackedDocs);
     this.onUntrackDocs.emit(docIds);
 
-    // Close any open PatchesDoc instances first
-    const closedPromises = docIds.filter(id => this.docs.has(id)).map(id => this.closeDoc(id)); // closeDoc removes from this.docs map
-    await Promise.all(closedPromises);
-
-    // Untrack from each doc's algorithm
-    // Group by algorithm and untrack
+    // Capture algorithm mapping BEFORE closing docs (closeDoc removes from this.docs)
     const byAlgorithm = new Map<ClientAlgorithm, string[]>();
     for (const docId of docIds) {
       const managed = this.docs.get(docId);
@@ -167,6 +162,12 @@ export class Patches {
       list.push(docId);
       byAlgorithm.set(algorithm, list);
     }
+
+    // Close any open PatchesDoc instances
+    const closedPromises = docIds.filter(id => this.docs.has(id)).map(id => this.closeDoc(id));
+    await Promise.all(closedPromises);
+
+    // Untrack from each doc's algorithm
     await Promise.all([...byAlgorithm.entries()].map(([algorithm, ids]) => algorithm.untrackDocs(ids)));
   }
 

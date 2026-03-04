@@ -5,7 +5,7 @@ export { OTServer, type CommitChangesOptions, type OTServerOptions } from './OTS
 // Branch managers
 export type { BranchManager } from './BranchManager.js';
 export { LWWBranchManager } from './LWWBranchManager.js';
-export { OTBranchManager, PatchesBranchManager } from './OTBranchManager.js';
+export { OTBranchManager } from './OTBranchManager.js';
 
 // In-memory backends (for testing)
 export { LWWMemoryStoreBackend } from './LWWMemoryStoreBackend.js';
@@ -20,7 +20,7 @@ export { buildVersionState, getBaseStateBeforeVersion } from '../algorithms/ot/s
 export { concatStreams, jsonReadable, parseVersionState, readStreamAsString } from './jsonReadable.js';
 
 // Concurrency utilities
-export { blockable, blockableResponse, blocking, singleInvocation } from '../utils/concurrency.js';
+export { blockable, blockableResponse, blocking, releaseConcurrency, singleInvocation } from '../utils/concurrency.js';
 
 // Errors
 export { RevConflictError } from './RevConflictError.js';

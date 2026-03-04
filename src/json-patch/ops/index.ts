@@ -13,19 +13,21 @@ import { text } from './text.js';
 // Export all patch operations
 export { add, bit, copy, increment, max, min, move, remove, replace, test };
 
+const defaultTypes: JSONPatchOpHandlerMap = {
+  test,
+  add,
+  remove,
+  replace,
+  copy,
+  move,
+  '@inc': increment,
+  '@bit': bit,
+  '@txt': text,
+  '@max': max,
+  '@min': min,
+};
+
 export function getTypes(custom?: JSONPatchOpHandlerMap) {
-  return {
-    test,
-    add,
-    remove,
-    replace,
-    copy,
-    move,
-    '@inc': increment,
-    '@bit': bit,
-    '@txt': text,
-    '@max': max,
-    '@min': min,
-    ...custom,
-  };
+  if (!custom || Object.keys(custom).length === 0) return defaultTypes;
+  return { ...defaultTypes, ...custom };
 }

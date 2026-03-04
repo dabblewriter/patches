@@ -1,20 +1,36 @@
 /** A field value with LWW timestamp. */
-export interface Field { val: any; ts: number }
+export interface Field {
+  val: any;
+  ts: number;
+}
 
 /** Map of dot-notation field keys (with optional suffix) to values. */
 export type FieldMap = Record<string, Field>;
 
 /** A change sent from client to server. */
-export interface Change { id: string; rev: number; fields: FieldMap }
+export interface Change {
+  id: string;
+  rev: number;
+  fields: FieldMap;
+}
 
 /** Result from server after committing a change. */
-export interface CommitResult { rev: number; fields: FieldMap }
+export interface CommitResult {
+  rev: number;
+  fields: FieldMap;
+}
 
 /** Full document state. */
-export interface DocState { rev: number; fields: FieldMap }
+export interface DocState {
+  rev: number;
+  fields: FieldMap;
+}
 
 /** Suffix constants for special field types. */
-export const INC = '+', BIT = '~', TXT = '#', MAX = '^';
+export const INC = '+',
+  BIT = '~',
+  TXT = '#',
+  MAX = '^';
 const SUFFIXES = new Set([INC, BIT, TXT, MAX]);
 
 /** Parse a field key into its path and suffix (if any). */
@@ -24,10 +40,17 @@ export function parseSuffix(key: string): { path: string; suffix: string } {
 }
 
 /** Server-side text log entry for OT. */
-export interface TextLogEntry { key: string; delta: any; rev: number }
+export interface TextLogEntry {
+  key: string;
+  delta: any;
+  rev: number;
+}
 
 /** Server-side change log entry for idempotency. */
-export interface ChangeLogEntry { changeId: string; ts: number }
+export interface ChangeLogEntry {
+  changeId: string;
+  ts: number;
+}
 
 /** Pluggable server-side database backend. */
 export interface DbBackend {

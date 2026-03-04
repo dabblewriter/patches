@@ -7,5 +7,4 @@ export * from './pathProxy.js';
 export { transformPatch } from './transformPatch.js';
 
 export * from './JSONPatch.js';
-export * from './ops/index.js';
-export type { ApplyJSONPatchOptions, JSONPatchOpHandlerMap as JSONPatchCustomTypes, JSONPatchOp } from './types.js';
+export type { ApplyJSONPatchOptions, JSONPatchOpHandlerMap, JSONPatchOp } from './types.js';

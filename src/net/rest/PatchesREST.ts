@@ -1,5 +1,6 @@
 import { signal, type Unsubscriber } from 'easy-signal';
 import type {
+  Branch,
   Change,
   ChangeInput,
   CommitChangesOptions,
@@ -245,7 +246,7 @@ export class PatchesREST implements PatchesConnection {
 
   // --- Branch Operations (not in PatchesAPI but matches PatchesClient feature parity) ---
 
-  async listBranches(docId: string): Promise<VersionMetadata[]> {
+  async listBranches(docId: string): Promise<Branch[]> {
     return this._fetch(`/docs/${encodeDocId(docId)}/_branches`);
   }
 

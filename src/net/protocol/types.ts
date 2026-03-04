@@ -118,16 +118,6 @@ export interface JsonRpcNotification {
 /** Union type for all possible JSON-RPC message types */
 export type Message = JsonRpcRequest | JsonRpcResponse | JsonRpcNotification;
 
-export interface ListOptions {
-  startAt?: string;
-  startAfter?: string;
-  endAt?: string;
-  endBefore?: string;
-  prefix?: string;
-  limit?: number;
-  reverse?: boolean;
-}
-
 export interface PatchesAPI {
   // === Subscription Operations ===
   /**

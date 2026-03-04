@@ -109,7 +109,7 @@ export class OTBranchManager implements BranchManager {
    * @param branchId - The ID of the branch to close.
    * @param status - The status to set for the branch.
    */
-  async closeBranch(branchId: string, status?: Exclude<BranchStatus, 'open'> | null): Promise<void> {
+  async closeBranch(branchId: string, status?: Exclude<BranchStatus, 'open'>): Promise<void> {
     await this.store.updateBranch(branchId, { status: status ?? 'closed' });
   }
 
@@ -204,8 +204,3 @@ export class OTBranchManager implements BranchManager {
 
 // Re-export for backwards compatibility
 export { assertBranchMetadata } from './branchUtils.js';
-
-/**
- * @deprecated Use OTBranchManager instead. This alias will be removed in a future version.
- */
-export const PatchesBranchManager = OTBranchManager;

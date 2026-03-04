@@ -106,6 +106,7 @@ export class OTServer implements PatchesServer {
     changes: ChangeInput[],
     options?: CommitChangesOptions
   ): Promise<{ changes: Change[]; docReloadRequired?: true }> {
+    const clientId = getClientId();
     const { catchupChanges, newChanges, docReloadRequired } = await commitChanges(
       this.store,
       docId,
@@ -117,7 +118,7 @@ export class OTServer implements PatchesServer {
     // Notify about newly committed changes (broadcast to other clients)
     if (newChanges.length > 0) {
       try {
-        await this.onChangesCommitted.emit(docId, newChanges, options, getClientId());
+        await this.onChangesCommitted.emit(docId, newChanges, options, clientId);
       } catch (error) {
         console.error(`Failed to notify clients about committed changes for doc ${docId}:`, error);
       }

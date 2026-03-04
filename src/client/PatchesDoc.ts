@@ -69,5 +69,4 @@ export interface PatchesDoc<T extends object = object> extends ReadonlyStore<T> 
   change(mutator: ChangeMutator<T>): void;
 }
 
-// Re-export OTDoc as the default PatchesDoc class for backwards compatibility
-export { OTDoc, OTDoc as PatchesDocClass } from './OTDoc.js';
+export { OTDoc } from './OTDoc.js';

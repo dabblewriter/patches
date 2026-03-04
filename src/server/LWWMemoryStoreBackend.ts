@@ -253,10 +253,6 @@ export class LWWMemoryStoreBackend
     }
   }
 
-  async closeBranch(branchId: string): Promise<void> {
-    await this.updateBranch(branchId, { status: 'closed' });
-  }
-
   // === Testing utilities ===
 
   /**

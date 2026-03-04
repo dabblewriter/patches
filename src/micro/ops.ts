@@ -16,8 +16,10 @@ export function applyBitmask(num: number, mask: number): number {
 
 /** Combine two bitmasks into one. */
 export function combineBitmasks(a: number, b: number): number {
-  const aOff = (a >> 15) & 0x7fff, aOn = a & 0x7fff;
-  const bOff = (b >> 15) & 0x7fff, bOn = b & 0x7fff;
+  const aOff = (a >> 15) & 0x7fff,
+    aOn = a & 0x7fff;
+  const bOff = (b >> 15) & 0x7fff,
+    bOn = b & 0x7fff;
   return (((aOff & ~bOn) | bOff) << 15) | ((aOn & ~bOff) | bOn);
 }
 
@@ -34,11 +36,16 @@ export function generateId(): string {
 export function mergeField(existing: Field | undefined, incoming: Field, suffix: string): Field {
   const ev = existing?.val ?? 0;
   switch (suffix) {
-    case INC: return { val: ev + incoming.val, ts: incoming.ts };
-    case BIT: return { val: applyBitmask(ev, incoming.val), ts: incoming.ts };
-    case MAX: return incoming.val >= ev ? incoming : existing!;
-    case TXT: return incoming; // text composed separately
-    default: return incoming.ts >= (existing?.ts ?? 0) ? incoming : existing!;
+    case INC:
+      return { val: ev + incoming.val, ts: incoming.ts };
+    case BIT:
+      return { val: applyBitmask(ev, incoming.val), ts: incoming.ts };
+    case MAX:
+      return incoming.val >= ev ? incoming : existing!;
+    case TXT:
+      return incoming; // text composed separately
+    default:
+      return incoming.ts >= (existing?.ts ?? 0) ? incoming : existing!;
   }
 }
 
@@ -49,14 +56,26 @@ export function consolidateOps(pending: FieldMap, newOps: FieldMap): FieldMap {
   const result = { ...pending };
   for (const [key, field] of Object.entries(newOps)) {
     const ex = result[key];
-    if (!ex) { result[key] = field; continue; }
+    if (!ex) {
+      result[key] = field;
+      continue;
+    }
     const { suffix } = parseSuffix(key);
     switch (suffix) {
-      case INC: result[key] = { val: ex.val + field.val, ts: field.ts }; break;
-      case BIT: result[key] = { val: combineBitmasks(ex.val, field.val), ts: field.ts }; break;
-      case MAX: result[key] = field.val >= ex.val ? field : ex; break;
-      case TXT: result[key] = { val: new Delta(ex.val).compose(new Delta(field.val)).ops, ts: field.ts }; break;
-      default: result[key] = field;
+      case INC:
+        result[key] = { val: ex.val + field.val, ts: field.ts };
+        break;
+      case BIT:
+        result[key] = { val: combineBitmasks(ex.val, field.val), ts: field.ts };
+        break;
+      case MAX:
+        result[key] = field.val >= ex.val ? field : ex;
+        break;
+      case TXT:
+        result[key] = { val: new Delta(ex.val).compose(new Delta(field.val)).ops, ts: field.ts };
+        break;
+      default:
+        result[key] = field;
     }
   }
   return result;

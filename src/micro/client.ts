@@ -44,7 +44,10 @@ export class MicroClient {
 
     if (this._dbName) {
       const cached = await this._idbLoad(docId);
-      if (cached) { state = { rev: cached.rev, fields: cached.fields }; pending = cached.pending; }
+      if (cached) {
+        state = { rev: cached.rev, fields: cached.fields };
+        pending = cached.pending;
+      }
     }
 
     try {
@@ -80,7 +83,10 @@ export class MicroClient {
   async flush(docId: string) {
     const entry = this._docs.get(docId);
     if (!entry) return;
-    if (entry.timer) { clearTimeout(entry.timer); entry.timer = null; }
+    if (entry.timer) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
     await this._doFlush(docId, entry);
   }
 
@@ -151,14 +157,16 @@ export class MicroClient {
       }
     };
 
-    ws.onmessage = (e) => {
+    ws.onmessage = e => {
       try {
         const msg = JSON.parse(e.data as string);
         if (msg.type === 'change' && msg.docId) {
           const entry = this._docs.get(msg.docId);
           if (entry) entry.doc.applyRemote(msg.fields, msg.rev);
         }
-      } catch { /* ignore malformed messages */ }
+      } catch {
+        /* ignore malformed messages */
+      }
     };
 
     ws.onclose = () => {
@@ -204,7 +212,10 @@ export class MicroClient {
         if (!db.objectStoreNames.contains('docs')) db.createObjectStore('docs');
         if (!db.objectStoreNames.contains('pending')) db.createObjectStore('pending');
       };
-      req.onsuccess = () => { this._db = req.result; resolve(req.result); };
+      req.onsuccess = () => {
+        this._db = req.result;
+        resolve(req.result);
+      };
       req.onerror = () => reject(req.error);
     });
   }
@@ -219,7 +230,9 @@ export class MicroClient {
       ]);
       if (!docData) return null;
       return { fields: docData.fields, rev: docData.rev, pending: pendingData?.ops ?? {} };
-    } catch { return null; }
+    } catch {
+      return null;
+    }
   }
 
   private async _idbSave(docId: string, doc: MicroDoc<any>) {
@@ -228,7 +241,9 @@ export class MicroClient {
       const tx = db.transaction(['docs', 'pending'], 'readwrite');
       tx.objectStore('docs').put({ fields: doc.confirmed, rev: doc.rev }, docId);
       tx.objectStore('pending').put({ ops: doc.pending }, docId);
-    } catch { /* best-effort */ }
+    } catch {
+      /* best-effort */
+    }
   }
 }
 

@@ -183,10 +183,4 @@ export interface BranchingStoreBackend {
 
   /** Updates specific fields (status, name, metadata) of an existing branch record. */
   updateBranch(branchId: string, updates: Partial<Pick<Branch, 'status' | 'name' | 'metadata'>>): Promise<void>;
-
-  /**
-   * @deprecated Use updateBranch with status instead.
-   * Marks a branch as closed. Implementations might handle this via updateBranch.
-   */
-  closeBranch(branchId: string): Promise<void>;
 }

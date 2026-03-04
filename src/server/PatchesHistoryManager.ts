@@ -75,7 +75,7 @@ export class PatchesHistoryManager {
    * @returns A ReadableStream of the JSON state, or a stream of 'null' if not found.
    * @throws Error if state loading fails.
    */
-  async getStateAtVersion(docId: string, versionId: string): Promise<ReadableStream<string>> {
+  async getVersionState(docId: string, versionId: string): Promise<ReadableStream<string>> {
     try {
       const rawState = await this.store.loadVersionState(docId, versionId);
       if (rawState === undefined) {
@@ -125,31 +125,12 @@ export class PatchesHistoryManager {
    * @returns An array of Change objects.
    * @throws Error if the version ID is not found or change loading fails.
    */
-  async getChangesForVersion(docId: string, versionId: string): Promise<Change[]> {
+  async getVersionChanges(docId: string, versionId: string): Promise<Change[]> {
     try {
       return (await this.store.loadVersionChanges?.(docId, versionId)) ?? [];
     } catch (error) {
       console.error(`Failed to load changes for version ${versionId} of doc ${docId}.`, error);
       throw new Error(`Could not load changes for version ${versionId}.`, { cause: error });
     }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Alias methods for RPC API compatibility
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Alias for getStateAtVersion for RPC API compatibility.
-   * Returns a ReadableStream for efficient JSON-RPC streaming.
-   */
-  async getVersionState(docId: string, versionId: string): Promise<ReadableStream<string>> {
-    return this.getStateAtVersion(docId, versionId);
-  }
-
-  /**
-   * Alias for getChangesForVersion for RPC API compatibility.
-   */
-  async getVersionChanges(docId: string, versionId: string): Promise<Change[]> {
-    return this.getChangesForVersion(docId, versionId);
   }
 }

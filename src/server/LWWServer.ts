@@ -148,6 +148,8 @@ export class LWWServer implements PatchesServer {
     changes: ChangeInput[],
     options?: CommitChangesOptions
   ): Promise<{ changes: Change[]; docReloadRequired?: true }> {
+    const clientId = getClientId();
+
     if (changes.length === 0) {
       return { changes: [] };
     }
@@ -204,7 +206,7 @@ export class LWWServer implements PatchesServer {
           id: change.id,
           committedAt: serverNow,
         });
-        await this.onChangesCommitted.emit(docId, [broadcastChange], options, getClientId());
+        await this.onChangesCommitted.emit(docId, [broadcastChange], options, clientId);
       } catch (error) {
         console.error(`Failed to notify clients about committed changes for doc ${docId}:`, error);
       }

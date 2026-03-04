@@ -1,18 +1,15 @@
 import { signal, type Signal, type Unsubscriber } from 'easy-signal';
 import { StatusError } from '../error.js';
 import { clearAuthContext, getAuthContext, setAuthContext } from '../serverContext.js';
-import type { AuthContext, AuthorizationProvider } from '../websocket/AuthorizationProvider.js';
+import type { Access, AuthContext, AuthorizationProvider } from '../websocket/AuthorizationProvider.js';
 import type { JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, Message } from './types.js';
 import { rpcError, rpcNotification, rpcResponse } from './utils.js';
 
 export type ConnectionSignalSubscriber = (params: any, clientId?: string) => any;
 export type MessageHandler<R = any> = (...args: any[]) => Promise<R> | R;
 
-/** Access level for API methods */
-export type AccessLevel = 'read' | 'write';
-
 /** Static API definition mapping method names to access levels */
-export type ApiDefinition = Record<string, AccessLevel>;
+export type ApiDefinition = Record<string, Access>;
 
 /** Options for creating a JSONRPCServer */
 export interface JSONRPCServerOptions {
@@ -227,7 +224,7 @@ export class JSONRPCServer {
    * @throws StatusError if access is denied
    */
   protected async assertAccess(
-    access: AccessLevel,
+    access: Access,
     ctx: AuthContext | undefined,
     method: string,
     args?: any[]
@@ -263,12 +260,12 @@ export class JSONRPCServer {
     // Normalize params to an array
     const args = Array.isArray(params) ? params : params === undefined ? [] : [params];
 
-    // Make ctx available synchronously via getAuthContext() during handler execution
+    // Make ctx available synchronously via getAuthContext() during handler execution.
+    // Context is cleared immediately after the synchronous portion of the handler runs,
+    // so handlers must capture it before any await.
     setAuthContext(ctx);
-    try {
-      return await handler(...args);
-    } finally {
-      clearAuthContext();
-    }
+    const promise = handler(...args);
+    clearAuthContext();
+    return await promise;
   }
 }

@@ -289,6 +289,7 @@ export class PatchesREST implements PatchesConnection {
 
     const response = await globalThis.fetch(`${this._url}${path}`, {
       method,
+      credentials: 'include',
       headers: {
         ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
         ...headers,

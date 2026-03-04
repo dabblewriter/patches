@@ -151,6 +151,8 @@ export interface VersionMetadata {
   isOffline?: boolean;
   /** User-defined name if origin is 'branch'. */
   branchName?: string;
+  /** Whether this version was auto-saved immediately before restoring a previous version. */
+  beforeRestored?: boolean;
   /** Unix timestamp in milliseconds of version start. */
   startedAt: number;
   /** Unix timestamp in milliseconds of version end. */

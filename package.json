@@ -1,6 +1,6 @@
 {
   "name": "@dabble/patches",
-  "version": "0.7.23",
+  "version": "0.8.4",
   "description": "Immutable JSON Patch implementation based on RFC 6902 supporting operational transformation and last-writer-wins",
   "author": "Jacob Wright <jacwright@gmail.com>",
   "bugs": {
@@ -41,6 +41,10 @@
     "./solid": {
       "import": "./dist/solid/index.js",
       "types": "./dist/solid/index.d.ts"
+    },
+    "./micro": {
+      "import": "./dist/micro/index.js",
+      "types": "./dist/micro/index.d.ts"
     }
   },
   "files": [
@@ -75,27 +79,28 @@
     "lint:fix": "eslint src tests --fix"
   },
   "dependencies": {
-    "@dabble/delta": "^1.2.4",
+    "@dabble/delta": "^1.2.5",
     "alphacounter": "^2.1.1",
-    "crypto-id": "^0.3.1",
-    "easy-signal": "^5.0.2",
+    "crypto-id": "^0.3.2",
+    "easy-signal": "^5.0.5",
     "simple-peer": "^9.11.1",
     "simplified-concurrency": "^0.2.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/simple-peer": "^9.11.9",
-    "@typescript-eslint/eslint-plugin": "^8.48.0",
-    "@typescript-eslint/parser": "^8.48.0",
-    "eslint": "^9.39.1",
+    "@typescript-eslint/eslint-plugin": "^8.56.1",
+    "@typescript-eslint/parser": "^8.56.1",
+    "eslint": "^10.0.2",
     "fake-indexeddb": "^6.2.5",
-    "happy-dom": "^20.1.0",
-    "prettier": "^3.7.3",
-    "solid-js": "^1.9.3",
+    "happy-dom": "^20.8.3",
+    "prettier": "^3.8.1",
+    "solid-js": "^1.9.11",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "vite-plugin-solid": "^2.11.10",
-    "vitest": "^4.0.14",
-    "vue": "^3.5.26"
+    "vitest": "^4.0.18",
+    "vue": "^3.5.29"
   },
   "peerDependencies": {
     "solid-js": "^1.8.0",

@@ -3,6 +3,7 @@ import { createChange } from '../../src/data/change';
 import { JSONPatch } from '../../src/json-patch/JSONPatch';
 import { clearAuthContext, setAuthContext } from '../../src/net/serverContext';
 import { OTServer } from '../../src/server/OTServer';
+import { readStreamAsString } from '../../src/server/jsonReadable';
 import { assertVersionMetadata } from '../../src/server/utils';
 import type { OTStoreBackend } from '../../src/server/types';
 import type { Change, EditableVersionMetadata } from '../../src/types';
@@ -14,16 +15,14 @@ vi.mock('../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
 vi.mock('../../src/algorithms/ot/server/createVersion');
 vi.mock('../../src/algorithms/ot/shared/applyChanges');
 vi.mock('../../src/data/change');
-vi.mock('../../src/json-patch/applyPatch');
 vi.mock('../../src/json-patch/createJSONPatch');
 vi.mock('../../src/json-patch/transformPatch');
 
 import { createVersion as createVersionAlgorithm } from '../../src/algorithms/ot/server/createVersion';
-import { getSnapshotAtRevision } from '../../src/algorithms/ot/server/getSnapshotAtRevision';
+import { getSnapshotAtRevision, getSnapshotStream } from '../../src/algorithms/ot/server/getSnapshotAtRevision';
 import { getStateAtRevision } from '../../src/algorithms/ot/server/getStateAtRevision';
 import { handleOfflineSessionsAndBatches } from '../../src/algorithms/ot/server/handleOfflineSessionsAndBatches';
 import { applyChanges } from '../../src/algorithms/ot/shared/applyChanges';
-import { applyPatch } from '../../src/json-patch/applyPatch';
 import { createJSONPatch } from '../../src/json-patch/createJSONPatch';
 import { transformPatch } from '../../src/json-patch/transformPatch';
 
@@ -33,10 +32,14 @@ describe('OTServer', () => {
 
   beforeEach(() => {
     mockStore = {
+      getCurrentRev: vi.fn().mockResolvedValue(0),
       listChanges: vi.fn(),
       saveChanges: vi.fn(),
       deleteDoc: vi.fn(),
       createVersion: vi.fn(),
+      listVersions: vi.fn().mockResolvedValue([]),
+      loadVersionState: vi.fn().mockResolvedValue(undefined),
+      updateVersion: vi.fn(),
     } as any;
 
     server = new OTServer(mockStore);
@@ -67,19 +70,29 @@ describe('OTServer', () => {
   });
 
   describe('getDoc', () => {
-    it('should get document state at latest revision', async () => {
+    it('should get document state at latest revision as a ReadableStream', async () => {
       const mockState = { content: 'test' };
-      vi.mocked(getStateAtRevision).mockResolvedValue({ state: mockState, rev: 5 });
+      const mockJson = JSON.stringify({ state: mockState, rev: 5, changes: [] });
+      const mockStream = new ReadableStream<string>({
+        start(controller) {
+          controller.enqueue(mockJson);
+          controller.close();
+        },
+      });
+      vi.mocked(getSnapshotStream).mockResolvedValue(mockStream);
 
-      const result = await server.getDoc('doc1');
+      const stream = await server.getDoc('doc1');
 
-      expect(getStateAtRevision).toHaveBeenCalledWith(mockStore, 'doc1');
-      expect(result).toEqual({ state: mockState, rev: 5 });
+      expect(getSnapshotStream).toHaveBeenCalledWith(mockStore, 'doc1');
+      expect(stream).toBeInstanceOf(ReadableStream);
+      const json = await readStreamAsString(stream);
+      const result = JSON.parse(json);
+      expect(result).toEqual({ state: mockState, rev: 5, changes: [] });
     });
   });
 
   describe('getChangesSince', () => {
-    it('should get changes after specific revision', async () => {
+    it('should return changes after specific revision', async () => {
       const mockChanges = [
         { id: 'change1', rev: 2 },
         { id: 'change2', rev: 3 },
@@ -89,7 +102,7 @@ describe('OTServer', () => {
       const result = await server.getChangesSince('doc1', 1);
 
       expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', { startAfter: 1 });
-      expect(result).toBe(mockChanges);
+      expect(result).toEqual(mockChanges);
     });
   });
 
@@ -105,6 +118,7 @@ describe('OTServer', () => {
     } as Change;
 
     beforeEach(() => {
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(1);
       vi.mocked(getSnapshotAtRevision).mockResolvedValue({
         state: { content: 'old' },
         rev: 1,
@@ -117,13 +131,12 @@ describe('OTServer', () => {
       vi.mocked(applyChanges).mockReturnValue({ content: 'old' });
       vi.mocked(mockStore.listChanges).mockResolvedValue([]);
       vi.mocked(transformPatch).mockReturnValue([{ op: 'replace', path: '/content', value: 'new content' }]);
-      vi.mocked(applyPatch).mockReturnValue({ content: 'new content' });
       vi.mocked(mockStore.saveChanges).mockResolvedValue();
     });
 
     it('should return empty array for empty changes', async () => {
       const result = await server.commitChanges('doc1', []);
-      expect(result).toEqual([]);
+      expect(result.changes).toEqual([]);
     });
 
     it('should fill in baseRev when missing (apply to latest)', async () => {
@@ -138,8 +151,8 @@ describe('OTServer', () => {
       } as any;
       const result = await server.commitChanges('doc1', [changeWithoutBaseRev]);
       // Should succeed, not throw - baseRev gets filled in with current revision
-      expect(result).toHaveLength(1);
-      expect(result[0].baseRev).toBe(1); // Current rev from mock
+      expect(result.changes).toHaveLength(1);
+      expect(result.changes[0].baseRev).toBe(1); // Current rev from mock
     });
 
     it('should throw error for inconsistent baseRev in batch', async () => {
@@ -166,7 +179,7 @@ describe('OTServer', () => {
 
     it('should successfully commit new changes', async () => {
       // Mock handleOfflineSessionsAndBatches to return the input changes
-      vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue([mockChange]);
+      vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue();
 
       const result = await server.commitChanges('doc1', [mockChange]);
 
@@ -181,7 +194,7 @@ describe('OTServer', () => {
         ])
       );
       // Result is combined: catchup + new changes
-      expect(result).toHaveLength(1); // One transformed change, no catchup
+      expect(result.changes).toHaveLength(1); // One transformed change, no catchup
     });
 
     it('should filter out already committed changes', async () => {
@@ -191,13 +204,12 @@ describe('OTServer', () => {
       const result = await server.commitChanges('doc1', [existingChange]);
 
       // Result contains catchup changes only (no new changes)
-      expect(result).toEqual([existingChange]);
+      expect(result.changes).toEqual([existingChange]);
       expect(mockStore.saveChanges).not.toHaveBeenCalled();
     });
 
     it('should handle offline sessions with batchId (fast-forward)', async () => {
-      const offlineChanges = [mockChange];
-      vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue(offlineChanges);
+      vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue();
       // No committed changes = fast-forward
       vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
@@ -208,17 +220,13 @@ describe('OTServer', () => {
         expect.any(Number), // sessionTimeoutMillis
         'doc1',
         [mockChange],
-        1,
-        'batch1',
-        'main', // Fast-forward: origin is 'main'
-        undefined // maxStorageBytes
+        'main' // Fast-forward: origin is 'main'
       );
     });
 
     it('should handle offline sessions with batchId (divergent)', async () => {
-      const offlineChanges = [mockChange];
       const committedChange = { ...mockChange, id: 'committed' } as Change;
-      vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue(offlineChanges);
+      vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue();
       // Has committed changes = divergent
       vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
 
@@ -229,10 +237,7 @@ describe('OTServer', () => {
         expect.any(Number), // sessionTimeoutMillis
         'doc1',
         [mockChange],
-        1,
-        'batch1',
-        'offline-branch', // Divergent: origin is 'offline-branch'
-        undefined // maxStorageBytes
+        'offline-branch' // Divergent: origin is 'offline-branch'
       );
     });
 
@@ -247,29 +252,24 @@ describe('OTServer', () => {
       const result = await server.commitChanges('doc1', [changeWithoutBatch]);
 
       // Result contains only catchup changes (no new transformed changes)
-      expect(result).toEqual([committedChange]);
+      expect(result.changes).toEqual([committedChange]);
       expect(mockStore.saveChanges).not.toHaveBeenCalled();
     });
 
-    it('should handle apply patch errors gracefully', async () => {
+    it('should handle transformation that produces valid changes with committed changes present', async () => {
       // Need committed changes to trigger transformation path (not fast-forward)
       const committedChange = { ...mockChange, id: 'committed' } as Change;
       vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
       // Change without batchId to avoid offline handling
       const changeWithoutBatch = { ...mockChange, batchId: undefined } as Change;
-      vi.mocked(applyPatch).mockImplementation(() => {
-        throw new Error('Apply patch failed');
-      });
-
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.mocked(transformPatch).mockReturnValue([{ op: 'replace', path: '/content', value: 'new content' }]);
 
       const result = await server.commitChanges('doc1', [changeWithoutBatch]);
 
-      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Error applying change'), expect.any(Error));
-      // Result contains only catchup changes (no new changes due to error)
-      expect(result).toEqual([committedChange]);
-
-      consoleSpy.mockRestore();
+      // Result contains catchup changes + transformed new changes
+      expect(result.changes).toHaveLength(2);
+      expect(result.changes[0]).toEqual(committedChange);
+      expect(mockStore.saveChanges).toHaveBeenCalled();
     });
 
     it('should emit onChangesCommitted signal after successful commit', async () => {
@@ -300,10 +300,9 @@ describe('OTServer', () => {
 
   describe('change', () => {
     it('should create and commit server-side changes', async () => {
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(1);
       const mockPatch = new JSONPatch([{ op: 'replace', path: '/content', value: 'new' }]);
-      vi.spyOn(mockPatch, 'apply').mockImplementation(vi.fn());
 
-      const getDocSpy = vi.spyOn(server, 'getDoc').mockResolvedValue({ state: { content: 'old' }, rev: 1 });
       vi.mocked(createJSONPatch).mockReturnValue(mockPatch);
       vi.mocked(createChange).mockReturnValue({
         id: 'change1',
@@ -314,7 +313,7 @@ describe('OTServer', () => {
         committedAt: Date.now(),
       } as Change);
 
-      const commitSpy = vi.spyOn(server, 'commitChanges').mockResolvedValue([]);
+      const commitSpy = vi.spyOn(server, 'commitChanges').mockResolvedValue({ changes: [] });
 
       const result = await server.change(
         'doc1',
@@ -324,20 +323,18 @@ describe('OTServer', () => {
         { author: 'server' }
       );
 
+      expect(mockStore.getCurrentRev).toHaveBeenCalledWith('doc1');
       expect(createJSONPatch).toHaveBeenCalledWith(expect.any(Function));
-      expect(mockPatch.apply).toHaveBeenCalledWith({ content: 'old' });
       expect(commitSpy).toHaveBeenCalledWith('doc1', [expect.any(Object)]);
       expect(result).toBeDefined();
 
-      getDocSpy.mockRestore();
       commitSpy.mockRestore();
     });
 
     it('should return null for no-op changes', async () => {
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(1);
       const mockPatch = new JSONPatch([]);
-      vi.spyOn(mockPatch, 'apply').mockImplementation(vi.fn());
 
-      const getDocSpy = vi.spyOn(server, 'getDoc').mockResolvedValue({ state: { content: 'old' }, rev: 1 });
       vi.mocked(createJSONPatch).mockReturnValue(mockPatch);
 
       const result = await server.change('doc1', () => {
@@ -345,7 +342,6 @@ describe('OTServer', () => {
       });
 
       expect(result).toBeNull();
-      getDocSpy.mockRestore();
     });
   });
 
@@ -389,7 +385,6 @@ describe('OTServer', () => {
           } as Change,
         ],
       });
-      vi.mocked(applyChanges).mockReturnValue({ content: 'test' });
       vi.mocked(createVersionAlgorithm).mockResolvedValue(mockVersion);
 
       const result = await server.captureCurrentVersion('doc1', { name: 'v1.0' });
@@ -397,9 +392,10 @@ describe('OTServer', () => {
       expect(createVersionAlgorithm).toHaveBeenCalledWith(
         expect.any(Object), // store
         'doc1',
-        { content: 'test' },
         expect.any(Array), // changes
-        { name: 'v1.0' }
+        {
+          metadata: { name: 'v1.0' },
+        }
       );
       expect(result).toBe('version1');
     });
@@ -410,7 +406,6 @@ describe('OTServer', () => {
         rev: 5,
         changes: [],
       });
-      vi.mocked(applyChanges).mockReturnValue({ content: 'test' });
       vi.mocked(createVersionAlgorithm).mockResolvedValue(undefined);
 
       const result = await server.captureCurrentVersion('doc1');

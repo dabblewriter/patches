@@ -1,6 +1,8 @@
 export * from './http/FetchTransport.js';
 export * from './PatchesClient.js';
+export * from './PatchesConnection.js';
 export * from './PatchesSync.js';
+export * from './rest/index.js';
 export * from './protocol/JSONRPCClient.js';
 export * from './protocol/JSONRPCServer.js';
 export { getAuthContext, getClientId } from './serverContext.js';

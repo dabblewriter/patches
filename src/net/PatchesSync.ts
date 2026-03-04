@@ -1,5 +1,5 @@
 import { isEqual } from '@dabble/delta';
-import { batch, ReadonlyStoreClass, signal, store, type Store } from 'easy-signal';
+import { batch, ReadonlyStoreClass, signal, store, type Store, type Unsubscriber } from 'easy-signal';
 import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/ot/shared/changeBatching.js';
 import { BaseDoc } from '../client/BaseDoc.js';
 import type { ClientAlgorithm } from '../client/ClientAlgorithm.js';
@@ -8,6 +8,9 @@ import type { AlgorithmName, TrackedDoc } from '../client/PatchesStore.js';
 import { isDocLoaded } from '../shared/utils.js';
 import type { Change, DocSyncState, DocSyncStatus } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
+import { ErrorCodes, StatusError } from './error.js';
+import type { PatchesConnection } from './PatchesConnection.js';
+import type { JSONRPCClient } from './protocol/JSONRPCClient.js';
 import type { ConnectionState } from './protocol/types.js';
 import { PatchesWebSocket } from './websocket/PatchesWebSocket.js';
 import type { WebSocketOptions } from './websocket/WebSocketTransport.js';
@@ -22,6 +25,7 @@ export interface PatchesSyncState {
 
 export interface PatchesSyncOptions {
   subscribeFilter?: (docIds: string[]) => string[];
+  /** WebSocket options. Only used when a URL string is passed to the constructor. */
   websocket?: WebSocketOptions;
   /** Wire batch limit for network transmission. Defaults to 1MB. */
   maxPayloadBytes?: number;
@@ -39,8 +43,11 @@ const EMPTY_DOC_STATE: DocSyncState = {
 };
 
 /**
- * Handles WebSocket connection, document subscriptions, and syncing logic between
+ * Handles server connection, document subscriptions, and syncing logic between
  * the Patches instance and the server.
+ *
+ * Accepts either a URL string (creates a WebSocket connection) or a PatchesConnection
+ * instance (e.g. PatchesREST for SSE + fetch).
  *
  * PatchesSync is algorithm-agnostic. It delegates to algorithm methods for:
  * - Getting pending changes to send
@@ -48,7 +55,7 @@ const EMPTY_DOC_STATE: DocSyncState = {
  * - Confirming sent changes
  */
 export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
-  protected ws: PatchesWebSocket;
+  protected connection: PatchesConnection;
   protected patches: Patches;
   protected maxPayloadBytes?: number;
   protected maxStorageBytes?: number;
@@ -70,9 +77,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   readonly onRemoteDocDeleted = signal<(docId: string, pendingChanges: Change[]) => void>();
 
+  constructor(patches: Patches, url: string, options?: PatchesSyncOptions);
+  constructor(patches: Patches, connection: PatchesConnection, options?: PatchesSyncOptions);
   constructor(
     patches: Patches,
-    url: string,
+    urlOrConnection: string | PatchesConnection,
     protected options?: PatchesSyncOptions
   ) {
     super({
@@ -85,22 +94,30 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.maxPayloadBytes = options?.maxPayloadBytes;
     this.maxStorageBytes = options?.maxStorageBytes ?? patches.docOptions?.maxStorageBytes;
     this.sizeCalculator = options?.sizeCalculator ?? patches.docOptions?.sizeCalculator;
-    this.ws = new PatchesWebSocket(url, options?.websocket);
+
+    if (typeof urlOrConnection === 'string') {
+      this.connection = new PatchesWebSocket(urlOrConnection, options?.websocket);
+    } else {
+      this.connection = urlOrConnection;
+    }
+
     this.docStates = store<Record<string, DocSyncState>>({});
     this.trackedDocs = new Set(patches.trackedDocs);
 
     // --- Event Listeners ---
-    onlineState.onOnlineChange(online => this.updateState({ online }));
-    this.ws.onStateChange(this._handleConnectionChange.bind(this));
-    this.ws.onChangesCommitted(this._receiveCommittedChanges.bind(this));
-    this.ws.onDocDeleted(docId => this._handleRemoteDocDeleted(docId));
-
-    // Listen to Patches for tracking changes
-    patches.onTrackDocs(this._handleDocsTracked.bind(this));
-    patches.onUntrackDocs(this._handleDocsUntracked.bind(this));
-    patches.onDeleteDoc(this._handleDocDeleted.bind(this));
-    patches.onChange(this._handleDocChange.bind(this));
+    this._unsubs = [
+      onlineState.onOnlineChange(online => this.updateState({ online })),
+      this.connection.onStateChange(this._handleConnectionChange.bind(this)),
+      this.connection.onChangesCommitted(this._receiveCommittedChanges.bind(this)),
+      this.connection.onDocDeleted(docId => this._handleRemoteDocDeleted(docId)),
+      patches.onTrackDocs(this._handleDocsTracked.bind(this)),
+      patches.onUntrackDocs(this._handleDocsUntracked.bind(this)),
+      patches.onDeleteDoc(this._handleDocDeleted.bind(this)),
+      patches.onChange(this._handleDocChange.bind(this)),
+    ];
   }
+
+  private _unsubs: Unsubscriber[] = [];
 
   /**
    * Gets the algorithm for a document. Uses the open doc's algorithm if available,
@@ -121,29 +138,33 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
-   * Gets the URL of the WebSocket connection.
+   * Gets the server URL.
    */
   get url(): string {
-    return this.ws.transport.url;
+    return this.connection.url;
   }
 
   /**
-   * Sets the URL of the WebSocket connection.
+   * Sets the server URL. Reconnects if currently connected.
    */
   set url(url: string) {
-    this.ws.transport.url = url;
+    this.connection.url = url;
     if (this.state.connected) {
-      this.ws.disconnect();
-      this.ws.connect();
+      this.connection.disconnect();
+      this.connection.connect();
     }
   }
 
   /**
    * Gets the JSON-RPC client for making custom RPC calls.
-   * Useful for application-specific methods not part of the Patches protocol.
+   * Only available when using a WebSocket connection (PatchesWebSocket or PatchesClient).
+   * Returns undefined when using REST transport.
    */
-  get rpc() {
-    return this.ws.rpc;
+  get rpc(): JSONRPCClient | undefined {
+    if ('rpc' in this.connection) {
+      return (this.connection as { rpc: JSONRPCClient }).rpc;
+    }
+    return undefined;
   }
 
   /**
@@ -162,11 +183,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
-   * Connects to the WebSocket server and starts syncing if online. If not online, it will wait for online state.
+   * Connects to the server and starts syncing if online. If not online, it will wait for online state.
    */
   async connect(): Promise<void> {
     try {
-      await this.ws.connect();
+      await this.connection.connect();
     } catch (err) {
       console.error('PatchesSync connection failed:', err);
       const error = err instanceof Error ? err : new Error(String(err));
@@ -177,12 +198,22 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
-   * Disconnects from the WebSocket server and stops syncing.
+   * Disconnects from the server and stops syncing.
    */
   disconnect(): void {
-    this.ws.disconnect();
+    this.connection.disconnect();
     this.updateState({ connected: false, syncStatus: 'unsynced' });
     this._resetSyncingStatuses();
+  }
+
+  /**
+   * Disconnects and removes all event listeners.
+   * After calling destroy(), this instance should not be reused.
+   */
+  destroy(): void {
+    this.disconnect();
+    for (const unsub of this._unsubs) unsub();
+    this._unsubs.length = 0;
   }
 
   /**
@@ -242,7 +273,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         try {
           const subscribeIds = this._filterSubscribeIds(activeDocIds);
           if (subscribeIds.length) {
-            await this.ws.subscribe(subscribeIds);
+            await this.connection.subscribe(subscribeIds);
           }
         } catch (err) {
           console.warn('Error subscribing to active docs during sync:', err);
@@ -257,7 +288,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       const deletePromises = deletedDocs.map(async ({ docId }) => {
         try {
           console.info(`Attempting server delete for tombstoned doc: ${docId}`);
-          await this.ws.deleteDoc(docId);
+          await this.connection.deleteDoc(docId);
           // If server delete succeeds, remove tombstone and all data locally
           const algorithm = this._getAlgorithm(docId);
           await algorithm.confirmDeleteDoc(docId);
@@ -309,13 +340,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       } else {
         const committedRev = await algorithm.getCommittedRev(docId);
         if (committedRev) {
-          const serverChanges = await this.ws.getChangesSince(docId, committedRev);
+          const serverChanges = await this.connection.getChangesSince(docId, committedRev);
           if (serverChanges.length > 0) {
             await this._applyServerChangesToDoc(docId, serverChanges);
           }
         } else {
           // No committed rev means this is a new doc - fetch from server
-          const snapshot = await this.ws.getDoc(docId);
+          const snapshot = await this.connection.getDoc(docId);
           // Save via algorithm's store
           await algorithm.store.saveDoc(docId, snapshot);
           // Update synced doc with the server's revision
@@ -380,13 +411,25 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           throw new Error('Disconnected during flush');
         }
 
-        const committed = await this.ws.commitChanges(docId, changeBatch);
+        const { changes: committed, docReloadRequired } = await this.connection.commitChanges(docId, changeBatch);
 
-        // Apply the committed changes via algorithm
-        await this._applyServerChangesToDoc(docId, committed);
-
-        // Confirm the sent changes
-        await algorithm.confirmSent(docId, changeBatch);
+        if (docReloadRequired) {
+          // Our local state is stale (baseRev:0 on existing doc). Confirm the sent
+          // changes (they were committed), then reload the full state from the server.
+          await algorithm.confirmSent(docId, changeBatch);
+          const snapshot = await this.connection.getDoc(docId);
+          await algorithm.store.saveDoc(docId, snapshot);
+          this._updateDocSyncState(docId, { committedRev: snapshot.rev });
+          const openDoc = this.patches.getOpenDoc(docId) as BaseDoc | undefined;
+          if (openDoc) {
+            openDoc.import({ ...snapshot, changes: [] });
+          }
+        } else {
+          // Apply the committed changes via algorithm
+          await this._applyServerChangesToDoc(docId, committed);
+          // Confirm the sent changes
+          await algorithm.confirmSent(docId, changeBatch);
+        }
 
         // Fetch remaining pending for next batch or check completion
         pending = (await algorithm.getPendingToSend(docId)) ?? [];
@@ -448,7 +491,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (this.state.connected) {
       try {
         const algorithm = this._getAlgorithm(docId);
-        await this.ws.deleteDoc(docId);
+        await this.connection.deleteDoc(docId);
         await algorithm.confirmDeleteDoc(docId);
       } catch (err) {
         console.error(`Server delete failed for doc ${docId}, will retry on reconnect/resync.`, err);
@@ -543,7 +586,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         // Only subscribe to IDs not already covered by existing subscriptions
         const subscribeIds = this._filterSubscribeIds(newIds).filter(id => !alreadySubscribed.has(id));
         if (subscribeIds.length) {
-          await this.ws.subscribe(subscribeIds);
+          await this.connection.subscribe(subscribeIds);
         }
         // Trigger sync for newly tracked docs immediately
         await Promise.all(newIds.map(id => this.syncDoc(id)));
@@ -572,7 +615,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     if (this.state.connected && unsubscribeIds.length) {
       try {
-        await this.ws.unsubscribe(unsubscribeIds);
+        await this.connection.unsubscribe(unsubscribeIds);
       } catch (err) {
         console.warn(`Failed to unsubscribe docs: ${unsubscribeIds.join(', ')}`, err);
       }
@@ -660,7 +703,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
   /**
    * Applies the subscribeFilter option to a list of doc IDs, returning the subset
-   * that should be sent to ws.subscribe/unsubscribe. Returns the full list if no filter is set.
+   * that should be sent to subscribe/unsubscribe. Returns the full list if no filter is set.
    */
   protected _filterSubscribeIds(docIds: string[]): string[] {
     return this.options?.subscribeFilter?.(docIds) || docIds;
@@ -678,6 +721,6 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * Helper to detect DOC_DELETED (410) errors from the server.
    */
   protected _isDocDeletedError(err: unknown): boolean {
-    return typeof err === 'object' && err !== null && 'code' in err && (err as { code: number }).code === 410;
+    return err instanceof StatusError && err.code === ErrorCodes.DOC_DELETED;
   }
 }

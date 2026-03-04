@@ -124,7 +124,7 @@ describe('rebaseChanges', () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe('local2');
-    expect(result[0].rev).toBe(5); // Second rev after server change (first was filtered out)
+    expect(result[0].rev).toBe(4); // First assigned rev (dropped change does not consume a rev)
   });
 
   it('should handle multiple server changes', () => {

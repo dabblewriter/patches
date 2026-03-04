@@ -19,6 +19,15 @@ export class JSONRPCClient {
    */
   constructor(private transport: ClientTransport) {
     transport.onMessage(this.handleMessage.bind(this));
+
+    // Reject all pending calls when the transport disconnects
+    if ('onStateChange' in transport && typeof (transport as any).onStateChange === 'function') {
+      (transport as any).onStateChange((state: string) => {
+        if (state === 'disconnected' || state === 'error') {
+          this.rejectAllPending(new Error('Transport disconnected'));
+        }
+      });
+    }
   }
 
   /**

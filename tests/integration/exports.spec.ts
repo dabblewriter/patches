@@ -23,6 +23,7 @@ import {
   LWWServer,
   LWWBranchManager,
   LWWMemoryStoreBackend,
+  RevConflictError,
   type LWWServerOptions,
   type LWWStoreBackend,
   type VersioningStoreBackend,
@@ -117,8 +118,8 @@ describe('LWW exports', () => {
 
     it('exports LWWServerOptions type', () => {
       // Type-only export - verify it compiles
-      const _options: LWWServerOptions = { snapshotInterval: 200 };
-      expect(_options.snapshotInterval).toBe(200);
+      const _options: LWWServerOptions = {};
+      expect(_options).toBeDefined();
     });
 
     it('exports LWWStoreBackend type', () => {
@@ -131,6 +132,17 @@ describe('LWW exports', () => {
       // Type-only export - verify it compiles (LWWMemoryStoreBackend implements this)
       const _typeCheck: VersioningStoreBackend = new LWWMemoryStoreBackend();
       expect(_typeCheck).toBeDefined();
+    });
+
+    it('exports RevConflictError class', () => {
+      expect(RevConflictError).toBeDefined();
+      expect(typeof RevConflictError).toBe('function');
+
+      const error = new RevConflictError('test conflict');
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toBeInstanceOf(RevConflictError);
+      expect(error.name).toBe('RevConflictError');
+      expect(error.message).toBe('test conflict');
     });
   });
 

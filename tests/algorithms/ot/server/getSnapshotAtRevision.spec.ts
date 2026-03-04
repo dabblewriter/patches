@@ -9,6 +9,7 @@ describe('getSnapshotAtRevision', () => {
     vi.clearAllMocks();
 
     mockStore = {
+      getCurrentRev: vi.fn().mockResolvedValue(0),
       listVersions: vi.fn(),
       loadVersionState: vi.fn(),
       listChanges: vi.fn(),
@@ -47,7 +48,7 @@ describe('getSnapshotAtRevision', () => {
     ];
 
     vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
-    vi.mocked(mockStore.loadVersionState).mockResolvedValue(mockState);
+    vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify(mockState));
     vi.mocked(mockStore.listChanges).mockResolvedValue(mockChanges);
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1');
@@ -104,7 +105,7 @@ describe('getSnapshotAtRevision', () => {
     ];
 
     vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
-    vi.mocked(mockStore.loadVersionState).mockResolvedValue(mockState);
+    vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify(mockState));
     vi.mocked(mockStore.listChanges).mockResolvedValue(mockChanges);
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1', 7);
@@ -181,7 +182,7 @@ describe('getSnapshotAtRevision', () => {
     ];
 
     vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
-    vi.mocked(mockStore.loadVersionState).mockResolvedValue(null);
+    vi.mocked(mockStore.loadVersionState).mockResolvedValue(undefined);
     vi.mocked(mockStore.listChanges).mockResolvedValue(mockChanges);
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1');
@@ -207,7 +208,7 @@ describe('getSnapshotAtRevision', () => {
     const mockState = { text: 'hello' };
 
     vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
-    vi.mocked(mockStore.loadVersionState).mockResolvedValue(mockState);
+    vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify(mockState));
     vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1');
@@ -295,7 +296,7 @@ describe('getSnapshotAtRevision', () => {
     ];
 
     vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
-    vi.mocked(mockStore.loadVersionState).mockResolvedValue(mockState);
+    vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify(mockState));
     vi.mocked(mockStore.listChanges).mockResolvedValue(mockChanges);
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1', 18);

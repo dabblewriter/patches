@@ -7,10 +7,12 @@ import type {
   ListVersionsOptions,
   VersionMetadata,
 } from '../types.js';
+import { jsonReadable } from './jsonReadable.js';
 import type {
   BranchingStoreBackend,
   ListFieldsOptions,
   LWWStoreBackend,
+  SnapshotResult,
   TombstoneStoreBackend,
   VersioningStoreBackend,
 } from './types.js';
@@ -23,7 +25,6 @@ interface DocData {
 
 interface VersionData {
   metadata: VersionMetadata;
-  state: any;
 }
 
 /**
@@ -65,8 +66,10 @@ export class LWWMemoryStoreBackend
 
   // === Snapshot ===
 
-  async getSnapshot(docId: string): Promise<{ state: any; rev: number } | null> {
-    return this.docs.get(docId)?.snapshot ?? null;
+  async getSnapshot(docId: string): Promise<SnapshotResult | null> {
+    const snapshot = this.docs.get(docId)?.snapshot;
+    if (!snapshot) return null;
+    return { rev: snapshot.rev, state: jsonReadable(JSON.stringify(snapshot.state)) };
   }
 
   async saveSnapshot(docId: string, state: any, rev: number): Promise<void> {
@@ -151,9 +154,9 @@ export class LWWMemoryStoreBackend
 
   // === Versioning ===
 
-  async createVersion(docId: string, metadata: VersionMetadata, state: any, _changes?: Change[]): Promise<void> {
+  async createVersion(docId: string, metadata: VersionMetadata, _changes?: Change[]): Promise<void> {
     const versions = this.versions.get(docId) || [];
-    versions.push({ metadata, state });
+    versions.push({ metadata });
     this.versions.set(docId, versions);
   }
 
@@ -204,10 +207,15 @@ export class LWWMemoryStoreBackend
     return result;
   }
 
-  async loadVersionState(docId: string, versionId: string): Promise<any | undefined> {
+  async loadVersion(docId: string, versionId: string): Promise<VersionMetadata | undefined> {
     const versions = this.versions.get(docId) || [];
-    const version = versions.find(v => v.metadata.id === versionId);
-    return version?.state;
+    return versions.find(v => v.metadata.id === versionId)?.metadata;
+  }
+
+  async loadVersionState(_docId: string, _versionId: string): Promise<string | undefined> {
+    // State is not stored by the server — it's built out of band by onVersionCreated subscribers.
+    // Override this in test implementations that need to return state.
+    return undefined;
   }
 
   async updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void> {
@@ -243,10 +251,6 @@ export class LWWMemoryStoreBackend
     if (branch) {
       Object.assign(branch, updates);
     }
-  }
-
-  async closeBranch(branchId: string): Promise<void> {
-    await this.updateBranch(branchId, { status: 'closed' });
   }
 
   // === Testing utilities ===

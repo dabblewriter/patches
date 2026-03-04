@@ -40,17 +40,14 @@ const store = new MyDatabaseStore();
 const server = new OTServer(store, {
   // Create version snapshots after 30 minutes of inactivity (default)
   sessionTimeoutMinutes: 30,
-  // Optional: limit change size for databases with row size limits
-  maxStorageBytes: 1024 * 1024, // 1MB
 });
 ```
 
 ### Options
 
-| Option                  | Type     | Default     | Description                                                         |
-| ----------------------- | -------- | ----------- | ------------------------------------------------------------------- |
-| `sessionTimeoutMinutes` | `number` | `30`        | Minutes of inactivity before creating a new version snapshot        |
-| `maxStorageBytes`       | `number` | `undefined` | Maximum bytes per change. Useful for databases with row size limits |
+| Option                  | Type     | Default | Description                                                  |
+| ----------------------- | -------- | ------- | ------------------------------------------------------------ |
+| `sessionTimeoutMinutes` | `number` | `30`    | Minutes of inactivity before creating a new version snapshot |
 
 ## Core Method: `commitChanges()`
 
@@ -61,7 +58,7 @@ async commitChanges(
   docId: string,
   changes: ChangeInput[],
   options?: CommitChangesOptions
-): Promise<Change[]>
+): Promise<{ changes: Change[]; docReloadRequired?: true }>
 ```
 
 ### Parameters
@@ -104,12 +101,18 @@ The heavy lifting is handled by the `commitChanges` [algorithm](algorithms.md) i
 
 ### Return Value
 
-Returns `Promise<Change[]>` containing:
+Returns an object with:
 
-- **Catchup changes**: Changes committed by other clients since the client's `baseRev`
-- **Client's changes**: The client's own changes after transformation (with assigned revisions)
+- **`changes`**: Combined array — catchup changes from other clients first, then the client's own changes after transformation (with assigned revisions)
+- **`docReloadRequired`** _(optional)_: `true` when the client's local state is stale and it must call `getDoc` before continuing. This happens when an offline-first client (`baseRev: 0`) commits changes to a document that already has server history — the server commits the changes but cannot inline all the missed history.
 
-The client receives both in a single array. Their own changes appear at the end with server-assigned revision numbers.
+```typescript
+const { changes, docReloadRequired } = await server.commitChanges(docId, myChanges);
+if (docReloadRequired) {
+  const snapshot = await server.getDoc(docId);
+  // reload local state from snapshot
+}
+```
 
 ### Error Handling
 
@@ -133,14 +136,9 @@ await server.commitChanges(docId, batch2); // batchId: 'abc123'
 await server.commitChanges(docId, batch3); // batchId: 'abc123'
 ```
 
-### Offline-First Optimization
+### Offline-First Behavior
 
-When a client that has never synced (`baseRev: 0`) commits changes to an existing document, the server applies an optimization. Instead of transforming through potentially thousands of historical changes, it:
-
-1. Rebases the client's changes to the current revision
-2. Returns a synthetic catchup change with a root-level replace containing the full current state
-
-This single operation gives the client the complete document state efficiently.
+When a client that has never synced (`baseRev: 0`) commits changes to an existing document, the server rebases the client's changes to the current revision and commits them. Because the server cannot inline potentially thousands of historical changes in the commit response, it sets `docReloadRequired: true`. The client must then call `getDoc` to fetch the full current state before continuing.
 
 ## Server-Side Changes with `change()`
 
@@ -168,16 +166,14 @@ This creates a proper change, applies it through the standard OT flow, and trigg
 
 ### `getDoc()`
 
-Get the current state and revision of a document:
+Get the current state of a document as a streaming JSON envelope:
 
 ```typescript
-const { state, rev } = await server.getDoc(docId);
+const stream = await server.getDoc(docId);
+// stream contains: {"state":...,"rev":N,"changes":[...]}
 ```
 
-Returns a `PatchesState` object with:
-
-- `state`: The current document state
-- `rev`: The current revision number
+Returns a `ReadableStream<string>` that emits the full document envelope without parsing the state blob. The `state` field comes from the latest version snapshot; `changes` contains any changes committed after that snapshot. Reconstruct the current state by applying the changes on top of the state.
 
 ### `getChangesSince()`
 
@@ -275,16 +271,21 @@ server.onDocDeleted((docId, options, originClientId) => {
 
 ```typescript
 interface OTStoreBackend extends ServerStoreBackend, VersioningStoreBackend {
+  // Revision tracking
+  getCurrentRev(docId: string): Promise<number>;
+
   // Change operations
   saveChanges(docId: string, changes: Change[]): Promise<void>;
   listChanges(docId: string, options: ListChangesOptions): Promise<Change[]>;
 
   // Version operations (inherited from VersioningStoreBackend)
-  createVersion(docId: string, metadata: VersionMetadata, state: any, changes?: Change[]): Promise<void>;
+  // The store is responsible for building and persisting version state from the
+  // supplied changes — inline or queued — and must throw if state creation fails.
+  createVersion(docId: string, metadata: VersionMetadata, changes?: Change[]): Promise<void>;
   listVersions(docId: string, options: ListVersionsOptions): Promise<VersionMetadata[]>;
-  loadVersionState(docId: string, versionId: string): Promise<any | undefined>;
-  loadVersionChanges(docId: string, versionId: string): Promise<Change[]>;
-  appendVersionChanges(docId, versionId, changes, newEndedAt, newEndRev, newState): Promise<void>;
+  loadVersion(docId: string, versionId: string): Promise<VersionMetadata | undefined>;
+  loadVersionState(docId: string, versionId: string): Promise<string | ReadableStream<string> | undefined>;
+  loadVersionChanges?(docId: string, versionId: string): Promise<Change[]>;
   updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void>;
 
   // Document deletion (inherited from ServerStoreBackend)

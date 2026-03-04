@@ -1,55 +1,43 @@
-import { createVersionMetadata } from '../../../data/version.js';
 import type { OTStoreBackend } from '../../../server/types.js';
 import type { Change } from '../../../types.js';
-import { applyChanges } from '../shared/applyChanges.js';
-import { breakChanges } from '../shared/changeBatching.js';
-import { getStateAtRevision } from './getStateAtRevision.js';
+import { createVersion } from './createVersion.js';
 
 /**
  * Handles offline/large batch versioning logic for multi-batch uploads.
- * Groups changes into sessions, merges with previous batch if needed, and creates/extends versions.
  *
- * Each session's `isOffline` metadata is determined per-session by comparing `committedAt` and
- * `createdAt` on the first change — if the gap exceeds `sessionTimeoutMillis`, the session is
- * marked offline.
+ * Detects session boundaries from timestamps and creates versions for each session.
+ * Changes are never collapsed — they're preserved individually.
  *
+ * Each session version gets a `parentId` linking it to the preceding version:
+ * - Session 1's parent: the last main-timeline version before the batch's first change
+ * - Session N's parent (N > 1): the immediately preceding session's version
+ *
+ * @param store Store backend for version creation
+ * @param sessionTimeoutMillis Timeout for detecting session boundaries
  * @param docId Document ID
- * @param changes The incoming changes (all with the same batchId)
- * @param baseRev The base revision for the batch
- * @param batchId The batch identifier
- * @param origin The origin to use for created versions (default: 'offline-branch')
- * @param maxStorageBytes If set, break collapsed changes that exceed this size
- * @returns The changes (collapsed into one if divergent, unchanged if fast-forward)
+ * @param changes The incoming changes
+ * @param origin The origin for version metadata
  */
 export async function handleOfflineSessionsAndBatches(
   store: OTStoreBackend,
   sessionTimeoutMillis: number,
   docId: string,
   changes: Change[],
-  baseRev: number,
-  batchId?: string,
-  origin: 'main' | 'offline-branch' = 'offline-branch',
-  maxStorageBytes?: number
+  origin: 'main' | 'offline-branch' = 'offline-branch'
 ) {
-  // Find the last version for this groupId (if any)
-  const [lastVersion] = await store.listVersions(docId, {
-    groupId: batchId,
-    reverse: true,
-    limit: 1,
-  });
-
-  let offlineBaseState: any;
+  // For offline branches, find the last main version to use as the initial parent.
+  // This anchors the offline session chain to the main timeline.
   let parentId: string | undefined;
-
-  if (lastVersion) {
-    // Continue from the last version's state
-    // loadVersionState returns a PatchState ({state, rev}); extract the .state
-    const vs = await store.loadVersionState(docId, lastVersion.id);
-    offlineBaseState = (vs as any).state ?? vs;
-    parentId = lastVersion.id;
-  } else {
-    // First batch for this batchId: start at baseRev
-    offlineBaseState = (await getStateAtRevision(store, docId, baseRev)).state;
+  if (origin === 'offline-branch' && changes.length > 0) {
+    const firstRev = changes[0].rev;
+    const mainVersions = await store.listVersions(docId, {
+      limit: 1,
+      reverse: true,
+      startAfter: firstRev,
+      origin: 'main',
+      orderBy: 'endRev',
+    });
+    parentId = mainVersions[0]?.id;
   }
 
   let sessionStartIndex = 0;
@@ -62,55 +50,10 @@ export async function handleOfflineSessionsAndBatches(
     if (timeDiff > sessionTimeoutMillis || isLastChange) {
       const sessionChanges = changes.slice(sessionStartIndex, i);
       if (sessionChanges.length > 0) {
-        // Continuation: first change in this session is within timeout of the last version's end
-        const isContinuation =
-          !!lastVersion && sessionChanges[0].createdAt - lastVersion.endedAt <= sessionTimeoutMillis;
-
-        if (isContinuation && store.appendVersionChanges) {
-          // Append to the existing version
-          const mergedState = applyChanges(offlineBaseState, sessionChanges);
-          const newEndedAt = sessionChanges[sessionChanges.length - 1].createdAt;
-          const newRev = sessionChanges[sessionChanges.length - 1].rev;
-          await store.appendVersionChanges(docId, lastVersion.id, sessionChanges, newEndedAt, newRev, mergedState);
-          offlineBaseState = mergedState;
-          parentId = lastVersion.parentId;
-        } else {
-          // Create a new version for this session
-          offlineBaseState = applyChanges(offlineBaseState, sessionChanges);
-
-          const isOffline = sessionChanges[0].committedAt - sessionChanges[0].createdAt > sessionTimeoutMillis;
-
-          const sessionMetadata = createVersionMetadata({
-            parentId,
-            groupId: batchId,
-            origin,
-            ...(isOffline ? { isOffline } : {}),
-            startedAt: sessionChanges[0].createdAt,
-            endedAt: sessionChanges[sessionChanges.length - 1].createdAt,
-            endRev: sessionChanges[sessionChanges.length - 1].rev,
-            startRev: sessionChanges[0].rev,
-          });
-          await store.createVersion(docId, sessionMetadata, offlineBaseState, sessionChanges);
-          parentId = sessionMetadata.id;
-        }
+        const version = await createVersion(store, docId, sessionChanges, { origin, parentId });
+        parentId = version?.id; // Each subsequent session's parent is the prior session
         sessionStartIndex = i;
       }
     }
   }
-
-  // Only collapse changes into one if divergent (need transformation)
-  // For fast-forward (origin: 'main'), return unchanged - caller saves them directly
-  if (origin === 'offline-branch') {
-    const collapsed = changes.reduce((firstChange, nextChange) => {
-      firstChange.ops = [...firstChange.ops, ...nextChange.ops];
-      return firstChange;
-    });
-
-    // Break oversized collapsed changes if maxStorageBytes is set
-    if (maxStorageBytes) {
-      return breakChanges([collapsed], maxStorageBytes);
-    }
-    return [collapsed];
-  }
-  return changes;
 }

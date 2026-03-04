@@ -21,7 +21,8 @@ export function invertPatch(object: any, ops: JSONPatchOp[], custom: JSONPatchOp
           isIndex = (prop as any) >= 0;
         } catch (err: any) {
           throw new Error(
-            `Patch mismatch. This patch was not applied to the provided object and cannot be inverted. ${err.message || err}`
+            `Patch mismatch. This patch was not applied to the provided object and cannot be inverted. ${err.message || err}`,
+            { cause: err }
           );
         }
 

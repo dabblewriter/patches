@@ -5,7 +5,6 @@ import type {
   CommitChangesOptions,
   DeleteDocOptions,
   EditableVersionMetadata,
-  PatchesState,
 } from '../types.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 
@@ -19,6 +18,14 @@ export interface CommitResult {
   catchupChanges: Change[];
   /** The client's changes after transformation (will be broadcast to others). */
   newChanges: Change[];
+  /**
+   * When true, the client's local state is stale and it must call `getDoc` to
+   * reload the full current document before continuing. This happens when an
+   * offline-first client (baseRev: 0) commits changes to a document that already
+   * has server-side history — the server commits the changes but cannot send
+   * all the missed history inline.
+   */
+  docReloadRequired?: true;
 }
 
 /**
@@ -30,17 +37,18 @@ export interface CommitResult {
  */
 export interface PatchesServer {
   /**
-   * Get the current state of a document.
+   * Get the current state of a document as a ReadableStream of JSON.
+   * The stream contains the full JSON envelope: `{"state":...,"rev":N,"changes":[...]}`.
    * @param docId - The document ID.
-   * @returns The document state and revision, or `{ state: {}, rev: 0 }` if not found.
+   * @returns A ReadableStream of JSON string chunks.
    */
-  getDoc(docId: string): Promise<PatchesState>;
+  getDoc(docId: string): Promise<ReadableStream<string>>;
 
   /**
    * Get changes that occurred after a specific revision.
    * @param docId - The document ID.
    * @param rev - The revision number to get changes after.
-   * @returns Array of changes after the specified revision, in revision order.
+   * @returns Array of changes after the given revision.
    */
   getChangesSince(docId: string, rev: number): Promise<Change[]>;
 
@@ -48,15 +56,23 @@ export interface PatchesServer {
    * Commit changes to a document.
    *
    * Applies operational transformation as needed, assigns revision numbers,
-   * and persists the changes. Returns all changes the client needs to apply:
-   * both catchup changes (from other clients) and the client's own transformed changes.
+   * and persists the changes. Returns all changes the client needs to apply
+   * (catchup changes from others, followed by the client's own transformed changes),
+   * plus an optional `docReloadRequired` flag.
+   *
+   * When `docReloadRequired` is true, the client's changes were committed but its
+   * local state is stale. The client must call `getDoc` to reload before continuing.
    *
    * @param docId - The document ID.
    * @param changes - The changes to commit.
    * @param options - Optional commit options.
-   * @returns Combined array of catchup changes followed by the client's committed changes.
+   * @returns An object with the committed changes and an optional reload flag.
    */
-  commitChanges(docId: string, changes: ChangeInput[], options?: CommitChangesOptions): Promise<Change[]>;
+  commitChanges(
+    docId: string,
+    changes: ChangeInput[],
+    options?: CommitChangesOptions
+  ): Promise<{ changes: Change[]; docReloadRequired?: true }>;
 
   /**
    * Delete a document.

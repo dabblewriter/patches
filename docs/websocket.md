@@ -311,10 +311,15 @@ const sync = new PatchesSync(patches, url, {
 });
 ```
 
+## Alternative: SSE + REST
+
+If WebSockets don't fit your infrastructure, check out the [SSE + REST transport](sse-rest.md) — same sync capabilities over standard HTTP.
+
 ## Related Documentation
 
 - [PatchesSync](PatchesSync.md) - The sync coordinator (what you should actually use)
 - [net.md](net.md) - Network layer overview
+- [sse-rest.md](sse-rest.md) - SSE + REST transport (alternative to WebSocket)
 - [json-rpc.md](json-rpc.md) - The underlying protocol
 - [OTServer](OTServer.md) - Server-side OT implementation
 - [LWWServer](LWWServer.md) - Server-side LWW implementation

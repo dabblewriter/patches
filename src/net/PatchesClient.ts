@@ -1,5 +1,6 @@
 import { signal } from 'easy-signal';
 import type {
+  Branch,
   Change,
   ChangeInput,
   DeleteDocOptions,
@@ -100,7 +101,11 @@ export class PatchesClient implements PatchesAPI {
    * @param options - Optional commit settings (e.g., forceCommit for migrations).
    * @returns A promise resolving with the changes as committed by the server (potentially transformed).
    */
-  async commitChanges(docId: string, changes: ChangeInput[], options?: CommitChangesOptions): Promise<Change[]> {
+  async commitChanges(
+    docId: string,
+    changes: ChangeInput[],
+    options?: CommitChangesOptions
+  ): Promise<{ changes: Change[]; docReloadRequired?: true }> {
     return this.rpc.call('commitChanges', docId, changes, options);
   }
 
@@ -173,7 +178,7 @@ export class PatchesClient implements PatchesAPI {
    * @param docId - The ID of the document.
    * @returns A promise resolving with an array of branch metadata objects.
    */
-  async listBranches(docId: string): Promise<VersionMetadata[]> {
+  async listBranches(docId: string): Promise<Branch[]> {
     return this.rpc.call('listBranches', docId);
   }
 

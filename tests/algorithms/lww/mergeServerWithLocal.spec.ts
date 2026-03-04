@@ -66,23 +66,26 @@ describe('mergeServerWithLocal', () => {
   });
 
   describe('non-delta local ops', () => {
-    it('should keep server value when local has replace on same path', () => {
+    it('should preserve local value when local has replace on same path', () => {
       const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/name', value: 'Server' }])];
       const localOps: JSONPatchOp[] = [{ op: 'replace', path: '/name', value: 'Local', ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
 
-      // Server value wins for non-delta ops (already committed)
-      expect(result[0].ops[0].value).toBe('Server');
+      // Local value wins for non-delta ops (newer local value preserved)
+      expect(result[0].ops[0].value).toBe('Local');
+      expect(result[0].ops[0].op).toBe('replace');
     });
 
-    it('should keep server value when local has remove on same path', () => {
+    it('should preserve local remove when local has remove on same path', () => {
       const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/field', value: 'value' }])];
       const localOps: JSONPatchOp[] = [{ op: 'remove', path: '/field', ts: 1000 }];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
 
-      expect(result[0].ops[0].value).toBe('value');
+      // Local remove wins — local op is preserved with its value (undefined for remove)
+      expect(result[0].ops[0].op).toBe('remove');
+      expect(result[0].ops[0].value).toBeUndefined();
     });
   });
 
@@ -133,14 +136,14 @@ describe('mergeServerWithLocal', () => {
       ];
       const localOps: JSONPatchOp[] = [
         { op: '@inc', path: '/a', value: 5, ts: 1000 }, // Delta - merge
-        { op: 'replace', path: '/b', value: 'local', ts: 1000 }, // Non-delta - server wins
+        { op: 'replace', path: '/b', value: 'local', ts: 1000 }, // Non-delta - local wins
         // /c has no local op
       ];
 
       const result = mergeServerWithLocal(serverChanges, localOps);
 
       expect(result[0].ops[0].value).toBe(15); // 10 + 5
-      expect(result[0].ops[1].value).toBe(20); // Server wins
+      expect(result[0].ops[1].value).toBe('local'); // Local wins for non-delta ops
       expect(result[0].ops[2].value).toBe(30); // No local op
     });
 

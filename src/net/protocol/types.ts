@@ -118,16 +118,6 @@ export interface JsonRpcNotification {
 /** Union type for all possible JSON-RPC message types */
 export type Message = JsonRpcRequest | JsonRpcResponse | JsonRpcNotification;
 
-export interface ListOptions {
-  startAt?: string;
-  startAfter?: string;
-  endAt?: string;
-  endBefore?: string;
-  prefix?: string;
-  limit?: number;
-  reverse?: boolean;
-}
-
 export interface PatchesAPI {
   // === Subscription Operations ===
   /**
@@ -150,8 +140,12 @@ export interface PatchesAPI {
   /** Get changes that occurred after a specific revision. */
   getChangesSince(docId: string, rev: number): Promise<Change[]>;
 
-  /** Apply a set of changes from the client to a document. Returns the committed changes. */
-  commitChanges(docId: string, changes: ChangeInput[], options?: CommitChangesOptions): Promise<Change[]>;
+  /** Apply a set of changes from the client to a document. Returns the committed changes and an optional reload flag. */
+  commitChanges(
+    docId: string,
+    changes: ChangeInput[],
+    options?: CommitChangesOptions
+  ): Promise<{ changes: Change[]; docReloadRequired?: true }>;
 
   /** Delete a document. */
   deleteDoc(docId: string): Promise<void>;

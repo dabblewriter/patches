@@ -53,9 +53,29 @@ try {
 
 The goal: you work with your documents, and PatchesSync handles the plumbing.
 
+## Transport Options
+
+Patches supports two transport layers:
+
+- **WebSocket** — bidirectional persistent connection, lowest latency. See [websocket.md](websocket.md).
+- **SSE + REST** — Server-Sent Events for receiving changes, HTTP/fetch for sending them. Better proxy/CDN compatibility, built-in reconnection recovery. See [sse-rest.md](sse-rest.md).
+
+Both implement the `PatchesConnection` interface and work interchangeably with `PatchesSync`.
+
+```typescript
+// WebSocket
+const sync = new PatchesSync(patches, 'wss://server.example.com');
+
+// SSE + REST
+const rest = new PatchesREST('https://server.example.com', {
+  headers: { Authorization: `Bearer ${token}` },
+});
+const sync = new PatchesSync(patches, rest);
+```
+
 ## The Architecture
 
-Under the hood, `PatchesSync` uses `PatchesWebSocket`, which relies on `WebSocketTransport`. This layered approach handles:
+Under the hood, the WebSocket path uses `PatchesWebSocket`, which relies on `WebSocketTransport`. This layered approach handles:
 
 - **Connection Management**: Connect, disconnect, and reconnect logic
 - **JSON-RPC Protocol**: Structured, reliable message framing (see [json-rpc.md](json-rpc.md))
@@ -251,17 +271,19 @@ PatchesSync is algorithm-agnostic - it delegates to the appropriate algorithm fo
 
 ## Accessing the RPC Layer
 
-Need to make custom RPC calls beyond the Patches protocol? Access the underlying JSON-RPC client:
+Need to make custom RPC calls beyond the Patches protocol? Access the underlying JSON-RPC client (WebSocket transport only):
 
 ```typescript
-// Make custom RPC calls
-const result = await sync.rpc.call('myCustomMethod', arg1, arg2);
+// Make custom RPC calls (only available with WebSocket transport)
+const result = await sync.rpc?.call('myCustomMethod', arg1, arg2);
 
 // Listen for custom notifications
-sync.rpc.on('myCustomNotification', params => {
+sync.rpc?.on('myCustomNotification', params => {
   console.log('Custom notification:', params);
 });
 ```
+
+> **Note:** `sync.rpc` returns `undefined` when using the SSE + REST transport. For custom server calls with REST, use `fetch` directly.
 
 ## Related Documentation
 
@@ -269,6 +291,7 @@ sync.rpc.on('myCustomNotification', params => {
 - [PatchesDoc](PatchesDoc.md) - Working with individual documents
 - [persist.md](persist.md) - Local storage and how PatchesStore works
 - [websocket.md](websocket.md) - WebSocket transport details
+- [sse-rest.md](sse-rest.md) - SSE + REST transport
 - [json-rpc.md](json-rpc.md) - The JSON-RPC protocol layer
 - [awareness.md](awareness.md) - Presence indicators using WebRTC
 - [OTServer](OTServer.md) - Server-side OT implementation

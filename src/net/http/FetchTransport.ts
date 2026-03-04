@@ -7,29 +7,23 @@ import { rpcError } from '../protocol/utils.js';
  */
 export class FetchTransport implements ClientTransport {
   public readonly onMessage = signal<(raw: string) => void>();
-  private headers: Record<string, string> | undefined;
 
   constructor(
     private url: string,
     private authHeader: string
   ) {}
 
-  addHeadersToNextCall(headers: Record<string, string>): void {
-    this.headers = headers;
-  }
-
-  async send(raw: string): Promise<void> {
+  async send(raw: string, extraHeaders?: Record<string, string>): Promise<void> {
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (this.authHeader) headers['Authorization'] = this.authHeader;
+      if (extraHeaders) Object.assign(headers, extraHeaders);
+
       const response = await globalThis.fetch(this.url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: this.authHeader,
-          ...this.headers,
-        },
+        headers,
         body: raw,
       });
-      this.headers = undefined;
       this.onMessage.emit(await response.text());
     } catch (error) {
       // ensure the error is associated with the request that was sent

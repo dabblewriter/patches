@@ -50,13 +50,7 @@ export function applyCommittedChanges(
   }
 
   // 1. Apply to committed state
-  try {
-    state = applyChanges(state, newServerChanges);
-  } catch (error) {
-    console.error('Failed to apply server changes to committed state:', error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    throw new Error(`Critical sync error applying server changes: ${errorMessage}`);
-  }
+  state = applyChanges(state, newServerChanges);
 
   // 2. Update committed revision to the latest one from the applied server changes.
   rev = lastChange.rev;

@@ -3,12 +3,6 @@ import { handleOfflineSessionsAndBatches } from '../../../../src/algorithms/ot/s
 import type { OTStoreBackend } from '../../../../src/server/types';
 import type { Change } from '../../../../src/types';
 
-// Mock the dependencies
-vi.mock('crypto-id');
-vi.mock('../../../../src/data/version');
-vi.mock('../../../../src/algorithms/ot/shared/applyChanges');
-vi.mock('../../../../src/algorithms/ot/server/getStateAtRevision');
-
 describe('handleOfflineSessionsAndBatches', () => {
   let mockStore: OTStoreBackend;
   const sessionTimeoutMillis = 300000; // 5 minutes
@@ -22,139 +16,34 @@ describe('handleOfflineSessionsAndBatches', () => {
     committedAt: Date.now(),
   });
 
-  beforeEach(async () => {
+  beforeEach(() => {
     vi.clearAllMocks();
-
-    // Mock crypto-id
-    const { createSortableId } = await import('crypto-id');
-    vi.mocked(createSortableId).mockReturnValue('generated-group-id');
-
-    // Mock createVersion
-    const { createVersionMetadata: createVersion } = await import('../../../../src/data/version');
-    vi.mocked(createVersion).mockImplementation((data: any) => ({
-      id: 'version-id',
-      origin: 'offline-branch' as const,
-      startedAt: Date.now(),
-      endedAt: Date.now(),
-      rev: 1,
-      baseRev: 0,
-      ...(data || {}),
-    }));
-
-    // Mock applyChanges
-    const { applyChanges } = await import('../../../../src/algorithms/ot/shared/applyChanges');
-    vi.mocked(applyChanges).mockImplementation((state: any, changes: any) => ({
-      ...(state || {}),
-      appliedChanges: changes.length,
-    }));
-
-    // Mock getStateAtRevision
-    const { getStateAtRevision } = await import('../../../../src/algorithms/ot/server/getStateAtRevision');
-    vi.mocked(getStateAtRevision).mockResolvedValue({
-      state: { baseState: true },
-      rev: 5,
-    });
-
     mockStore = {
-      listVersions: vi.fn(),
       createVersion: vi.fn(),
-      updateVersion: vi.fn(),
-      appendVersionChanges: vi.fn(),
-      loadVersionState: vi.fn(),
-      saveChanges: vi.fn(),
+      listVersions: vi.fn().mockResolvedValue([]),
     } as any;
   });
 
-  it('should create new version for first batch without existing groupId', async () => {
+  it('should call store.createVersion for a single session of changes', async () => {
     const changes = [createChange('1', 6, 1000), createChange('2', 7, 1100)];
 
-    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
+    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 'offline-branch');
 
-    const result = await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
-
-    expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
-      groupId: undefined,
-      reverse: true,
-      limit: 1,
-    });
-
-    expect(mockStore.createVersion).toHaveBeenCalled();
-
-    // Should return collapsed changes
-    expect(result).toHaveLength(1);
-    expect(result[0].ops).toHaveLength(2); // Combined ops
-  });
-
-  it('should create new version when batchId is provided', async () => {
-    const changes = [createChange('1', 6, 1000), createChange('2', 7, 1100)];
-    const batchId = 'custom-batch-id';
-
-    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
-
-    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5, batchId);
-
-    expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
-      groupId: batchId, // Should use provided batchId as groupId
-      reverse: true,
-      limit: 1,
-    });
-  });
-
-  it('should extend existing version when within timeout', async () => {
-    const existingVersion = {
-      id: 'existing-version',
-      parentId: 'parent-version',
-      endedAt: 1000,
-      origin: 'offline-branch' as const,
-      startedAt: 900,
-      endRev: 1,
-      startRev: 1,
-    };
-    const changes = [
-      createChange('1', 6, 1200), // Within timeout
-    ];
-
-    vi.mocked(mockStore.listVersions).mockResolvedValue([existingVersion]);
-    vi.mocked(mockStore.loadVersionState).mockResolvedValue({ existingState: true });
-
-    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
-
-    expect(mockStore.loadVersionState).toHaveBeenCalledWith('doc1', 'existing-version');
-    expect(mockStore.appendVersionChanges).toHaveBeenCalledWith(
+    expect(mockStore.createVersion).toHaveBeenCalledTimes(1);
+    expect(mockStore.createVersion).toHaveBeenCalledWith(
       'doc1',
-      'existing-version',
-      changes,
-      expect.any(Number), // newEndedAt
-      6, // newRev from the change
-      expect.any(Object) // mergedState
+      expect.objectContaining({
+        origin: 'offline-branch',
+        startRev: 6,
+        endRev: 7,
+        startedAt: 1000,
+        endedAt: 1100,
+      }),
+      changes
     );
-    expect(mockStore.updateVersion).not.toHaveBeenCalled();
-    expect(mockStore.saveChanges).not.toHaveBeenCalled();
   });
 
-  it('should create new session when timeout exceeded', async () => {
-    const existingVersion = {
-      id: 'existing-version',
-      parentId: 'parent-version',
-      endedAt: 1000,
-      origin: 'offline-branch' as const,
-      startedAt: 900,
-      endRev: 1,
-      startRev: 1,
-    };
-    const changes = [
-      createChange('1', 6, 400000), // Exceeds timeout (300000ms)
-    ];
-
-    vi.mocked(mockStore.listVersions).mockResolvedValue([existingVersion]);
-    vi.mocked(mockStore.loadVersionState).mockResolvedValue({ existingState: true });
-
-    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
-
-    expect(mockStore.createVersion).toHaveBeenCalled();
-  });
-
-  it('should handle multiple sessions within same batch', async () => {
+  it('should call store.createVersion per session when there are gaps', async () => {
     const changes = [
       createChange('1', 6, 1000),
       createChange('2', 7, 1100),
@@ -162,203 +51,129 @@ describe('handleOfflineSessionsAndBatches', () => {
       createChange('4', 9, 400100),
     ];
 
-    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
+    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 'offline-branch');
 
-    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
-
-    // Should create two versions (two sessions)
     expect(mockStore.createVersion).toHaveBeenCalledTimes(2);
-  });
-
-  it('should collapse all changes into single change for transformation', async () => {
-    const changes = [createChange('1', 6, 1000), createChange('2', 7, 1100), createChange('3', 8, 1200)];
-
-    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
-
-    const result = await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
-
-    expect(result).toHaveLength(1);
-    expect(result[0].ops).toHaveLength(3); // All ops combined
-    expect(result[0].id).toBe(changes[0].id); // Should keep first change's id
+    expect(mockStore.createVersion).toHaveBeenNthCalledWith(
+      1,
+      'doc1',
+      expect.objectContaining({
+        origin: 'offline-branch',
+        startRev: 6,
+        endRev: 7,
+        startedAt: 1000,
+        endedAt: 1100,
+      }),
+      [changes[0], changes[1]]
+    );
+    expect(mockStore.createVersion).toHaveBeenNthCalledWith(
+      2,
+      'doc1',
+      expect.objectContaining({
+        origin: 'offline-branch',
+        startRev: 8,
+        endRev: 9,
+        startedAt: 400000,
+        endedAt: 400100,
+      }),
+      [changes[2], changes[3]]
+    );
   });
 
   it('should handle single change', async () => {
     const changes = [createChange('1', 6, 1000)];
 
-    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
+    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 'offline-branch');
 
-    const result = await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
-
-    expect(result).toHaveLength(1);
-    expect(result[0]).toBe(changes[0]); // Should return the same change
+    expect(mockStore.createVersion).toHaveBeenCalledTimes(1);
+    expect(mockStore.createVersion).toHaveBeenCalledWith(
+      'doc1',
+      expect.objectContaining({
+        origin: 'offline-branch',
+        startRev: 6,
+        endRev: 6,
+        startedAt: 1000,
+        endedAt: 1000,
+      }),
+      [changes[0]]
+    );
   });
 
-  it('should use getStateAtRevision for initial base state when no existing version', async () => {
+  it('should detect three sessions with two gaps', async () => {
+    const changes = [
+      createChange('1', 6, 1000),
+      createChange('2', 7, 400000), // Gap 1
+      createChange('3', 8, 800000), // Gap 2
+    ];
+
+    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 'offline-branch');
+
+    expect(mockStore.createVersion).toHaveBeenCalledTimes(3);
+    expect(mockStore.createVersion).toHaveBeenNthCalledWith(
+      1,
+      'doc1',
+      expect.objectContaining({ startRev: 6, endRev: 6, startedAt: 1000, endedAt: 1000 }),
+      [changes[0]]
+    );
+    expect(mockStore.createVersion).toHaveBeenNthCalledWith(
+      2,
+      'doc1',
+      expect.objectContaining({ startRev: 7, endRev: 7, startedAt: 400000, endedAt: 400000 }),
+      [changes[1]]
+    );
+    expect(mockStore.createVersion).toHaveBeenNthCalledWith(
+      3,
+      'doc1',
+      expect.objectContaining({ startRev: 8, endRev: 8, startedAt: 800000, endedAt: 800000 }),
+      [changes[2]]
+    );
+  });
+
+  it('should set parentId from last main version on first session', async () => {
+    const changes = [createChange('1', 6, 1000), createChange('2', 7, 1100)];
+    const mainVersion = { id: 'main-v1', endRev: 5, origin: 'main' };
+
+    vi.mocked(mockStore.listVersions).mockResolvedValue([mainVersion] as any);
+
+    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 'offline-branch');
+
+    expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
+      limit: 1,
+      reverse: true,
+      startAfter: 6, // firstRev
+      origin: 'main',
+      orderBy: 'endRev',
+    });
+
+    expect(mockStore.createVersion).toHaveBeenCalledWith(
+      'doc1',
+      expect.objectContaining({ parentId: 'main-v1' }),
+      changes
+    );
+  });
+
+  it('should set undefined parentId when no main version exists', async () => {
     const changes = [createChange('1', 6, 1000)];
 
+    // No main versions found
     vi.mocked(mockStore.listVersions).mockResolvedValue([]);
 
-    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
+    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 'offline-branch');
 
-    const { getStateAtRevision } = await import('../../../../src/algorithms/ot/server/getStateAtRevision');
-    expect(getStateAtRevision).toHaveBeenCalledWith(mockStore, 'doc1', 5);
-  });
-
-  it('should set correct metadata for created versions', async () => {
-    const changes = [createChange('1', 6, 1000), createChange('2', 7, 2000)];
-
-    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
-
-    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
-
-    const { createVersionMetadata: createVersion } = await import('../../../../src/data/version');
-    expect(createVersion).toHaveBeenCalledWith({
-      parentId: undefined,
-      groupId: undefined,
-      origin: 'offline-branch',
-      isOffline: true,
-      startedAt: 1000,
-      endedAt: 2000,
-      endRev: 7,
-      startRev: 6,
-    });
-  });
-
-  it('should infer isOffline as true when committedAt - createdAt exceeds timeout', async () => {
-    const changes: Change[] = [
-      { id: '1', rev: 6, baseRev: 5, ops: [{ op: 'add', path: '/a', value: 1 }], createdAt: 1000, committedAt: 500000 },
-      { id: '2', rev: 7, baseRev: 6, ops: [{ op: 'add', path: '/b', value: 2 }], createdAt: 2000, committedAt: 500000 },
-    ];
-
-    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
-
-    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
-
-    const { createVersionMetadata: createVersion } = await import('../../../../src/data/version');
-    expect(createVersion).toHaveBeenCalledWith(
-      expect.objectContaining({ isOffline: true })
-    );
-  });
-
-  it('should not set isOffline when committedAt - createdAt is within timeout', async () => {
-    const changes: Change[] = [
-      { id: '1', rev: 6, baseRev: 5, ops: [{ op: 'add', path: '/a', value: 1 }], createdAt: 1000, committedAt: 2000 },
-      { id: '2', rev: 7, baseRev: 6, ops: [{ op: 'add', path: '/b', value: 2 }], createdAt: 1100, committedAt: 2000 },
-    ];
-
-    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
-
-    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
-
-    const { createVersionMetadata: createVersion } = await import('../../../../src/data/version');
-    expect(createVersion).toHaveBeenCalledWith(
-      expect.not.objectContaining({ isOffline: expect.anything() })
-    );
-  });
-
-  it('should infer different isOffline values for different sessions', async () => {
-    // Session 1: committedAt - createdAt = 1000 (within timeout) → not offline
-    // Session 2: committedAt - createdAt = 500000 (exceeds timeout) → offline
-    const changes: Change[] = [
-      { id: '1', rev: 6, baseRev: 5, ops: [{ op: 'add', path: '/a', value: 1 }], createdAt: 1000, committedAt: 2000 },
-      { id: '2', rev: 7, baseRev: 6, ops: [{ op: 'add', path: '/b', value: 2 }], createdAt: 1100, committedAt: 2000 },
-      // Large gap in createdAt → new session
-      { id: '3', rev: 8, baseRev: 7, ops: [{ op: 'add', path: '/c', value: 3 }], createdAt: 400000, committedAt: 900000 },
-      { id: '4', rev: 9, baseRev: 8, ops: [{ op: 'add', path: '/d', value: 4 }], createdAt: 400100, committedAt: 900000 },
-    ];
-
-    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
-
-    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
-
-    const { createVersionMetadata: createVersion } = await import('../../../../src/data/version');
-    expect(createVersion).toHaveBeenCalledTimes(2);
-    // First session: not offline (committedAt 2000 - createdAt 1000 = 1000ms < 300000ms)
-    expect(createVersion).toHaveBeenNthCalledWith(1,
-      expect.not.objectContaining({ isOffline: expect.anything() })
-    );
-    // Second session: offline (committedAt 900000 - createdAt 400000 = 500000ms > 300000ms)
-    expect(createVersion).toHaveBeenNthCalledWith(2,
-      expect.objectContaining({ isOffline: true })
-    );
-  });
-
-  it('should break collapsed changes when maxPayloadBytes is set and exceeded', async () => {
-    // Create changes with large ops that when collapsed will exceed the limit
-    const createLargeChange = (id: string, rev: number, createdAtMs: number): Change => ({
-      id,
-      rev,
-      baseRev: rev - 1,
-      ops: [{ op: 'add', path: `/change-${id}`, value: 'x'.repeat(200) }],
-      createdAt: createdAtMs,
-      committedAt: Date.now(),
-    });
-
-    const changes = [createLargeChange('1', 6, 1000), createLargeChange('2', 7, 1100), createLargeChange('3', 8, 1200)];
-
-    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
-
-    // Set a maxPayloadBytes that will be exceeded by the collapsed change
-    const maxPayloadBytes = 400; // Small enough to trigger breaking
-    const result = await handleOfflineSessionsAndBatches(
-      mockStore,
-      sessionTimeoutMillis,
+    // parentId should not be set (undefined is not included in objectContaining)
+    expect(mockStore.createVersion).toHaveBeenCalledWith(
       'doc1',
-      changes,
-      5,
-      undefined,
-      'offline-branch',
-      maxPayloadBytes
+      expect.not.objectContaining({ parentId: expect.anything() }),
+      changes
     );
-
-    // Should return multiple changes since the collapsed one was too large
-    expect(result.length).toBeGreaterThan(1);
-    // Each resulting change should be smaller than maxPayloadBytes
-    for (const change of result) {
-      expect(JSON.stringify(change).length).toBeLessThanOrEqual(maxPayloadBytes);
-    }
   });
 
-  it('should not break collapsed changes when maxPayloadBytes is not set', async () => {
-    const createLargeChange = (id: string, rev: number, createdAtMs: number): Change => ({
-      id,
-      rev,
-      baseRev: rev - 1,
-      ops: [{ op: 'add', path: `/change-${id}`, value: 'x'.repeat(200) }],
-      createdAt: createdAtMs,
-      committedAt: Date.now(),
-    });
+  it('should not query for main version when origin is main', async () => {
+    const changes = [createChange('1', 6, 1000)];
 
-    const changes = [createLargeChange('1', 6, 1000), createLargeChange('2', 7, 1100), createLargeChange('3', 8, 1200)];
+    await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 'main');
 
-    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
-
-    // No maxPayloadBytes set
-    const result = await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 5);
-
-    // Should return single collapsed change
-    expect(result).toHaveLength(1);
-    expect(result[0].ops).toHaveLength(3);
-  });
-
-  it('should return unchanged changes when origin is main (fast-forward)', async () => {
-    const changes = [createChange('1', 6, 1000), createChange('2', 7, 1100)];
-
-    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
-
-    const result = await handleOfflineSessionsAndBatches(
-      mockStore,
-      sessionTimeoutMillis,
-      'doc1',
-      changes,
-      5,
-      undefined,
-      'main' // Fast-forward case
-    );
-
-    // Should return unchanged changes (not collapsed)
-    expect(result).toHaveLength(2);
-    expect(result[0]).toBe(changes[0]);
-    expect(result[1]).toBe(changes[1]);
+    expect(mockStore.listVersions).not.toHaveBeenCalled();
+    expect(mockStore.createVersion).toHaveBeenCalledWith('doc1', expect.objectContaining({ origin: 'main' }), changes);
   });
 });

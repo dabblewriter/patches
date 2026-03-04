@@ -193,15 +193,23 @@ describe('PatchesHistoryManager', () => {
     });
   });
 
-  describe('getStateAtVersion', () => {
+  describe('getVersionState', () => {
     it('should load state for valid version', async () => {
       const mockState = { content: 'test content', title: 'Test Doc' };
-      vi.mocked(mockStore.loadVersionState).mockResolvedValue(mockState);
+      vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify(mockState));
 
-      const result = await historyManager.getStateAtVersion('doc1', 'version1');
+      const result = await historyManager.getVersionState('doc1', 'version1');
 
       expect(mockStore.loadVersionState).toHaveBeenCalledWith('doc1', 'version1');
-      expect(result).toEqual(mockState);
+      // Result is a ReadableStream — read it to verify contents
+      const reader = result.getReader();
+      let text = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += value;
+      }
+      expect(JSON.parse(text)).toEqual(mockState);
     });
 
     it('should handle store errors gracefully', async () => {
@@ -210,7 +218,7 @@ describe('PatchesHistoryManager', () => {
 
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-      await expect(historyManager.getStateAtVersion('doc1', 'version1')).rejects.toThrow(
+      await expect(historyManager.getVersionState('doc1', 'version1')).rejects.toThrow(
         'Could not load state for version version1.'
       );
 
@@ -224,7 +232,7 @@ describe('PatchesHistoryManager', () => {
 
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-      await expect(historyManager.getStateAtVersion('doc1', 'nonexistent')).rejects.toThrow(
+      await expect(historyManager.getVersionState('doc1', 'nonexistent')).rejects.toThrow(
         'Could not load state for version nonexistent.'
       );
 
@@ -232,7 +240,7 @@ describe('PatchesHistoryManager', () => {
     });
   });
 
-  describe('getChangesForVersion', () => {
+  describe('getVersionChanges', () => {
     const mockChanges: Change[] = [
       {
         id: 'change1',
@@ -257,7 +265,7 @@ describe('PatchesHistoryManager', () => {
     it('should load changes for valid version', async () => {
       vi.mocked(mockStore.loadVersionChanges!).mockResolvedValue(mockChanges);
 
-      const result = await historyManager.getChangesForVersion('doc1', 'version1');
+      const result = await historyManager.getVersionChanges('doc1', 'version1');
 
       expect(mockStore.loadVersionChanges).toHaveBeenCalledWith('doc1', 'version1');
       expect(result).toEqual(mockChanges);
@@ -269,7 +277,7 @@ describe('PatchesHistoryManager', () => {
 
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-      await expect(historyManager.getChangesForVersion('doc1', 'version1')).rejects.toThrow(
+      await expect(historyManager.getVersionChanges('doc1', 'version1')).rejects.toThrow(
         'Could not load changes for version version1.'
       );
 
@@ -283,11 +291,65 @@ describe('PatchesHistoryManager', () => {
 
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-      await expect(historyManager.getChangesForVersion('doc1', 'missing-version')).rejects.toThrow(
+      await expect(historyManager.getVersionChanges('doc1', 'missing-version')).rejects.toThrow(
         'Could not load changes for version missing-version.'
       );
 
       consoleSpy.mockRestore();
+    });
+  });
+
+  describe('getStateBeforeVersion', () => {
+    it('should throw for LWW stores (no listChanges)', async () => {
+      await expect(historyManager.getStateBeforeVersion('doc1', 'v1')).rejects.toThrow(
+        'getStateBeforeVersion is only supported for OT stores.'
+      );
+    });
+
+    it('should throw when version is not found', async () => {
+      const otStore = {
+        ...mockStore,
+        listChanges: vi.fn(),
+        loadVersion: vi.fn().mockResolvedValue(undefined),
+      } as any;
+      const otHistoryManager = new PatchesHistoryManager(mockServer, otStore);
+
+      await expect(otHistoryManager.getStateBeforeVersion('doc1', 'missing')).rejects.toThrow(
+        'Version missing not found for doc doc1.'
+      );
+    });
+
+    it('should return base state using parentId chain', async () => {
+      const parentVersion = { id: 'parent-v', endRev: 5, startRev: 1, origin: 'main' as const };
+      const targetVersion = { id: 'v1', startRev: 6, parentId: 'parent-v', origin: 'offline-branch' as const };
+      const parentState = { content: 'base' };
+
+      const otStore = {
+        ...mockStore,
+        listChanges: vi.fn().mockResolvedValue([]),
+        loadVersion: vi
+          .fn()
+          .mockImplementation((_: string, id: string) =>
+            Promise.resolve(id === 'v1' ? targetVersion : id === 'parent-v' ? parentVersion : undefined)
+          ),
+        loadVersionState: vi.fn().mockResolvedValue(JSON.stringify(parentState)),
+        listVersions: vi.fn().mockResolvedValue([]),
+      } as any;
+      const otHistoryManager = new PatchesHistoryManager(mockServer, otStore);
+
+      const result = await otHistoryManager.getStateBeforeVersion('doc1', 'v1');
+
+      // Result is a ReadableStream — read it to verify contents
+      const reader = result.getReader();
+      let text = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += value;
+      }
+      // startRev - 1 = 6 - 1 = 5; state should be the parent version's state (no gap)
+      expect(JSON.parse(text)).toEqual(parentState);
+      expect(otStore.loadVersion).toHaveBeenCalledWith('doc1', 'parent-v');
     });
   });
 
@@ -343,15 +405,23 @@ describe('PatchesHistoryManager', () => {
         },
       ];
 
-      vi.mocked(mockStore.loadVersionState).mockResolvedValue(mockState);
+      vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify(mockState));
       vi.mocked(mockStore.loadVersionChanges!).mockResolvedValue(mockChanges);
 
-      const [state, changes] = await Promise.all([
-        historyManager.getStateAtVersion('doc1', 'version1'),
-        historyManager.getChangesForVersion('doc1', 'version1'),
+      const [stateStream, changes] = await Promise.all([
+        historyManager.getVersionState('doc1', 'version1'),
+        historyManager.getVersionChanges('doc1', 'version1'),
       ]);
 
-      expect(state).toEqual(mockState);
+      // State is a ReadableStream — read it
+      const reader = stateStream.getReader();
+      let text = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += value;
+      }
+      expect(JSON.parse(text)).toEqual(mockState);
       expect(changes).toEqual(mockChanges);
     });
   });

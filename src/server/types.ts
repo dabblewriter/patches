@@ -24,36 +24,31 @@ export interface ServerStoreBackend {
  */
 export interface VersioningStoreBackend {
   /**
-   * Saves version metadata, its state snapshot, and optionally the original changes.
-   * State and changes are stored separately from the core metadata.
+   * Saves version metadata and optionally the original changes.
+   * Implementations are responsible for building and persisting version state —
+   * inline or queued, but must throw if state creation fails.
    * @param changes - Optional for LWW (which doesn't store changes), required for OT.
    */
-  createVersion(docId: string, metadata: VersionMetadata, state: any, changes?: Change[]): Promise<void>;
+  createVersion(docId: string, metadata: VersionMetadata, changes?: Change[]): Promise<void>;
 
   /** Lists version metadata based on filtering/sorting options. */
   listVersions(docId: string, options: ListVersionsOptions): Promise<VersionMetadata[]>;
 
-  /** Loads the state snapshot for a specific version ID. */
-  loadVersionState(docId: string, versionId: string): Promise<any | undefined>;
+  /** Loads metadata for a specific version by its ID. */
+  loadVersion(docId: string, versionId: string): Promise<VersionMetadata | undefined>;
+
+  /**
+   * Loads the state snapshot for a specific version ID.
+   * Returns a JSON string, ReadableStream of JSON chunks, or undefined if not found.
+   * ReadableStream allows large state blobs to be streamed without full materialization.
+   */
+  loadVersionState(docId: string, versionId: string): Promise<string | ReadableStream<string> | undefined>;
 
   /** Update a version's metadata. */
   updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void>;
 
   /** Loads the original Change objects associated with a specific version ID. */
   loadVersionChanges?(docId: string, versionId: string): Promise<Change[]>;
-
-  /**
-   * Appends changes to an existing version, updating its state snapshot, endedAt, and endRev.
-   * Used when a session spans multiple batch submissions.
-   */
-  appendVersionChanges?(
-    docId: string,
-    versionId: string,
-    changes: Change[],
-    newEndedAt: number,
-    newEndRev: number,
-    newState: any
-  ): Promise<void>;
 }
 
 /**
@@ -62,6 +57,13 @@ export interface VersioningStoreBackend {
  * for session tracking and state snapshots.
  */
 export interface OTStoreBackend extends ServerStoreBackend, VersioningStoreBackend {
+  /**
+   * Get the current revision number without loading state.
+   * @param docId - The document ID.
+   * @returns The current revision number, or 0 if document doesn't exist.
+   */
+  getCurrentRev(docId: string): Promise<number>;
+
   /** Saves a batch of committed server changes. */
   saveChanges(docId: string, changes: Change[]): Promise<void>;
 
@@ -73,6 +75,15 @@ export interface OTStoreBackend extends ServerStoreBackend, VersioningStoreBacke
  * Options for listing fields. Use either sinceRev OR paths, not both.
  */
 export type ListFieldsOptions = { sinceRev: number } | { paths: string[] };
+
+/**
+ * Result from LWW getSnapshot. State is a ReadableStream so large snapshots
+ * can be streamed to clients without full materialization.
+ */
+export interface SnapshotResult {
+  rev: number;
+  state: ReadableStream<string>;
+}
 
 /**
  * Interface for LWW (Last-Write-Wins) storage backend.
@@ -89,10 +100,11 @@ export interface LWWStoreBackend extends ServerStoreBackend {
 
   /**
    * Get the latest snapshot of document state.
+   * State is returned as a ReadableStream so it can be streamed to clients.
    * @param docId - The document ID.
-   * @returns The snapshot state and revision, or null if no snapshot exists.
+   * @returns The snapshot revision and state stream, or null if no snapshot exists.
    */
-  getSnapshot(docId: string): Promise<{ state: any; rev: number } | null>;
+  getSnapshot(docId: string): Promise<SnapshotResult | null>;
 
   /**
    * Save a snapshot of document state (overwrites previous snapshot).
@@ -171,10 +183,4 @@ export interface BranchingStoreBackend {
 
   /** Updates specific fields (status, name, metadata) of an existing branch record. */
   updateBranch(branchId: string, updates: Partial<Pick<Branch, 'status' | 'name' | 'metadata'>>): Promise<void>;
-
-  /**
-   * @deprecated Use updateBranch with status instead.
-   * Marks a branch as closed. Implementations might handle this via updateBranch.
-   */
-  closeBranch(branchId: string): Promise<void>;
 }

@@ -17,6 +17,14 @@ function concurrency(docId: string): Concurrency {
 }
 
 /**
+ * Release the concurrency entry for a document, freeing memory.
+ * Call when a document is untracked or deleted.
+ */
+export function releaseConcurrency(docId: string): void {
+  docIds.delete(docId);
+}
+
+/**
  * Wrap a function which is blockable for a document.
  * Also, a Typescript decorator for functions which are blockable.
  */

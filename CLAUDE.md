@@ -38,7 +38,7 @@ src/
     ot/server/  — OT server algorithms
     ot/shared/  — shared OT logic
     lww/        — LWW algorithms
-  net/          — transport layer (WebSocket, WebRTC)
+  net/          — transport layer (WebSocket, SSE+REST, WebRTC)
   json-patch/   — JSON Patch operations
 tests/          — mirrors src/ structure
 docs/           — architecture and API documentation
@@ -63,6 +63,7 @@ Read these when working in a specific area:
 | `docs/branching.md` | Branching concepts and workflows |
 | `docs/net.md` | Transport layer |
 | `docs/websocket.md` | WebSocket protocol |
+| `docs/sse-rest.md` | SSE + REST transport |
 | `docs/concurrency.md` | Concurrency utilities for custom backends |
 | `docs/json-patch.md` | JSON Patch format |
 | `src/vue/README.md` | Vue 3 integration |

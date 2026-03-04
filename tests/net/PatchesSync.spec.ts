@@ -93,6 +93,7 @@ describe('PatchesSync', () => {
       getChangesSince: vi.fn().mockResolvedValue([]),
       commitChanges: vi.fn().mockResolvedValue({ changes: [] }),
       deleteDoc: vi.fn().mockResolvedValue(undefined),
+      rpc: { call: vi.fn(), notify: vi.fn(), on: vi.fn() },
       onStateChange: vi.fn(),
       onChangesCommitted: vi.fn(),
       onDocDeleted: vi.fn(),
@@ -1267,6 +1268,70 @@ describe('PatchesSync', () => {
 
         expect(sync.docStates.state.doc1).toBeUndefined();
       });
+    });
+  });
+
+  describe('PatchesConnection constructor overload', () => {
+    it('should accept a PatchesConnection instead of a URL', () => {
+      const mockConnection = {
+        url: 'https://api.example.com',
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn(),
+        subscribe: vi.fn().mockResolvedValue([]),
+        unsubscribe: vi.fn().mockResolvedValue(undefined),
+        getDoc: vi.fn().mockResolvedValue({ state: {}, rev: 0 }),
+        getChangesSince: vi.fn().mockResolvedValue([]),
+        commitChanges: vi.fn().mockResolvedValue({ changes: [] }),
+        deleteDoc: vi.fn().mockResolvedValue(undefined),
+        createVersion: vi.fn().mockResolvedValue(''),
+        listVersions: vi.fn().mockResolvedValue([]),
+        getVersionState: vi.fn().mockResolvedValue({ state: {}, rev: 0 }),
+        getVersionChanges: vi.fn().mockResolvedValue([]),
+        updateVersion: vi.fn().mockResolvedValue(undefined),
+        onStateChange: vi.fn(),
+        onChangesCommitted: vi.fn(),
+        onDocDeleted: vi.fn(),
+      };
+
+      const connectionSync = new PatchesSync(mockPatches, mockConnection as any);
+      expect(connectionSync).toBeInstanceOf(PatchesSync);
+      // Should NOT have created a PatchesWebSocket
+      expect(connectionSync['connection']).toBe(mockConnection);
+    });
+
+    it('should still work with URL string (backward compat)', () => {
+      const urlSync = new PatchesSync(mockPatches, 'ws://localhost:8080');
+      expect(PatchesWebSocket).toHaveBeenCalledWith('ws://localhost:8080', undefined);
+    });
+
+    it('should return undefined for rpc when using non-WebSocket connection', () => {
+      const mockConnection = {
+        url: 'https://api.example.com',
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn(),
+        subscribe: vi.fn().mockResolvedValue([]),
+        unsubscribe: vi.fn().mockResolvedValue(undefined),
+        getDoc: vi.fn().mockResolvedValue({ state: {}, rev: 0 }),
+        getChangesSince: vi.fn().mockResolvedValue([]),
+        commitChanges: vi.fn().mockResolvedValue({ changes: [] }),
+        deleteDoc: vi.fn().mockResolvedValue(undefined),
+        createVersion: vi.fn().mockResolvedValue(''),
+        listVersions: vi.fn().mockResolvedValue([]),
+        getVersionState: vi.fn().mockResolvedValue({ state: {}, rev: 0 }),
+        getVersionChanges: vi.fn().mockResolvedValue([]),
+        updateVersion: vi.fn().mockResolvedValue(undefined),
+        onStateChange: vi.fn(),
+        onChangesCommitted: vi.fn(),
+        onDocDeleted: vi.fn(),
+      };
+
+      const connectionSync = new PatchesSync(mockPatches, mockConnection as any);
+      expect(connectionSync.rpc).toBeUndefined();
+    });
+
+    it('should return rpc when using WebSocket connection (URL constructor)', () => {
+      // mockWebSocket has an rpc property via PatchesClient
+      expect(sync.rpc).toBeDefined();
     });
   });
 

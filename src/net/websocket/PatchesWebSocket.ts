@@ -1,5 +1,6 @@
 import { type Signal } from 'easy-signal';
 import { PatchesClient } from '../PatchesClient.js';
+import type { PatchesConnection } from '../PatchesConnection.js';
 import type { ConnectionState } from '../protocol/types.js';
 import { WebSocketTransport, type WebSocketOptions } from './WebSocketTransport.js';
 
@@ -9,7 +10,7 @@ import { WebSocketTransport, type WebSocketOptions } from './WebSocketTransport.
  * versioning, and other OT-specific functionality
  * over a WebSocket connection.
  */
-export class PatchesWebSocket extends PatchesClient {
+export class PatchesWebSocket extends PatchesClient implements PatchesConnection {
   transport: WebSocketTransport;
 
   // --- Public Signals ---
@@ -27,6 +28,17 @@ export class PatchesWebSocket extends PatchesClient {
     super(transport);
     this.transport = transport;
     this.onStateChange = this.transport.onStateChange;
+  }
+
+  // --- URL ---
+
+  /** The WebSocket server URL. */
+  get url(): string {
+    return this.transport.url;
+  }
+
+  set url(url: string) {
+    this.transport.url = url;
   }
 
   // --- Connection Management ---

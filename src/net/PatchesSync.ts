@@ -7,7 +7,7 @@ import { Patches } from '../client/Patches.js';
 import type { AlgorithmName, TrackedDoc } from '../client/PatchesStore.js';
 import { isDocLoaded } from '../shared/utils.js';
 import type { Change, DocSyncState, DocSyncStatus } from '../types.js';
-import { blockable } from '../utils/concurrency.js';
+import { blockable, serialGate } from '../utils/concurrency.js';
 import { ErrorCodes, StatusError } from './error.js';
 import type { PatchesConnection } from './PatchesConnection.js';
 import type { JSONRPCClient } from './protocol/JSONRPCClient.js';
@@ -316,9 +316,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * Syncs a single document.
    * @param docId The ID of the document to sync.
    */
-  @blockable
+  @serialGate
   protected async syncDoc(docId: string): Promise<void> {
-    if (!this.state.connected) return;
+    if (!this.state.connected || !this.trackedDocs.has(docId)) return;
 
     this._updateDocSyncState(docId, { syncStatus: 'syncing' });
 
@@ -622,11 +622,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     }
   }
 
-  protected async _handleDocChange(docId: string): Promise<void> {
+  protected _handleDocChange(docId: string): void {
     if (!this.trackedDocs.has(docId)) return;
     this._updateDocSyncState(docId, { hasPending: true });
     if (!this.state.connected) return;
-    await this.syncDoc(docId);
+    this.syncDoc(docId);
   }
 
   /**

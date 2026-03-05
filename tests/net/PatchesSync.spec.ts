@@ -1363,4 +1363,156 @@ describe('PatchesSync', () => {
       expect(mockAlgorithm.getPendingToSend).toHaveBeenCalledWith('doc2');
     });
   });
+
+  describe('syncDoc serialGate: one in-flight at a time per doc', () => {
+    beforeEach(() => {
+      sync['updateState']({ connected: true });
+      sync['trackedDocs'].add('doc1');
+    });
+
+    it('should run exactly one follow-up sync when changes arrive during in-flight', async () => {
+      let resolveFirst!: () => void;
+      const callCount = { value: 0 };
+
+      // Spy on flushDoc (called inside syncDoc) to track actual send attempts
+      // Since syncDoc is the gate, we count via flushDoc invocations
+      const flushSpy = vi.spyOn(sync as any, 'flushDoc').mockResolvedValue(undefined);
+      mockAlgorithm.getPendingToSend
+        .mockResolvedValueOnce([{ id: 'a', rev: 1, baseRev: 0, ops: [], createdAt: 0, committedAt: 0 }])
+        .mockResolvedValueOnce([{ id: 'b', rev: 2, baseRev: 1, ops: [], createdAt: 0, committedAt: 0 }])
+        .mockResolvedValue(null);
+
+      // Gate is on syncDoc itself now; hold it open via flushDoc
+      let resolveFlush!: () => void;
+      flushSpy.mockImplementationOnce(
+        () =>
+          new Promise<void>(r => {
+            resolveFlush = r;
+          })
+      );
+
+      // First call: in-flight (blocked inside flushDoc)
+      const p1 = sync['syncDoc']('doc1');
+      // Two more: should collapse to one queued follow-up
+      sync['syncDoc']('doc1');
+      sync['syncDoc']('doc1');
+
+      await Promise.resolve();
+      // Only one flush started
+      expect(flushSpy).toHaveBeenCalledTimes(1);
+
+      // Unblock the first
+      resolveFlush();
+      await p1;
+      await vi.waitFor(() => flushSpy.mock.calls.length === 2);
+
+      // Exactly one follow-up flush (not two)
+      expect(flushSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('should not run a follow-up when no additional triggers arrived', async () => {
+      mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      mockWebSocket.getChangesSince.mockResolvedValue([]);
+
+      await sync['syncDoc']('doc1');
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // getCommittedRev called exactly once (one syncDoc run, no follow-up)
+      expect(mockAlgorithm.getCommittedRev).toHaveBeenCalledTimes(1);
+    });
+
+    it('should be a no-op after disconnect (syncDoc returns early)', async () => {
+      let resolveFlush!: () => void;
+      const flushSpy = vi.spyOn(sync as any, 'flushDoc').mockImplementation(
+        () =>
+          new Promise<void>(r => {
+            resolveFlush = r;
+          })
+      );
+      mockAlgorithm.getPendingToSend.mockResolvedValue([
+        { id: 'a', rev: 1, baseRev: 0, ops: [], createdAt: 0, committedAt: 0 },
+      ]);
+
+      const p1 = sync['syncDoc']('doc1'); // in-flight
+      sync['syncDoc']('doc1'); // queued
+
+      // Wait for getPendingToSend to resolve so flushDoc is actually called
+      await vi.waitFor(() => flushSpy.mock.calls.length > 0);
+
+      const connectionHandler = vi.mocked(mockWebSocket.onStateChange).mock.calls[0][0];
+      connectionHandler('disconnected');
+
+      resolveFlush();
+      await p1;
+      // Let follow-up attempt settle
+      await vi.waitFor(() => true);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Follow-up ran but returned early (not connected), so only one flush
+      expect(flushSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should be a no-op after doc is untracked (syncDoc returns early)', async () => {
+      let resolveFlush!: () => void;
+      const flushSpy = vi.spyOn(sync as any, 'flushDoc').mockImplementation(
+        () =>
+          new Promise<void>(r => {
+            resolveFlush = r;
+          })
+      );
+      mockAlgorithm.getPendingToSend.mockResolvedValue([
+        { id: 'a', rev: 1, baseRev: 0, ops: [], createdAt: 0, committedAt: 0 },
+      ]);
+
+      const p1 = sync['syncDoc']('doc1'); // in-flight
+      sync['syncDoc']('doc1'); // queued
+
+      const untrackHandler = vi.mocked(mockPatches.onUntrackDocs).mock.calls[0][0];
+      await untrackHandler(['doc1']); // removes doc1 from trackedDocs
+
+      resolveFlush();
+      await p1;
+      await vi.waitFor(() => true);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Follow-up ran but returned early (not tracked), so only one flush
+      expect(flushSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should gate each docId independently', async () => {
+      let resolveDoc1!: () => void;
+      const flushCalls: string[] = [];
+
+      vi.spyOn(sync as any, 'flushDoc').mockImplementation(function (this: any, ...args: unknown[]) {
+        const [docId] = args as [string];
+        flushCalls.push(docId);
+        if (docId === 'doc1' && flushCalls.filter(id => id === 'doc1').length === 1) {
+          return new Promise<void>(resolve => {
+            resolveDoc1 = resolve;
+          });
+        }
+        return Promise.resolve();
+      });
+      mockAlgorithm.getPendingToSend.mockResolvedValue([
+        { id: 'a', rev: 1, baseRev: 0, ops: [], createdAt: 0, committedAt: 0 },
+      ]);
+
+      sync['trackedDocs'].add('doc2');
+
+      const doc1Promise = sync['syncDoc']('doc1');
+      await sync['syncDoc']('doc2');
+
+      // doc2 completed; doc1 still in-flight
+      expect(flushCalls.filter(id => id === 'doc1').length).toBe(1);
+      expect(flushCalls.filter(id => id === 'doc2').length).toBe(1);
+
+      resolveDoc1();
+      await doc1Promise;
+    });
+  });
 });

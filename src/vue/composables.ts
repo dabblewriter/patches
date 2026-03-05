@@ -302,17 +302,27 @@ function _usePatchesDocEager<T extends object>(docId: string, options: UsePatche
   let unsubscribe: Unsubscriber | null = null;
 
   if (autoClose) {
+    let unmounted = false;
+
     manager
       .openDoc<T>(patches, docId, openDocOpts)
       .then(patchesDoc => {
+        if (unmounted) {
+          // Component unmounted before openDoc resolved — close immediately to avoid leak
+          manager.closeDoc(patches, docId, shouldUntrack);
+          return;
+        }
         unsubscribe = setupDoc(patchesDoc);
       })
       .catch(err => {
-        baseReturn.error.value = err;
-        baseReturn.loading.value = false;
+        if (!unmounted) {
+          baseReturn.error.value = err;
+          baseReturn.loading.value = false;
+        }
       });
 
     onBeforeUnmount(() => {
+      unmounted = true;
       unsubscribe?.();
       manager.closeDoc(patches, docId, shouldUntrack);
     });
@@ -534,6 +544,7 @@ export function providePatchesDoc<T extends object>(
 
   const currentDocId = ref<string>(unref(docId));
   let unsubscribe: Unsubscriber | null = null;
+  let providerUnmounted = false;
 
   async function initDoc(id: string) {
     currentDocId.value = id;
@@ -543,10 +554,17 @@ export function providePatchesDoc<T extends object>(
     if (autoClose) {
       try {
         const patchesDoc = await manager.openDoc<T>(patches, id, openDocOpts);
+        if (providerUnmounted || currentDocId.value !== id) {
+          // Component unmounted or docId changed before openDoc resolved — close immediately
+          manager.closeDoc(patches, id, shouldUntrack);
+          return;
+        }
         unsubscribe = setupDoc(patchesDoc);
       } catch (err) {
-        baseReturn.error.value = err as Error;
-        baseReturn.loading.value = false;
+        if (!providerUnmounted && currentDocId.value === id) {
+          baseReturn.error.value = err as Error;
+          baseReturn.loading.value = false;
+        }
       }
     } else {
       try {
@@ -589,6 +607,7 @@ export function providePatchesDoc<T extends object>(
   }
 
   onBeforeUnmount(async () => {
+    providerUnmounted = true;
     unsubscribe?.();
 
     if (autoClose) {

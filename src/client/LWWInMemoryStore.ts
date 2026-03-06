@@ -92,14 +92,15 @@ export class LWWInMemoryStore implements LWWClientStore {
 
   /**
    * Saves the current document state to storage.
-   * Clears all committed fields, pending ops, and sending change.
+   * Clears committed fields (subsumed by the snapshot) but preserves pending ops.
    */
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
+    const existing = this.docs.get(docId);
     this.docs.set(docId, {
       snapshot: { state: docState.state, rev: docState.rev },
       committedFields: new Map(),
-      pendingOps: new Map(),
-      sendingChange: null,
+      pendingOps: existing?.pendingOps ?? new Map(),
+      sendingChange: existing?.sendingChange ?? null,
       committedRev: docState.rev,
     });
   }
@@ -214,7 +215,13 @@ export class LWWInMemoryStore implements LWWClientStore {
   }
 
   /**
-   * Clear sendingChange after server ack, move ops to committed.
+   * Move sending ops to committed, then clear the sending slot.
+   * committedRev is NOT updated here — applyServerChanges owns that using the
+   * server's actual rev. Updating it here would bump the rev above the server's
+   * real value for noop changes (where the server doesn't create a new rev).
+   *
+   * Call this BEFORE applyServerChanges so that server corrections (which run
+   * after) overwrite any stale ops for fields the server won via LWW.
    */
   async confirmSendingChange(docId: string): Promise<void> {
     const buf = this.docs.get(docId);
@@ -223,12 +230,6 @@ export class LWWInMemoryStore implements LWWClientStore {
     // Move ops to committed fields (store the value directly)
     for (const op of buf.sendingChange.ops) {
       buf.committedFields.set(op.path, op.value);
-    }
-
-    // Update committed rev
-    const changeRev = buf.sendingChange.rev;
-    if (changeRev !== undefined && changeRev > buf.committedRev) {
-      buf.committedRev = changeRev;
     }
 
     buf.sendingChange = null;

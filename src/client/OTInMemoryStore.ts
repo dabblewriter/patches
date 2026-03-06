@@ -55,10 +55,11 @@ export class OTInMemoryStore implements OTClientStore {
 
   // ─── Writes ────────────────────────────────────────────────────────────
   async saveDoc(docId: string, snapshot: PatchesState): Promise<void> {
+    const existing = this.docs.get(docId);
     this.docs.set(docId, {
       snapshot,
       committed: [],
-      pending: [],
+      pending: existing?.pending ?? [],
     });
   }
 

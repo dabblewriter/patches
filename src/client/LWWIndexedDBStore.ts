@@ -202,12 +202,12 @@ export class LWWIndexedDBStore implements LWWClientStore {
 
   /**
    * Saves the current document state to storage.
-   * Clears all committed fields and pending ops.
+   * Clears committed fields (subsumed by the snapshot) but preserves pending ops.
    */
   @blockable
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
-    const [tx, snapshots, committedOps, pendingOps, sendingChanges, docsStore] = await this.db.transaction(
-      ['snapshots', 'committedOps', 'pendingOps', 'sendingChanges', 'docs'],
+    const [tx, snapshots, committedOps, docsStore] = await this.db.transaction(
+      ['snapshots', 'committedOps', 'docs'],
       'readwrite'
     );
 
@@ -217,8 +217,6 @@ export class LWWIndexedDBStore implements LWWClientStore {
       docsStore.put<TrackedDoc>({ docId, committedRev: rev, algorithm: 'lww' }),
       snapshots.put<Snapshot>({ docId, state, rev }),
       this.deleteFieldsForDoc(committedOps, docId),
-      this.deleteFieldsForDoc(pendingOps, docId),
-      sendingChanges.delete(docId),
     ]);
 
     await tx.complete();
@@ -370,12 +368,18 @@ export class LWWIndexedDBStore implements LWWClientStore {
   }
 
   /**
-   * Clear sendingChange after server ack, move ops to committed.
+   * Move sending ops to committed, then clear the sending slot.
+   * committedRev is NOT updated here — applyServerChanges owns that using the
+   * server's actual rev. Updating it here would bump the rev above the server's
+   * real value for noop changes (where the server doesn't create a new rev).
+   *
+   * Call this BEFORE applyServerChanges so that server corrections (which run
+   * after) overwrite any stale ops for fields the server won via LWW.
    */
   @blockable
   async confirmSendingChange(docId: string): Promise<void> {
-    const [tx, sendingChanges, committedOps, docsStore] = await this.db.transaction(
-      ['sendingChanges', 'committedOps', 'docs'],
+    const [tx, sendingChanges, committedOps] = await this.db.transaction(
+      ['sendingChanges', 'committedOps'],
       'readwrite'
     );
 
@@ -387,15 +391,6 @@ export class LWWIndexedDBStore implements LWWClientStore {
 
     // Move ops to committed (store op directly) - batch for performance
     await Promise.all(sending.change.ops.map(op => committedOps.put<CommittedOp>({ ...op, docId })));
-
-    // Update committed rev
-    const changeRev = sending.change.rev;
-    if (changeRev !== undefined) {
-      const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0, algorithm: 'lww' as const };
-      if (changeRev > docMeta.committedRev) {
-        await docsStore.put({ ...docMeta, committedRev: changeRev });
-      }
-    }
 
     await sendingChanges.delete(docId);
     await tx.complete();

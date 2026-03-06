@@ -189,7 +189,6 @@ export class OTIndexedDBStore implements OTClientStore {
       docsStore.put<TrackedDoc>({ docId, committedRev: rev, algorithm: 'ot' }),
       snapshots.put<Snapshot>({ docId, state, rev }),
       committedChanges.delete([docId, 0], [docId, Infinity]),
-      pendingChanges.delete([docId, 0], [docId, Infinity]),
     ]);
 
     await tx.complete();

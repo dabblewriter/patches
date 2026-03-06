@@ -425,10 +425,12 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
             openDoc.import({ ...snapshot, changes: [] });
           }
         } else {
-          // Apply the committed changes via algorithm
-          await this._applyServerChangesToDoc(docId, committed);
-          // Confirm the sent changes
+          // Confirm sent first so server corrections (applied next) overwrite
+          // any stale ops for fields the server won via LWW timestamp resolution.
+          // For OT this order doesn't matter; for LWW it ensures applyServerChanges
+          // is the last writer for corrected fields.
           await algorithm.confirmSent(docId, changeBatch);
+          await this._applyServerChangesToDoc(docId, committed);
         }
 
         // Fetch remaining pending for next batch or check completion

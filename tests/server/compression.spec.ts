@@ -1,11 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  base64Compressor,
-  uint8Compressor,
-  compressedSizeBase64,
-  compressedSizeUint8,
-  createOpsCompressedSizeCalculator,
-} from '../../src/compression';
+import { base64Compressor, uint8Compressor, compressedSizeBase64, compressedSizeUint8 } from '../../src/compression';
 import type { Change } from '../../src/types';
 import type { JSONPatchOp } from '../../src/json-patch/types';
 
@@ -274,129 +268,48 @@ describe('SizeCalculator', () => {
     expect(compressedSizeUint8(undefined)).toBe(0);
   });
 
+  it('should return 0 for undefined', () => {
+    expect(compressedSizeBase64(undefined)).toBe(0);
+    expect(compressedSizeUint8(undefined)).toBe(0);
+  });
+
+  it('should return 0 for null', () => {
+    expect(compressedSizeBase64(null)).toBe(0);
+    expect(compressedSizeUint8(null)).toBe(0);
+  });
+
   it('should return 0 for circular structures', () => {
     const circular: any = { foo: 'bar' };
     circular.self = circular;
 
-    // New API returns 0 instead of throwing
     expect(compressedSizeBase64(circular)).toBe(0);
     expect(compressedSizeUint8(circular)).toBe(0);
   });
-});
 
-describe('createOpsCompressedSizeCalculator', () => {
-  const makeChange = (ops: any[]): Change => ({
-    id: 'change-1',
-    rev: 1,
-    baseRev: 0,
-    ops,
-    createdAt: 0,
-    committedAt: 0,
-  });
-
-  describe('fast path (JSON length < maxBytes)', () => {
-    it('returns JSON string length without compressing when under the limit', () => {
-      const change = makeChange([{ op: 'add', path: '/title', value: 'Hello' }]);
-      const maxBytes = 1_000_000;
-      const calculator = createOpsCompressedSizeCalculator(uint8Compressor, maxBytes);
-
-      const size = calculator(change);
-      const jsonLength = JSON.stringify(change).length;
-
-      expect(size).toBe(jsonLength);
+  describe('Change objects (ops-only compression)', () => {
+    const makeChange = (ops: any[]): Change => ({
+      id: 'change-1',
+      rev: 1,
+      baseRev: 0,
+      ops,
+      createdAt: 0,
+      committedAt: 0,
     });
 
-    it('returns 0 for undefined', () => {
-      const calculator = createOpsCompressedSizeCalculator(uint8Compressor, 1_000_000);
-      expect(calculator(undefined)).toBe(0);
-    });
-
-    it('returns 0 for null', () => {
-      const calculator = createOpsCompressedSizeCalculator(uint8Compressor, 1_000_000);
-      expect(calculator(null)).toBe(0);
-    });
-  });
-
-  describe('slow path (JSON length >= maxBytes)', () => {
-    it('compresses only ops when JSON size exceeds maxBytes (uint8)', () => {
+    it('compresses only the ops field for Change-like objects', () => {
       const largeValue = 'x'.repeat(2000);
       const change = makeChange([{ op: 'replace', path: '/content', value: largeValue }]);
-      const maxBytes = 10; // force slow path
-      const calculator = createOpsCompressedSizeCalculator(uint8Compressor, maxBytes);
-
-      const size = calculator(change);
       const uncompressedSize = new TextEncoder().encode(JSON.stringify(change)).length;
 
-      // Repetitive data compresses well, so the result should be smaller
-      expect(size).toBeLessThan(uncompressedSize);
-      expect(size).toBeGreaterThan(0);
+      // Repetitive data compresses well
+      expect(compressedSizeBase64(change)).toBeLessThan(uncompressedSize);
+      expect(compressedSizeUint8(change)).toBeLessThan(uncompressedSize);
     });
 
-    it('compresses only ops when JSON size exceeds maxBytes (base64)', () => {
-      const largeValue = 'x'.repeat(2000);
-      const change = makeChange([{ op: 'replace', path: '/content', value: largeValue }]);
-      const maxBytes = 10; // force slow path
-      const calculator = createOpsCompressedSizeCalculator(base64Compressor, maxBytes);
+    it('compressedSizeUint8 is smaller than compressedSizeBase64 for Change objects', () => {
+      const change = makeChange([{ op: 'replace', path: '/content', value: 'a'.repeat(2000) }]);
 
-      const size = calculator(change);
-      const uncompressedSize = new TextEncoder().encode(JSON.stringify(change)).length;
-
-      expect(size).toBeLessThan(uncompressedSize);
-      expect(size).toBeGreaterThan(0);
-    });
-
-    it('uint8 slow-path size is smaller than base64 slow-path size', () => {
-      const largeValue = 'a'.repeat(2000);
-      const change = makeChange([{ op: 'replace', path: '/content', value: largeValue }]);
-      const maxBytes = 10;
-
-      const uint8Size = createOpsCompressedSizeCalculator(uint8Compressor, maxBytes)(change);
-      const base64Size = createOpsCompressedSizeCalculator(base64Compressor, maxBytes)(change);
-
-      // Binary encoding has less overhead than base64
-      expect(uint8Size).toBeLessThan(base64Size);
-    });
-  });
-
-  describe('accuracy vs old whole-object calculators', () => {
-    it('reflects actual ops-only compression (more accurate than whole-object compressors)', () => {
-      const largeValue = 'unique content '.repeat(200);
-      const change = makeChange([{ op: 'replace', path: '/content', value: largeValue }]);
-      const maxBytes = 10; // force slow path
-
-      const newCalculator = createOpsCompressedSizeCalculator(uint8Compressor, maxBytes);
-      const newSize = newCalculator(change);
-      const oldSize = compressedSizeUint8(change);
-
-      // The factory compresses only ops (matching the backend), while the old
-      // calculator compresses the whole change JSON — both should be under the
-      // uncompressed size for repetitive data.
-      const uncompressedSize = new TextEncoder().encode(JSON.stringify(change)).length;
-      expect(newSize).toBeLessThan(uncompressedSize);
-      expect(oldSize).toBeLessThan(uncompressedSize);
-    });
-  });
-
-  describe('non-Change data fallback', () => {
-    it('falls through to byte-accurate JSON size for non-Change data when above maxBytes', () => {
-      const nonChange = { foo: 'bar', baz: 42 };
-      const maxBytes = 1; // force slow path
-      const calculator = createOpsCompressedSizeCalculator(uint8Compressor, maxBytes);
-
-      const size = calculator(nonChange);
-      const expected = new TextEncoder().encode(JSON.stringify(nonChange)).length;
-
-      expect(size).toBe(expected);
-    });
-  });
-
-  describe('circular structure', () => {
-    it('returns 0 for circular structures', () => {
-      const circular: any = { foo: 'bar' };
-      circular.self = circular;
-      const calculator = createOpsCompressedSizeCalculator(uint8Compressor, 1_000_000);
-
-      expect(calculator(circular)).toBe(0);
+      expect(compressedSizeUint8(change)).toBeLessThan(compressedSizeBase64(change));
     });
   });
 });

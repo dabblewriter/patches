@@ -7,10 +7,10 @@
  *
  * @example Client: Size calculator for change splitting
  * ```typescript
- * import { createOpsCompressedSizeCalculator, uint8Compressor } from '@dabble/patches/compression';
+ * import { compressedSizeUint8 } from '@dabble/patches/compression';
  *
  * new OTDoc(state, {}, {
- *   sizeCalculator: createOpsCompressedSizeCalculator(uint8Compressor, 1_000_000),
+ *   sizeCalculator: compressedSizeUint8,
  *   maxStorageBytes: 1_000_000,
  * });
  * ```
@@ -37,78 +37,21 @@ import type { JSONPatchOp } from '../json-patch/types.js';
 export type SizeCalculator = (data: unknown) => number;
 
 /**
- * Create a size calculator that accurately measures change storage size when the
- * server uses a `CompressedStoreBackend`.
+ * Estimate the stored size of a change after base64 LZ compression.
  *
- * Uses a two-step approach for efficiency:
- * 1. **Fast path**: JSON string length — cheap and sufficient for 99% of changes
- *    that are well under the storage limit.
- * 2. **Slow path**: Compresses only the `ops` field (mirroring what
- *    `CompressedStoreBackend` does) and returns the actual stored size. This gives
- *    accurate measurements for large changes that need to be split.
- *
- * @param compressor - The same `OpsCompressor` used by your `CompressedStoreBackend`
- *   (e.g. `uint8Compressor` or `base64Compressor`). This keeps the calculator
- *   configurable — not all servers use compression.
- * @param maxBytes - The storage limit in bytes. Compression is only performed when
- *   the JSON size exceeds this value.
- *
- * @example
- * ```typescript
- * import { createOpsCompressedSizeCalculator, uint8Compressor } from '@dabble/patches/compression';
- *
- * new OTDoc(state, {}, {
- *   sizeCalculator: createOpsCompressedSizeCalculator(uint8Compressor, 1_000_000),
- *   maxStorageBytes: 1_000_000,
- * });
- * ```
- */
-export function createOpsCompressedSizeCalculator(compressor: OpsCompressor, maxBytes: number): SizeCalculator {
-  return (data: unknown) => {
-    if (data === undefined || data === null) return 0;
-    try {
-      const json = JSON.stringify(data);
-      if (!json) return 0;
-
-      // Fast path: JSON string length is a cheap first approximation.
-      // For ASCII/Latin content json.length ≈ byte count, so this avoids
-      // compression work for the vast majority of small changes.
-      if (json.length < maxBytes) return json.length;
-
-      // Slow path: if the data looks like a Change (has an `ops` array),
-      // compress only the ops field — mirroring what CompressedStoreBackend does.
-      if (typeof data === 'object' && 'ops' in data && Array.isArray((data as Record<string, unknown>).ops)) {
-        const { ops, ...rest } = data as Record<string, unknown>;
-        const compressedOps = compressor.compress(ops as JSONPatchOp[]);
-
-        if (compressedOps instanceof Uint8Array) {
-          // Binary storage: non-ops JSON size + raw binary ops byte count.
-          const nonOpsSize = new TextEncoder().encode(JSON.stringify(rest)).length;
-          return nonOpsSize + compressedOps.length;
-        } else {
-          // String storage (e.g. base64): measure full JSON with compressed ops.
-          const storedJson = JSON.stringify({ ...rest, ops: compressedOps });
-          return new TextEncoder().encode(storedJson).length;
-        }
-      }
-
-      // Fallback for non-Change data: accurate byte size.
-      return new TextEncoder().encode(json).length;
-    } catch {
-      return 0;
-    }
-  };
-}
-
-/**
- * Calculate size after base64 LZ compression of the entire data object.
- * Use `createOpsCompressedSizeCalculator` instead when your server uses
- * `CompressedStoreBackend`, as that compresses only the `ops` field for a
- * more accurate size estimate.
+ * When passed a Change object (has an `ops` array), only the `ops` field is
+ * compressed — mirroring what `CompressedStoreBackend` does — so the estimate
+ * reflects the actual stored size rather than compressing everything together.
+ * For other data it falls back to compressing the whole value.
  */
 export const compressedSizeBase64: SizeCalculator = data => {
-  if (data === undefined) return 0;
+  if (data === undefined || data === null) return 0;
   try {
+    if (typeof data === 'object' && 'ops' in data && Array.isArray((data as Record<string, unknown>).ops)) {
+      const { ops, ...rest } = data as Record<string, unknown>;
+      const compressedOps = compressToBase64(JSON.stringify(ops as JSONPatchOp[]));
+      return new TextEncoder().encode(JSON.stringify({ ...rest, ops: compressedOps })).length;
+    }
     const json = JSON.stringify(data);
     if (!json) return 0;
     return compressToBase64(json).length;
@@ -118,14 +61,22 @@ export const compressedSizeBase64: SizeCalculator = data => {
 };
 
 /**
- * Calculate size after uint8array LZ compression of the entire data object.
- * Use `createOpsCompressedSizeCalculator` instead when your server uses
- * `CompressedStoreBackend`, as that compresses only the `ops` field for a
- * more accurate size estimate.
+ * Estimate the stored size of a change after uint8array LZ compression.
+ *
+ * When passed a Change object (has an `ops` array), only the `ops` field is
+ * compressed — mirroring what `CompressedStoreBackend` does — so the estimate
+ * reflects the actual stored size rather than compressing everything together.
+ * For other data it falls back to compressing the whole value.
  */
 export const compressedSizeUint8: SizeCalculator = data => {
-  if (data === undefined) return 0;
+  if (data === undefined || data === null) return 0;
   try {
+    if (typeof data === 'object' && 'ops' in data && Array.isArray((data as Record<string, unknown>).ops)) {
+      const { ops, ...rest } = data as Record<string, unknown>;
+      const compressedOps = compressToUint8Array(JSON.stringify(ops as JSONPatchOp[]));
+      const nonOpsSize = new TextEncoder().encode(JSON.stringify(rest)).length;
+      return nonOpsSize + compressedOps.length;
+    }
     const json = JSON.stringify(data);
     if (!json) return 0;
     return compressToUint8Array(json).length;

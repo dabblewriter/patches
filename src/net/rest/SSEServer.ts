@@ -141,8 +141,8 @@ export class SSEServer {
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
     client.writer = writable.getWriter();
 
-    // Flush response headers immediately — some HTTP servers buffer until first body byte.
-    client.writer.write(client.encoder.encode(': connected\n\n'));
+    // Set browser reconnect interval and flush response headers (some servers buffer until first body byte).
+    client.writer.write(client.encoder.encode('retry: 5000\n\n'));
 
     // Replay buffered events or send resync
     if (lastEventId) {

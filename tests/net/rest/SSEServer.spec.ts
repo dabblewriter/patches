@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SSEServer } from '../../../src/net/rest/SSEServer';
 
-/** Helper: read all available chunks from a ReadableStream and return them as strings. */
+/** Helper: read chunks from a ReadableStream, skipping the initial retry message. */
 async function readStream(stream: ReadableStream<Uint8Array>, count = 20): Promise<string[]> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   const chunks: string[] = [];
+  // Skip the initial retry: message sent on connect
+  await reader.read();
   for (let i = 0; i < count; i++) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -13,6 +15,14 @@ async function readStream(stream: ReadableStream<Uint8Array>, count = 20): Promi
   }
   reader.releaseLock();
   return chunks;
+}
+
+/** Helper: read the raw first chunk (before skipping). */
+async function readFirstChunk(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = stream.getReader();
+  const { value } = await reader.read();
+  reader.releaseLock();
+  return new TextDecoder().decode(value);
 }
 
 describe('SSEServer', () => {
@@ -40,6 +50,12 @@ describe('SSEServer', () => {
     it('should track the client as connected', () => {
       server.connect('client1');
       expect(server.getConnectionIds()).toContain('client1');
+    });
+
+    it('should send retry interval as first message', async () => {
+      const stream = server.connect('client1');
+      const first = await readFirstChunk(stream);
+      expect(first).toBe('retry: 5000\n\n');
     });
 
     it('should not duplicate client on reconnect', () => {

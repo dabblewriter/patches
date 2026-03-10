@@ -338,8 +338,42 @@ function splitLargeInsertText(text: string, maxChunkLength: number, attributes?:
 }
 
 /**
- * Attempt to break a large value in a replace/add operation
- * @param sizeCalculator - Custom size calculator (e.g., for compressed size)
+ * Recursively strip text delta objects from a value, replacing them with stubs.
+ * For each text delta found, pushes a @txt op to `textOps`.
+ *
+ * Text deltas are detected as plain objects with an `ops` array containing at
+ * least one `insert` operation (i.e. Quill Delta documents).
+ */
+function stripTextDeltas(value: any, basePath: string, textOps: JSONPatchOp[]): any {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+
+  // Detect text delta: object with an ops array containing insert operations
+  if (Array.isArray(value.ops) && value.ops.some((op: any) => op.insert !== undefined)) {
+    // Extract as @txt op; the value is the ops array itself
+    textOps.push({ op: '@txt' as const, path: basePath, value: value.ops });
+    // Return a stub with the ops property removed
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { ops: _ops, ...stub } = value;
+    return stub;
+  }
+
+  // Recurse into object properties
+  const result: Record<string, any> = {};
+  for (const [key, val] of Object.entries(value)) {
+    result[key] = stripTextDeltas(val, `${basePath}/${key}`, textOps);
+  }
+  return result;
+}
+
+/**
+ * Attempt to break a large replace/add operation by extracting text deltas as @txt ops.
+ *
+ * Text delta objects (`{ ops: [{insert: ...}] }`) are replaced with stubs in the value,
+ * and separate `@txt` ops are appended to the same Change. If the resulting Change still
+ * exceeds maxBytes, it is split further by ops via breakSingleChange.
+ *
+ * Non-object values (strings, arrays) and objects with no text deltas are included as-is
+ * with a warning.
  */
 function breakLargeValueOp(
   origChange: Change,
@@ -348,78 +382,34 @@ function breakLargeValueOp(
   startRev: number,
   sizeCalculator?: SizeCalculator
 ): Change[] {
-  const results: Change[] = [];
-  let rev = startRev;
-  const baseOpSize = getSizeForStorage({ ...op, value: '' }, sizeCalculator);
-  const baseChangeSize = getSizeForStorage({ ...origChange, ops: [{ ...op, value: '' }] }, sizeCalculator) - baseOpSize;
-  const valueBudget = maxBytes - baseChangeSize - 50;
+  const value = op.value;
 
-  if (typeof op.value === 'string' && op.value.length > 100) {
-    const text = op.value;
-    const targetChunkSize = Math.max(1, valueBudget);
-    const numChunks = Math.ceil(text.length / targetChunkSize);
-    const chunkSize = Math.ceil(text.length / numChunks);
-    for (let i = 0; i < text.length; i += chunkSize) {
-      const chunk = text.slice(i, i + chunkSize);
-      const newOp: any = { op: 'add' };
-      if (i === 0) {
-        newOp.op = op.op;
-        newOp.path = op.path;
-        newOp.value = chunk;
-      } else {
-        newOp.op = 'patch';
-        newOp.path = op.path;
-        newOp.appendString = chunk;
-      }
-      results.push(deriveNewChange(origChange, rev++, [newOp]));
-    }
-    return results;
-  } else if (Array.isArray(op.value) && op.value.length > 1) {
-    const originalArray = op.value;
-    let currentChunk: any[] = [];
-    let chunkStartIndex = 0;
-    for (let i = 0; i < originalArray.length; i++) {
-      const item = originalArray[i];
-      const tentativeChunk = [...currentChunk, item];
-      const tentativeOp = { ...op, value: tentativeChunk };
-      const tentativeChangeSize = getSizeForStorage({ ...origChange, ops: [tentativeOp] }, sizeCalculator);
-      if (currentChunk.length > 0 && tentativeChangeSize > maxBytes) {
-        const chunkOp: any = {};
-        if (chunkStartIndex === 0) {
-          chunkOp.op = op.op;
-          chunkOp.path = op.path;
-          chunkOp.value = currentChunk;
-        } else {
-          chunkOp.op = 'patch';
-          chunkOp.path = op.path;
-          chunkOp.appendArray = currentChunk;
-        }
-        results.push(deriveNewChange(origChange, rev++, [chunkOp]));
-        currentChunk = [item];
-        chunkStartIndex = i;
-      } else {
-        currentChunk.push(item);
-      }
-    }
-    if (currentChunk.length > 0) {
-      const chunkOp: any = {};
-      if (chunkStartIndex === 0) {
-        chunkOp.op = op.op;
-        chunkOp.path = op.path;
-        chunkOp.value = currentChunk;
-      } else {
-        chunkOp.op = 'patch';
-        chunkOp.path = op.path;
-        chunkOp.appendArray = currentChunk;
-      }
-      results.push(deriveNewChange(origChange, rev, [chunkOp]));
-    }
-    return results;
+  // Only handle plain object values
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    console.warn(`Oversized op ${op.op} at "${op.path}" is not an object; including as-is`);
+    return [deriveNewChange(origChange, startRev, [op])];
   }
-  console.warn(
-    `Warning: Single operation of type ${op.op} (path: ${op.path}) could not be split further by breakLargeValueOp despite exceeding maxBytes. Including as is.`
-  );
-  return [deriveNewChange(origChange, rev, [op])]; // Return original op in a new change if not splittable by this func
+
+  // Extract text deltas, replacing them with stubs
+  const textOps: JSONPatchOp[] = [];
+  const strippedValue = stripTextDeltas(value, op.path, textOps);
+
+  if (textOps.length === 0) {
+    console.warn(`Oversized op ${op.op} at "${op.path}" has no text deltas; including as-is`);
+    return [deriveNewChange(origChange, startRev, [op])];
+  }
+
+  // Build a combined Change: structural op with stubs + all @txt ops
+  const allOps: JSONPatchOp[] = [{ ...op, value: strippedValue }, ...textOps];
+  const combinedChange = deriveNewChange(origChange, startRev, allOps);
+
+  // If combined Change fits within the limit, return it as-is
+  if (getSizeForStorage(combinedChange, sizeCalculator) <= maxBytes) {
+    return [combinedChange];
+  }
+
+  // Still too large — split by ops (individual @txt ops broken further by breakTextOp)
+  return breakSingleChange(combinedChange, maxBytes, sizeCalculator);
 }
 
 function deriveNewChange(origChange: Change, rev: number, ops: JSONPatchOp[]) {

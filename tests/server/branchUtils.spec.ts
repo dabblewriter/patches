@@ -92,19 +92,20 @@ describe('branchUtils', () => {
   describe('createBranchRecord', () => {
     it('should create branch record with required fields', () => {
       const before = Date.now();
-      const branch = createBranchRecord('branch1', 'doc1', 5);
+      const branch = createBranchRecord('branch1', 'doc1', 5, 2);
       const after = Date.now();
 
       expect(branch.id).toBe('branch1');
       expect(branch.docId).toBe('doc1');
       expect(branch.branchedAtRev).toBe(5);
+      expect(branch.contentStartRev).toBe(2);
       expect(branch.status).toBe('open');
       expect(branch.createdAt).toBeGreaterThanOrEqual(before);
       expect(branch.createdAt).toBeLessThanOrEqual(after);
     });
 
     it('should include optional metadata', () => {
-      const branch = createBranchRecord('branch1', 'doc1', 5, {
+      const branch = createBranchRecord('branch1', 'doc1', 5, 2, {
         name: 'feature-branch',
         customField: 'value',
       });
@@ -114,7 +115,7 @@ describe('branchUtils', () => {
     });
 
     it('should not allow metadata to override required fields', () => {
-      const branch = createBranchRecord('branch1', 'doc1', 5, {
+      const branch = createBranchRecord('branch1', 'doc1', 5, 2, {
         id: 'wrong-id',
         status: 'closed',
       } as any);

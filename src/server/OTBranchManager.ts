@@ -56,26 +56,42 @@ export class OTBranchManager implements BranchManager {
    * Creates a new branch for a document.
    * @param docId - The ID of the document to branch from.
    * @param rev - The revision of the document to branch from.
-   * @param branchName - Optional name for the branch.
    * @param metadata - Additional optional metadata to store with the branch.
+   * @param initialChanges - Optional pre-built initialization changes. If provided, stored
+   *   directly. If omitted, a root-replace change is generated from the source state at `rev`
+   *   and split via breakChanges when maxPayloadBytes is set.
    * @returns The ID of the new branch document.
    */
-  async createBranch(docId: string, rev: number, metadata?: EditableBranchMetadata): Promise<string> {
+  async createBranch(
+    docId: string,
+    rev: number,
+    metadata?: EditableBranchMetadata,
+    initialChanges?: Change[]
+  ): Promise<string> {
     await assertNotABranch(this.store, docId);
 
-    // Get the state at the branch point
-    const { state: stateAtRev } = await getStateAtRevision(this.store, docId, rev);
     const branchDocId = await generateBranchId(this.store, docId);
     const now = Date.now();
 
-    // Initialize the branch document with a root-replace change containing the source state
-    const initialChange = createChange(0, 1, [{ op: 'replace' as const, path: '', value: stateAtRev }], {
-      createdAt: now,
-      committedAt: now,
-    });
-    await this.store.saveChanges(branchDocId, [initialChange]);
+    let initChanges: Change[];
+    if (initialChanges?.length) {
+      initChanges = initialChanges;
+    } else {
+      // Generate init changes from the source state at the branch point
+      const { state: stateAtRev } = await getStateAtRevision(this.store, docId, rev);
+      const rootReplace = createChange(0, 1, [{ op: 'replace' as const, path: '', value: stateAtRev }], {
+        createdAt: now,
+        committedAt: now,
+      });
+      initChanges = this.maxPayloadBytes ? breakChanges([rootReplace], this.maxPayloadBytes) : [rootReplace];
+    }
 
-    // Create an initial version at the branch point rev (metadata + changes only, no state)
+    // contentStartRev is the first revision after all initialization changes
+    const contentStartRev = initChanges[initChanges.length - 1].rev + 1;
+
+    await this.store.saveChanges(branchDocId, initChanges);
+
+    // Create an initial version representing the branch point (metadata + init changes, no state)
     const initialVersionMetadata = createVersionMetadata({
       origin: 'main',
       startedAt: now,
@@ -86,10 +102,10 @@ export class OTBranchManager implements BranchManager {
       groupId: branchDocId,
       branchName: metadata?.name,
     });
-    await this.store.createVersion(branchDocId, initialVersionMetadata, [initialChange]);
+    await this.store.createVersion(branchDocId, initialVersionMetadata, initChanges);
 
     // Create the branch metadata record
-    const branch = createBranchRecord(branchDocId, docId, rev, metadata);
+    const branch = createBranchRecord(branchDocId, docId, rev, contentStartRev, metadata);
     await this.store.createBranch(branch);
     return branchDocId;
   }
@@ -127,8 +143,9 @@ export class OTBranchManager implements BranchManager {
     const sourceDocId = branch.docId;
     const branchStartRevOnSource = branch.branchedAtRev;
 
-    // Get all committed server changes made on the branch document since it was created
-    const branchChanges = await this.store.listChanges(branchId, {});
+    // Skip initialization changes — only merge user content changes
+    const contentStartRev = branch.contentStartRev ?? 2;
+    const branchChanges = await this.store.listChanges(branchId, { startAfter: contentStartRev - 1 });
     if (branchChanges.length === 0) {
       console.log(`Branch ${branchId} has no changes to merge.`);
       await this.closeBranch(branchId, 'merged');

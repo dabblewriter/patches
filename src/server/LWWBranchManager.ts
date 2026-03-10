@@ -62,7 +62,7 @@ export class LWWBranchManager implements BranchManager {
    * @param metadata - Optional branch metadata.
    * @returns The new branch document ID.
    */
-  async createBranch(docId: string, atPoint: number, metadata?: EditableBranchMetadata): Promise<string> {
+  async createBranch(docId: string, atPoint: number, metadata?: EditableBranchMetadata, _initialChanges?: Change[]): Promise<string> {
     await assertNotABranch(this.store, docId);
 
     // Build state directly from store (no streaming round-trip)
@@ -89,7 +89,8 @@ export class LWWBranchManager implements BranchManager {
     }
 
     // Create the branch metadata record
-    const branch = createBranchRecord(branchDocId, docId, atPoint, metadata);
+    // contentStartRev: first rev of user content after init (for LWW, init is just the snapshot copy)
+    const branch = createBranchRecord(branchDocId, docId, atPoint, rev + 1, metadata);
     await this.store.createBranch(branch);
     return branchDocId;
   }

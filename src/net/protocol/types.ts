@@ -1,8 +1,10 @@
 import type { Unsubscriber } from 'easy-signal';
 import type {
+  Branch,
   Change,
   ChangeInput,
   CommitChangesOptions,
+  EditableBranchMetadata,
   EditableVersionMetadata,
   ListVersionsOptions,
   PatchesState,
@@ -165,6 +167,13 @@ export interface PatchesAPI {
 
   /** Update the name and other metadata of a specific version. */
   updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void>;
+}
+
+export interface BranchAPI {
+  listBranches(docId: string): Promise<Branch[]>;
+  createBranch(docId: string, rev: number, metadata?: EditableBranchMetadata, initialChanges?: Change[]): Promise<string>;
+  closeBranch(branchId: string): Promise<void>;
+  mergeBranch(branchId: string): Promise<void>;
 }
 
 // Also define the expected parameters for notifications the server might send:

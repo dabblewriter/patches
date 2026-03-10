@@ -5,6 +5,7 @@ import type {
   ChangeInput,
   CommitChangesOptions,
   DeleteDocOptions,
+  EditableBranchMetadata,
   EditableVersionMetadata,
   ListVersionsOptions,
   PatchesSnapshot,
@@ -250,10 +251,10 @@ export class PatchesREST implements PatchesConnection {
     return this._fetch(`/docs/${encodeDocId(docId)}/_branches`);
   }
 
-  async createBranch(docId: string, rev: number, metadata?: EditableVersionMetadata): Promise<string> {
+  async createBranch(docId: string, rev: number, metadata?: EditableBranchMetadata, initialChanges?: Change[]): Promise<string> {
     return this._fetch(`/docs/${encodeDocId(docId)}/_branches`, {
       method: 'POST',
-      body: { rev, ...metadata },
+      body: { rev, ...metadata, ...(initialChanges ? { initialChanges } : {}) },
     });
   }
 

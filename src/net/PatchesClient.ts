@@ -4,6 +4,7 @@ import type {
   Change,
   ChangeInput,
   DeleteDocOptions,
+  EditableBranchMetadata,
   EditableVersionMetadata,
   ListVersionsOptions,
   PatchesSnapshot,
@@ -189,8 +190,8 @@ export class PatchesClient implements PatchesAPI {
    * @param metadata - Optional metadata for the new branch.
    * @returns A promise resolving with the unique ID of the newly created branch.
    */
-  async createBranch(docId: string, rev: number, metadata?: EditableVersionMetadata): Promise<string> {
-    return this.rpc.call('createBranch', docId, rev, metadata);
+  async createBranch(docId: string, rev: number, metadata?: EditableBranchMetadata, initialChanges?: Change[]): Promise<string> {
+    return this.rpc.call('createBranch', docId, rev, metadata, initialChanges);
   }
 
   /**

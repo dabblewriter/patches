@@ -17,7 +17,7 @@ export const branchManagerApi: ApiDefinition = {
 /**
  * Fields that cannot be modified via updateBranch().
  */
-const nonModifiableBranchFields = new Set(['id', 'docId', 'branchedAtRev', 'createdAt', 'status']);
+const nonModifiableBranchFields = new Set(['id', 'docId', 'branchedAtRev', 'createdAt', 'status', 'contentStartRev']);
 
 /**
  * Validates that branch metadata doesn't contain non-modifiable fields.
@@ -54,6 +54,7 @@ export async function generateBranchId(store: BranchIdGenerator, docId: string):
  * @param branchDocId - The branch document ID.
  * @param sourceDocId - The source document being branched from.
  * @param branchedAtRev - The revision at which the branch was created.
+ * @param contentStartRev - The first revision of user content on the branch (after init changes).
  * @param metadata - Optional branch metadata (name, etc.).
  * @returns A new Branch object.
  */
@@ -61,6 +62,7 @@ export function createBranchRecord(
   branchDocId: string,
   sourceDocId: string,
   branchedAtRev: number,
+  contentStartRev: number,
   metadata?: EditableBranchMetadata
 ): Branch {
   return {
@@ -68,6 +70,7 @@ export function createBranchRecord(
     id: branchDocId,
     docId: sourceDocId,
     branchedAtRev,
+    contentStartRev,
     createdAt: Date.now(),
     status: 'open',
   };

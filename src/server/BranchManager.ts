@@ -21,9 +21,12 @@ export interface BranchManager {
    * @param docId - The source document ID.
    * @param atPoint - Algorithm-specific branching point (revision for OT, typically current rev for LWW).
    * @param metadata - Optional branch metadata (name, custom fields).
+   * @param initialChanges - Optional pre-built initialization changes. If provided, stored directly
+   *   and contentStartRev is set to lastChange.rev + 1. If omitted, the implementation generates
+   *   initialization changes from the source state.
    * @returns The new branch document ID.
    */
-  createBranch(docId: string, atPoint: number, metadata?: EditableBranchMetadata): Promise<string>;
+  createBranch(docId: string, atPoint: number, metadata?: EditableBranchMetadata, initialChanges?: Change[]): Promise<string>;
 
   /**
    * Updates branch metadata.

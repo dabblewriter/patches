@@ -178,6 +178,7 @@ describe('OTBranchManager', () => {
         id: 'generated-id',
         docId: 'doc1',
         branchedAtRev: 5,
+        contentStartRev: 2,
         createdAt: expect.any(Number),
         status: 'open',
       });
@@ -192,6 +193,7 @@ describe('OTBranchManager', () => {
         id: 'generated-id',
         docId: 'doc1',
         branchedAtRev: 3,
+        contentStartRev: 2,
         createdAt: expect.any(Number),
         status: 'open',
       });
@@ -300,6 +302,7 @@ describe('OTBranchManager', () => {
       id: 'branch1',
       docId: 'doc1',
       branchedAtRev: 5,
+      contentStartRev: 2,
       createdAt: Date.now(),
       status: 'open',
       name: 'Feature Branch',
@@ -374,7 +377,7 @@ describe('OTBranchManager', () => {
       const result = await branchManager.mergeBranch('branch1');
 
       expect(mockStore.loadBranch).toHaveBeenCalledWith('branch1');
-      expect(mockStore.listChanges).toHaveBeenCalledWith('branch1', {});
+      expect(mockStore.listChanges).toHaveBeenCalledWith('branch1', { startAfter: 1 });
       expect(mockStore.listVersions).toHaveBeenCalledWith('branch1', { origin: 'main' });
       expect(createChange).toHaveBeenCalledWith(
         5,

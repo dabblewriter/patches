@@ -181,6 +181,6 @@ export interface BranchingStoreBackend {
   /** Creates or updates the metadata record for a branch. */
   createBranch(branch: Branch): Promise<void>;
 
-  /** Updates specific fields (status, name, metadata) of an existing branch record. */
-  updateBranch(branchId: string, updates: Partial<Pick<Branch, 'status' | 'name' | 'metadata'>>): Promise<void>;
+  /** Updates mutable fields of an existing branch record (excludes immutable identity fields). */
+  updateBranch(branchId: string, updates: Partial<Omit<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'contentStartRev'>>): Promise<void>;
 }

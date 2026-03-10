@@ -102,11 +102,19 @@ export interface Branch {
   name?: string;
   /** Current status of the branch. */
   status: BranchStatus;
+  /**
+   * The first revision on the branch that contains user content (after initialization changes).
+   * Initialization changes (e.g. the root-replace that seeds the branch with source state)
+   * are at revisions < contentStartRev and are skipped during merge.
+   * Typically 2 for a single-change initialization; higher when the initial state is split
+   * across multiple changes due to size limits.
+   */
+  contentStartRev: number;
   /** Optional arbitrary metadata associated with the branch record. */
   [metadata: string]: any;
 }
 
-export type EditableBranchMetadata = Disallowed<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'status'>;
+export type EditableBranchMetadata = Disallowed<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'status' | 'contentStartRev'>;
 
 /**
  * Represents a tombstone for a deleted document.

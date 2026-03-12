@@ -16,7 +16,7 @@ import { StatusError } from '../error.js';
 import type { PatchesConnection } from '../PatchesConnection.js';
 import type { ConnectionState } from '../protocol/types.js';
 import { onlineState } from '../websocket/onlineState.js';
-import { encodeDocId, normalizeIds } from './utils.js';
+import { normalizeIds } from './utils.js';
 
 const SESSION_STORAGE_KEY = 'patches-clientId';
 
@@ -194,11 +194,11 @@ export class PatchesREST implements PatchesConnection {
   // --- PatchesAPI: Documents ---
 
   async getDoc<T = any>(docId: string): Promise<PatchesState<T>> {
-    return this._fetch(`/docs/${encodeDocId(docId)}`);
+    return this._fetch(`/docs/${docId}`);
   }
 
   async getChangesSince(docId: string, rev: number): Promise<Change[]> {
-    return this._fetch(`/docs/${encodeDocId(docId)}/_changes?since=${rev}`);
+    return this._fetch(`/docs/${docId}/_changes?since=${rev}`);
   }
 
   async commitChanges(
@@ -206,20 +206,20 @@ export class PatchesREST implements PatchesConnection {
     changes: ChangeInput[],
     options?: CommitChangesOptions
   ): Promise<{ changes: Change[]; docReloadRequired?: true }> {
-    return this._fetch(`/docs/${encodeDocId(docId)}/_changes`, {
+    return this._fetch(`/docs/${docId}/_changes`, {
       method: 'POST',
       body: { changes, options },
     });
   }
 
   async deleteDoc(docId: string, _options?: DeleteDocOptions): Promise<void> {
-    await this._fetch(`/docs/${encodeDocId(docId)}`, { method: 'DELETE' });
+    await this._fetch(`/docs/${docId}`, { method: 'DELETE' });
   }
 
   // --- PatchesAPI: Versions ---
 
   async createVersion(docId: string, metadata: EditableVersionMetadata): Promise<string> {
-    return this._fetch(`/docs/${encodeDocId(docId)}/_versions`, {
+    return this._fetch(`/docs/${docId}/_versions`, {
       method: 'POST',
       body: metadata,
     });
@@ -227,19 +227,19 @@ export class PatchesREST implements PatchesConnection {
 
   async listVersions(docId: string, options?: ListVersionsOptions): Promise<VersionMetadata[]> {
     const params = options ? `?${new URLSearchParams(options as Record<string, string>)}` : '';
-    return this._fetch(`/docs/${encodeDocId(docId)}/_versions${params}`);
+    return this._fetch(`/docs/${docId}/_versions${params}`);
   }
 
   async getVersionState(docId: string, versionId: string): Promise<PatchesSnapshot> {
-    return this._fetch(`/docs/${encodeDocId(docId)}/_versions/${encodeURIComponent(versionId)}`);
+    return this._fetch(`/docs/${docId}/_versions/${encodeURIComponent(versionId)}`);
   }
 
   async getVersionChanges(docId: string, versionId: string): Promise<Change[]> {
-    return this._fetch(`/docs/${encodeDocId(docId)}/_versions/${encodeURIComponent(versionId)}/_changes`);
+    return this._fetch(`/docs/${docId}/_versions/${encodeURIComponent(versionId)}/_changes`);
   }
 
   async updateVersion(docId: string, versionId: string, metadata: EditableVersionMetadata): Promise<void> {
-    await this._fetch(`/docs/${encodeDocId(docId)}/_versions/${encodeURIComponent(versionId)}`, {
+    await this._fetch(`/docs/${docId}/_versions/${encodeURIComponent(versionId)}`, {
       method: 'PUT',
       body: metadata,
     });
@@ -248,22 +248,27 @@ export class PatchesREST implements PatchesConnection {
   // --- Branch Operations (not in PatchesAPI but matches PatchesClient feature parity) ---
 
   async listBranches(docId: string): Promise<Branch[]> {
-    return this._fetch(`/docs/${encodeDocId(docId)}/_branches`);
+    return this._fetch(`/docs/${docId}/_branches`);
   }
 
-  async createBranch(docId: string, rev: number, metadata?: EditableBranchMetadata, initialChanges?: Change[]): Promise<string> {
-    return this._fetch(`/docs/${encodeDocId(docId)}/_branches`, {
+  async createBranch(
+    docId: string,
+    rev: number,
+    metadata?: EditableBranchMetadata,
+    initialChanges?: Change[]
+  ): Promise<string> {
+    return this._fetch(`/docs/${docId}/_branches`, {
       method: 'POST',
       body: { rev, ...metadata, ...(initialChanges ? { initialChanges } : {}) },
     });
   }
 
   async closeBranch(branchId: string): Promise<void> {
-    await this._fetch(`/docs/${encodeDocId(branchId)}`, { method: 'DELETE' });
+    await this._fetch(`/docs/${branchId}`, { method: 'DELETE' });
   }
 
   async mergeBranch(branchId: string): Promise<void> {
-    await this._fetch(`/docs/${encodeDocId(branchId)}/_merge`, { method: 'POST' });
+    await this._fetch(`/docs/${branchId}/_merge`, { method: 'POST' });
   }
 
   // --- Private Helpers ---

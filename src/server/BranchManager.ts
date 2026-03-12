@@ -26,7 +26,12 @@ export interface BranchManager {
    *   initialization changes from the source state.
    * @returns The new branch document ID.
    */
-  createBranch(docId: string, atPoint: number, metadata?: EditableBranchMetadata, initialChanges?: Change[]): Promise<string>;
+  createBranch(
+    docId: string,
+    atPoint: number,
+    metadata?: EditableBranchMetadata,
+    initialChanges?: Change[]
+  ): Promise<string>;
 
   /**
    * Updates branch metadata.

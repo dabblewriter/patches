@@ -171,7 +171,12 @@ export interface PatchesAPI {
 
 export interface BranchAPI {
   listBranches(docId: string): Promise<Branch[]>;
-  createBranch(docId: string, rev: number, metadata?: EditableBranchMetadata, initialChanges?: Change[]): Promise<string>;
+  createBranch(
+    docId: string,
+    rev: number,
+    metadata?: EditableBranchMetadata,
+    initialChanges?: Change[]
+  ): Promise<string>;
   closeBranch(branchId: string): Promise<void>;
   mergeBranch(branchId: string): Promise<void>;
 }

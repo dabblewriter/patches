@@ -62,7 +62,12 @@ export class LWWBranchManager implements BranchManager {
    * @param metadata - Optional branch metadata.
    * @returns The new branch document ID.
    */
-  async createBranch(docId: string, atPoint: number, metadata?: EditableBranchMetadata, _initialChanges?: Change[]): Promise<string> {
+  async createBranch(
+    docId: string,
+    atPoint: number,
+    metadata?: EditableBranchMetadata,
+    _initialChanges?: Change[]
+  ): Promise<string> {
     await assertNotABranch(this.store, docId);
 
     // Build state directly from store (no streaming round-trip)

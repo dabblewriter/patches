@@ -182,5 +182,8 @@ export interface BranchingStoreBackend {
   createBranch(branch: Branch): Promise<void>;
 
   /** Updates mutable fields of an existing branch record (excludes immutable identity fields). */
-  updateBranch(branchId: string, updates: Partial<Omit<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'contentStartRev'>>): Promise<void>;
+  updateBranch(
+    branchId: string,
+    updates: Partial<Omit<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'contentStartRev'>>
+  ): Promise<void>;
 }

@@ -114,7 +114,10 @@ export interface Branch {
   [metadata: string]: any;
 }
 
-export type EditableBranchMetadata = Disallowed<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'status' | 'contentStartRev'>;
+export type EditableBranchMetadata = Disallowed<
+  Branch,
+  'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'status' | 'contentStartRev'
+>;
 
 /**
  * Represents a tombstone for a deleted document.

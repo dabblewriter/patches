@@ -125,7 +125,7 @@ export interface Branch {
 
 export type EditableBranchMetadata = Disallowed<
   Branch,
-  'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'contentStartRev' | 'pending' | 'deleted'
+  'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'contentStartRev' | 'pending' | 'deleted'
 >;
 
 /**

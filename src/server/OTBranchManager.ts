@@ -147,6 +147,13 @@ export class OTBranchManager implements BranchManager {
   }
 
   /**
+   * Deletes a branch, replacing the record with a tombstone.
+   */
+  async deleteBranch(branchId: string): Promise<void> {
+    await this.store.deleteBranch(branchId);
+  }
+
+  /**
    * Merges changes from a branch back into its source document.
    * @param branchId - The ID of the branch document to merge.
    * @returns The server commit change(s) applied to the source document.

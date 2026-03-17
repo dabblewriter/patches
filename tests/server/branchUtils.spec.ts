@@ -18,6 +18,7 @@ describe('branchUtils', () => {
         createBranch: 'write',
         updateBranch: 'write',
         closeBranch: 'write',
+        deleteBranch: 'write',
         mergeBranch: 'write',
       });
     });

@@ -232,8 +232,13 @@ export class LWWMemoryStoreBackend
     const result: Branch[] = [];
     const since = options?.since ? (typeof options.since === 'string' ? Date.parse(options.since) : options.since) : 0;
     for (const branch of this.branches.values()) {
-      if (branch.docId === docId && branch.modifiedAt >= since) {
-        result.push(branch);
+      if (branch.docId !== docId) continue;
+      if (since) {
+        // Incremental: include tombstones so clients can clean up
+        if (branch.modifiedAt > since) result.push(branch);
+      } else {
+        // Full list: exclude tombstones
+        if (!branch.deleted) result.push(branch);
       }
     }
     return result;
@@ -251,6 +256,23 @@ export class LWWMemoryStoreBackend
     const branch = this.branches.get(branchId);
     if (branch) {
       Object.assign(branch, updates);
+    }
+  }
+
+  async deleteBranch(branchId: string): Promise<void> {
+    const branch = this.branches.get(branchId);
+    if (branch) {
+      // Replace with tombstone
+      this.branches.set(branchId, {
+        id: branch.id,
+        docId: branch.docId,
+        branchedAtRev: branch.branchedAtRev,
+        createdAt: branch.createdAt,
+        modifiedAt: Date.now(),
+        status: branch.status,
+        contentStartRev: branch.contentStartRev,
+        deleted: true,
+      });
     }
   }
 

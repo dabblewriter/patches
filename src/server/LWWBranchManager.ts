@@ -144,6 +144,13 @@ export class LWWBranchManager implements BranchManager {
   }
 
   /**
+   * Deletes a branch, replacing the record with a tombstone.
+   */
+  async deleteBranch(branchId: string): Promise<void> {
+    await this.store.deleteBranch(branchId);
+  }
+
+  /**
    * Merges a branch back into its source document.
    *
    * LWW merge algorithm:

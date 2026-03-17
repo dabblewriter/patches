@@ -116,13 +116,16 @@ export interface Branch {
   /** True when this branch was created offline and hasn't been synced to the server yet. */
   pending?: true;
 
+  /** True when this branch has been deleted. Stored as a tombstone for incremental sync. */
+  deleted?: true;
+
   /** Optional arbitrary metadata associated with the branch record. */
   [metadata: string]: any;
 }
 
 export type EditableBranchMetadata = Disallowed<
   Branch,
-  'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'contentStartRev' | 'pending'
+  'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'contentStartRev' | 'pending' | 'deleted'
 >;
 
 /**
@@ -134,7 +137,7 @@ export type EditableBranchMetadata = Disallowed<
  */
 export type CreateBranchMetadata = Disallowed<
   Branch,
-  'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'pending'
+  'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'pending' | 'deleted'
 >;
 
 /**
@@ -142,7 +145,7 @@ export type CreateBranchMetadata = Disallowed<
  */
 export interface ListBranchesOptions {
   /**
-   * Only return branches modified at or after this timestamp (ISO 8601 string or Unix ms).
+   * Only return branches modified after this timestamp (ISO 8601 string or Unix ms).
    * Enables incremental sync: after the initial full list, subsequent calls can pass the
    * most recent `modifiedAt` value to fetch only updates.
    */

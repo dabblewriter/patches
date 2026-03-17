@@ -263,6 +263,10 @@ export class PatchesREST implements PatchesConnection {
     await this._fetch(`/docs/${branchId}`, { method: 'DELETE' });
   }
 
+  async deleteBranch(branchId: string): Promise<void> {
+    await this._fetch(`/docs/${branchId}/_delete-branch`, { method: 'POST' });
+  }
+
   async mergeBranch(branchId: string): Promise<void> {
     await this._fetch(`/docs/${branchId}/_merge`, { method: 'POST' });
   }

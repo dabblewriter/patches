@@ -174,6 +174,7 @@ export interface BranchAPI {
   listBranches(docId: string, options?: ListBranchesOptions): Promise<Branch[]>;
   createBranch(docId: string, rev: number, metadata?: CreateBranchMetadata): Promise<string>;
   closeBranch(branchId: string): Promise<void>;
+  deleteBranch(branchId: string): Promise<void>;
   mergeBranch(branchId: string): Promise<void>;
 }
 

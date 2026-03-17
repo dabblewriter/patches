@@ -36,6 +36,7 @@ describe('OTBranchManager', () => {
       loadBranch: vi.fn(),
       createBranch: vi.fn(),
       updateBranch: vi.fn(),
+      deleteBranch: vi.fn(),
       closeBranch: vi.fn(),
       // OTStoreBackend methods (extends ServerStoreBackend and VersioningStoreBackend)
       deleteDoc: vi.fn(),
@@ -363,6 +364,16 @@ describe('OTBranchManager', () => {
         status: 'merged',
         modifiedAt: expect.any(Number),
       });
+    });
+  });
+
+  describe('deleteBranch', () => {
+    it('should delegate to store.deleteBranch', async () => {
+      vi.mocked(mockStore.deleteBranch).mockResolvedValue();
+
+      await branchManager.deleteBranch('branch1');
+
+      expect(mockStore.deleteBranch).toHaveBeenCalledWith('branch1');
     });
   });
 

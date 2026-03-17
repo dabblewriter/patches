@@ -5,7 +5,6 @@ import type { BranchAPI } from '../net/protocol/types.js';
 import type {
   Branch,
   CreateBranchMetadata,
-  EditableBranchMetadata,
   ListBranchesOptions,
 } from '../types.js';
 import type { BranchClientStore } from './BranchClientStore.js';
@@ -69,14 +68,22 @@ export class PatchesBranchClient {
       if (since) {
         const updates = await this.api.listBranches(this.id, { since });
         if (updates.length > 0) {
-          await this.localStore.saveBranches(this.id, updates);
+          // Separate tombstones from live branches
+          const deleted = updates.filter(b => b.deleted);
+          const live = updates.filter(b => !b.deleted);
+          if (deleted.length > 0) {
+            await this.localStore.deleteBranches(deleted.map(b => b.id));
+          }
+          if (live.length > 0) {
+            await this.localStore.saveBranches(this.id, live);
+          }
         }
         this.branches.state = await this.localStore.listBranches(this.id);
         return this.branches.state;
       }
     }
 
-    // Full fetch (first time or no local store)
+    // Full fetch (first time or no local store) — server excludes tombstones
     const branches = await this.api.listBranches(this.id, options);
     if (this.localStore) {
       await this.localStore.saveBranches(this.id, branches);
@@ -103,7 +110,7 @@ export class PatchesBranchClient {
     }
 
     // Online path: server creates the branch and initial content
-    const branchId = await this.api.createBranch(this.id, rev, metadata as EditableBranchMetadata);
+    const branchId = await this.api.createBranch(this.id, rev, metadata);
     await this.listBranches();
     return branchId;
   }
@@ -112,6 +119,15 @@ export class PatchesBranchClient {
   async closeBranch(branchId: string): Promise<void> {
     await this.api.closeBranch(branchId);
     await this.listBranches();
+  }
+
+  /** Delete a branch (replaces with tombstone on server, removes from local store) */
+  async deleteBranch(branchId: string): Promise<void> {
+    await this.api.deleteBranch(branchId);
+    if (this.localStore) {
+      await this.localStore.deleteBranches([branchId]);
+    }
+    this.branches.state = this.branches.state.filter(b => b.id !== branchId);
   }
 
   /** Merge a branch's changes back into this document */
@@ -128,7 +144,7 @@ export class PatchesBranchClient {
   // --- Private ---
 
   private async _createBranchOffline(rev: number, metadata: CreateBranchMetadata, initialState: any): Promise<string> {
-    const branchDocId = metadata?.id as string | undefined;
+    const branchDocId = metadata.id as string | undefined;
     if (!branchDocId) {
       throw new Error('metadata.id is required when creating a branch with initialState');
     }
@@ -177,14 +193,8 @@ export class PatchesBranchClient {
     if (!algorithm) {
       throw new Error(`Algorithm '${algorithmName}' not found`);
     }
-    await algorithm.handleDocChange(branchDocId, initChanges[0].ops, undefined, {});
-
-    // If breakChanges produced multiple changes, save the remaining ones
-    // (handleDocChange only processes the first set of ops; we need to save any additional changes)
-    if (initChanges.length > 1) {
-      for (let i = 1; i < initChanges.length; i++) {
-        await algorithm.handleDocChange(branchDocId, initChanges[i].ops, undefined, {});
-      }
+    for (const change of initChanges) {
+      await algorithm.handleDocChange(branchDocId, change.ops, undefined, {});
     }
 
     // Update branches store

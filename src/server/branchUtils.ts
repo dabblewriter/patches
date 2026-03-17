@@ -11,6 +11,7 @@ export const branchManagerApi: ApiDefinition = {
   createBranch: 'write',
   updateBranch: 'write',
   closeBranch: 'write',
+  deleteBranch: 'write',
   mergeBranch: 'write',
 } as const;
 

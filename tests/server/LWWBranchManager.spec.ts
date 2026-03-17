@@ -49,6 +49,7 @@ describe('LWWBranchManager', () => {
         createBranch: 'write',
         updateBranch: 'write',
         closeBranch: 'write',
+        deleteBranch: 'write',
         mergeBranch: 'write',
       });
     });
@@ -229,6 +230,27 @@ describe('LWWBranchManager', () => {
 
       const branches = await branchManager.listBranches('doc1');
       expect(branches[0].status).toBe('archived');
+    });
+  });
+
+  describe('deleteBranch', () => {
+    it('should replace branch with tombstone', async () => {
+      await server.commitChanges('doc1', [
+        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }] },
+      ]);
+      const branchId = await branchManager.createBranch('doc1', 1, { name: 'Doomed' });
+
+      await branchManager.deleteBranch(branchId);
+
+      // Full list should not include deleted branch
+      const branches = await branchManager.listBranches('doc1');
+      expect(branches.find(b => b.id === branchId)).toBeUndefined();
+
+      // Incremental list should include tombstone
+      const allBranches = await branchManager.listBranches('doc1', { since: 1 });
+      const tombstone = allBranches.find(b => b.id === branchId);
+      expect(tombstone).toBeDefined();
+      expect(tombstone!.deleted).toBe(true);
     });
   });
 

@@ -47,6 +47,14 @@ export interface BranchManager {
   closeBranch(branchId: string, status?: Exclude<BranchStatus, 'open'>): Promise<void>;
 
   /**
+   * Deletes a branch, replacing it with a tombstone record.
+   * The tombstone preserves `id`, `docId`, `modifiedAt`, and `deleted: true`
+   * so that clients using incremental sync (`since`) can clean up their local cache.
+   * @param branchId - The branch document ID to delete.
+   */
+  deleteBranch(branchId: string): Promise<void>;
+
+  /**
    * Merges a branch back into its source document.
    * Algorithm-specific: OT uses fast-forward or flattened merge, LWW uses timestamp resolution.
    * @param branchId - The branch document ID to merge.

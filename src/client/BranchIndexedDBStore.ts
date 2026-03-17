@@ -39,7 +39,7 @@ export class BranchIndexedDBStore implements BranchClientStore {
     const [tx, branchStore] = await this.db.transaction(['branches'], 'readonly');
     const results = await branchStore.getAllByIndex<StoredBranch>('_docId', docId);
     await tx.complete();
-    return results.map(stripInternal);
+    return results.filter(b => !b.deleted).map(stripInternal);
   }
 
   async saveBranches(docId: string, branches: Branch[]): Promise<void> {
@@ -58,6 +58,13 @@ export class BranchIndexedDBStore implements BranchClientStore {
     await tx.complete();
   }
 
+  async listPendingBranches(): Promise<Branch[]> {
+    const [tx, branchStore] = await this.db.transaction(['branches'], 'readonly');
+    const all = await branchStore.getAll<StoredBranch>();
+    await tx.complete();
+    return all.filter(b => b.pending).map(stripInternal);
+  }
+
   async getLastModifiedAt(docId: string): Promise<number | undefined> {
     const [tx, branchStore] = await this.db.transaction(['branches'], 'readonly');
     const branches = await branchStore.getAllByIndex<StoredBranch>('_docId', docId);
@@ -67,7 +74,7 @@ export class BranchIndexedDBStore implements BranchClientStore {
 
     let max = 0;
     for (const b of branches) {
-      if (!b.pending && b.modifiedAt > max) max = b.modifiedAt;
+      if (!b.pending && !b.deleted && b.modifiedAt > max) max = b.modifiedAt;
     }
     return max || undefined;
   }

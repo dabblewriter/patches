@@ -187,4 +187,11 @@ export interface BranchingStoreBackend {
     branchId: string,
     updates: Partial<Omit<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'contentStartRev'>>
   ): Promise<void>;
+
+  /**
+   * Replaces a branch record with a tombstone containing only `id`, `docId`, `modifiedAt`,
+   * and `deleted: true`. Tombstones are returned by `listBranches` when `since` is provided
+   * so that clients can clean up their local cache.
+   */
+  deleteBranch(branchId: string): Promise<void>;
 }

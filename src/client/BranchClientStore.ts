@@ -9,8 +9,9 @@ import type { Branch } from '../types.js';
  */
 export interface BranchClientStore {
   /**
-   * Returns all locally cached branch metas for a document.
+   * Returns locally cached branch metas for a document.
    * Includes both committed (synced) and pending (unsynced) branches.
+   * Excludes deleted branches.
    */
   listBranches(docId: string): Promise<Branch[]>;
 
@@ -25,6 +26,12 @@ export interface BranchClientStore {
    * Removes branches from the local store.
    */
   deleteBranches(branchIds: string[]): Promise<void>;
+
+  /**
+   * Returns all branches with `pending: true` across all documents.
+   * Used by PatchesSync to efficiently find branches that need server creation.
+   */
+  listPendingBranches(): Promise<Branch[]>;
 
   /**
    * Returns the most recent `modifiedAt` timestamp across all committed branches

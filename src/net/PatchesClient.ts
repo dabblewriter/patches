@@ -205,6 +205,14 @@ export class PatchesClient implements PatchesAPI {
   }
 
   /**
+   * Deletes a branch on the server, replacing it with a tombstone.
+   * @param branchId - The ID of the branch to delete.
+   */
+  async deleteBranch(branchId: string): Promise<void> {
+    return this.rpc.call('deleteBranch', branchId);
+  }
+
+  /**
    * Merges a branch on the server.
    * @param branchId - The ID of the branch to merge.
    * @returns A promise resolving when the merge is confirmed.

@@ -242,32 +242,27 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     const branchApi = this.options?.branchApi;
     if (!branchStore || !branchApi) return;
 
-    for (const docId of this.trackedDocs) {
+    const pendingBranches = await branchStore.listPendingBranches();
+
+    for (const branch of pendingBranches) {
       if (!this.state.connected) break;
 
-      const branches = await branchStore.listBranches(docId);
-      const pendingBranches = branches.filter(b => b.pending);
+      try {
+        // Create the branch on the server. The server is idempotent when metadata.id is provided.
+        // The server skips initial change creation when contentStartRev is set in the metadata.
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { docId: sourceDocId, branchedAtRev, createdAt, modifiedAt, status, pending, deleted, ...metadata } = branch;
+        await branchApi.createBranch(sourceDocId, branchedAtRev, metadata);
 
-      for (const branch of pendingBranches) {
-        if (!this.state.connected) break;
-
-        try {
-          // Create the branch on the server. The server is idempotent when metadata.id is provided.
-          // The server skips initial change creation when contentStartRev is set in the metadata.
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          const { docId: sourceDocId, branchedAtRev, createdAt, modifiedAt, status, pending, ...metadata } = branch;
-          await branchApi.createBranch(sourceDocId, branchedAtRev, metadata);
-
-          // Clear the pending flag
-          const synced = { ...branch };
-          delete synced.pending;
-          await branchStore.saveBranches(sourceDocId, [synced]);
-        } catch (err) {
-          console.error('Failed to sync pending branch meta:', branch.id, err);
-          this.onError.emit(err instanceof Error ? err : new Error(String(err)));
-          // Stop processing further branches — ordering may matter
-          break;
-        }
+        // Clear the pending flag
+        const synced = { ...branch };
+        delete synced.pending;
+        await branchStore.saveBranches(sourceDocId, [synced]);
+      } catch (err) {
+        console.error('Failed to sync pending branch meta:', branch.id, err);
+        this.onError.emit(err instanceof Error ? err : new Error(String(err)));
+        // Stop processing further branches — ordering may matter
+        break;
       }
     }
   }

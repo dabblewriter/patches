@@ -7,11 +7,11 @@
  *
  * @example Client: Size calculator for change splitting
  * ```typescript
- * import { compressedSizeBase64 } from '@dabble/patches/compression';
+ * import { compressedSizeUint8 } from '@dabble/patches/compression';
  *
  * new OTDoc(state, {}, {
- *   sizeCalculator: compressedSizeBase64,
- *   maxStorageBytes: 1_000_000
+ *   sizeCalculator: compressedSizeUint8,
+ *   maxStorageBytes: 1_000_000,
  * });
  * ```
  *
@@ -37,12 +37,21 @@ import type { JSONPatchOp } from '../json-patch/types.js';
 export type SizeCalculator = (data: unknown) => number;
 
 /**
- * Calculate size after base64 LZ compression.
- * Use this when your server uses base64 compression format.
+ * Estimate the stored size of a change after base64 LZ compression.
+ *
+ * When passed a Change object (has an `ops` array), only the `ops` field is
+ * compressed — mirroring what `CompressedStoreBackend` does — so the estimate
+ * reflects the actual stored size rather than compressing everything together.
+ * For other data it falls back to compressing the whole value.
  */
 export const compressedSizeBase64: SizeCalculator = data => {
-  if (data === undefined) return 0;
+  if (data === undefined || data === null) return 0;
   try {
+    if (typeof data === 'object' && 'ops' in data && Array.isArray((data as Record<string, unknown>).ops)) {
+      const { ops, ...rest } = data as Record<string, unknown>;
+      const compressedOps = compressToBase64(JSON.stringify(ops as JSONPatchOp[]));
+      return new TextEncoder().encode(JSON.stringify({ ...rest, ops: compressedOps })).length;
+    }
     const json = JSON.stringify(data);
     if (!json) return 0;
     return compressToBase64(json).length;
@@ -52,12 +61,22 @@ export const compressedSizeBase64: SizeCalculator = data => {
 };
 
 /**
- * Calculate size after uint8array LZ compression.
- * Use this when your server uses binary compression format.
+ * Estimate the stored size of a change after uint8array LZ compression.
+ *
+ * When passed a Change object (has an `ops` array), only the `ops` field is
+ * compressed — mirroring what `CompressedStoreBackend` does — so the estimate
+ * reflects the actual stored size rather than compressing everything together.
+ * For other data it falls back to compressing the whole value.
  */
 export const compressedSizeUint8: SizeCalculator = data => {
-  if (data === undefined) return 0;
+  if (data === undefined || data === null) return 0;
   try {
+    if (typeof data === 'object' && 'ops' in data && Array.isArray((data as Record<string, unknown>).ops)) {
+      const { ops, ...rest } = data as Record<string, unknown>;
+      const compressedOps = compressToUint8Array(JSON.stringify(ops as JSONPatchOp[]));
+      const nonOpsSize = new TextEncoder().encode(JSON.stringify(rest)).length;
+      return nonOpsSize + compressedOps.length;
+    }
     const json = JSON.stringify(data);
     if (!json) return 0;
     return compressToUint8Array(json).length;

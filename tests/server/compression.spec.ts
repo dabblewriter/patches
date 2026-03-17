@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { base64Compressor, uint8Compressor, compressedSizeBase64, compressedSizeUint8 } from '../../src/compression';
+import type { Change } from '../../src/types';
 import type { JSONPatchOp } from '../../src/json-patch/types';
 
 describe('OpsCompressor', () => {
@@ -267,12 +268,43 @@ describe('SizeCalculator', () => {
     expect(compressedSizeUint8(undefined)).toBe(0);
   });
 
+  it('should return 0 for null', () => {
+    expect(compressedSizeBase64(null)).toBe(0);
+    expect(compressedSizeUint8(null)).toBe(0);
+  });
+
   it('should return 0 for circular structures', () => {
     const circular: any = { foo: 'bar' };
     circular.self = circular;
 
-    // New API returns 0 instead of throwing
     expect(compressedSizeBase64(circular)).toBe(0);
     expect(compressedSizeUint8(circular)).toBe(0);
+  });
+
+  describe('Change objects (ops-only compression)', () => {
+    const makeChange = (ops: any[]): Change => ({
+      id: 'change-1',
+      rev: 1,
+      baseRev: 0,
+      ops,
+      createdAt: 0,
+      committedAt: 0,
+    });
+
+    it('compresses only the ops field for Change-like objects', () => {
+      const largeValue = 'x'.repeat(2000);
+      const change = makeChange([{ op: 'replace', path: '/content', value: largeValue }]);
+      const uncompressedSize = new TextEncoder().encode(JSON.stringify(change)).length;
+
+      // Repetitive data compresses well
+      expect(compressedSizeBase64(change)).toBeLessThan(uncompressedSize);
+      expect(compressedSizeUint8(change)).toBeLessThan(uncompressedSize);
+    });
+
+    it('compressedSizeUint8 is smaller than compressedSizeBase64 for Change objects', () => {
+      const change = makeChange([{ op: 'replace', path: '/content', value: 'a'.repeat(2000) }]);
+
+      expect(compressedSizeUint8(change)).toBeLessThan(compressedSizeBase64(change));
+    });
   });
 });

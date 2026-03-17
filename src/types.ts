@@ -98,6 +98,8 @@ export interface Branch {
   branchedAtRev: number;
   /** Unix timestamp in milliseconds when the branch was created. */
   createdAt: number;
+  /** Unix timestamp in milliseconds when the branch was last modified. Updated on status/metadata changes. */
+  modifiedAt: number;
   /** Optional user-friendly name for the branch. */
   name?: string;
   /** Current status of the branch. */
@@ -110,14 +112,42 @@ export interface Branch {
    * across multiple changes due to size limits.
    */
   contentStartRev: number;
+
+  /** True when this branch was created offline and hasn't been synced to the server yet. */
+  pending?: true;
+
   /** Optional arbitrary metadata associated with the branch record. */
   [metadata: string]: any;
 }
 
 export type EditableBranchMetadata = Disallowed<
   Branch,
-  'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'status' | 'contentStartRev'
+  'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'contentStartRev' | 'pending'
 >;
+
+/**
+ * Metadata for creating a new branch.
+ * Allows `id` and `contentStartRev` in addition to the fields allowed by `EditableBranchMetadata`.
+ * - `id`: Client-provided branch document ID. Required for offline branch creation.
+ * - `contentStartRev`: The first revision of user content. Set by the client when creating
+ *   initial changes offline (the server uses this to know where user content begins during merge).
+ */
+export type CreateBranchMetadata = Disallowed<
+  Branch,
+  'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'pending'
+>;
+
+/**
+ * Options for listing branches.
+ */
+export interface ListBranchesOptions {
+  /**
+   * Only return branches modified at or after this timestamp (ISO 8601 string or Unix ms).
+   * Enables incremental sync: after the initial full list, subsequent calls can pass the
+   * most recent `modifiedAt` value to fetch only updates.
+   */
+  since?: string | number;
+}
 
 /**
  * Represents a tombstone for a deleted document.

@@ -4,6 +4,7 @@ import type {
   Change,
   DocumentTombstone,
   EditableVersionMetadata,
+  ListBranchesOptions,
   ListChangesOptions,
   ListVersionsOptions,
   VersionMetadata,
@@ -173,7 +174,7 @@ export interface BranchingStoreBackend {
   createBranchId?(docId: string): Promise<string> | string;
 
   /** Lists metadata records for branches originating from a document. */
-  listBranches(docId: string): Promise<Branch[]>;
+  listBranches(docId: string, options?: ListBranchesOptions): Promise<Branch[]>;
 
   /** Loads the metadata record for a specific branch ID. */
   loadBranch(branchId: string): Promise<Branch | null>;

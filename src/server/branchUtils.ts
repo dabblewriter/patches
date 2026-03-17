@@ -17,7 +17,15 @@ export const branchManagerApi: ApiDefinition = {
 /**
  * Fields that cannot be modified via updateBranch().
  */
-const nonModifiableBranchFields = new Set(['id', 'docId', 'branchedAtRev', 'createdAt', 'status', 'contentStartRev']);
+const nonModifiableBranchFields = new Set([
+  'id',
+  'docId',
+  'branchedAtRev',
+  'createdAt',
+  'modifiedAt',
+  'status',
+  'contentStartRev',
+]);
 
 /**
  * Validates that branch metadata doesn't contain non-modifiable fields.
@@ -65,13 +73,15 @@ export function createBranchRecord(
   contentStartRev: number,
   metadata?: EditableBranchMetadata
 ): Branch {
+  const now = Date.now();
   return {
     ...metadata,
     id: branchDocId,
     docId: sourceDocId,
     branchedAtRev,
     contentStartRev,
-    createdAt: Date.now(),
+    createdAt: now,
+    modifiedAt: now,
     status: 'open',
   };
 }
@@ -139,9 +149,11 @@ export async function wrapMergeCommit<T>(
  * @param status - The status to set (defaults to 'closed').
  */
 export async function closeBranch(
-  store: { updateBranch(branchId: string, updates: Partial<Pick<Branch, 'status' | 'name'>>): Promise<void> },
+  store: {
+    updateBranch(branchId: string, updates: Partial<Pick<Branch, 'status' | 'name' | 'modifiedAt'>>): Promise<void>;
+  },
   branchId: string,
   status?: Exclude<BranchStatus, 'open'> | null
 ): Promise<void> {
-  await store.updateBranch(branchId, { status: status ?? 'closed' });
+  await store.updateBranch(branchId, { status: status ?? 'closed', modifiedAt: Date.now() });
 }

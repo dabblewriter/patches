@@ -4,8 +4,9 @@ import type {
   Change,
   ChangeInput,
   CommitChangesOptions,
-  EditableBranchMetadata,
+  CreateBranchMetadata,
   EditableVersionMetadata,
+  ListBranchesOptions,
   ListVersionsOptions,
   PatchesState,
   VersionMetadata,
@@ -170,13 +171,8 @@ export interface PatchesAPI {
 }
 
 export interface BranchAPI {
-  listBranches(docId: string): Promise<Branch[]>;
-  createBranch(
-    docId: string,
-    rev: number,
-    metadata?: EditableBranchMetadata,
-    initialChanges?: Change[]
-  ): Promise<string>;
+  listBranches(docId: string, options?: ListBranchesOptions): Promise<Branch[]>;
+  createBranch(docId: string, rev: number, metadata?: CreateBranchMetadata): Promise<string>;
   closeBranch(branchId: string): Promise<void>;
   mergeBranch(branchId: string): Promise<void>;
 }

@@ -95,12 +95,11 @@ export class LWWInMemoryStore implements LWWClientStore {
    * Clears committed fields (subsumed by the snapshot) but preserves pending ops.
    */
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
-    const existing = this.docs.get(docId);
     this.docs.set(docId, {
       snapshot: { state: docState.state, rev: docState.rev },
       committedFields: new Map(),
-      pendingOps: existing?.pendingOps ?? new Map(),
-      sendingChange: existing?.sendingChange ?? null,
+      pendingOps: new Map(),
+      sendingChange: null,
       committedRev: docState.rev,
     });
   }
@@ -230,6 +229,11 @@ export class LWWInMemoryStore implements LWWClientStore {
     // Move ops to committed fields (store the value directly)
     for (const op of buf.sendingChange.ops) {
       buf.committedFields.set(op.path, op.value);
+    }
+
+    // Update committed rev
+    if (buf.sendingChange.rev > buf.committedRev) {
+      buf.committedRev = buf.sendingChange.rev;
     }
 
     buf.sendingChange = null;

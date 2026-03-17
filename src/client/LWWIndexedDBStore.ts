@@ -206,8 +206,8 @@ export class LWWIndexedDBStore implements LWWClientStore {
    */
   @blockable
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
-    const [tx, snapshots, committedOps, docsStore] = await this.db.transaction(
-      ['snapshots', 'committedOps', 'docs'],
+    const [tx, snapshots, committedOps, pendingOps, sendingChanges, docsStore] = await this.db.transaction(
+      ['snapshots', 'committedOps', 'pendingOps', 'sendingChanges', 'docs'],
       'readwrite'
     );
 
@@ -217,6 +217,8 @@ export class LWWIndexedDBStore implements LWWClientStore {
       docsStore.put<TrackedDoc>({ docId, committedRev: rev, algorithm: 'lww' }),
       snapshots.put<Snapshot>({ docId, state, rev }),
       this.deleteFieldsForDoc(committedOps, docId),
+      this.deleteFieldsForDoc(pendingOps, docId),
+      sendingChanges.delete(docId),
     ]);
 
     await tx.complete();
@@ -378,8 +380,8 @@ export class LWWIndexedDBStore implements LWWClientStore {
    */
   @blockable
   async confirmSendingChange(docId: string): Promise<void> {
-    const [tx, sendingChanges, committedOps] = await this.db.transaction(
-      ['sendingChanges', 'committedOps'],
+    const [tx, sendingChanges, committedOps, docsStore] = await this.db.transaction(
+      ['sendingChanges', 'committedOps', 'docs'],
       'readwrite'
     );
 
@@ -391,6 +393,15 @@ export class LWWIndexedDBStore implements LWWClientStore {
 
     // Move ops to committed (store op directly) - batch for performance
     await Promise.all(sending.change.ops.map(op => committedOps.put<CommittedOp>({ ...op, docId })));
+
+    // Update committed rev
+    const rev = sending.change.rev;
+    if (rev !== undefined) {
+      const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0, algorithm: 'lww' as const };
+      if (rev > docMeta.committedRev) {
+        await docsStore.put({ ...docMeta, committedRev: rev });
+      }
+    }
 
     await sendingChanges.delete(docId);
     await tx.complete();

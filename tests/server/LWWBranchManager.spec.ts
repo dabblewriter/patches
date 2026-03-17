@@ -138,6 +138,40 @@ describe('LWWBranchManager', () => {
       );
     });
 
+    it('should skip initial change creation when contentStartRev is set', async () => {
+      const branchId = await branchManager.createBranch('doc1', 0, { name: 'Offline', contentStartRev: 4 });
+
+      const branches = await branchManager.listBranches('doc1');
+      const branch = branches.find(b => b.id === branchId);
+      expect(branch?.contentStartRev).toBe(4);
+    });
+
+    it('should be idempotent when metadata.id matches existing branch', async () => {
+      await server.commitChanges('doc1', [
+        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }] },
+      ]);
+      const branchId = await branchManager.createBranch('doc1', 1, { id: 'my-branch' });
+
+      // Create again with same ID — should be a no-op
+      const result = await branchManager.createBranch('doc1', 1, { id: 'my-branch' });
+      expect(result).toBe(branchId);
+
+      // Should still only have one branch
+      const branches = await branchManager.listBranches('doc1');
+      expect(branches.filter(b => b.id === 'my-branch')).toHaveLength(1);
+    });
+
+    it('should throw when metadata.id matches branch for different doc', async () => {
+      await server.commitChanges('doc1', [
+        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }] },
+      ]);
+      await branchManager.createBranch('doc1', 1, { id: 'shared-id' });
+
+      await expect(
+        branchManager.createBranch('doc2', 1, { id: 'shared-id' })
+      ).rejects.toThrow('already exists for a different document');
+    });
+
     it('should use custom branch ID generator if provided', async () => {
       // Add custom ID generator to store
       (store as any).createBranchId = vi.fn(() => 'custom-branch-id');

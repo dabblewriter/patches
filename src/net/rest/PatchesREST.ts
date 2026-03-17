@@ -5,7 +5,7 @@ import type {
   ChangeInput,
   CommitChangesOptions,
   DeleteDocOptions,
-  EditableBranchMetadata,
+  CreateBranchMetadata,
   EditableVersionMetadata,
   ListVersionsOptions,
   PatchesSnapshot,
@@ -247,19 +247,15 @@ export class PatchesREST implements PatchesConnection {
 
   // --- Branch Operations (not in PatchesAPI but matches PatchesClient feature parity) ---
 
-  async listBranches(docId: string): Promise<Branch[]> {
-    return this._fetch(`/docs/${docId}/_branches`);
+  async listBranches(docId: string, options?: { since?: string | number }): Promise<Branch[]> {
+    const params = options?.since ? `?since=${encodeURIComponent(String(options.since))}` : '';
+    return this._fetch(`/docs/${docId}/_branches${params}`);
   }
 
-  async createBranch(
-    docId: string,
-    rev: number,
-    metadata?: EditableBranchMetadata,
-    initialChanges?: Change[]
-  ): Promise<string> {
+  async createBranch(docId: string, rev: number, metadata?: CreateBranchMetadata): Promise<string> {
     return this._fetch(`/docs/${docId}/_branches`, {
       method: 'POST',
-      body: { rev, ...metadata, ...(initialChanges ? { initialChanges } : {}) },
+      body: { rev, ...metadata },
     });
   }
 

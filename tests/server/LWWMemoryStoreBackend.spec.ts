@@ -489,7 +489,9 @@ describe('LWWMemoryStoreBackend', () => {
       id,
       docId,
       branchedAtRev: 5,
+      contentStartRev: 2,
       createdAt: Date.now(),
+      modifiedAt: Date.now(),
       status: 'open',
     });
 
@@ -580,7 +582,9 @@ describe('LWWMemoryStoreBackend', () => {
         id: 'branch1',
         docId: 'doc1',
         branchedAtRev: 5,
+        contentStartRev: 2,
         createdAt: Date.now(),
+        modifiedAt: Date.now(),
         status: 'open',
       });
 
@@ -611,7 +615,9 @@ describe('LWWMemoryStoreBackend', () => {
         id: 'branch1',
         docId: 'doc1',
         branchedAtRev: 5,
+        contentStartRev: 2,
         createdAt: Date.now(),
+        modifiedAt: Date.now(),
         status: 'open',
       });
 

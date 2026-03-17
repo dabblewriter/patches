@@ -178,7 +178,7 @@ export class OTIndexedDBStore implements OTClientStore {
    */
   @blockable
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
-    const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.db.transaction(
+    const [tx, snapshots, committedChanges, , docsStore] = await this.db.transaction(
       ['snapshots', 'committedChanges', 'pendingChanges', 'docs'],
       'readwrite'
     );

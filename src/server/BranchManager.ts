@@ -1,4 +1,4 @@
-import type { Branch, BranchStatus, Change, EditableBranchMetadata } from '../types.js';
+import type { Branch, BranchStatus, Change, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
 
 /**
  * Interface for managing document branches.
@@ -12,25 +12,24 @@ export interface BranchManager {
   /**
    * Lists all branches for a document.
    * @param docId - The source document ID.
+   * @param options - Optional filtering options (e.g. `since` for incremental sync).
    * @returns Array of branch metadata.
    */
-  listBranches(docId: string): Promise<Branch[]>;
+  listBranches(docId: string, options?: ListBranchesOptions): Promise<Branch[]>;
 
   /**
    * Creates a new branch from a document.
    * @param docId - The source document ID.
    * @param atPoint - Algorithm-specific branching point (revision for OT, typically current rev for LWW).
    * @param metadata - Optional branch metadata (name, custom fields).
-   * @param initialChanges - Optional pre-built initialization changes. If provided, stored directly
-   *   and contentStartRev is set to lastChange.rev + 1. If omitted, the implementation generates
-   *   initialization changes from the source state.
+   *   When `contentStartRev` is set, the server skips generating initial changes
+   *   (the client has already created them and will sync them as regular document changes).
    * @returns The new branch document ID.
    */
   createBranch(
     docId: string,
     atPoint: number,
-    metadata?: EditableBranchMetadata,
-    initialChanges?: Change[]
+    metadata?: CreateBranchMetadata,
   ): Promise<string>;
 
   /**

@@ -154,6 +154,18 @@ export class PatchesBranchClient {
     this.branches.state = this.branches.state.filter(b => b.id !== branchId);
   }
 
+  /**
+   * Delete a branch and its document.
+   *
+   * Convenience method that deletes both the branch record and the branch document.
+   * The branch record deletion follows the same offline/online logic as `deleteBranch`.
+   * The branch document is deleted via `Patches.deleteDoc` (tombstoned for sync).
+   */
+  async deleteBranchWithDoc(branchId: string): Promise<void> {
+    await this.deleteBranch(branchId);
+    await this.patches.deleteDoc(branchId);
+  }
+
   /** Merge a branch's changes back into this document */
   async mergeBranch(branchId: string): Promise<void> {
     await this.api.mergeBranch(branchId);

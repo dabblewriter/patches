@@ -50,6 +50,7 @@ describe('PatchesBranchClient', () => {
       defaultAlgorithm: 'ot',
       algorithms: { ot: mockAlgorithm },
       trackDocs: vi.fn().mockResolvedValue(undefined),
+      deleteDoc: vi.fn().mockResolvedValue(undefined),
       onChange: { emit: vi.fn() },
     };
   });
@@ -303,6 +304,24 @@ describe('PatchesBranchClient', () => {
       await client.deleteBranch('b1');
 
       expect(api.deleteBranch).toHaveBeenCalledWith('b1');
+      expect(client.branches.state).toEqual([]);
+    });
+  });
+
+  describe('deleteBranchWithDoc', () => {
+    it('should delete both the branch record and the branch document', async () => {
+      const client = new PatchesBranchClient('doc1', api, patches, localStore);
+      const b1 = makeBranch({ id: 'b1' });
+      client.branches.state = [b1];
+
+      await client.deleteBranchWithDoc('b1');
+
+      // Should have saved tombstone for branch record
+      expect(localStore.saveBranches).toHaveBeenCalledWith('doc1', [
+        expect.objectContaining({ id: 'b1', pending: true, deleted: true }),
+      ]);
+      // Should have called deleteDoc on the branch document
+      expect(patches.deleteDoc).toHaveBeenCalledWith('b1');
       expect(client.branches.state).toEqual([]);
     });
   });

@@ -121,11 +121,35 @@ export class PatchesBranchClient {
     await this.listBranches();
   }
 
-  /** Delete a branch (replaces with tombstone on server, removes from local store) */
+  /**
+   * Delete a branch.
+   *
+   * With a local store: marks the branch as a pending deletion (`deleted: true`, `pending: true`)
+   * so PatchesSync can sync it to the server later. The branch is immediately hidden from
+   * `branches.state` and `listBranches`.
+   *
+   * Without a local store: calls the server API directly (online-only).
+   */
   async deleteBranch(branchId: string): Promise<void> {
-    await this.api.deleteBranch(branchId);
     if (this.localStore) {
-      await this.localStore.deleteBranches([branchId]);
+      const existing = this.branches.state.find(b => b.id === branchId);
+      const docId = existing?.docId ?? this.id;
+
+      if (existing?.pending) {
+        // Branch was created offline and never synced — just remove it, no server call needed
+        await this.localStore.deleteBranches([branchId]);
+      } else {
+        // Branch exists on the server — save as a pending-deleted tombstone for sync
+        const tombstone: Branch = {
+          ...(existing ?? { id: branchId, docId, branchedAtRev: 0, createdAt: 0, status: 'open' as const, contentStartRev: 0 }),
+          modifiedAt: Date.now(),
+          pending: true,
+          deleted: true,
+        };
+        await this.localStore.saveBranches(docId, [tombstone]);
+      }
+    } else {
+      await this.api.deleteBranch(branchId);
     }
     this.branches.state = this.branches.state.filter(b => b.id !== branchId);
   }
@@ -147,6 +171,14 @@ export class PatchesBranchClient {
     const branchDocId = metadata.id as string | undefined;
     if (!branchDocId) {
       throw new Error('metadata.id is required when creating a branch with initialState');
+    }
+
+    // Prevent branching from a branch: check if this document is itself a branch
+    if (this.localStore) {
+      const maybeBranch = await this.localStore.loadBranch(this.id);
+      if (maybeBranch) {
+        throw new Error('Cannot create a branch from another branch.');
+      }
     }
 
     const now = Date.now();

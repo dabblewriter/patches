@@ -37,6 +37,7 @@ describe('PatchesBranchClient', () => {
     };
     localStore = {
       listBranches: vi.fn().mockResolvedValue([]),
+      loadBranch: vi.fn().mockResolvedValue(undefined),
       saveBranches: vi.fn().mockResolvedValue(undefined),
       deleteBranches: vi.fn().mockResolvedValue(undefined),
       listPendingBranches: vi.fn().mockResolvedValue([]),
@@ -234,24 +235,68 @@ describe('PatchesBranchClient', () => {
 
       await expect(client.createBranch(3, { id: 'bad' }, { x: 1 })).rejects.toThrow("Algorithm 'lww' not found");
     });
+
+    it('should reject branching from a branch', async () => {
+      // Simulate doc1 being a branch itself by having loadBranch return a record
+      localStore.loadBranch.mockResolvedValue(makeBranch({ id: 'doc1', docId: 'original-doc' }));
+      const client = new PatchesBranchClient('doc1', api, patches, localStore);
+
+      await expect(client.createBranch(5, { id: 'nested-branch' }, { data: 'test' })).rejects.toThrow(
+        'Cannot create a branch from another branch.'
+      );
+
+      expect(localStore.saveBranches).not.toHaveBeenCalled();
+      expect(patches.trackDocs).not.toHaveBeenCalled();
+    });
+
+    it('should allow branching when document is not a branch', async () => {
+      localStore.loadBranch.mockResolvedValue(undefined);
+      const client = new PatchesBranchClient('doc1', api, patches, localStore);
+
+      const id = await client.createBranch(5, { id: 'ok-branch' }, { data: 'test' });
+
+      expect(id).toBe('ok-branch');
+      expect(localStore.loadBranch).toHaveBeenCalledWith('doc1');
+    });
   });
 
   describe('deleteBranch', () => {
-    it('should call API, clean local store, and update branches state', async () => {
+    it('should save pending-deleted tombstone to local store and update branches state', async () => {
       const client = new PatchesBranchClient('doc1', api, patches, localStore);
-      // Seed some branches
       const b1 = makeBranch({ id: 'b1' });
       const b2 = makeBranch({ id: 'b2' });
       client.branches.state = [b1, b2];
 
       await client.deleteBranch('b1');
 
-      expect(api.deleteBranch).toHaveBeenCalledWith('b1');
-      expect(localStore.deleteBranches).toHaveBeenCalledWith(['b1']);
+      // Should NOT call server API
+      expect(api.deleteBranch).not.toHaveBeenCalled();
+      // Should save tombstone with pending + deleted flags
+      expect(localStore.saveBranches).toHaveBeenCalledWith('doc1', [
+        expect.objectContaining({
+          id: 'b1',
+          pending: true,
+          deleted: true,
+        }),
+      ]);
       expect(client.branches.state).toEqual([b2]);
     });
 
-    it('should work without local store', async () => {
+    it('should directly remove pending (unsynced) branch from local store', async () => {
+      const client = new PatchesBranchClient('doc1', api, patches, localStore);
+      const pendingBranch = makeBranch({ id: 'b1', pending: true });
+      client.branches.state = [pendingBranch];
+
+      await client.deleteBranch('b1');
+
+      // Should physically delete — no tombstone needed since server doesn't know about it
+      expect(localStore.deleteBranches).toHaveBeenCalledWith(['b1']);
+      expect(localStore.saveBranches).not.toHaveBeenCalled();
+      expect(api.deleteBranch).not.toHaveBeenCalled();
+      expect(client.branches.state).toEqual([]);
+    });
+
+    it('should call API directly without local store', async () => {
       const client = new PatchesBranchClient('doc1', api, patches);
       client.branches.state = [makeBranch({ id: 'b1' })];
 

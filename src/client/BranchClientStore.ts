@@ -16,6 +16,12 @@ export interface BranchClientStore {
   listBranches(docId: string): Promise<Branch[]>;
 
   /**
+   * Loads a single branch by its branch document ID.
+   * Returns undefined if not found. Used to check if a document is a branch.
+   */
+  loadBranch(branchId: string): Promise<Branch | undefined>;
+
+  /**
    * Saves branch metas to the local store.
    * Merges with existing data: updates existing branches and adds new ones.
    * Branches not in the provided array are left untouched (incremental update friendly).
@@ -29,7 +35,7 @@ export interface BranchClientStore {
 
   /**
    * Returns all branches with `pending: true` across all documents.
-   * Used by PatchesSync to efficiently find branches that need server creation.
+   * Used by PatchesSync to efficiently find branches that need server creation or deletion.
    */
   listPendingBranches(): Promise<Branch[]>;
 

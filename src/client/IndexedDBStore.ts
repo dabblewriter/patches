@@ -271,6 +271,13 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     return results.filter(b => !b.deleted).map(stripInternal);
   }
 
+  async loadBranch(branchId: string): Promise<Branch | undefined> {
+    const [tx, branchStore] = await this.transaction(['branches'], 'readonly');
+    const result = await branchStore.get<StoredBranch>(branchId);
+    await tx.complete();
+    return result ? stripInternal(result) : undefined;
+  }
+
   async saveBranches(docId: string, branches: Branch[]): Promise<void> {
     if (branches.length === 0) return;
     const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');

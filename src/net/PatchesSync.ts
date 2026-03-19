@@ -233,7 +233,12 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
   /**
    * Syncs pending branch metas to the server.
-   * Branches created offline have `pending: true` on their metadata.
+   *
+   * Pending branches come in two flavors:
+   * - **Created offline** (`pending: true`, no `deleted`): created on the server via `createBranch`.
+   * - **Deleted offline** (`pending: true`, `deleted: true`): deleted on the server via `deleteBranch`,
+   *   then physically removed from the local store.
+   *
    * The server skips initial change creation when `contentStartRev` is set in the metadata,
    * so their document content flows through the standard doc sync pipeline.
    */
@@ -244,7 +249,12 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     const pendingBranches = await branchStore.listPendingBranches();
 
-    for (const branch of pendingBranches) {
+    // Process creations first, then deletions, so a create+delete in the same
+    // offline session is handled correctly.
+    const pendingCreates = pendingBranches.filter(b => !b.deleted);
+    const pendingDeletes = pendingBranches.filter(b => b.deleted);
+
+    for (const branch of pendingCreates) {
       if (!this.state.connected) break;
 
       try {
@@ -262,6 +272,22 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         console.error('Failed to sync pending branch meta:', branch.id, err);
         this.onError.emit(err instanceof Error ? err : new Error(String(err)));
         // Stop processing further branches — ordering may matter
+        break;
+      }
+    }
+
+    for (const branch of pendingDeletes) {
+      if (!this.state.connected) break;
+
+      try {
+        await branchApi.deleteBranch(branch.id);
+
+        // Server confirmed the delete — remove the tombstone from the local store
+        await branchStore.deleteBranches([branch.id]);
+      } catch (err) {
+        console.error('Failed to sync pending branch deletion:', branch.id, err);
+        this.onError.emit(err instanceof Error ? err : new Error(String(err)));
+        // Stop processing further deletions — keep tombstone for retry
         break;
       }
     }

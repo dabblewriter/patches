@@ -228,9 +228,9 @@ export class LWWMemoryStoreBackend
 
   // === Branching ===
 
-  async listBranches(docId: string, options?: { since?: string | number }): Promise<Branch[]> {
+  async listBranches(docId: string, options?: { since?: number }): Promise<Branch[]> {
     const result: Branch[] = [];
-    const since = options?.since ? (typeof options.since === 'string' ? Date.parse(options.since) : options.since) : 0;
+    const since = options?.since ?? 0;
     for (const branch of this.branches.values()) {
       if (branch.docId !== docId) continue;
       if (since) {

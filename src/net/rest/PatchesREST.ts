@@ -247,7 +247,7 @@ export class PatchesREST implements PatchesConnection {
 
   // --- Branch Operations (not in PatchesAPI but matches PatchesClient feature parity) ---
 
-  async listBranches(docId: string, options?: { since?: string | number }): Promise<Branch[]> {
+  async listBranches(docId: string, options?: { since?: number }): Promise<Branch[]> {
     const params = options?.since ? `?since=${encodeURIComponent(String(options.since))}` : '';
     return this._fetch(`/docs/${docId}/_branches${params}`);
   }

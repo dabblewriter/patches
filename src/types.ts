@@ -132,7 +132,16 @@ export interface Branch {
 
 export type EditableBranchMetadata = Disallowed<
   Branch,
-  'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'contentStartRev' | 'lastMergedRev' | 'pending' | 'deleted'
+  | 'id'
+  | 'docId'
+  | 'branchedAtRev'
+  | 'createdAt'
+  | 'modifiedAt'
+  | 'status'
+  | 'contentStartRev'
+  | 'lastMergedRev'
+  | 'pending'
+  | 'deleted'
 >;
 
 /**
@@ -154,11 +163,11 @@ export type CreateBranchMetadata = Omit<
  */
 export interface ListBranchesOptions {
   /**
-   * Only return branches modified after this timestamp (ISO 8601 string or Unix ms).
+   * Only return branches modified after this timestamp (Unix ms).
    * Enables incremental sync: after the initial full list, subsequent calls can pass the
    * most recent `modifiedAt` value to fetch only updates.
    */
-  since?: string | number;
+  since?: number;
 }
 
 /**

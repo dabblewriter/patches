@@ -14,6 +14,7 @@ export * from './Patches.js';
 export * from './PatchesDoc.js';
 export * from './PatchesBranchClient.js';
 export * from './PatchesHistoryClient.js';
+export type * from './BranchClientStore.js';
 export type * from './PatchesStore.js';
 export type * from './OTClientStore.js';
 export type * from './LWWClientStore.js';

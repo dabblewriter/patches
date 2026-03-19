@@ -1,5 +1,12 @@
 import { JSONPatch } from '../json-patch/JSONPatch.js';
-import type { Branch, BranchStatus, Change, EditableBranchMetadata } from '../types.js';
+import type {
+  Branch,
+  BranchStatus,
+  Change,
+  CreateBranchMetadata,
+  EditableBranchMetadata,
+  ListBranchesOptions,
+} from '../types.js';
 import type { BranchManager } from './BranchManager.js';
 import {
   assertBranchMetadata,
@@ -44,10 +51,11 @@ export class LWWBranchManager implements BranchManager {
   /**
    * Lists all branches for a document.
    * @param docId - The source document ID.
+   * @param options - Optional filtering options (e.g. `since` for incremental sync).
    * @returns Array of branch metadata.
    */
-  async listBranches(docId: string): Promise<Branch[]> {
-    return await this.store.listBranches(docId);
+  async listBranches(docId: string, options?: ListBranchesOptions): Promise<Branch[]> {
+    return await this.store.listBranches(docId, options);
   }
 
   /**
@@ -59,43 +67,55 @@ export class LWWBranchManager implements BranchManager {
    *
    * @param docId - The source document ID.
    * @param atPoint - The revision number (recorded for tracking).
-   * @param metadata - Optional branch metadata.
    * @returns The new branch document ID.
    */
-  async createBranch(
-    docId: string,
-    atPoint: number,
-    metadata?: EditableBranchMetadata,
-    _initialChanges?: Change[]
-  ): Promise<string> {
+  async createBranch(docId: string, atPoint: number, metadata?: CreateBranchMetadata): Promise<string> {
+    const branchDocId = metadata?.id ?? (await generateBranchId(this.store, docId));
+
+    // Idempotent: if a branch with this ID already exists, return it as a no-op.
+    // This handles retry-on-bad-connection scenarios.
+    if (metadata?.id) {
+      const existing = await this.store.loadBranch(branchDocId);
+      if (existing) {
+        if (existing.docId !== docId) {
+          throw new Error(`Branch ${branchDocId} already exists for a different document`);
+        }
+        return branchDocId;
+      }
+    }
+
     await assertNotABranch(this.store, docId);
 
-    // Build state directly from store (no streaming round-trip)
-    const snapshot = await this.store.getSnapshot(docId);
-    const baseRev = snapshot?.rev ?? 0;
-    let state: any = snapshot ? JSON.parse(await readStreamAsString(snapshot.state)) : {};
+    if (!metadata?.contentStartRev) {
+      // Build state directly from store (no streaming round-trip)
+      const snapshot = await this.store.getSnapshot(docId);
+      const baseRev = snapshot?.rev ?? 0;
+      let state: any = snapshot ? JSON.parse(await readStreamAsString(snapshot.state)) : {};
 
-    const ops = await this.store.listOps(docId);
-    const opsAfterSnapshot = ops.filter(op => (op.rev ?? 0) > baseRev);
-    if (opsAfterSnapshot.length > 0) {
-      state = new JSONPatch(opsAfterSnapshot).apply(state);
+      const ops = await this.store.listOps(docId);
+      const opsAfterSnapshot = ops.filter(op => (op.rev ?? 0) > baseRev);
+      if (opsAfterSnapshot.length > 0) {
+        state = new JSONPatch(opsAfterSnapshot).apply(state);
+      }
+      const rev = ops.length > 0 ? Math.max(baseRev, ...ops.map(op => op.rev ?? 0)) : baseRev;
+
+      // Initialize the branch document with current state as snapshot
+      await this.store.saveSnapshot(branchDocId, state, rev);
+
+      // Copy ops metadata to the branch document (preserving timestamps)
+      if (ops.length > 0) {
+        await this.store.saveOps(branchDocId, ops);
+      }
+
+      // Create the branch metadata record
+      // contentStartRev: first rev of user content after init (for LWW, init is just the snapshot copy)
+      const branch = createBranchRecord(branchDocId, docId, atPoint, rev + 1, metadata);
+      await this.store.createBranch(branch);
+      return branchDocId;
     }
-    const rev = ops.length > 0 ? Math.max(baseRev, ...ops.map(op => op.rev ?? 0)) : baseRev;
 
-    // Generate branch document ID
-    const branchDocId = await generateBranchId(this.store, docId);
-
-    // Initialize the branch document with current state as snapshot
-    await this.store.saveSnapshot(branchDocId, state, rev);
-
-    // Copy ops metadata to the branch document (preserving timestamps)
-    if (ops.length > 0) {
-      await this.store.saveOps(branchDocId, ops);
-    }
-
-    // Create the branch metadata record
-    // contentStartRev: first rev of user content after init (for LWW, init is just the snapshot copy)
-    const branch = createBranchRecord(branchDocId, docId, atPoint, rev + 1, metadata);
+    // Client supplied initial content — contentStartRev tells us where user content begins
+    const branch = createBranchRecord(branchDocId, docId, atPoint, metadata.contentStartRev, metadata);
     await this.store.createBranch(branch);
     return branchDocId;
   }
@@ -107,7 +127,7 @@ export class LWWBranchManager implements BranchManager {
    */
   async updateBranch(branchId: string, metadata: EditableBranchMetadata): Promise<void> {
     assertBranchMetadata(metadata);
-    await this.store.updateBranch(branchId, metadata);
+    await this.store.updateBranch(branchId, { ...metadata, modifiedAt: Date.now() });
   }
 
   /**
@@ -116,14 +136,24 @@ export class LWWBranchManager implements BranchManager {
    * @param status - The status to set (defaults to 'closed').
    */
   async closeBranch(branchId: string, status?: Exclude<BranchStatus, 'open'> | null): Promise<void> {
-    await this.store.updateBranch(branchId, { status: status ?? 'closed' });
+    await this.store.updateBranch(branchId, { status: status ?? 'closed', modifiedAt: Date.now() });
+  }
+
+  /**
+   * Deletes a branch, replacing the record with a tombstone.
+   */
+  async deleteBranch(branchId: string): Promise<void> {
+    await this.store.deleteBranch(branchId);
   }
 
   /**
    * Merges a branch back into its source document.
    *
+   * Supports multiple merges — the branch stays open and `lastMergedRev` tracks
+   * which branch revision was last merged. Subsequent merges only pick up new changes.
+   *
    * LWW merge algorithm:
-   * 1. Get all ops changes made on the branch since it was created
+   * 1. Get ops changes made on the branch since last merge (or since creation)
    * 2. Apply those changes to the source document
    * 3. Timestamps automatically resolve any conflicts (later wins)
    *
@@ -137,14 +167,16 @@ export class LWWBranchManager implements BranchManager {
 
     const sourceDocId = branch.docId;
 
-    // Get all changes made on the branch (synthesized from ops)
-    const branchChanges = await this.lwwServer.getChangesSince(branchId, branch.branchedAtRev);
+    // Get only unmerged changes: since lastMergedRev (if previously merged) or branchedAtRev
+    const sinceRev = branch.lastMergedRev ?? branch.branchedAtRev;
+    const branchChanges = await this.lwwServer.getChangesSince(branchId, sinceRev);
 
     if (branchChanges.length === 0) {
-      console.log(`Branch ${branchId} has no changes to merge.`);
-      await this.closeBranch(branchId, 'merged');
       return [];
     }
+
+    // Track the branch rev for lastMergedRev update
+    const branchRev = await this.store.getCurrentRev(branchId);
 
     // LWW merge: commit the branch changes to the source document
     // Timestamps will automatically resolve any conflicts
@@ -152,8 +184,8 @@ export class LWWBranchManager implements BranchManager {
       this.lwwServer.commitChanges(sourceDocId, branchChanges)
     );
 
-    // Close the branch
-    await this.closeBranch(branchId, 'merged');
+    // Update lastMergedRev so next merge picks up only new changes
+    await this.store.updateBranch(branchId, { lastMergedRev: branchRev, modifiedAt: Date.now() });
     return committedChanges;
   }
 }

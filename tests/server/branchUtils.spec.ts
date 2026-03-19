@@ -18,6 +18,7 @@ describe('branchUtils', () => {
         createBranch: 'write',
         updateBranch: 'write',
         closeBranch: 'write',
+        deleteBranch: 'write',
         mergeBranch: 'write',
       });
     });
@@ -48,6 +49,10 @@ describe('branchUtils', () => {
 
     it('should throw for protected field: createdAt', () => {
       expect(() => assertBranchMetadata({ createdAt: 12345 } as any)).toThrow('Cannot modify branch field createdAt');
+    });
+
+    it('should throw for protected field: modifiedAt', () => {
+      expect(() => assertBranchMetadata({ modifiedAt: 12345 } as any)).toThrow('Cannot modify branch field modifiedAt');
     });
 
     it('should throw for protected field: status', () => {
@@ -102,6 +107,8 @@ describe('branchUtils', () => {
       expect(branch.status).toBe('open');
       expect(branch.createdAt).toBeGreaterThanOrEqual(before);
       expect(branch.createdAt).toBeLessThanOrEqual(after);
+      expect(branch.modifiedAt).toBeGreaterThanOrEqual(before);
+      expect(branch.modifiedAt).toBeLessThanOrEqual(after);
     });
 
     it('should include optional metadata', () => {
@@ -143,6 +150,8 @@ describe('branchUtils', () => {
           docId: 'parent',
           branchedAtRev: 5,
           createdAt: Date.now(),
+          modifiedAt: Date.now(),
+          contentStartRev: 2,
           status: 'open',
         } as Branch),
       };
@@ -158,6 +167,8 @@ describe('branchUtils', () => {
         docId: 'doc1',
         branchedAtRev: 5,
         createdAt: Date.now(),
+        modifiedAt: Date.now(),
+        contentStartRev: 2,
         status: 'open',
       };
 
@@ -174,6 +185,8 @@ describe('branchUtils', () => {
         docId: 'doc1',
         branchedAtRev: 5,
         createdAt: Date.now(),
+        modifiedAt: Date.now(),
+        contentStartRev: 2,
         status: 'closed',
       };
 
@@ -188,6 +201,8 @@ describe('branchUtils', () => {
         docId: 'doc1',
         branchedAtRev: 5,
         createdAt: Date.now(),
+        modifiedAt: Date.now(),
+        contentStartRev: 2,
         status: 'merged',
       };
 

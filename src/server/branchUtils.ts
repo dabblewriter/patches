@@ -1,6 +1,6 @@
 import { createId } from 'crypto-id';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
-import type { Branch, BranchStatus, EditableBranchMetadata } from '../types.js';
+import type { Branch, BranchStatus, CreateBranchMetadata, EditableBranchMetadata } from '../types.js';
 
 /**
  * Standard API definition for branch managers.
@@ -11,13 +11,23 @@ export const branchManagerApi: ApiDefinition = {
   createBranch: 'write',
   updateBranch: 'write',
   closeBranch: 'write',
+  deleteBranch: 'write',
   mergeBranch: 'write',
 } as const;
 
 /**
  * Fields that cannot be modified via updateBranch().
  */
-const nonModifiableBranchFields = new Set(['id', 'docId', 'branchedAtRev', 'createdAt', 'status', 'contentStartRev']);
+const nonModifiableBranchFields = new Set([
+  'id',
+  'docId',
+  'branchedAtRev',
+  'createdAt',
+  'modifiedAt',
+  'status',
+  'contentStartRev',
+  'lastMergedRev',
+]);
 
 /**
  * Validates that branch metadata doesn't contain non-modifiable fields.
@@ -63,15 +73,17 @@ export function createBranchRecord(
   sourceDocId: string,
   branchedAtRev: number,
   contentStartRev: number,
-  metadata?: EditableBranchMetadata
+  metadata?: CreateBranchMetadata | EditableBranchMetadata
 ): Branch {
+  const now = Date.now();
   return {
     ...metadata,
     id: branchDocId,
     docId: sourceDocId,
     branchedAtRev,
     contentStartRev,
-    createdAt: Date.now(),
+    createdAt: now,
+    modifiedAt: now,
     status: 'open',
   };
 }
@@ -139,9 +151,11 @@ export async function wrapMergeCommit<T>(
  * @param status - The status to set (defaults to 'closed').
  */
 export async function closeBranch(
-  store: { updateBranch(branchId: string, updates: Partial<Pick<Branch, 'status' | 'name'>>): Promise<void> },
+  store: {
+    updateBranch(branchId: string, updates: Partial<Pick<Branch, 'status' | 'name' | 'modifiedAt'>>): Promise<void>;
+  },
   branchId: string,
   status?: Exclude<BranchStatus, 'open'> | null
 ): Promise<void> {
-  await store.updateBranch(branchId, { status: status ?? 'closed' });
+  await store.updateBranch(branchId, { status: status ?? 'closed', modifiedAt: Date.now() });
 }

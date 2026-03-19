@@ -98,11 +98,11 @@ describe('PatchesWebSocket', () => {
       mockRPCInstance.call = vi.fn().mockResolvedValue('branch123');
 
       await patchesWS.createBranch('doc1', 5);
-      expect(mockRPCInstance.call).toHaveBeenCalledWith('createBranch', 'doc1', 5, undefined, undefined);
+      expect(mockRPCInstance.call).toHaveBeenCalledWith('createBranch', 'doc1', 5, undefined);
 
       mockRPCInstance.call = vi.fn().mockResolvedValue([]);
       await patchesWS.listBranches('doc1');
-      expect(mockRPCInstance.call).toHaveBeenCalledWith('listBranches', 'doc1');
+      expect(mockRPCInstance.call).toHaveBeenCalledWith('listBranches', 'doc1', undefined);
 
       mockRPCInstance.call = vi.fn().mockResolvedValue(undefined);
       await patchesWS.closeBranch('branch1');

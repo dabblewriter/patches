@@ -90,6 +90,7 @@ interface Branch {
   createdAt: number; // Unix timestamp (milliseconds)
   name?: string; // Human-readable name
   status: BranchStatus; // 'open' | 'merged' | 'closed'
+  lastMergedRev?: number; // Branch rev through which changes were last merged
 }
 
 type BranchStatus = 'open' | 'merged' | 'closed';
@@ -119,29 +120,23 @@ await branchManager.closeBranch(branchDocId, 'closed');
 
 ## Merging Back
 
-Merging applies branch changes to the source document:
+Merging applies branch changes to the source document. Branches support **multiple merges** — the branch stays open after each merge, and `lastMergedRev` tracks which branch revision was last merged. Subsequent merges only pick up new changes.
 
 ```typescript
-const committedChanges = await branchManager.mergeBranch(branchDocId);
-console.log(`Merged ${committedChanges.length} changes back to source`);
+// First merge
+const changes1 = await branchManager.mergeBranch(branchDocId);
+// Branch stays open — make more edits...
+
+// Second merge — only new changes since first merge
+const changes2 = await branchManager.mergeBranch(branchDocId);
+
+// Close explicitly when done
+await branchManager.closeBranch(branchDocId);
 ```
 
 ### OT Merge Approach
 
-The [OTBranchManager](PatchesBranchManager.md) handles two scenarios:
-
-**Fast-forward merge** (no concurrent changes on source):
-
-```
-Source: [rev 40] [rev 41] [rev 42] ─────────────────────────────────────[rev 43] [rev 44] [rev 45]
-                              │                                             ↑
-                              └── Branch created ── [change A] [change B] ──┘
-                                                                          merge
-```
-
-The branch changes (A, B) are committed individually to the source. Their version history shows `origin: 'main'` because they're now part of the main timeline. Clean and simple.
-
-**Divergent merge** (source has new changes since branching):
+The [OTBranchManager](PatchesBranchManager.md) always flattens branch changes and uses `batchId` for correct transformation:
 
 ```
 Source: [rev 40] [rev 41] [rev 42] [rev 43 (Bob)] [rev 44 (Carol)] ───────[rev 45]
@@ -153,9 +148,12 @@ Source: [rev 40] [rev 41] [rev 42] [rev 43 (Bob)] [rev 44 (Carol)] ────�
 When Alice merges her branch:
 
 1. Branch changes get copied to source with `origin: 'branch'` in version metadata
-2. All branch changes get flattened into a single change
-3. That flattened change gets transformed against concurrent source changes
-4. Result is committed to source
+2. Unmerged branch changes (since `lastMergedRev`) get flattened into a single change
+3. All merge changes use `batchId: branchId` — this tells `commitChanges` not to transform them against previously-merged changes from the same branch (they share the same causal context)
+4. The flattened change gets transformed against only truly concurrent source changes
+5. `lastMergedRev` is updated on the branch record
+
+Why `batchId`? All changes in a branch are created in the context of each other. Change 500 knows about change 5, even across multiple merges. Using the branch ID as the batch ID ensures they're never transformed against each other.
 
 Why flatten? Transforming 1,000 individual branch changes against 500 source changes would be slow. Flattening gives the same end result with better performance. The original version history is preserved with `origin: 'branch'` for traceability.
 
@@ -163,13 +161,14 @@ Why flatten? Transforming 1,000 individual branch changes against 500 source cha
 
 The `LWWBranchManager` approach is simpler:
 
-1. Get all field changes made on the branch
+1. Get field changes made on the branch since last merge (or since creation)
 2. Commit them to the source document
 3. Timestamps automatically resolve conflicts
+4. Update `lastMergedRev` on the branch
 
 No transformation. No flattening. Just timestamp comparison. If the branch wrote to `/settings/theme` with timestamp 1738761234567 and source has an older timestamp, branch wins. If source has a newer timestamp, source wins.
 
-This works because LWW conflicts don't need intelligent merging. The last writer wins, and that's the expected behavior.
+This works because LWW conflicts don't need intelligent merging. The last writer wins, and that's the expected behavior. LWW merge is naturally idempotent — merging the same ops multiple times produces the same result.
 
 ## Design Decisions
 
@@ -239,13 +238,15 @@ const branches = await branchManager.listBranches('main-doc');
 const activeBranches = branches.filter(b => b.status === 'open');
 console.log(`${activeBranches.length} active branches`);
 
-// 4. Merge when ready
+// 4. Merge when ready (branch stays open for further edits)
 const changes = await branchManager.mergeBranch(branchDocId);
 console.log(`Merged ${changes.length} changes`);
-// Branch status is now 'merged'
 
-// 5. Or close without merging
-// await branchManager.closeBranch(branchDocId, 'closed');
+// 5. Merge again after more edits (only new changes since last merge)
+const moreChanges = await branchManager.mergeBranch(branchDocId);
+
+// 6. Close when done (or close without merging)
+await branchManager.closeBranch(branchDocId, 'closed');
 ```
 
 The branch manager handles all the complexity. You just create branches, work on them, and merge when ready.

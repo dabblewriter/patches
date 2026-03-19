@@ -2,7 +2,14 @@ import { getStateAtRevision } from '../algorithms/ot/server/getStateAtRevision.j
 import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import { createVersionMetadata } from '../data/version.js';
-import type { Branch, BranchStatus, Change, EditableBranchMetadata } from '../types.js';
+import type {
+  Branch,
+  BranchStatus,
+  Change,
+  CreateBranchMetadata,
+  EditableBranchMetadata,
+  ListBranchesOptions,
+} from '../types.js';
 import type { BranchManager } from './BranchManager.js';
 import {
   assertBranchMetadata,
@@ -46,36 +53,44 @@ export class OTBranchManager implements BranchManager {
   /**
    * Lists all open branches for a document.
    * @param docId - The ID of the document.
+   * @param options - Optional filtering options (e.g. `since` for incremental sync).
    * @returns The branches.
    */
-  async listBranches(docId: string): Promise<Branch[]> {
-    return await this.store.listBranches(docId);
+  async listBranches(docId: string, options?: ListBranchesOptions): Promise<Branch[]> {
+    return await this.store.listBranches(docId, options);
   }
 
   /**
    * Creates a new branch for a document.
    * @param docId - The ID of the document to branch from.
    * @param rev - The revision of the document to branch from.
-   * @param metadata - Additional optional metadata to store with the branch.
-   * @param initialChanges - Optional pre-built initialization changes. If provided, stored
-   *   directly. If omitted, a root-replace change is generated from the source state at `rev`
-   *   and split via breakChanges when maxPayloadBytes is set.
    * @returns The ID of the new branch document.
    */
-  async createBranch(
-    docId: string,
-    rev: number,
-    metadata?: EditableBranchMetadata,
-    initialChanges?: Change[]
-  ): Promise<string> {
+  async createBranch(docId: string, rev: number, metadata?: CreateBranchMetadata): Promise<string> {
+    const branchDocId = metadata?.id ?? (await generateBranchId(this.store, docId));
+
+    // Idempotent: if a branch with this ID already exists, return it as a no-op.
+    // This handles retry-on-bad-connection scenarios.
+    if (metadata?.id) {
+      const existing = await this.store.loadBranch(branchDocId);
+      if (existing) {
+        if (existing.docId !== docId) {
+          throw new Error(`Branch ${branchDocId} already exists for a different document`);
+        }
+        return branchDocId;
+      }
+    }
+
     await assertNotABranch(this.store, docId);
 
-    const branchDocId = await generateBranchId(this.store, docId);
     const now = Date.now();
 
-    let initChanges: Change[];
-    if (initialChanges?.length) {
-      initChanges = initialChanges;
+    let contentStartRev: number;
+
+    if (metadata?.contentStartRev) {
+      // Client supplied initial content as pending changes through normal sync flow.
+      // contentStartRev tells us where user content begins (init changes are below it).
+      contentStartRev = metadata.contentStartRev;
     } else {
       // Generate init changes from the source state at the branch point
       const { state: stateAtRev } = await getStateAtRevision(this.store, docId, rev);
@@ -83,26 +98,24 @@ export class OTBranchManager implements BranchManager {
         createdAt: now,
         committedAt: now,
       });
-      initChanges = this.maxPayloadBytes ? breakChanges([rootReplace], this.maxPayloadBytes) : [rootReplace];
+      const initChanges = this.maxPayloadBytes ? breakChanges([rootReplace], this.maxPayloadBytes) : [rootReplace];
+      contentStartRev = initChanges[initChanges.length - 1].rev + 1;
+
+      await this.store.saveChanges(branchDocId, initChanges);
+
+      // Create an initial version representing the branch point (metadata + init changes, no state)
+      const initialVersionMetadata = createVersionMetadata({
+        origin: 'main',
+        startedAt: now,
+        endedAt: now,
+        endRev: rev,
+        startRev: rev,
+        name: metadata?.name,
+        groupId: branchDocId,
+        branchName: metadata?.name,
+      });
+      await this.store.createVersion(branchDocId, initialVersionMetadata, initChanges);
     }
-
-    // contentStartRev is the first revision after all initialization changes
-    const contentStartRev = initChanges[initChanges.length - 1].rev + 1;
-
-    await this.store.saveChanges(branchDocId, initChanges);
-
-    // Create an initial version representing the branch point (metadata + init changes, no state)
-    const initialVersionMetadata = createVersionMetadata({
-      origin: 'main',
-      startedAt: now,
-      endedAt: now,
-      endRev: rev,
-      startRev: rev,
-      name: metadata?.name,
-      groupId: branchDocId,
-      branchName: metadata?.name,
-    });
-    await this.store.createVersion(branchDocId, initialVersionMetadata, initChanges);
 
     // Create the branch metadata record
     const branch = createBranchRecord(branchDocId, docId, rev, contentStartRev, metadata);
@@ -117,7 +130,7 @@ export class OTBranchManager implements BranchManager {
    */
   async updateBranch(branchId: string, metadata: EditableBranchMetadata): Promise<void> {
     assertBranchMetadata(metadata);
-    await this.store.updateBranch(branchId, metadata);
+    await this.store.updateBranch(branchId, { ...metadata, modifiedAt: Date.now() });
   }
 
   /**
@@ -126,11 +139,25 @@ export class OTBranchManager implements BranchManager {
    * @param status - The status to set for the branch.
    */
   async closeBranch(branchId: string, status?: Exclude<BranchStatus, 'open'>): Promise<void> {
-    await this.store.updateBranch(branchId, { status: status ?? 'closed' });
+    await this.store.updateBranch(branchId, { status: status ?? 'closed', modifiedAt: Date.now() });
+  }
+
+  /**
+   * Deletes a branch, replacing the record with a tombstone.
+   */
+  async deleteBranch(branchId: string): Promise<void> {
+    await this.store.deleteBranch(branchId);
   }
 
   /**
    * Merges changes from a branch back into its source document.
+   *
+   * Supports multiple merges — the branch stays open and `lastMergedRev` tracks
+   * which branch revision was last merged. Subsequent merges only pick up new changes.
+   *
+   * All merge changes use `batchId: branchId` so that `commitChanges` never transforms
+   * branch changes against each other (they share the same causal context).
+   *
    * @param branchId - The ID of the branch document to merge.
    * @returns The server commit change(s) applied to the source document.
    * @throws Error if branch not found, already closed/merged, or merge fails.
@@ -143,40 +170,30 @@ export class OTBranchManager implements BranchManager {
     const sourceDocId = branch.docId;
     const branchStartRevOnSource = branch.branchedAtRev;
 
-    // Skip initialization changes — only merge user content changes
-    const contentStartRev = branch.contentStartRev ?? 2;
-    const branchChanges = await this.store.listChanges(branchId, { startAfter: contentStartRev - 1 });
+    // Get only unmerged changes: since lastMergedRev (if previously merged) or contentStartRev
+    const startAfter = branch.lastMergedRev ?? (branch.contentStartRev ?? 2) - 1;
+    const branchChanges = await this.store.listChanges(branchId, { startAfter });
     if (branchChanges.length === 0) {
-      console.log(`Branch ${branchId} has no changes to merge.`);
-      await this.closeBranch(branchId, 'merged');
       return [];
     }
 
-    // Check if we can fast-forward (no concurrent changes on source since branch)
-    const sourceChanges = await this.store.listChanges(sourceDocId, {
-      startAfter: branchStartRevOnSource,
-    });
-    const canFastForward = sourceChanges.length === 0;
+    const lastBranchRev = branchChanges[branchChanges.length - 1].rev;
 
     // Get all versions from the branch doc (skip offline-branch versions)
     const branchVersions = await this.store.listVersions(branchId, { origin: 'main' });
-
-    // For each version, create a corresponding version in the main doc
-    // Use 'main' origin if fast-forward, 'branch' if divergent
-    const versionOrigin = canFastForward ? 'main' : 'branch';
-    let lastVersionId: string | undefined;
 
     // Note: if version creation succeeds but commit fails, orphaned versions
     // may remain in the store. The store interface does not currently expose a
     // deleteVersion method, so cleanup is not possible. These orphaned versions
     // are harmless (they reference a groupId that was never fully merged).
+    let lastVersionId: string | undefined;
     for (const v of branchVersions) {
       const newVersionMetadata = createVersionMetadata({
         ...v,
-        origin: versionOrigin,
+        origin: 'branch',
         startRev: branchStartRevOnSource,
         groupId: branchId,
-        branchName: branch.name, // Keep branchName for traceability
+        branchName: branch.name,
         parentId: lastVersionId,
       });
       const changes = await this.store.loadVersionChanges?.(branchId, v.id);
@@ -184,37 +201,34 @@ export class OTBranchManager implements BranchManager {
       lastVersionId = newVersionMetadata.id;
     }
 
+    // Flatten all unmerged ops into a single change with batchId set to branchId so that
+    // commitChanges won't transform these against previously-merged changes from this branch
+    // (all branch changes share the same causal context).
+    //
+    // The baseRev and rev here are synthetic placeholders — they don't correspond to actual
+    // revisions on the source document. commitChanges will transform the ops against any
+    // concurrent source changes since branchStartRevOnSource and assign the real revision.
+    const rev = branchStartRevOnSource + branchChanges.length;
+    const flattenedChange = createChange(
+      branchStartRevOnSource,
+      rev,
+      branchChanges.flatMap(c => c.ops),
+      { batchId: branchId }
+    );
+
+    // Break oversized flattened change if needed (batchId is preserved by breakChanges)
+    let changesToCommit = [flattenedChange];
+    if (this.maxPayloadBytes) {
+      changesToCommit = breakChanges(changesToCommit, this.maxPayloadBytes);
+    }
+
     // Commit changes to source doc with error handling
     const committedMergeChanges = await wrapMergeCommit(branchId, sourceDocId, async () => {
-      if (canFastForward) {
-        // Fast-forward: commit branch changes individually with adjusted revs
-        const adjustedChanges = branchChanges.map(c => ({
-          ...c,
-          baseRev: branchStartRevOnSource,
-          rev: undefined, // Let commitChanges assign sequential revs
-        }));
-        return (await this.patchesServer.commitChanges(sourceDocId, adjustedChanges)).changes;
-      } else {
-        // Divergent: flatten and transform (current behavior)
-        const rev = branchStartRevOnSource + branchChanges.length;
-        const flattenedChange = createChange(
-          branchStartRevOnSource,
-          rev,
-          branchChanges.flatMap(c => c.ops)
-        );
-
-        // Break oversized flattened change if needed
-        let changesToCommit = [flattenedChange];
-        if (this.maxPayloadBytes) {
-          changesToCommit = breakChanges(changesToCommit, this.maxPayloadBytes);
-        }
-
-        return (await this.patchesServer.commitChanges(sourceDocId, changesToCommit)).changes;
-      }
+      return (await this.patchesServer.commitChanges(sourceDocId, changesToCommit)).changes;
     });
 
-    // Merge succeeded. Update the branch status.
-    await this.closeBranch(branchId, 'merged');
+    // Merge succeeded. Update lastMergedRev so next merge picks up only new changes.
+    await this.store.updateBranch(branchId, { lastMergedRev: lastBranchRev, modifiedAt: Date.now() });
     return committedMergeChanges;
   }
 }

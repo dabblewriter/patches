@@ -2,6 +2,7 @@ import { isEqual } from '@dabble/delta';
 import { batch, ReadonlyStoreClass, signal, store, type Store, type Unsubscriber } from 'easy-signal';
 import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/ot/shared/changeBatching.js';
 import { BaseDoc } from '../client/BaseDoc.js';
+import type { BranchClientStore } from '../client/BranchClientStore.js';
 import type { ClientAlgorithm } from '../client/ClientAlgorithm.js';
 import { Patches } from '../client/Patches.js';
 import type { AlgorithmName, TrackedDoc } from '../client/PatchesStore.js';
@@ -11,7 +12,7 @@ import { blockable, serialGate } from '../utils/concurrency.js';
 import { ErrorCodes, StatusError } from './error.js';
 import type { PatchesConnection } from './PatchesConnection.js';
 import type { JSONRPCClient } from './protocol/JSONRPCClient.js';
-import type { ConnectionState } from './protocol/types.js';
+import type { BranchAPI, ConnectionState } from './protocol/types.js';
 import { PatchesWebSocket } from './websocket/PatchesWebSocket.js';
 import type { WebSocketOptions } from './websocket/WebSocketTransport.js';
 import { onlineState } from './websocket/onlineState.js';
@@ -33,6 +34,20 @@ export interface PatchesSyncOptions {
   maxStorageBytes?: number;
   /** Custom size calculator for storage limit. Falls back to patches.docOptions.sizeCalculator. */
   sizeCalculator?: SizeCalculator;
+  /**
+   * Local store for branch metadata.
+   * When provided, enables offline branch support:
+   * - Branch metas are cached locally for offline viewing
+   * - Branches with `pending: true` are created on the server during sync
+   * - Branch document content flows through the standard doc sync pipeline
+   */
+  branchStore?: BranchClientStore;
+  /**
+   * Branch API for syncing pending branch metas.
+   * Required when branchStore is provided. Typically the same RPC client
+   * used by PatchesBranchClient instances.
+   */
+  branchApi?: BranchAPI;
 }
 
 const EMPTY_DOC_STATE: DocSyncState = {
@@ -76,6 +91,12 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * Provides the pending changes that were discarded so the application can handle them.
    */
   readonly onRemoteDocDeleted = signal<(docId: string, pendingChanges: Change[]) => void>();
+  /**
+   * Signal emitted after pending branch metas have been synced to the server.
+   * Consumers should use this to refresh in-memory branch state (e.g. call `loadCached()`
+   * on their PatchesBranchClient instances).
+   */
+  readonly onBranchMetasSynced = signal();
 
   constructor(patches: Patches, url: string, options?: PatchesSyncOptions);
   constructor(patches: Patches, connection: PatchesConnection, options?: PatchesSyncOptions);
@@ -90,6 +111,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       syncStatus: 'unsynced',
     });
     this.patches = patches;
+
+    if (options?.branchStore && !options?.branchApi) {
+      throw new Error('branchApi is required when branchStore is provided');
+    }
+
     // Use options if provided, otherwise fall back to patches.docOptions
     this.maxPayloadBytes = options?.maxPayloadBytes;
     this.maxStorageBytes = options?.maxStorageBytes ?? patches.docOptions?.maxStorageBytes;
@@ -217,6 +243,81 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
+   * Syncs pending branch metas to the server.
+   *
+   * Pending branches come in two flavors:
+   * - **Created offline** (`pending: true`, no `deleted`): created on the server via `createBranch`.
+   * - **Deleted offline** (`pending: true`, `deleted: true`): deleted on the server via `deleteBranch`,
+   *   then physically removed from the local store.
+   *
+   * The server skips initial change creation when `contentStartRev` is set in the metadata,
+   * so their document content flows through the standard doc sync pipeline.
+   */
+  protected async syncPendingBranchMetas(): Promise<void> {
+    const branchStore = this.options?.branchStore;
+    const branchApi = this.options?.branchApi;
+    if (!branchStore || !branchApi) return;
+
+    const pendingBranches = await branchStore.listPendingBranches();
+
+    // Process creations first, then deletions, so a create+delete in the same
+    // offline session is handled correctly.
+    const pendingCreates = pendingBranches.filter(b => !b.deleted);
+    const pendingDeletes = pendingBranches.filter(b => b.deleted);
+
+    for (const branch of pendingCreates) {
+      if (!this.state.connected) break;
+
+      try {
+        // Create the branch on the server. The server is idempotent when metadata.id is provided.
+        // The server skips initial change creation when contentStartRev is set in the metadata.
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const {
+          docId: sourceDocId,
+          branchedAtRev,
+          createdAt,
+          modifiedAt,
+          status,
+          pending,
+          deleted,
+          ...metadata
+        } = branch;
+        await branchApi.createBranch(sourceDocId, branchedAtRev, metadata);
+
+        // Clear the pending flag
+        const synced = { ...branch };
+        delete synced.pending;
+        await branchStore.saveBranches(sourceDocId, [synced]);
+      } catch (err) {
+        console.error('Failed to sync pending branch meta:', branch.id, err);
+        this.onError.emit(err instanceof Error ? err : new Error(String(err)));
+        // Stop processing further branches — ordering may matter
+        break;
+      }
+    }
+
+    for (const branch of pendingDeletes) {
+      if (!this.state.connected) break;
+
+      try {
+        await branchApi.deleteBranch(branch.id);
+
+        // Server confirmed the delete — remove the tombstone from the local store
+        await branchStore.deleteBranches([branch.id]);
+      } catch (err) {
+        console.error('Failed to sync pending branch deletion:', branch.id, err);
+        this.onError.emit(err instanceof Error ? err : new Error(String(err)));
+        // Stop processing further deletions — keep tombstone for retry
+        break;
+      }
+    }
+
+    if (pendingBranches.length > 0) {
+      this.onBranchMetasSynced.emit();
+    }
+  }
+
+  /**
    * Syncs all known docs when initially connected.
    */
   protected async syncAllKnownDocs(): Promise<void> {
@@ -224,6 +325,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.updateState({ syncStatus: 'syncing' });
 
     try {
+      // Sync pending branch metas first — branches must exist on the server
+      // before their document content can be synced.
+      await this.syncPendingBranchMetas();
+
       // Get tracked docs from ALL algorithms and populate docAlgorithms Map
       const allTracked: TrackedDoc[] = [];
 

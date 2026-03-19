@@ -4,6 +4,7 @@ import type {
   Change,
   DocumentTombstone,
   EditableVersionMetadata,
+  ListBranchesOptions,
   ListChangesOptions,
   ListVersionsOptions,
   VersionMetadata,
@@ -173,7 +174,7 @@ export interface BranchingStoreBackend {
   createBranchId?(docId: string): Promise<string> | string;
 
   /** Lists metadata records for branches originating from a document. */
-  listBranches(docId: string): Promise<Branch[]>;
+  listBranches(docId: string, options?: ListBranchesOptions): Promise<Branch[]>;
 
   /** Loads the metadata record for a specific branch ID. */
   loadBranch(branchId: string): Promise<Branch | null>;
@@ -186,4 +187,11 @@ export interface BranchingStoreBackend {
     branchId: string,
     updates: Partial<Omit<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'contentStartRev'>>
   ): Promise<void>;
+
+  /**
+   * Replaces a branch record with a tombstone containing only `id`, `docId`, `modifiedAt`,
+   * and `deleted: true`. Tombstones are returned by `listBranches` when `since` is provided
+   * so that clients can clean up their local cache.
+   */
+  deleteBranch(branchId: string): Promise<void>;
 }

@@ -84,6 +84,30 @@ describe('breakChanges', () => {
     expect(result[1].ops).toHaveLength(1);
   });
 
+  it('should preserve batchId on derived changes when splitting', () => {
+    const change: Change = {
+      id: 'change-1',
+      rev: 1,
+      baseRev: 0,
+      ops: [
+        { op: 'add', path: '/test1', value: 'data1' },
+        { op: 'add', path: '/test2', value: 'data2' },
+      ],
+      createdAt: 0,
+      committedAt: 0,
+      batchId: 'my-batch-id',
+    };
+
+    const singleOpChange = createChange(1, [change.ops[0]]);
+    const maxBytes = getJSONByteSize(singleOpChange) + 10;
+
+    const result = breakChanges([change], maxBytes);
+
+    expect(result).toHaveLength(2);
+    expect(result[0].batchId).toBe('my-batch-id');
+    expect(result[1].batchId).toBe('my-batch-id');
+  });
+
   it('should handle empty changes array', () => {
     const result = breakChanges([], 100);
     expect(result).toEqual([]);

@@ -489,7 +489,9 @@ describe('LWWMemoryStoreBackend', () => {
       id,
       docId,
       branchedAtRev: 5,
+      contentStartRev: 2,
       createdAt: Date.now(),
+      modifiedAt: Date.now(),
       status: 'open',
     });
 
@@ -561,6 +563,45 @@ describe('LWWMemoryStoreBackend', () => {
       });
     });
 
+    describe('deleteBranch', () => {
+      it('replaces branch with tombstone', async () => {
+        await store.createBranch(createTestBranch('branch1', 'doc1'));
+
+        await store.deleteBranch('branch1');
+
+        const loaded = await store.loadBranch('branch1');
+        expect(loaded?.deleted).toBe(true);
+        expect(loaded?.id).toBe('branch1');
+        expect(loaded?.docId).toBe('doc1');
+      });
+
+      it('tombstones are excluded from full listBranches', async () => {
+        await store.createBranch(createTestBranch('branch1', 'doc1'));
+        await store.createBranch(createTestBranch('branch2', 'doc1'));
+        await store.deleteBranch('branch1');
+
+        const branches = await store.listBranches('doc1');
+        expect(branches).toHaveLength(1);
+        expect(branches[0].id).toBe('branch2');
+      });
+
+      it('tombstones are included in incremental listBranches', async () => {
+        const now = Date.now();
+        await store.createBranch(createTestBranch('branch1', 'doc1'));
+        await store.deleteBranch('branch1');
+
+        const branches = await store.listBranches('doc1', { since: now - 1000 });
+        expect(branches).toHaveLength(1);
+        expect(branches[0].id).toBe('branch1');
+        expect(branches[0].deleted).toBe(true);
+      });
+
+      it('does nothing for non-existent branch', async () => {
+        // Should not throw
+        await store.deleteBranch('nonexistent');
+      });
+    });
+
     describe('closeBranch via updateBranch', () => {
       it('sets status to closed', async () => {
         await store.createBranch(createTestBranch('branch1', 'doc1'));
@@ -580,7 +621,9 @@ describe('LWWMemoryStoreBackend', () => {
         id: 'branch1',
         docId: 'doc1',
         branchedAtRev: 5,
+        contentStartRev: 2,
         createdAt: Date.now(),
+        modifiedAt: Date.now(),
         status: 'open',
       });
 
@@ -611,7 +654,9 @@ describe('LWWMemoryStoreBackend', () => {
         id: 'branch1',
         docId: 'doc1',
         branchedAtRev: 5,
+        contentStartRev: 2,
         createdAt: Date.now(),
+        modifiedAt: Date.now(),
         status: 'open',
       });
 

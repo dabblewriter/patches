@@ -1,6 +1,6 @@
 import { createId } from 'crypto-id';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
-import type { Branch, BranchStatus, EditableBranchMetadata } from '../types.js';
+import type { Branch, BranchStatus, CreateBranchMetadata, EditableBranchMetadata } from '../types.js';
 
 /**
  * Standard API definition for branch managers.
@@ -73,7 +73,7 @@ export function createBranchRecord(
   sourceDocId: string,
   branchedAtRev: number,
   contentStartRev: number,
-  metadata?: EditableBranchMetadata
+  metadata?: CreateBranchMetadata | EditableBranchMetadata
 ): Branch {
   const now = Date.now();
   return {

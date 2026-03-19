@@ -91,6 +91,12 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * Provides the pending changes that were discarded so the application can handle them.
    */
   readonly onRemoteDocDeleted = signal<(docId: string, pendingChanges: Change[]) => void>();
+  /**
+   * Signal emitted after pending branch metas have been synced to the server.
+   * Consumers should use this to refresh in-memory branch state (e.g. call `loadCached()`
+   * on their PatchesBranchClient instances).
+   */
+  readonly onBranchMetasSynced = signal();
 
   constructor(patches: Patches, url: string, options?: PatchesSyncOptions);
   constructor(patches: Patches, connection: PatchesConnection, options?: PatchesSyncOptions);
@@ -290,6 +296,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         // Stop processing further deletions — keep tombstone for retry
         break;
       }
+    }
+
+    if (pendingBranches.length > 0) {
+      this.onBranchMetasSynced.emit();
     }
   }
 

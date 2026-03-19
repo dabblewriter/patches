@@ -267,6 +267,7 @@ describe('PatchesBranchClient', () => {
       const b1 = makeBranch({ id: 'b1' });
       const b2 = makeBranch({ id: 'b2' });
       client.branches.state = [b1, b2];
+      localStore.loadBranch.mockResolvedValue(b1);
 
       await client.deleteBranch('b1');
 
@@ -287,6 +288,7 @@ describe('PatchesBranchClient', () => {
       const client = new PatchesBranchClient('doc1', api, patches, localStore);
       const pendingBranch = makeBranch({ id: 'b1', pending: true });
       client.branches.state = [pendingBranch];
+      localStore.loadBranch.mockResolvedValue(pendingBranch);
 
       await client.deleteBranch('b1');
 
@@ -313,6 +315,7 @@ describe('PatchesBranchClient', () => {
       const client = new PatchesBranchClient('doc1', api, patches, localStore);
       const b1 = makeBranch({ id: 'b1' });
       client.branches.state = [b1];
+      localStore.loadBranch.mockResolvedValue(b1);
 
       await client.deleteBranchWithDoc('b1');
 

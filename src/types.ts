@@ -142,10 +142,12 @@ export type EditableBranchMetadata = Disallowed<
  * - `contentStartRev`: The first revision of user content. Set by the client when creating
  *   initial changes offline (the server uses this to know where user content begins during merge).
  */
-export type CreateBranchMetadata = Disallowed<
-  Branch,
-  'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'pending' | 'deleted'
->;
+export type CreateBranchMetadata = Omit<
+  Disallowed<Branch, 'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'pending' | 'deleted'>,
+  'contentStartRev'
+> & {
+  contentStartRev?: number;
+};
 
 /**
  * Options for listing branches.

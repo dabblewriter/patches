@@ -132,7 +132,7 @@ export class PatchesBranchClient {
    */
   async deleteBranch(branchId: string): Promise<void> {
     if (this.localStore) {
-      const existing = this.branches.state.find(b => b.id === branchId);
+      const existing = await this.localStore.loadBranch(branchId);
       const docId = existing?.docId ?? this.id;
 
       if (existing?.pending) {

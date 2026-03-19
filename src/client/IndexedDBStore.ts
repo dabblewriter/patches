@@ -8,6 +8,8 @@ import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 interface StoredBranch extends Branch {
   /** Source docId index for querying all branches of a doc */
   _docId: string;
+  /** Numeric pending flag for IndexedDB indexing (1 when pending, absent otherwise) */
+  _pending?: 1;
 }
 
 /**
@@ -25,7 +27,7 @@ interface StoredBranch extends Branch {
  * - Extensibility via onUpgrade signal for algorithm-specific stores
  */
 export class IndexedDBStore implements PatchesStore, BranchClientStore {
-  private static readonly DB_VERSION = 1;
+  private static readonly DB_VERSION = 2;
 
   protected db: IDBDatabase | null = null;
   protected dbName?: string;
@@ -71,6 +73,13 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     if (!db.objectStoreNames.contains('branches')) {
       const branchStore = db.createObjectStore('branches', { keyPath: 'id' });
       branchStore.createIndex('_docId', '_docId', { unique: false });
+      branchStore.createIndex('_pending', '_pending', { unique: false });
+    } else {
+      // Upgrade path: add _pending index to existing branches store
+      const branchStore = _transaction.objectStore('branches');
+      if (!branchStore.indexNames.contains('_pending')) {
+        branchStore.createIndex('_pending', '_pending', { unique: false });
+      }
     }
   }
 
@@ -282,7 +291,11 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     if (branches.length === 0) return;
     const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
     await Promise.all(
-      branches.map(branch => branchStore.put<StoredBranch>({ ...branch, _docId: docId }))
+      branches.map(branch => {
+        const stored: StoredBranch = { ...branch, _docId: docId };
+        if (branch.pending) stored._pending = 1;
+        return branchStore.put<StoredBranch>(stored);
+      })
     );
     await tx.complete();
   }
@@ -296,9 +309,9 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
 
   async listPendingBranches(): Promise<Branch[]> {
     const [tx, branchStore] = await this.transaction(['branches'], 'readonly');
-    const all = await branchStore.getAll<StoredBranch>();
+    const results = await branchStore.getAllByIndex<StoredBranch>('_pending', 1);
     await tx.complete();
-    return all.filter(b => b.pending).map(stripInternal);
+    return results.map(stripInternal);
   }
 
   async getLastModifiedAt(docId: string): Promise<number | undefined> {
@@ -319,7 +332,7 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
 /** Strip internal IndexedDB fields from stored branch */
 function stripInternal(stored: StoredBranch): Branch {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { _docId, ...branch } = stored;
+  const { _docId, _pending, ...branch } = stored;
   return branch;
 }
 

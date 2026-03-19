@@ -205,24 +205,21 @@ export class OTBranchManager implements BranchManager {
       lastVersionId = newVersionMetadata.id;
     }
 
-    // Flatten all unmerged ops into a single change.
+    // Flatten all unmerged ops into a single change with batchId set to branchId so that
+    // commitChanges won't transform these against previously-merged changes from this branch
+    // (all branch changes share the same causal context).
     const rev = branchStartRevOnSource + branchChanges.length;
     const flattenedChange = createChange(
       branchStartRevOnSource,
       rev,
-      branchChanges.flatMap(c => c.ops)
+      branchChanges.flatMap(c => c.ops),
+      { batchId: branchId }
     );
 
-    // Break oversized flattened change if needed
+    // Break oversized flattened change if needed (batchId is preserved by breakChanges)
     let changesToCommit = [flattenedChange];
     if (this.maxPayloadBytes) {
       changesToCommit = breakChanges(changesToCommit, this.maxPayloadBytes);
-    }
-
-    // Set batchId to branchId on all changes so commitChanges won't transform
-    // them against previously-merged changes from this branch (same causal context).
-    for (const c of changesToCommit) {
-      c.batchId = branchId;
     }
 
     // Commit changes to source doc with error handling

@@ -415,6 +415,6 @@ function breakLargeValueOp(
 function deriveNewChange(origChange: Change, rev: number, ops: JSONPatchOp[]) {
   // Filter out metadata that shouldn't be part of the new change object
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { id: _id, ops: _o, rev: _r, baseRev: _br, created: _c, batchId: _bi, ...metadata } = origChange;
+  const { id: _id, ops: _o, rev: _r, baseRev: _br, created: _c, ...metadata } = origChange;
   return createChange(origChange.baseRev, rev, ops, metadata);
 }

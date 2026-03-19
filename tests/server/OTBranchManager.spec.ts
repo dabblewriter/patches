@@ -447,6 +447,7 @@ describe('OTBranchManager', () => {
         ],
         createdAt: Date.now(),
         committedAt: Date.now(),
+        batchId: 'branch1',
         metadata: {},
       };
 
@@ -463,7 +464,8 @@ describe('OTBranchManager', () => {
       expect(createChange).toHaveBeenCalledWith(
         5,
         7,
-        mockBranchChanges.flatMap(c => c.ops)
+        mockBranchChanges.flatMap(c => c.ops),
+        { batchId: 'branch1' }
       );
       // batchId should be set to branchId on all changes
       expect(mockServer.commitChanges).toHaveBeenCalledWith('doc1', [

@@ -111,6 +111,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       syncStatus: 'unsynced',
     });
     this.patches = patches;
+
+    if (options?.branchStore && !options?.branchApi) {
+      throw new Error('branchApi is required when branchStore is provided');
+    }
+
     // Use options if provided, otherwise fall back to patches.docOptions
     this.maxPayloadBytes = options?.maxPayloadBytes;
     this.maxStorageBytes = options?.maxStorageBytes ?? patches.docOptions?.maxStorageBytes;

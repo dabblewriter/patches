@@ -142,6 +142,9 @@ export class PatchesBranchClient {
         // Branch was created offline and never synced — just remove it, no server call needed
         await this.localStore.deleteBranches([branchId]);
       } else {
+        if (!existing) {
+          console.warn(`deleteBranch: branch ${branchId} not found in local store, creating tombstone with placeholder fields`);
+        }
         // Branch exists on the server — save as a pending-deleted tombstone for sync
         const tombstone: Branch = {
           ...(existing ?? { id: branchId, docId, branchedAtRev: 0, createdAt: 0, status: 'open' as const, contentStartRev: 0 }),
@@ -226,22 +229,32 @@ export class PatchesBranchClient {
       pending: true,
     };
 
+    // Validate algorithm exists before persisting anything
+    const algorithmName = this.options?.algorithm ?? this.patches.defaultAlgorithm;
+    const algorithm = this.patches.algorithms[algorithmName];
+    if (!algorithm) {
+      throw new Error(`Algorithm '${algorithmName}' not found`);
+    }
+
     // Save branch meta locally
     if (this.localStore) {
       await this.localStore.saveBranches(this.id, [branch]);
     }
 
-    // Track the branch document through the standard pipeline
-    const algorithmName = this.options?.algorithm ?? this.patches.defaultAlgorithm;
-    await this.patches.trackDocs([branchDocId], algorithmName);
+    try {
+      // Track the branch document through the standard pipeline
+      await this.patches.trackDocs([branchDocId], algorithmName);
 
-    // Save initial changes as pending through the algorithm's store
-    const algorithm = this.patches.algorithms[algorithmName];
-    if (!algorithm) {
-      throw new Error(`Algorithm '${algorithmName}' not found`);
-    }
-    for (const change of initChanges) {
-      await algorithm.handleDocChange(branchDocId, change.ops, undefined, {});
+      // Save initial changes as pending through the algorithm's store
+      for (const change of initChanges) {
+        await algorithm.handleDocChange(branchDocId, change.ops, undefined, {});
+      }
+    } catch (err) {
+      // Rollback: remove saved branch meta so we don't leave inconsistent state
+      if (this.localStore) {
+        await this.localStore.deleteBranches([branchDocId]);
+      }
+      throw err;
     }
 
     // Update branches store

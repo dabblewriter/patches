@@ -208,6 +208,10 @@ export class OTBranchManager implements BranchManager {
     // Flatten all unmerged ops into a single change with batchId set to branchId so that
     // commitChanges won't transform these against previously-merged changes from this branch
     // (all branch changes share the same causal context).
+    //
+    // The baseRev and rev here are synthetic placeholders — they don't correspond to actual
+    // revisions on the source document. commitChanges will transform the ops against any
+    // concurrent source changes since branchStartRevOnSource and assign the real revision.
     const rev = branchStartRevOnSource + branchChanges.length;
     const flattenedChange = createChange(
       branchStartRevOnSource,

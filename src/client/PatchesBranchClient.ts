@@ -106,7 +106,10 @@ export class PatchesBranchClient {
    */
   async createBranch(rev: number, metadata?: CreateBranchMetadata, initialState?: any): Promise<string> {
     if (initialState !== undefined) {
-      return this._createBranchOffline(rev, metadata!, initialState);
+      if (!metadata) {
+        throw new Error('metadata is required when creating a branch with initialState');
+      }
+      return this._createBranchOffline(rev, metadata, initialState);
     }
 
     // Online path: server creates the branch and initial content

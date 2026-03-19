@@ -1581,12 +1581,24 @@ describe('PatchesSync', () => {
 
     it('should stop processing on API error', async () => {
       const branch1 = {
-        id: 'b1', docId: 'doc1', branchedAtRev: 3, createdAt: 100, modifiedAt: 100,
-        status: 'open', contentStartRev: 2, pending: true as const,
+        id: 'b1',
+        docId: 'doc1',
+        branchedAtRev: 3,
+        createdAt: 100,
+        modifiedAt: 100,
+        status: 'open',
+        contentStartRev: 2,
+        pending: true as const,
       };
       const branch2 = {
-        id: 'b2', docId: 'doc1', branchedAtRev: 4, createdAt: 200, modifiedAt: 200,
-        status: 'open', contentStartRev: 2, pending: true as const,
+        id: 'b2',
+        docId: 'doc1',
+        branchedAtRev: 4,
+        createdAt: 200,
+        modifiedAt: 200,
+        status: 'open',
+        contentStartRev: 2,
+        pending: true as const,
       };
       mockBranchStore.listPendingBranches.mockResolvedValue([branch1, branch2]);
       mockBranchApi.createBranch.mockRejectedValueOnce(new Error('Network error'));
@@ -1606,8 +1618,14 @@ describe('PatchesSync', () => {
 
     it('should stop if disconnected mid-sync', async () => {
       const branch = {
-        id: 'b1', docId: 'doc1', branchedAtRev: 3, createdAt: 100, modifiedAt: 100,
-        status: 'open', contentStartRev: 2, pending: true as const,
+        id: 'b1',
+        docId: 'doc1',
+        branchedAtRev: 3,
+        createdAt: 100,
+        modifiedAt: 100,
+        status: 'open',
+        contentStartRev: 2,
+        pending: true as const,
       };
       mockBranchStore.listPendingBranches.mockResolvedValue([branch]);
 
@@ -1625,12 +1643,24 @@ describe('PatchesSync', () => {
 
     it('should query all pending branches regardless of docId', async () => {
       const branch1 = {
-        id: 'b1', docId: 'doc1', branchedAtRev: 3, createdAt: 100, modifiedAt: 100,
-        status: 'open', contentStartRev: 2, pending: true as const,
+        id: 'b1',
+        docId: 'doc1',
+        branchedAtRev: 3,
+        createdAt: 100,
+        modifiedAt: 100,
+        status: 'open',
+        contentStartRev: 2,
+        pending: true as const,
       };
       const branch2 = {
-        id: 'b2', docId: 'doc2', branchedAtRev: 1, createdAt: 200, modifiedAt: 200,
-        status: 'open', contentStartRev: 2, pending: true as const,
+        id: 'b2',
+        docId: 'doc2',
+        branchedAtRev: 1,
+        createdAt: 200,
+        modifiedAt: 200,
+        status: 'open',
+        contentStartRev: 2,
+        pending: true as const,
       };
       mockBranchStore.listPendingBranches.mockResolvedValue([branch1, branch2]);
 
@@ -1724,8 +1754,14 @@ describe('PatchesSync', () => {
 
     it('should emit onBranchMetasSynced after syncing pending branches', async () => {
       const pendingBranch = {
-        id: 'b1', docId: 'doc1', branchedAtRev: 3, createdAt: 100, modifiedAt: 100,
-        status: 'open', contentStartRev: 2, pending: true as const,
+        id: 'b1',
+        docId: 'doc1',
+        branchedAtRev: 3,
+        createdAt: 100,
+        modifiedAt: 100,
+        status: 'open',
+        contentStartRev: 2,
+        pending: true as const,
       };
       mockBranchStore.listPendingBranches.mockResolvedValue([pendingBranch]);
 

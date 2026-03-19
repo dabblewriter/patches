@@ -217,9 +217,7 @@ describe('OTBranchManager', () => {
       const result = await branchManager.createBranch('doc1', 5, { name: 'Offline', contentStartRev: 4 });
 
       expect(result).toBe('generated-id');
-      expect(mockStore.createBranch).toHaveBeenCalledWith(
-        expect.objectContaining({ contentStartRev: 4 })
-      );
+      expect(mockStore.createBranch).toHaveBeenCalledWith(expect.objectContaining({ contentStartRev: 4 }));
     });
 
     it('should be idempotent when metadata.id matches existing branch', async () => {
@@ -254,9 +252,9 @@ describe('OTBranchManager', () => {
       };
       vi.mocked(mockStore.loadBranch).mockResolvedValue(existing);
 
-      await expect(
-        branchManager.createBranch('doc1', 5, { id: 'my-branch' })
-      ).rejects.toThrow('already exists for a different document');
+      await expect(branchManager.createBranch('doc1', 5, { id: 'my-branch' })).rejects.toThrow(
+        'already exists for a different document'
+      );
     });
 
     it('should throw error when trying to branch from a branch', async () => {
@@ -468,9 +466,7 @@ describe('OTBranchManager', () => {
         { batchId: 'branch1' }
       );
       // batchId should be set to branchId on all changes
-      expect(mockServer.commitChanges).toHaveBeenCalledWith('doc1', [
-        expect.objectContaining({ batchId: 'branch1' }),
-      ]);
+      expect(mockServer.commitChanges).toHaveBeenCalledWith('doc1', [expect.objectContaining({ batchId: 'branch1' })]);
       // Should update lastMergedRev instead of closing branch
       expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
         lastMergedRev: 2,
@@ -629,20 +625,26 @@ describe('OTBranchManager', () => {
       await branchManager.mergeBranch('branch1');
 
       expect(mockStore.createVersion).toHaveBeenCalledTimes(2);
-      expect(createVersionMetadata).toHaveBeenNthCalledWith(1, expect.objectContaining({
-        origin: 'branch',
-        startRev: 5,
-        groupId: 'branch1',
-        branchName: 'Feature Branch',
-        parentId: undefined,
-      }));
-      expect(createVersionMetadata).toHaveBeenNthCalledWith(2, expect.objectContaining({
-        origin: 'branch',
-        startRev: 5,
-        groupId: 'branch1',
-        branchName: 'Feature Branch',
-        parentId: 'new-version1',
-      }));
+      expect(createVersionMetadata).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          origin: 'branch',
+          startRev: 5,
+          groupId: 'branch1',
+          branchName: 'Feature Branch',
+          parentId: undefined,
+        })
+      );
+      expect(createVersionMetadata).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          origin: 'branch',
+          startRev: 5,
+          groupId: 'branch1',
+          branchName: 'Feature Branch',
+          parentId: 'new-version1',
+        })
+      );
     });
   });
 });

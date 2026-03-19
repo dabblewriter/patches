@@ -2,11 +2,7 @@ import { store, type Store } from 'easy-signal';
 import { breakChanges, type SizeCalculator } from '../algorithms/ot/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import type { BranchAPI } from '../net/protocol/types.js';
-import type {
-  Branch,
-  CreateBranchMetadata,
-  ListBranchesOptions,
-} from '../types.js';
+import type { Branch, CreateBranchMetadata, ListBranchesOptions } from '../types.js';
 import type { BranchClientStore } from './BranchClientStore.js';
 import type { Patches } from './Patches.js';
 import type { AlgorithmName } from './PatchesStore.js';
@@ -143,11 +139,20 @@ export class PatchesBranchClient {
         await this.localStore.deleteBranches([branchId]);
       } else {
         if (!existing) {
-          console.warn(`deleteBranch: branch ${branchId} not found in local store, creating tombstone with placeholder fields`);
+          console.warn(
+            `deleteBranch: branch ${branchId} not found in local store, creating tombstone with placeholder fields`
+          );
         }
         // Branch exists on the server — save as a pending-deleted tombstone for sync
         const tombstone: Branch = {
-          ...(existing ?? { id: branchId, docId, branchedAtRev: 0, createdAt: 0, status: 'open' as const, contentStartRev: 0 }),
+          ...(existing ?? {
+            id: branchId,
+            docId,
+            branchedAtRev: 0,
+            createdAt: 0,
+            status: 'open' as const,
+            contentStartRev: 0,
+          }),
           modifiedAt: Date.now(),
           pending: true,
           deleted: true,

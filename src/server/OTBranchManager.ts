@@ -66,12 +66,8 @@ export class OTBranchManager implements BranchManager {
    * @param rev - The revision of the document to branch from.
    * @returns The ID of the new branch document.
    */
-  async createBranch(
-    docId: string,
-    rev: number,
-    metadata?: CreateBranchMetadata,
-  ): Promise<string> {
-    const branchDocId = metadata?.id ?? await generateBranchId(this.store, docId);
+  async createBranch(docId: string, rev: number, metadata?: CreateBranchMetadata): Promise<string> {
+    const branchDocId = metadata?.id ?? (await generateBranchId(this.store, docId));
 
     // Idempotent: if a branch with this ID already exists, return it as a no-op.
     // This handles retry-on-bad-connection scenarios.

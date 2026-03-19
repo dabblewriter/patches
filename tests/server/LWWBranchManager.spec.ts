@@ -168,9 +168,9 @@ describe('LWWBranchManager', () => {
       ]);
       await branchManager.createBranch('doc1', 1, { id: 'shared-id' });
 
-      await expect(
-        branchManager.createBranch('doc2', 1, { id: 'shared-id' })
-      ).rejects.toThrow('already exists for a different document');
+      await expect(branchManager.createBranch('doc2', 1, { id: 'shared-id' })).rejects.toThrow(
+        'already exists for a different document'
+      );
     });
 
     it('should use custom branch ID generator if provided', async () => {

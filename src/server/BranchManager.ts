@@ -1,4 +1,11 @@
-import type { Branch, BranchStatus, Change, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
+import type {
+  Branch,
+  BranchStatus,
+  Change,
+  CreateBranchMetadata,
+  EditableBranchMetadata,
+  ListBranchesOptions,
+} from '../types.js';
 
 /**
  * Interface for managing document branches.
@@ -26,11 +33,7 @@ export interface BranchManager {
    *   (the client has already created them and will sync them as regular document changes).
    * @returns The new branch document ID.
    */
-  createBranch(
-    docId: string,
-    atPoint: number,
-    metadata?: CreateBranchMetadata,
-  ): Promise<string>;
+  createBranch(docId: string, atPoint: number, metadata?: CreateBranchMetadata): Promise<string>;
 
   /**
    * Updates branch metadata.

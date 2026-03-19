@@ -272,7 +272,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         // Create the branch on the server. The server is idempotent when metadata.id is provided.
         // The server skips initial change creation when contentStartRev is set in the metadata.
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { docId: sourceDocId, branchedAtRev, createdAt, modifiedAt, status, pending, deleted, ...metadata } = branch;
+        const {
+          docId: sourceDocId,
+          branchedAtRev,
+          createdAt,
+          modifiedAt,
+          status,
+          pending,
+          deleted,
+          ...metadata
+        } = branch;
         await branchApi.createBranch(sourceDocId, branchedAtRev, metadata);
 
         // Clear the pending flag

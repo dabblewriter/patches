@@ -69,12 +69,8 @@ export class LWWBranchManager implements BranchManager {
    * @param atPoint - The revision number (recorded for tracking).
    * @returns The new branch document ID.
    */
-  async createBranch(
-    docId: string,
-    atPoint: number,
-    metadata?: CreateBranchMetadata,
-  ): Promise<string> {
-    const branchDocId = metadata?.id ?? await generateBranchId(this.store, docId);
+  async createBranch(docId: string, atPoint: number, metadata?: CreateBranchMetadata): Promise<string> {
+    const branchDocId = metadata?.id ?? (await generateBranchId(this.store, docId));
 
     // Idempotent: if a branch with this ID already exists, return it as a no-op.
     // This handles retry-on-bad-connection scenarios.

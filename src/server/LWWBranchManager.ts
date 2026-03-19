@@ -153,8 +153,11 @@ export class LWWBranchManager implements BranchManager {
   /**
    * Merges a branch back into its source document.
    *
+   * Supports multiple merges — the branch stays open and `lastMergedRev` tracks
+   * which branch revision was last merged. Subsequent merges only pick up new changes.
+   *
    * LWW merge algorithm:
-   * 1. Get all ops changes made on the branch since it was created
+   * 1. Get ops changes made on the branch since last merge (or since creation)
    * 2. Apply those changes to the source document
    * 3. Timestamps automatically resolve any conflicts (later wins)
    *
@@ -168,14 +171,16 @@ export class LWWBranchManager implements BranchManager {
 
     const sourceDocId = branch.docId;
 
-    // Get all changes made on the branch (synthesized from ops)
-    const branchChanges = await this.lwwServer.getChangesSince(branchId, branch.branchedAtRev);
+    // Get only unmerged changes: since lastMergedRev (if previously merged) or branchedAtRev
+    const sinceRev = branch.lastMergedRev ?? branch.branchedAtRev;
+    const branchChanges = await this.lwwServer.getChangesSince(branchId, sinceRev);
 
     if (branchChanges.length === 0) {
-      console.log(`Branch ${branchId} has no changes to merge.`);
-      await this.closeBranch(branchId, 'merged');
       return [];
     }
+
+    // Track the branch rev for lastMergedRev update
+    const branchRev = await this.store.getCurrentRev(branchId);
 
     // LWW merge: commit the branch changes to the source document
     // Timestamps will automatically resolve any conflicts
@@ -183,8 +188,8 @@ export class LWWBranchManager implements BranchManager {
       this.lwwServer.commitChanges(sourceDocId, branchChanges)
     );
 
-    // Close the branch
-    await this.closeBranch(branchId, 'merged');
+    // Update lastMergedRev so next merge picks up only new changes
+    await this.store.updateBranch(branchId, { lastMergedRev: branchRev, modifiedAt: Date.now() });
     return committedChanges;
   }
 }

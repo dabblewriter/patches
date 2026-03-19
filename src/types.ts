@@ -113,6 +113,13 @@ export interface Branch {
    */
   contentStartRev: number;
 
+  /**
+   * The branch-side revision through which changes have already been merged.
+   * Set after each merge so subsequent merges only pick up new changes.
+   * Undefined means the branch has never been merged.
+   */
+  lastMergedRev?: number;
+
   /** True when this branch was created offline and hasn't been synced to the server yet. */
   pending?: true;
 
@@ -125,7 +132,7 @@ export interface Branch {
 
 export type EditableBranchMetadata = Disallowed<
   Branch,
-  'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'contentStartRev' | 'pending' | 'deleted'
+  'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'contentStartRev' | 'lastMergedRev' | 'pending' | 'deleted'
 >;
 
 /**

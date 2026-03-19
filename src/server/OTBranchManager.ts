@@ -155,6 +155,13 @@ export class OTBranchManager implements BranchManager {
 
   /**
    * Merges changes from a branch back into its source document.
+   *
+   * Supports multiple merges — the branch stays open and `lastMergedRev` tracks
+   * which branch revision was last merged. Subsequent merges only pick up new changes.
+   *
+   * All merge changes use `batchId: branchId` so that `commitChanges` never transforms
+   * branch changes against each other (they share the same causal context).
+   *
    * @param branchId - The ID of the branch document to merge.
    * @returns The server commit change(s) applied to the source document.
    * @throws Error if branch not found, already closed/merged, or merge fails.
@@ -167,40 +174,30 @@ export class OTBranchManager implements BranchManager {
     const sourceDocId = branch.docId;
     const branchStartRevOnSource = branch.branchedAtRev;
 
-    // Skip initialization changes — only merge user content changes
-    const contentStartRev = branch.contentStartRev ?? 2;
-    const branchChanges = await this.store.listChanges(branchId, { startAfter: contentStartRev - 1 });
+    // Get only unmerged changes: since lastMergedRev (if previously merged) or contentStartRev
+    const startAfter = branch.lastMergedRev ?? (branch.contentStartRev ?? 2) - 1;
+    const branchChanges = await this.store.listChanges(branchId, { startAfter });
     if (branchChanges.length === 0) {
-      console.log(`Branch ${branchId} has no changes to merge.`);
-      await this.closeBranch(branchId, 'merged');
       return [];
     }
 
-    // Check if we can fast-forward (no concurrent changes on source since branch)
-    const sourceChanges = await this.store.listChanges(sourceDocId, {
-      startAfter: branchStartRevOnSource,
-    });
-    const canFastForward = sourceChanges.length === 0;
+    const lastBranchRev = branchChanges[branchChanges.length - 1].rev;
 
     // Get all versions from the branch doc (skip offline-branch versions)
     const branchVersions = await this.store.listVersions(branchId, { origin: 'main' });
-
-    // For each version, create a corresponding version in the main doc
-    // Use 'main' origin if fast-forward, 'branch' if divergent
-    const versionOrigin = canFastForward ? 'main' : 'branch';
-    let lastVersionId: string | undefined;
 
     // Note: if version creation succeeds but commit fails, orphaned versions
     // may remain in the store. The store interface does not currently expose a
     // deleteVersion method, so cleanup is not possible. These orphaned versions
     // are harmless (they reference a groupId that was never fully merged).
+    let lastVersionId: string | undefined;
     for (const v of branchVersions) {
       const newVersionMetadata = createVersionMetadata({
         ...v,
-        origin: versionOrigin,
+        origin: 'branch',
         startRev: branchStartRevOnSource,
         groupId: branchId,
-        branchName: branch.name, // Keep branchName for traceability
+        branchName: branch.name,
         parentId: lastVersionId,
       });
       const changes = await this.store.loadVersionChanges?.(branchId, v.id);
@@ -208,37 +205,33 @@ export class OTBranchManager implements BranchManager {
       lastVersionId = newVersionMetadata.id;
     }
 
+    // Flatten all unmerged ops into a single change.
+    const rev = branchStartRevOnSource + branchChanges.length;
+    const flattenedChange = createChange(
+      branchStartRevOnSource,
+      rev,
+      branchChanges.flatMap(c => c.ops)
+    );
+
+    // Break oversized flattened change if needed
+    let changesToCommit = [flattenedChange];
+    if (this.maxPayloadBytes) {
+      changesToCommit = breakChanges(changesToCommit, this.maxPayloadBytes);
+    }
+
+    // Set batchId to branchId on all changes so commitChanges won't transform
+    // them against previously-merged changes from this branch (same causal context).
+    for (const c of changesToCommit) {
+      c.batchId = branchId;
+    }
+
     // Commit changes to source doc with error handling
     const committedMergeChanges = await wrapMergeCommit(branchId, sourceDocId, async () => {
-      if (canFastForward) {
-        // Fast-forward: commit branch changes individually with adjusted revs
-        const adjustedChanges = branchChanges.map(c => ({
-          ...c,
-          baseRev: branchStartRevOnSource,
-          rev: undefined, // Let commitChanges assign sequential revs
-        }));
-        return (await this.patchesServer.commitChanges(sourceDocId, adjustedChanges)).changes;
-      } else {
-        // Divergent: flatten and transform (current behavior)
-        const rev = branchStartRevOnSource + branchChanges.length;
-        const flattenedChange = createChange(
-          branchStartRevOnSource,
-          rev,
-          branchChanges.flatMap(c => c.ops)
-        );
-
-        // Break oversized flattened change if needed
-        let changesToCommit = [flattenedChange];
-        if (this.maxPayloadBytes) {
-          changesToCommit = breakChanges(changesToCommit, this.maxPayloadBytes);
-        }
-
-        return (await this.patchesServer.commitChanges(sourceDocId, changesToCommit)).changes;
-      }
+      return (await this.patchesServer.commitChanges(sourceDocId, changesToCommit)).changes;
     });
 
-    // Merge succeeded. Update the branch status.
-    await this.closeBranch(branchId, 'merged');
+    // Merge succeeded. Update lastMergedRev so next merge picks up only new changes.
+    await this.store.updateBranch(branchId, { lastMergedRev: lastBranchRev, modifiedAt: Date.now() });
     return committedMergeChanges;
   }
 }

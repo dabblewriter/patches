@@ -465,9 +465,13 @@ describe('OTBranchManager', () => {
         7,
         mockBranchChanges.flatMap(c => c.ops)
       );
-      expect(mockServer.commitChanges).toHaveBeenCalledWith('doc1', [flattenedChange]);
+      // batchId should be set to branchId on all changes
+      expect(mockServer.commitChanges).toHaveBeenCalledWith('doc1', [
+        expect.objectContaining({ batchId: 'branch1' }),
+      ]);
+      // Should update lastMergedRev instead of closing branch
       expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
-        status: 'merged',
+        lastMergedRev: 2,
         modifiedAt: expect.any(Number),
       });
       expect(result).toEqual(committedChanges);
@@ -488,20 +492,14 @@ describe('OTBranchManager', () => {
       );
     });
 
-    it('should handle branch with no changes', async () => {
+    it('should return empty array when no changes to merge', async () => {
       vi.mocked(mockStore.listChanges).mockResolvedValue([]);
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
       const result = await branchManager.mergeBranch('branch1');
 
-      expect(consoleSpy).toHaveBeenCalledWith('Branch branch1 has no changes to merge.');
-      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
-        status: 'merged',
-        modifiedAt: expect.any(Number),
-      });
+      // Should NOT update branch or close it when there's nothing to merge
+      expect(mockStore.updateBranch).not.toHaveBeenCalled();
       expect(result).toEqual([]);
-
-      consoleSpy.mockRestore();
     });
 
     it('should handle commit errors gracefully', async () => {
@@ -524,6 +522,49 @@ describe('OTBranchManager', () => {
       expect(consoleSpy).toHaveBeenCalledWith('Failed to merge branch branch1 into doc1:', commitError);
 
       consoleSpy.mockRestore();
+    });
+
+    it('should use lastMergedRev when branch was previously merged', async () => {
+      const previouslyMergedBranch = {
+        ...mockBranch,
+        lastMergedRev: 5, // Already merged through rev 5
+      };
+      vi.mocked(mockStore.loadBranch).mockResolvedValue(previouslyMergedBranch);
+
+      const newChanges: Change[] = [
+        {
+          id: 'change3',
+          rev: 6,
+          baseRev: 5,
+          ops: [{ op: 'replace', path: '/footer', value: 'New Footer' }],
+          createdAt: Date.now(),
+          committedAt: Date.now(),
+          metadata: {},
+        },
+      ];
+      vi.mocked(mockStore.listChanges).mockResolvedValue(newChanges);
+
+      const flattenedChange = {
+        id: 'merged-change',
+        baseRev: 5,
+        rev: 6,
+        ops: newChanges.flatMap(c => c.ops),
+        createdAt: Date.now(),
+        committedAt: Date.now(),
+        metadata: {},
+      };
+      vi.mocked(createChange).mockReturnValue(flattenedChange);
+      vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: [flattenedChange] });
+
+      await branchManager.mergeBranch('branch1');
+
+      // Should query changes after lastMergedRev, not contentStartRev
+      expect(mockStore.listChanges).toHaveBeenCalledWith('branch1', { startAfter: 5 });
+      // Should update lastMergedRev to the latest branch rev
+      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
+        lastMergedRev: 6,
+        modifiedAt: expect.any(Number),
+      });
     });
 
     it('should create versions for all branch versions', async () => {
@@ -586,22 +627,20 @@ describe('OTBranchManager', () => {
       await branchManager.mergeBranch('branch1');
 
       expect(mockStore.createVersion).toHaveBeenCalledTimes(2);
-      expect(createVersionMetadata).toHaveBeenNthCalledWith(1, {
-        ...multipleVersions[0],
+      expect(createVersionMetadata).toHaveBeenNthCalledWith(1, expect.objectContaining({
         origin: 'branch',
         startRev: 5,
         groupId: 'branch1',
         branchName: 'Feature Branch',
         parentId: undefined,
-      });
-      expect(createVersionMetadata).toHaveBeenNthCalledWith(2, {
-        ...multipleVersions[1],
+      }));
+      expect(createVersionMetadata).toHaveBeenNthCalledWith(2, expect.objectContaining({
         origin: 'branch',
         startRev: 5,
         groupId: 'branch1',
         branchName: 'Feature Branch',
         parentId: 'new-version1',
-      });
+      }));
     });
   });
 });
@@ -622,7 +661,7 @@ describe('assertBranchMetadata', () => {
   });
 
   it('should throw error for non-modifiable fields', () => {
-    const invalidFields = ['id', 'docId', 'branchedAtRev', 'createdAt', 'modifiedAt', 'status'];
+    const invalidFields = ['id', 'docId', 'branchedAtRev', 'createdAt', 'modifiedAt', 'status', 'lastMergedRev'];
 
     invalidFields.forEach(field => {
       const metadata = { [field]: 'value' } as any;

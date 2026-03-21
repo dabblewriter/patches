@@ -6,13 +6,16 @@ The use case is simple: experimentation without fear. Want to try a radical rede
 
 **Table of Contents**
 
-- [How Branching Works](#how-branching-works)
-- [OT vs LWW Branching](#ot-vs-lww-branching)
-- [Creating a Branch](#creating-a-branch)
-- [Branch Metadata](#branch-metadata)
-- [Merging Back](#merging-back)
-- [Design Decisions](#design-decisions)
-- [Practical Example](#practical-example)
+- [Branching and Merging in Patches](#branching-and-merging-in-patches)
+  - [How Branching Works](#how-branching-works)
+  - [OT vs LWW Branching](#ot-vs-lww-branching)
+  - [Creating a Branch](#creating-a-branch)
+  - [Branch Metadata](#branch-metadata)
+  - [Merging Back](#merging-back)
+    - [OT Merge Approach](#ot-merge-approach)
+    - [LWW Merge Approach](#lww-merge-approach)
+  - [Design Decisions](#design-decisions)
+  - [Practical Example](#practical-example)
 
 ## How Branching Works
 
@@ -136,26 +139,27 @@ await branchManager.closeBranch(branchDocId);
 
 ### OT Merge Approach
 
-The [OTBranchManager](PatchesBranchManager.md) always flattens branch changes and uses `batchId` for correct transformation:
+The [OTBranchManager](PatchesBranchManager.md) preserves original branch changes and uses `batchId` for correct transformation:
 
 ```
-Source: [rev 40] [rev 41] [rev 42] [rev 43 (Bob)] [rev 44 (Carol)] ───────[rev 45]
-                              │                                               ↑
-                              └── Branch created ── [change A] [change B] ────┘
-                                                                            merge (flattened + transformed)
+Source: [rev 40] [rev 41] [rev 42] [rev 43 (Bob)] [rev 44 (Carol)] ─────[rev 45] [rev 46]
+                              │                                             ↑        ↑
+                              └── Branch created ── [change A] [change B] ──┘────────┘
+                                                                          (each transformed independently)
 ```
 
 When Alice merges her branch:
 
-1. Branch changes get copied to source with `origin: 'branch'` in version metadata
-2. Unmerged branch changes (since `lastMergedRev`) get flattened into a single change
-3. All merge changes use `batchId: branchId` — this tells `commitChanges` not to transform them against previously-merged changes from the same branch (they share the same causal context)
-4. The flattened change gets transformed against only truly concurrent source changes
-5. `lastMergedRev` is updated on the branch record
+1. Branch versions get copied to source with `origin: 'branch'` in version metadata
+2. Unmerged branch changes (since `lastMergedRev`) are re-stamped with `baseRev` set to the branch point and `batchId: branchId`
+3. Original change IDs are preserved — this makes merges idempotent (safe to retry if the network drops after commit but before acknowledgment)
+4. `commitChanges` uses the `batchId` to skip transformation against previously-merged changes from the same branch (they share the same causal context)
+5. Each change gets transformed individually against truly concurrent source changes
+6. `lastMergedRev` is updated on the branch record
 
 Why `batchId`? All changes in a branch are created in the context of each other. Change 500 knows about change 5, even across multiple merges. Using the branch ID as the batch ID ensures they're never transformed against each other.
 
-Why flatten? Transforming 1,000 individual branch changes against 500 source changes would be slow. Flattening gives the same end result with better performance. The original version history is preserved with `origin: 'branch'` for traceability.
+Why preserve original changes instead of flattening? Idempotency. If changes are flattened into a new change with a new ID, a retry after a failed acknowledgment would create a duplicate with a different ID — the server can't detect it as a duplicate, and the document gets corrupted. Preserving original IDs means the server's ID-based deduplication catches retries automatically. This also enables offline merge: two clients merging the same branch produce identical change IDs, so deduplication prevents corruption.
 
 ### LWW Merge Approach
 
@@ -176,11 +180,11 @@ This works because LWW conflicts don't need intelligent merging. The last writer
 
 The initial branch version uses the source's revision number. When you branch at rev 42, the branch's first version is at rev 42. This means no translation needed when merging. The revision numbers just work.
 
-**Why flatten changes for divergent merges?**
+**Why not flatten changes for merge?**
 
-Performance. A branch with 10,000 tiny changes merged against 5,000 source changes would require transforming each branch change against each source change. Flattening collapses the branch into one change, making merge fast regardless of branch size.
+Flattening creates a new change with a new ID. That destroys idempotency — if a merge is retried (network failure after commit, before acknowledgment), the second attempt creates a different change ID for the same content. The server can't deduplicate it, and the document gets double-applied ops.
 
-The tradeoff: you lose the granular branch history in the transformation. But the original versions are preserved with `origin: 'branch'` metadata for auditing.
+Preserving original branch changes with their original IDs means the server's existing ID-based deduplication handles retries correctly. The tradeoff is more transformation work (N changes × committed ops instead of 1 × committed ops), but correctness beats performance here.
 
 **Why no nested branches?**
 
@@ -195,7 +199,7 @@ When a client goes offline, their changes are essentially a branch. They diverge
 Patches handles this the same way:
 
 - No concurrent server changes while offline? Changes merge like a fast-forward.
-- Concurrent server changes? Offline changes get marked `origin: 'offline-branch'` and flattened for transformation.
+- Concurrent server changes? Offline changes get marked `origin: 'offline-branch'` and each change is transformed individually against the concurrent changes.
 
 This consistency means the same algorithms handle both explicit branching and implicit offline divergence.
 

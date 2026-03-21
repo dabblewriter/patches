@@ -434,24 +434,14 @@ describe('OTBranchManager', () => {
       vi.mocked(mockStore.updateBranch).mockResolvedValue();
     });
 
-    it('should merge branch successfully', async () => {
-      const flattenedChange = {
-        id: 'merged-change',
+    it('should merge branch successfully with original change IDs preserved', async () => {
+      const committedChanges: Change[] = mockBranchChanges.map((c, i) => ({
+        ...c,
         baseRev: 5,
-        rev: 7,
-        ops: [
-          { op: 'replace', path: '/title', value: 'New Title' },
-          { op: 'add', path: '/section', value: 'New Section' },
-        ],
-        createdAt: Date.now(),
-        committedAt: Date.now(),
+        rev: 6 + i,
         batchId: 'branch1',
-        metadata: {},
-      };
+      }));
 
-      const committedChanges: Change[] = [flattenedChange];
-
-      vi.mocked(createChange).mockReturnValue(flattenedChange);
       vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: committedChanges });
 
       const result = await branchManager.mergeBranch('branch1');
@@ -459,14 +449,13 @@ describe('OTBranchManager', () => {
       expect(mockStore.loadBranch).toHaveBeenCalledWith('branch1');
       expect(mockStore.listChanges).toHaveBeenCalledWith('branch1', { startAfter: 1 });
       expect(mockStore.listVersions).toHaveBeenCalledWith('branch1', { origin: 'main' });
-      expect(createChange).toHaveBeenCalledWith(
-        5,
-        7,
-        mockBranchChanges.flatMap(c => c.ops),
-        { batchId: 'branch1' }
-      );
-      // batchId should be set to branchId on all changes
-      expect(mockServer.commitChanges).toHaveBeenCalledWith('doc1', [expect.objectContaining({ batchId: 'branch1' })]);
+      // Should send original changes re-stamped with baseRev and batchId
+      expect(mockServer.commitChanges).toHaveBeenCalledWith('doc1', [
+        expect.objectContaining({ id: 'change1', baseRev: 5, rev: 6, batchId: 'branch1' }),
+        expect.objectContaining({ id: 'change2', baseRev: 5, rev: 7, batchId: 'branch1' }),
+      ]);
+      // Should NOT call createChange (no flattening)
+      expect(createChange).not.toHaveBeenCalled();
       // Should update lastMergedRev instead of closing branch
       expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
         lastMergedRev: 2,
@@ -502,15 +491,6 @@ describe('OTBranchManager', () => {
 
     it('should handle commit errors gracefully', async () => {
       const commitError = new Error('Commit failed');
-      vi.mocked(createChange).mockReturnValue({
-        id: 'merged-change',
-        baseRev: 5,
-        rev: 7,
-        ops: [],
-        createdAt: Date.now(),
-        committedAt: Date.now(),
-        metadata: {},
-      });
       vi.mocked(mockServer.commitChanges).mockRejectedValue(commitError);
 
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -542,17 +522,9 @@ describe('OTBranchManager', () => {
       ];
       vi.mocked(mockStore.listChanges).mockResolvedValue(newChanges);
 
-      const flattenedChange = {
-        id: 'merged-change',
-        baseRev: 5,
-        rev: 6,
-        ops: newChanges.flatMap(c => c.ops),
-        createdAt: Date.now(),
-        committedAt: Date.now(),
-        metadata: {},
-      };
-      vi.mocked(createChange).mockReturnValue(flattenedChange);
-      vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: [flattenedChange] });
+      vi.mocked(mockServer.commitChanges).mockResolvedValue({
+        changes: newChanges.map(c => ({ ...c, baseRev: 5, rev: 6, batchId: 'branch1' })),
+      });
 
       await branchManager.mergeBranch('branch1');
 
@@ -611,15 +583,6 @@ describe('OTBranchManager', () => {
           endRev: 2,
           startRev: 5,
         });
-      vi.mocked(createChange).mockReturnValue({
-        id: 'merged-change',
-        baseRev: 5,
-        rev: 7,
-        ops: [],
-        createdAt: Date.now(),
-        committedAt: Date.now(),
-        metadata: {},
-      });
       vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: [] });
 
       await branchManager.mergeBranch('branch1');
@@ -665,7 +628,7 @@ describe('assertBranchMetadata', () => {
   });
 
   it('should throw error for non-modifiable fields', () => {
-    const invalidFields = ['id', 'docId', 'branchedAtRev', 'createdAt', 'modifiedAt', 'status', 'lastMergedRev'];
+    const invalidFields = ['id', 'docId', 'branchedAtRev', 'createdAt', 'modifiedAt', 'status', 'contentStartRev'];
 
     invalidFields.forEach(field => {
       const metadata = { [field]: 'value' } as any;

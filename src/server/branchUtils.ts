@@ -26,7 +26,6 @@ const nonModifiableBranchFields = new Set([
   'modifiedAt',
   'status',
   'contentStartRev',
-  'lastMergedRev',
 ]);
 
 /**

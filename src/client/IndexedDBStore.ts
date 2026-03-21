@@ -1,4 +1,5 @@
-import type { Branch, PatchesSnapshot, PatchesState } from '../types.js';
+import { createId } from 'crypto-id';
+import type { Branch, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions, PatchesSnapshot, PatchesState } from '../types.js';
 import { deferred, type Deferred } from '../utils/deferred.js';
 import { signal } from 'easy-signal';
 import type { BranchClientStore } from './BranchClientStore.js';
@@ -273,12 +274,90 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
 
   // ─── Branch Methods (BranchClientStore) ─────────────────────────────────
 
-  async listBranches(docId: string): Promise<Branch[]> {
+  // --- BranchAPI-compatible methods ---
+
+  async listBranches(docId: string, _options?: ListBranchesOptions): Promise<Branch[]> {
     const [tx, branchStore] = await this.transaction(['branches'], 'readonly');
     const results = await branchStore.getAllByIndex<StoredBranch>('_docId', docId);
     await tx.complete();
     return results.filter(b => !b.deleted).map(stripInternal);
   }
+
+  async createBranch(docId: string, rev: number, metadata?: CreateBranchMetadata): Promise<string> {
+    const branchDocId = metadata?.id ?? createId(22);
+    const now = Date.now();
+    const branch: Branch = {
+      ...metadata,
+      id: branchDocId,
+      docId,
+      branchedAtRev: rev,
+      contentStartRev: metadata?.contentStartRev ?? 0,
+      createdAt: now,
+      modifiedAt: now,
+      status: 'open',
+      pendingOp: 'create',
+    };
+    await this._saveBranch(docId, branch);
+    return branchDocId;
+  }
+
+  async closeBranch(branchId: string): Promise<void> {
+    const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
+    const existing = await branchStore.get<StoredBranch>(branchId);
+    if (!existing) throw new Error(`Branch ${branchId} not found`);
+    existing.status = 'closed';
+    existing.modifiedAt = Date.now();
+    // If never synced, keep pendingOp as 'create' — PatchesSync will create it with status closed
+    if (existing.pendingOp !== 'create') existing.pendingOp = 'close';
+    existing._pending = 1;
+    await branchStore.put<StoredBranch>(existing);
+    await tx.complete();
+  }
+
+  async deleteBranch(branchId: string): Promise<void> {
+    const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
+    const existing = await branchStore.get<StoredBranch>(branchId);
+
+    if (existing?.pendingOp === 'create') {
+      // Never synced — just remove it, no server call needed
+      await branchStore.delete(branchId);
+    } else {
+      // Save as a tombstone for PatchesSync to delete on the server
+      const docId = existing?._docId ?? '';
+      const tombstone: StoredBranch = {
+        ...(existing ?? {
+          id: branchId,
+          docId,
+          branchedAtRev: 0,
+          createdAt: 0,
+          status: 'open' as const,
+          contentStartRev: 0,
+          _docId: docId,
+        }),
+        modifiedAt: Date.now(),
+        pendingOp: 'delete',
+        deleted: true,
+        _pending: 1,
+      };
+      await branchStore.put<StoredBranch>(tombstone);
+    }
+    await tx.complete();
+  }
+
+  async updateBranch(branchId: string, metadata: EditableBranchMetadata): Promise<void> {
+    const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
+    const existing = await branchStore.get<StoredBranch>(branchId);
+    if (!existing) throw new Error(`Branch ${branchId} not found`);
+    Object.assign(existing, metadata);
+    existing.modifiedAt = Date.now();
+    // If never synced, keep pendingOp as 'create'
+    if (existing.pendingOp !== 'create') existing.pendingOp = 'update';
+    existing._pending = 1;
+    await branchStore.put<StoredBranch>(existing);
+    await tx.complete();
+  }
+
+  // --- Internal methods ---
 
   async loadBranch(branchId: string): Promise<Branch | undefined> {
     const [tx, branchStore] = await this.transaction(['branches'], 'readonly');
@@ -287,20 +366,22 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     return result ? stripInternal(result) : undefined;
   }
 
+  // --- Sync-facing methods ---
+
   async saveBranches(docId: string, branches: Branch[]): Promise<void> {
     if (branches.length === 0) return;
     const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
     await Promise.all(
       branches.map(branch => {
         const stored: StoredBranch = { ...branch, _docId: docId };
-        if (branch.pending) stored._pending = 1;
+        if (branch.pendingOp) stored._pending = 1;
         return branchStore.put<StoredBranch>(stored);
       })
     );
     await tx.complete();
   }
 
-  async deleteBranches(branchIds: string[]): Promise<void> {
+  async removeBranches(branchIds: string[]): Promise<void> {
     if (branchIds.length === 0) return;
     const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
     await Promise.all(branchIds.map(id => branchStore.delete(id)));
@@ -323,9 +404,19 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
 
     let max = 0;
     for (const b of branches) {
-      if (!b.pending && !b.deleted && b.modifiedAt > max) max = b.modifiedAt;
+      if (!b.pendingOp && !b.deleted && b.modifiedAt > max) max = b.modifiedAt;
     }
     return max || undefined;
+  }
+
+  // --- Private helpers ---
+
+  private async _saveBranch(docId: string, branch: Branch): Promise<void> {
+    const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
+    const stored: StoredBranch = { ...branch, _docId: docId };
+    if (branch.pendingOp) stored._pending = 1;
+    await branchStore.put<StoredBranch>(stored);
+    await tx.complete();
   }
 }
 

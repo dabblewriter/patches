@@ -35,7 +35,7 @@ type OTBranchStore = OTStoreBackend & BranchingStoreBackend;
  * Manages branches for documents using Operational Transformation semantics:
  * - Creates branches at specific revision points
  * - Uses fast-forward merge when possible (no concurrent changes on source)
- * - Falls back to flattened merge for divergent histories
+ * - Transforms individual branch changes against concurrent source changes for divergent histories
  *
  * A branch is a document that originates from another document at a specific revision.
  * Its first version represents the source document's state at that revision.
@@ -201,26 +201,16 @@ export class OTBranchManager implements BranchManager {
       lastVersionId = newVersionMetadata.id;
     }
 
-    // Flatten all unmerged ops into a single change with batchId set to branchId so that
-    // commitChanges won't transform these against previously-merged changes from this branch
-    // (all branch changes share the same causal context).
-    //
-    // The baseRev and rev here are synthetic placeholders — they don't correspond to actual
-    // revisions on the source document. commitChanges will transform the ops against any
-    // concurrent source changes since branchStartRevOnSource and assign the real revision.
-    const rev = branchStartRevOnSource + branchChanges.length;
-    const flattenedChange = createChange(
-      branchStartRevOnSource,
-      rev,
-      branchChanges.flatMap(c => c.ops),
-      { batchId: branchId }
-    );
-
-    // Break oversized flattened change if needed (batchId is preserved by breakChanges)
-    let changesToCommit = [flattenedChange];
-    if (this.maxPayloadBytes) {
-      changesToCommit = breakChanges(changesToCommit, this.maxPayloadBytes);
-    }
+    // Re-stamp branch changes for source document context:
+    // - baseRev: where the branch diverged from source (for transformation)
+    // - batchId: prevents transformation against previously-merged branch changes
+    // - Original change IDs preserved for retry idempotency
+    const changesToCommit = branchChanges.map((c, i) => ({
+      ...c,
+      baseRev: branchStartRevOnSource,
+      rev: branchStartRevOnSource + i + 1,
+      batchId: branchId,
+    }));
 
     // Commit changes to source doc with error handling
     const committedMergeChanges = await wrapMergeCommit(branchId, sourceDocId, async () => {

@@ -1,19 +1,61 @@
-import type { Branch } from '../types.js';
+import type {
+  Branch,
+  CreateBranchMetadata,
+  EditableBranchMetadata,
+  ListBranchesOptions,
+} from '../types.js';
 
 /**
- * Client-side storage interface for branch metadata.
+ * Client-side branch storage interface that doubles as a BranchAPI-compatible layer.
  *
- * Stores branch metas locally for offline viewing. Branches with `pending: true`
- * haven't been synced to the server yet; PatchesSync creates them on the server
- * and clears the flag during sync.
+ * Implements the same method signatures as BranchAPI (listBranches, createBranch,
+ * closeBranch, deleteBranch, updateBranch) so PatchesBranchClient can call a single
+ * interface regardless of online/offline mode.
+ *
+ * All mutating methods set `pendingOp` on the branch record so PatchesSync knows
+ * which operations to push to the server.
+ *
+ * Also exposes sync-facing methods used by PatchesSync to reconcile local state
+ * with the server.
  */
 export interface BranchClientStore {
+  // --- BranchAPI-compatible methods (PatchesBranchClient calls these) ---
+
   /**
    * Returns locally cached branch metas for a document.
-   * Includes both committed (synced) and pending (unsynced) branches.
    * Excludes deleted branches.
    */
-  listBranches(docId: string): Promise<Branch[]>;
+  listBranches(docId: string, options?: ListBranchesOptions): Promise<Branch[]>;
+
+  /**
+   * Creates a branch record locally with `pendingOp: 'create'`.
+   * Returns the branch document ID.
+   */
+  createBranch(docId: string, rev: number, metadata?: CreateBranchMetadata): Promise<string>;
+
+  /**
+   * Closes a branch locally, setting `status: 'closed'`.
+   * If the branch has `pendingOp: 'create'` (never synced), keeps it as 'create'
+   * but updates the status — PatchesSync will create it with status closed.
+   * Otherwise sets `pendingOp: 'close'`.
+   */
+  closeBranch(branchId: string): Promise<void>;
+
+  /**
+   * Deletes a branch locally.
+   * If the branch has `pendingOp: 'create'` (never synced), physically removes it.
+   * Otherwise saves a tombstone with `pendingOp: 'delete'` and `deleted: true`.
+   */
+  deleteBranch(branchId: string): Promise<void>;
+
+  /**
+   * Updates branch metadata locally (e.g. name, lastMergedRev).
+   * If the branch has `pendingOp: 'create'` (never synced), keeps it as 'create'.
+   * Otherwise sets `pendingOp: 'update'`.
+   */
+  updateBranch(branchId: string, metadata: EditableBranchMetadata): Promise<void>;
+
+  // --- Internal methods (PatchesBranchClient uses) ---
 
   /**
    * Loads a single branch by its branch document ID.
@@ -21,21 +63,24 @@ export interface BranchClientStore {
    */
   loadBranch(branchId: string): Promise<Branch | undefined>;
 
+  // --- Sync-facing methods (PatchesSync uses) ---
+
   /**
-   * Saves branch metas to the local store.
+   * Saves branch metas from the server into the local store.
    * Merges with existing data: updates existing branches and adds new ones.
    * Branches not in the provided array are left untouched (incremental update friendly).
    */
   saveBranches(docId: string, branches: Branch[]): Promise<void>;
 
   /**
-   * Removes branches from the local store.
+   * Physically removes branches from the local store.
+   * Called by PatchesSync after the server confirms deletion.
    */
-  deleteBranches(branchIds: string[]): Promise<void>;
+  removeBranches(branchIds: string[]): Promise<void>;
 
   /**
-   * Returns all branches with `pending: true` across all documents.
-   * Used by PatchesSync to efficiently find branches that need server creation or deletion.
+   * Returns all branches with a `pendingOp` set, across all documents.
+   * Used by PatchesSync to efficiently find branches that need server sync.
    */
   listPendingBranches(): Promise<Branch[]>;
 

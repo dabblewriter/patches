@@ -229,6 +229,24 @@ export class OTIndexedDBStore implements OTClientStore {
     return result;
   }
 
+  /**
+   * Lists all changes (committed + pending) for a document, sorted by rev.
+   * @param docId - The document ID.
+   * @param options.startAfter - Only return changes with rev > startAfter.
+   */
+  @blockable
+  async listChanges(docId: string, options?: { startAfter?: number }): Promise<Change[]> {
+    const startRev = (options?.startAfter ?? -1) + 1;
+    const [tx, committedChanges, pendingChanges] = await this.db.transaction(
+      ['committedChanges', 'pendingChanges'],
+      'readonly'
+    );
+    const committed = await committedChanges.getAll<Change>([docId, startRev], [docId, Infinity]);
+    const pending = await pendingChanges.getAll<Change>([docId, startRev], [docId, Infinity]);
+    await tx.complete();
+    return [...committed, ...pending].sort((a, b) => a.rev - b.rev);
+  }
+
   // ─── Server Changes ─────────────────────────────────────────────────────
 
   /**

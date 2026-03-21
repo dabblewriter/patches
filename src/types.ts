@@ -120,8 +120,8 @@ export interface Branch {
    */
   lastMergedRev?: number;
 
-  /** True when this branch was created offline and hasn't been synced to the server yet. */
-  pending?: true;
+  /** The pending operation to sync to the server. Set by BranchClientStore methods. */
+  pendingOp?: 'create' | 'close' | 'update' | 'delete';
 
   /** True when this branch has been deleted. Stored as a tombstone for incremental sync. */
   deleted?: true;
@@ -139,8 +139,7 @@ export type EditableBranchMetadata = Disallowed<
   | 'modifiedAt'
   | 'status'
   | 'contentStartRev'
-  | 'lastMergedRev'
-  | 'pending'
+  | 'pendingOp'
   | 'deleted'
 >;
 
@@ -152,7 +151,7 @@ export type EditableBranchMetadata = Disallowed<
  *   initial changes offline (the server uses this to know where user content begins during merge).
  */
 export type CreateBranchMetadata = Omit<
-  Disallowed<Branch, 'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'pending' | 'deleted'>,
+  Disallowed<Branch, 'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'pendingOp' | 'deleted'>,
   'contentStartRev'
 > & {
   contentStartRev?: number;

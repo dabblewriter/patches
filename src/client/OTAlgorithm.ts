@@ -35,6 +35,11 @@ export class OTAlgorithm implements ClientAlgorithm {
     return this.store.getDoc(docId);
   }
 
+  async listChanges(docId: string, options?: { startAfter?: number }): Promise<Change[]> {
+    if (!this.store.listChanges) throw new Error('Store does not support listChanges');
+    return this.store.listChanges(docId, options);
+  }
+
   async handleDocChange<T extends object>(
     docId: string,
     ops: JSONPatchOp[],

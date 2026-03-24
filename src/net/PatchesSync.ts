@@ -288,7 +288,6 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     for (const branch of updates) {
       if (!this.state.connected) break;
-      if (branch.deleted) continue;
 
       try {
         // Extract only the editable metadata fields to send to the server

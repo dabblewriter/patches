@@ -1,24 +1,24 @@
+import type { Unsubscriber } from 'easy-signal';
 import {
+  inject,
+  onBeforeUnmount,
+  provide,
   ref,
   shallowRef,
-  onBeforeUnmount,
-  watch,
   toValue,
-  provide,
-  inject,
-  type Ref,
-  type ShallowRef,
+  watch,
+  type InjectionKey,
   type MaybeRef,
   type MaybeRefOrGetter,
-  type InjectionKey,
+  type Ref,
+  type ShallowRef,
 } from 'vue';
 import type { OpenDocOptions } from '../client/Patches.js';
 import type { PatchesDoc } from '../client/PatchesDoc.js';
-import type { DocSyncStatus, ChangeMutator } from '../types.js';
 import type { PatchesSyncState } from '../net/PatchesSync.js';
-import type { Unsubscriber } from 'easy-signal';
-import { usePatchesContext } from './provider.js';
+import type { ChangeMutator, DocSyncStatus } from '../types.js';
 import { getDocManager } from './doc-manager.js';
+import { usePatchesContext } from './provider.js';
 
 /**
  * Options for usePatchesDoc composable.
@@ -198,11 +198,15 @@ export function usePatchesDoc<T extends object>(
 
   const getter = typeof docId === 'string' ? () => docId : () => toValue(docId) || null;
 
-  watch(getter, async (newId, oldId) => {
-    if (newId === oldId) return;
-    if (oldId) await closePath(oldId);
-    if (newId) await openPath(newId);
-  }, { immediate: true });
+  watch(
+    getter,
+    async (newId, oldId) => {
+      if (newId === oldId) return;
+      if (oldId) await closePath(oldId);
+      if (newId) await openPath(newId);
+    },
+    { immediate: true }
+  );
 
   onBeforeUnmount(async () => {
     unmounted = true;
@@ -282,9 +286,7 @@ export function providePatchesDoc<T extends object>(
 ): UsePatchesDocReturn<T> {
   const key = createDocInjectionKey<T>(name);
   const result =
-    typeof docId === 'string'
-      ? usePatchesDoc<T>(docId, options)
-      : usePatchesDoc<T>(() => docId.value, options);
+    typeof docId === 'string' ? usePatchesDoc<T>(docId, options) : usePatchesDoc<T>(() => docId.value, options);
 
   // Provide BEFORE the async open resolves so useCurrentDoc works immediately
   provide(key, result);

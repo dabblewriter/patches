@@ -1,189 +1,90 @@
+import type { Unsubscriber } from 'easy-signal';
 import {
+  inject,
+  onBeforeUnmount,
+  provide,
   ref,
   shallowRef,
-  onBeforeUnmount,
+  toValue,
   watch,
-  unref,
-  provide,
-  inject,
+  type InjectionKey,
+  type MaybeRef,
+  type MaybeRefOrGetter,
   type Ref,
   type ShallowRef,
-  type MaybeRef,
-  type InjectionKey,
 } from 'vue';
 import type { OpenDocOptions } from '../client/Patches.js';
 import type { PatchesDoc } from '../client/PatchesDoc.js';
-import { JSONPatch } from '../json-patch/JSONPatch.js';
-import type { DocSyncStatus, ChangeMutator } from '../types.js';
 import type { PatchesSyncState } from '../net/PatchesSync.js';
-import type { Unsubscriber } from 'easy-signal';
-import { usePatchesContext } from './provider.js';
+import type { ChangeMutator, DocSyncStatus } from '../types.js';
 import { getDocManager } from './doc-manager.js';
+import { usePatchesContext } from './provider.js';
 
 /**
- * Options for usePatchesDoc composable (eager mode with docId).
+ * Options for usePatchesDoc composable.
  */
 export interface UsePatchesDocOptions extends OpenDocOptions {
   /**
-   * Controls document lifecycle management on component unmount.
-   *
-   * - `false` (default): Explicit mode. Assumes doc is already open. Throws if not.
-   * - `true`: Opens doc on mount with ref counting, closes on unmount (doc stays tracked).
-   * - `'untrack'`: Opens doc on mount, closes AND untracks on unmount (removes from sync).
-   *
-   * @default false
+   * When true, the document is removed from sync tracking on close.
+   * By default documents stay tracked after closing.
    */
-  autoClose?: boolean | 'untrack';
+  untrack?: boolean;
 }
 
 /**
- * Options for usePatchesDoc composable (lazy mode without docId).
- */
-export interface UsePatchesDocLazyOptions {
-  /**
-   * Inject doc.id into state under this key on every state update.
-   * Useful when the document ID is derived from the path but needed in the data.
-   */
-  idProp?: string;
-}
-
-/**
- * Return type for usePatchesDoc composable (eager mode).
+ * Return type for usePatchesDoc composable.
  */
 export interface UsePatchesDocReturn<T extends object> {
-  /**
-   * Reactive reference to the document state.
-   * Updated whenever the document changes (local or remote).
-   */
+  /** Reactive reference to the document state. */
   data: ShallowRef<T | undefined>;
-
-  /**
-   * Whether the document is currently loading/syncing.
-   * - `true` during initial load or updates
-   * - `false` when fully synced
-   */
+  /** Whether the document is currently loading. */
   loading: Ref<boolean>;
-
-  /**
-   * Error that occurred during sync, if any.
-   */
+  /** Error that occurred during sync, if any. */
   error: Ref<Error | undefined>;
-
-  /**
-   * The committed revision number.
-   * Increments each time the server confirms changes.
-   */
+  /** The committed revision number. */
   rev: Ref<number>;
-
-  /**
-   * Whether there are pending local changes not yet committed by server.
-   */
+  /** Whether there are pending local changes not yet committed by server. */
   hasPending: Ref<boolean>;
-
-  /**
-   * Make changes to the document.
-   *
-   * @example
-   * ```typescript
-   * change((patch, root) => {
-   *   patch.replace(root.title!, 'New Title')
-   * })
-   * ```
-   */
+  /** Make changes to the document. No-ops if the document is not loaded. */
   change: (mutator: ChangeMutator<T>) => void;
-
-  /**
-   * The underlying PatchesDoc instance.
-   * Useful for advanced operations.
-   */
-  doc: ShallowRef<PatchesDoc<T> | undefined>;
-}
-
-/**
- * Return type for usePatchesDoc composable (lazy mode).
- * Extends the eager return type with lifecycle management methods.
- */
-export interface UsePatchesDocLazyReturn<T extends object> extends UsePatchesDocReturn<T> {
-  /**
-   * Current document path. `null` when no document is loaded.
-   */
-  path: Ref<string | null>;
-
-  /**
-   * Open a document by path. Closes any previously loaded document first.
-   *
-   * @param docPath - The document path to open
-   * @param options - Optional algorithm and metadata overrides
-   */
-  load: (docPath: string, options?: OpenDocOptions) => Promise<void>;
-
-  /**
-   * Close the current document, unsubscribe, and reset all state.
-   * Calls `patches.closeDoc()` but does not untrack — tracking is managed separately.
-   */
+  /** Close the document and reset state. Useful for explicit cleanup without unmounting. */
   close: () => Promise<void>;
-
-  /**
-   * Create a new document: open it, set initial state, then close it.
-   * A one-shot operation that doesn't bind the document to this handle.
-   *
-   * @param docPath - The document path to create
-   * @param initialState - Initial state object or JSONPatch to apply
-   * @param options - Optional algorithm and metadata overrides
-   */
-  create: (docPath: string, initialState: T | JSONPatch, options?: OpenDocOptions) => Promise<void>;
+  /** The underlying PatchesDoc instance. */
+  doc: ShallowRef<PatchesDoc<T> | undefined>;
 }
 
 // --- Shared reactive state factory ---
 
-interface DocReactiveStateOptions<T extends object> {
-  initialLoading?: boolean;
-  hasSyncContext?: boolean;
-  transformState?: (state: T, doc: PatchesDoc<T>) => T;
-  changeBehavior: 'throw' | 'noop';
-}
-
 /**
- * Creates the shared reactive state, subscription wiring, and change helper
- * used by all doc composable modes (eager, lazy, provider).
+ * Creates the shared reactive state, subscription wiring, and change helper.
  * @internal
  */
-function createDocReactiveState<T extends object>(options: DocReactiveStateOptions<T>) {
-  const { initialLoading = true, hasSyncContext = false, transformState, changeBehavior } = options;
-
+function createDocReactiveState<T extends object>(hasSyncContext: boolean) {
   const doc = shallowRef<PatchesDoc<T> | undefined>(undefined) as ShallowRef<PatchesDoc<T> | undefined>;
   const data = shallowRef<T | undefined>(undefined) as ShallowRef<T | undefined>;
-  const loading = ref<boolean>(initialLoading);
+  const loading = ref<boolean>(false);
   const error = ref<Error | undefined>();
   const rev = ref<number>(0);
   const hasPending = ref<boolean>(false);
 
   function setupDoc(patchesDoc: PatchesDoc<T>): Unsubscriber {
     doc.value = patchesDoc;
-
-    // Track whether the initial load has completed. Once loaded, loading stays false.
     let loaded = false;
 
     function updateLoading(): void {
       if (loaded) return;
-
       if (patchesDoc.isLoaded.state) {
         loaded = true;
         loading.value = false;
       } else if (patchesDoc.syncStatus.state === 'syncing') {
         loading.value = true;
       } else if (!hasSyncContext) {
-        // No sync configured — doc is as loaded as it'll get
         loaded = true;
         loading.value = false;
       }
-      // With sync context: leave loading unchanged (waiting for sync to start)
     }
 
     const unsubState = patchesDoc.subscribe(state => {
-      if (transformState && state) {
-        state = transformState(state, patchesDoc);
-      }
       data.value = state;
       rev.value = patchesDoc.committedRev;
       hasPending.value = patchesDoc.hasPending;
@@ -211,250 +112,129 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
   }
 
   function change(mutator: ChangeMutator<T>) {
-    if (changeBehavior === 'throw') {
-      if (!doc.value) {
-        throw new Error('Cannot make changes: document not loaded yet');
-      }
-      doc.value.change(mutator);
-    } else {
-      doc.value?.change(mutator);
-    }
+    doc.value?.change(mutator);
   }
 
-  const baseReturn: UsePatchesDocReturn<T> = {
-    data,
-    loading,
-    error,
-    rev,
-    hasPending,
-    change,
-    doc,
-  };
+  // close is set by usePatchesDoc after construction
+  const baseReturn = { data, loading, error, rev, hasPending, change, doc } as UsePatchesDocReturn<T>;
 
-  return { doc, data, loading, error, rev, hasPending, setupDoc, resetRefs, change, baseReturn };
+  return { setupDoc, resetRefs, baseReturn };
 }
 
-// --- usePatchesDoc overloads ---
+// --- usePatchesDoc ---
 
 /**
  * Vue composable for reactive Patches document state.
  *
- * ## Eager Mode (with docId)
- *
- * Provides reactive access to an already-open Patches document.
- *
- * @example
- * ```typescript
- * // Explicit lifecycle — you control open/close
- * const { data, loading, change } = usePatchesDoc('doc-123')
- *
- * // Auto lifecycle — opens on mount, closes on unmount
- * const { data, loading, change } = usePatchesDoc('doc-123', { autoClose: true })
- * ```
- *
- * ## Lazy Mode (without docId)
- *
- * Returns a deferred handle with `load()`, `close()`, and `create()` methods.
- * Ideal for Pinia stores where the document path isn't known at creation time.
- * Does NOT use `onBeforeUnmount` — caller manages lifecycle.
+ * Opens the document automatically and closes it on unmount (or when the path
+ * changes). Accepts a static string, a ref, or a getter. When the value is
+ * `null` or `undefined`, no document is loaded.
  *
  * @example
  * ```typescript
- * // In a Pinia store
- * const { data, load, close, change, create } = usePatchesDoc<Project>()
+ * // Static
+ * const { data, change } = usePatchesDoc('doc-123')
  *
- * // Later, when the user navigates:
- * await load('projects/abc/content')
- *
- * // When leaving:
- * await close()
+ * // Reactive — swaps automatically
+ * const { data, change } = usePatchesDoc(() => currentId.value && `projects/${currentId.value}`)
  * ```
  */
 export function usePatchesDoc<T extends object>(docId: string, options?: UsePatchesDocOptions): UsePatchesDocReturn<T>;
-export function usePatchesDoc<T extends object>(options?: UsePatchesDocLazyOptions): UsePatchesDocLazyReturn<T>;
 export function usePatchesDoc<T extends object>(
-  docIdOrOptions?: string | UsePatchesDocLazyOptions,
+  docId: MaybeRefOrGetter<string | null | undefined>,
   options?: UsePatchesDocOptions
-): UsePatchesDocReturn<T> | UsePatchesDocLazyReturn<T> {
-  // Determine mode based on first argument
-  if (typeof docIdOrOptions === 'string') {
-    return _usePatchesDocEager<T>(docIdOrOptions, options ?? {});
-  }
-  return _usePatchesDocLazy<T>(docIdOrOptions ?? {});
-}
-
-/**
- * Eager mode implementation — the original behavior.
- */
-function _usePatchesDocEager<T extends object>(docId: string, options: UsePatchesDocOptions): UsePatchesDocReturn<T> {
+): UsePatchesDocReturn<T>;
+export function usePatchesDoc<T extends object>(
+  docId: string | MaybeRefOrGetter<string | null | undefined>,
+  options?: UsePatchesDocOptions
+): UsePatchesDocReturn<T> {
   const { patches, sync } = usePatchesContext();
-  const { autoClose = false, algorithm, metadata } = options;
-  const shouldUntrack = autoClose === 'untrack';
+  const { untrack: shouldUntrack = false, algorithm, metadata } = options ?? {};
   const openDocOpts: OpenDocOptions = { algorithm, metadata };
   const manager = getDocManager(patches);
 
-  const { setupDoc, baseReturn } = createDocReactiveState<T>({
-    initialLoading: !!autoClose,
-    hasSyncContext: !!sync,
-    changeBehavior: 'throw',
-  });
+  const { setupDoc, resetRefs, baseReturn } = createDocReactiveState<T>(!!sync);
 
   let unsubscribe: Unsubscriber | null = null;
-
-  if (autoClose) {
-    let unmounted = false;
-
-    manager
-      .openDoc<T>(patches, docId, openDocOpts)
-      .then(patchesDoc => {
-        if (unmounted) {
-          // Component unmounted before openDoc resolved — close immediately to avoid leak
-          manager.closeDoc(patches, docId, shouldUntrack);
-          return;
-        }
-        unsubscribe = setupDoc(patchesDoc);
-      })
-      .catch(err => {
-        if (!unmounted) {
-          baseReturn.error.value = err;
-          baseReturn.loading.value = false;
-        }
-      });
-
-    onBeforeUnmount(() => {
-      unmounted = true;
-      unsubscribe?.();
-      manager.closeDoc(patches, docId, shouldUntrack);
-    });
-  } else {
-    const patchesDoc = patches.getOpenDoc<T>(docId);
-
-    if (!patchesDoc) {
-      throw new Error(
-        `Document "${docId}" is not open. Either open it with patches.openDoc() first, or use { autoClose: true } option.`
-      );
-    }
-
-    manager.incrementRefCount(docId);
-    unsubscribe = setupDoc(patchesDoc);
-
-    onBeforeUnmount(() => {
-      unsubscribe?.();
-      manager.decrementRefCount(docId);
-    });
-  }
-
-  return baseReturn;
-}
-
-/**
- * Lazy mode implementation — deferred loading for Pinia stores and similar.
- * No onBeforeUnmount. Caller manages lifecycle via load()/close().
- */
-function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions): UsePatchesDocLazyReturn<T> {
-  const { patches, sync } = usePatchesContext();
-  const { idProp } = options;
-
-  const { setupDoc, resetRefs, loading, baseReturn } = createDocReactiveState<T>({
-    initialLoading: false,
-    hasSyncContext: !!sync,
-    changeBehavior: 'noop',
-    transformState: idProp ? (state, patchesDoc) => ({ ...state, [idProp]: patchesDoc.id }) as T : undefined,
-  });
-
-  let unsubscribe: Unsubscriber | null = null;
-  const path = ref<string | null>(null);
+  let currentDocId: string | null = null;
+  let unmounted = false;
 
   function teardown() {
     unsubscribe?.();
     unsubscribe = null;
-    resetRefs();
   }
 
-  async function load(docPath: string, options?: OpenDocOptions) {
-    if (path.value) {
-      const prevPath = path.value;
-      teardown();
-      await patches.closeDoc(prevPath);
-    }
-
-    path.value = docPath;
-    loading.value = true;
+  async function openPath(id: string) {
+    currentDocId = id;
+    baseReturn.loading.value = true;
 
     try {
-      const patchesDoc = await patches.openDoc<T>(docPath, options);
+      const patchesDoc = await manager.openDoc<T>(patches, id, openDocOpts);
+      if (unmounted || currentDocId !== id) {
+        manager.closeDoc(patches, id, shouldUntrack);
+        return;
+      }
       unsubscribe = setupDoc(patchesDoc);
     } catch (err) {
-      baseReturn.error.value = err as Error;
-      loading.value = false;
-    }
-  }
-
-  async function close() {
-    if (path.value) {
-      const prevPath = path.value;
-      teardown();
-      path.value = null;
-      await patches.closeDoc(prevPath);
-    }
-  }
-
-  async function create(docPath: string, initialState: T | JSONPatch, options?: OpenDocOptions) {
-    const newDoc = await patches.openDoc<T>(docPath, options);
-    newDoc.change((patch, root) => {
-      if (initialState instanceof JSONPatch) {
-        patch.ops = initialState.ops;
-      } else {
-        const state = { ...initialState };
-        if (idProp) delete (state as Record<string, unknown>)[idProp];
-        patch.replace(root, state);
+      if (!unmounted && currentDocId === id) {
+        baseReturn.error.value = err as Error;
+        baseReturn.loading.value = false;
       }
-    });
-    await patches.closeDoc(docPath);
+    }
   }
 
-  return { ...baseReturn, path, load, close, create };
+  async function closePath(id: string) {
+    teardown();
+    resetRefs();
+    await manager.closeDoc(patches, id, shouldUntrack);
+  }
+
+  baseReturn.close = async () => {
+    if (currentDocId) {
+      await closePath(currentDocId);
+      currentDocId = null;
+    }
+  };
+
+  const getter = typeof docId === 'string' ? () => docId : () => toValue(docId) || null;
+
+  watch(
+    getter,
+    async (newId, oldId) => {
+      if (newId === oldId) return;
+      if (oldId) await closePath(oldId);
+      if (newId) await openPath(newId);
+    },
+    { immediate: true }
+  );
+
+  onBeforeUnmount(async () => {
+    unmounted = true;
+    if (currentDocId) {
+      await closePath(currentDocId);
+      currentDocId = null;
+    }
+  });
+
+  return baseReturn;
 }
 
 /**
  * Return type for usePatchesSync composable.
  */
 export interface UsePatchesSyncReturn {
-  /**
-   * Whether the WebSocket connection is established.
-   */
   connected: Ref<boolean>;
-
-  /**
-   * Whether documents are currently syncing with the server.
-   */
   syncing: Ref<boolean>;
-
-  /**
-   * Whether the client believes it has network connectivity.
-   */
   online: Ref<boolean>;
 }
 
 /**
  * Vue composable for reactive Patches sync state.
  *
- * Provides reactive access to PatchesSync connection and sync status.
- * Useful for showing "Offline" banners, global loading indicators, etc.
- *
  * @example
  * ```typescript
  * const { connected, syncing, online } = usePatchesSync()
- *
- * // Show offline banner
- * if (!connected) {
- *   // Display "You are offline"
- * }
  * ```
- *
- * @returns Reactive sync state
- * @throws Error if Patches context not provided
- * @throws Error if PatchesSync was not provided to context
  */
 export function usePatchesSync(): UsePatchesSyncReturn {
   const { sync } = usePatchesContext();
@@ -477,17 +257,11 @@ export function usePatchesSync(): UsePatchesSyncReturn {
     unsubscribe();
   });
 
-  return {
-    connected,
-    syncing,
-    online,
-  };
+  return { connected, syncing, online };
 }
 
-/**
- * Creates an injection key for a named document context.
- * @internal
- */
+// --- providePatchesDoc / useCurrentDoc ---
+
 function createDocInjectionKey<T extends object>(name: string): InjectionKey<UsePatchesDocReturn<T>> {
   return Symbol(`patches-doc-${name}`) as InjectionKey<UsePatchesDocReturn<T>>;
 }
@@ -495,150 +269,37 @@ function createDocInjectionKey<T extends object>(name: string): InjectionKey<Use
 /**
  * Provides a Patches document in the component tree with a given name.
  *
- * This enables child components to access the document using `useCurrentDoc(name)`
- * without needing to pass the docId down through props. Supports both static and
- * reactive docIds.
- *
- * ## Use Cases
- *
- * **Static document (user settings):**
+ * @example
  * ```typescript
+ * // Static
  * providePatchesDoc('user', 'user-123')
- * ```
  *
- * **Reactive document (multi-tab with autoClose: false):**
- * ```typescript
- * const activeTabId = ref('design-1')
- * providePatchesDoc('whiteboard', activeTabId) // Keeps all docs open, switches between them
- * ```
- *
- * **Reactive document (single-doc with autoClose: true):**
- * ```typescript
+ * // Reactive
  * const currentDocId = ref('doc-1')
- * providePatchesDoc('document', currentDocId, { autoClose: true }) // Closes old, opens new
+ * providePatchesDoc('document', currentDocId)
  * ```
- *
- * @param name - Unique identifier for this document context (e.g., 'whiteboard', 'user')
- * @param docId - Document ID (static string or reactive ref)
- * @param options - Configuration options (autoClose, etc.)
- *
- * @throws Error if Patches context not provided
- * @throws Error if doc not open in explicit mode
  */
 export function providePatchesDoc<T extends object>(
   name: string,
   docId: MaybeRef<string>,
-  options: UsePatchesDocOptions = {}
+  options?: UsePatchesDocOptions
 ): UsePatchesDocReturn<T> {
-  const { patches, sync } = usePatchesContext();
-  const { autoClose = false, algorithm, metadata } = options;
-  const shouldUntrack = autoClose === 'untrack';
-  const openDocOpts: OpenDocOptions = { algorithm, metadata };
-  const manager = getDocManager(patches);
-
-  const { setupDoc, baseReturn } = createDocReactiveState<T>({
-    initialLoading: !!autoClose,
-    hasSyncContext: !!sync,
-    changeBehavior: 'throw',
-  });
-
-  const currentDocId = ref<string>(unref(docId));
-  let unsubscribe: Unsubscriber | null = null;
-  let providerUnmounted = false;
-
-  async function initDoc(id: string) {
-    currentDocId.value = id;
-    unsubscribe?.();
-    unsubscribe = null;
-
-    if (autoClose) {
-      try {
-        const patchesDoc = await manager.openDoc<T>(patches, id, openDocOpts);
-        if (providerUnmounted || currentDocId.value !== id) {
-          // Component unmounted or docId changed before openDoc resolved — close immediately
-          manager.closeDoc(patches, id, shouldUntrack);
-          return;
-        }
-        unsubscribe = setupDoc(patchesDoc);
-      } catch (err) {
-        if (!providerUnmounted && currentDocId.value === id) {
-          baseReturn.error.value = err as Error;
-          baseReturn.loading.value = false;
-        }
-      }
-    } else {
-      try {
-        const patchesDoc = patches.getOpenDoc<T>(id);
-        if (!patchesDoc) {
-          throw new Error(
-            `Document "${id}" is not open. Either open it with patches.openDoc() first, or use { autoClose: true } option.`
-          );
-        }
-        manager.incrementRefCount(id);
-        unsubscribe = setupDoc(patchesDoc);
-      } catch (err) {
-        baseReturn.error.value = err as Error;
-        baseReturn.loading.value = false;
-      }
-    }
-  }
-
-  // Provide BEFORE initializing so useCurrentDoc works in the same component
   const key = createDocInjectionKey<T>(name);
-  provide(key, baseReturn);
+  const result =
+    typeof docId === 'string' ? usePatchesDoc<T>(docId, options) : usePatchesDoc<T>(() => docId.value, options);
 
-  initDoc(unref(docId));
-
-  if (typeof docId !== 'string') {
-    watch(docId, async (newDocId, oldDocId) => {
-      if (newDocId === oldDocId) return;
-
-      unsubscribe?.();
-      unsubscribe = null;
-
-      if (autoClose) {
-        await manager.closeDoc(patches, oldDocId, shouldUntrack);
-      } else {
-        manager.decrementRefCount(oldDocId);
-      }
-
-      await initDoc(newDocId);
-    });
-  }
-
-  onBeforeUnmount(async () => {
-    providerUnmounted = true;
-    unsubscribe?.();
-
-    if (autoClose) {
-      await manager.closeDoc(patches, currentDocId.value, shouldUntrack);
-    } else {
-      manager.decrementRefCount(currentDocId.value);
-    }
-  });
-
-  return baseReturn;
+  // Provide BEFORE the async open resolves so useCurrentDoc works immediately
+  provide(key, result);
+  return result;
 }
 
 /**
  * Injects a Patches document provided by `providePatchesDoc`.
  *
- * Use this in child components to access a document provided higher up in the
- * component tree without passing the docId through props.
- *
  * @example
  * ```typescript
- * // Parent component
- * const whiteboardId = ref('whiteboard-123')
- * providePatchesDoc('whiteboard', whiteboardId)
- *
- * // Child component (anywhere in tree)
  * const { data, loading, change } = useCurrentDoc<WhiteboardDoc>('whiteboard')
  * ```
- *
- * @param name - The name used in providePatchesDoc
- * @returns Reactive document state and utilities
- * @throws Error if no document provided with that name
  */
 export function useCurrentDoc<T extends object>(name: string): UsePatchesDocReturn<T> {
   const key = createDocInjectionKey<T>(name);

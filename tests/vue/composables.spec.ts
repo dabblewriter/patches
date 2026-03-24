@@ -19,36 +19,18 @@ describe('Vue Composables', () => {
     await patches.close();
   });
 
-  describe('usePatchesDoc - explicit mode (default)', () => {
-    it('should throw error if doc not open', () => {
-      const TestComponent = defineComponent({
-        setup() {
-          expect(() => usePatchesDoc('doc-1')).toThrow('Document "doc-1" is not open');
-          return () => h('div');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches);
-
-      const el = document.createElement('div');
-      app.mount(el);
-      app.unmount();
-    });
-
-    it('should return reactive document state', async () => {
-      await patches.openDoc('doc-1');
-
+  describe('usePatchesDoc - static string', () => {
+    it('should auto-open and return reactive document state', async () => {
       let capturedData: any;
       let capturedLoading: any;
-      let capturedRev: any;
+      let capturedDoc: any;
 
       const TestComponent = defineComponent({
         setup() {
-          const { data, loading, rev } = usePatchesDoc<any>('doc-1');
+          const { data, loading, doc } = usePatchesDoc<any>('doc-1');
           capturedData = data;
           capturedLoading = loading;
-          capturedRev = rev;
+          capturedDoc = doc;
           return () => h('div');
         },
       });
@@ -59,19 +41,21 @@ describe('Vue Composables', () => {
       const el = document.createElement('div');
       app.mount(el);
 
-      // Initial state (might be null or {} depending on doc initialization)
-      expect(capturedData.value === null || typeof capturedData.value === 'object').toBe(true);
+      // Initially loading
+      expect(capturedLoading.value).toBe(true);
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(capturedDoc.value).toBeDefined();
       expect(capturedLoading.value).toBe(false);
-      expect(capturedRev.value).toBe(0);
+      expect(patches.getOpenDoc('doc-1')).toBeDefined();
 
       app.unmount();
-      await patches.closeDoc('doc-1');
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(patches.getOpenDoc('doc-1')).toBeUndefined();
     });
 
     it('should update reactively when document changes', async () => {
-      await patches.openDoc<{ title?: string }>('doc-1');
-      const doc = patches.getOpenDoc<{ title?: string }>('doc-1')!;
-
       let capturedData: any;
 
       const TestComponent = defineComponent({
@@ -88,22 +72,20 @@ describe('Vue Composables', () => {
       const el = document.createElement('div');
       app.mount(el);
 
-      // Make a change
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const doc = patches.getOpenDoc<{ title?: string }>('doc-1')!;
       doc.change((patch, root) => {
         patch.replace(root.title!, 'Hello World');
       });
 
       await nextTick();
-
       expect(capturedData.value.title).toBe('Hello World');
 
       app.unmount();
-      await patches.closeDoc('doc-1');
     });
 
     it('should provide change helper', async () => {
-      await patches.openDoc<{ count?: number }>('doc-1');
-
       let capturedChange: any;
       let capturedData: any;
 
@@ -122,111 +104,29 @@ describe('Vue Composables', () => {
       const el = document.createElement('div');
       app.mount(el);
 
-      // Use change helper
+      await new Promise(resolve => setTimeout(resolve, 10));
+
       capturedChange((patch: any, root: any) => {
         patch.replace(root.count!, 42);
       });
 
       await nextTick();
-
       expect(capturedData.value.count).toBe(42);
 
       app.unmount();
-      await patches.closeDoc('doc-1');
-    });
-
-    it('should clean up subscriptions on unmount', async () => {
-      await patches.openDoc('doc-1');
-      const doc = patches.getOpenDoc<any>('doc-1')!;
-
-      const stateSubscribeSpy = vi.spyOn(doc, 'subscribe');
-      const syncStatusSubscribeSpy = vi.spyOn(doc.syncStatus, 'subscribe');
-
-      const TestComponent = defineComponent({
-        setup() {
-          usePatchesDoc('doc-1');
-          return () => h('div');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches);
-
-      const el = document.createElement('div');
-      app.mount(el);
-
-      expect(stateSubscribeSpy).toHaveBeenCalled();
-      expect(syncStatusSubscribeSpy).toHaveBeenCalled();
-
-      // Get unsubscribe functions
-      const unsubState = stateSubscribeSpy.mock.results[0].value;
-      const unsubSync = syncStatusSubscribeSpy.mock.results[0].value;
-
-      const unsubStateSpy = vi.fn(unsubState);
-      const unsubSyncSpy = vi.fn(unsubSync);
-
-      // Replace with spies
-      stateSubscribeSpy.mockReturnValue(unsubStateSpy as any);
-      syncStatusSubscribeSpy.mockReturnValue(unsubSyncSpy as any);
-
-      app.unmount();
-
-      // Unsubscribers should have been called
-      // Note: Can't easily test this without mounting another component
-      // Just verify the pattern works
-
-      await patches.closeDoc('doc-1');
-    });
-  });
-
-  describe('usePatchesDoc - auto mode', () => {
-    it('should open document on mount', async () => {
-      let capturedDoc: any;
-
-      const TestComponent = defineComponent({
-        setup() {
-          const { doc } = usePatchesDoc<any>('doc-1', { autoClose: true });
-          capturedDoc = doc;
-          return () => h('div');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches);
-
-      const el = document.createElement('div');
-      app.mount(el);
-
-      // Wait for async open
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      expect(capturedDoc.value).toBeDefined();
-      expect(patches.getOpenDoc('doc-1')).toBeDefined();
-
-      app.unmount();
-
-      // Wait for async close
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      expect(patches.getOpenDoc('doc-1')).toBeUndefined();
     });
 
     it('should use ref counting for multiple components', async () => {
-      let capturedData1: any;
-      let capturedData2: any;
-
       const Component1 = defineComponent({
         setup() {
-          const { data } = usePatchesDoc<any>('doc-1', { autoClose: true });
-          capturedData1 = data;
+          usePatchesDoc<any>('doc-1');
           return () => h('div');
         },
       });
 
       const Component2 = defineComponent({
         setup() {
-          const { data } = usePatchesDoc<any>('doc-1', { autoClose: true });
-          capturedData2 = data;
+          usePatchesDoc<any>('doc-1');
           return () => h('div');
         },
       });
@@ -243,62 +143,23 @@ describe('Vue Composables', () => {
       const el = document.createElement('div');
       app.mount(el);
 
-      // Wait for async opens
       await new Promise(resolve => setTimeout(resolve, 10));
-
-      // Both components should have same data
-      expect(capturedData1.value).toEqual(capturedData2.value);
-
-      // Doc should be open
       expect(patches.getOpenDoc('doc-1')).toBeDefined();
 
       app.unmount();
-
-      // Wait for async closes
       await new Promise(resolve => setTimeout(resolve, 10));
-
-      // Doc should be closed after both components unmount
       expect(patches.getOpenDoc('doc-1')).toBeUndefined();
-    });
-
-    it('should handle loading state', async () => {
-      let capturedLoading: any;
-
-      const TestComponent = defineComponent({
-        setup() {
-          const { loading } = usePatchesDoc<any>('doc-1', { autoClose: true });
-          capturedLoading = loading;
-          return () => h('div');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches);
-
-      const el = document.createElement('div');
-
-      // Initially loading
-      app.mount(el);
-      expect(capturedLoading.value).toBe(true);
-
-      // Wait for open to complete
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      expect(capturedLoading.value).toBe(false);
-
-      app.unmount();
     });
 
     it('should handle errors during open', async () => {
       let capturedError: any;
       let capturedLoading: any;
 
-      // Mock openDoc to fail
       vi.spyOn(patches, 'openDoc').mockRejectedValue(new Error('Open failed'));
 
       const TestComponent = defineComponent({
         setup() {
-          const { error, loading } = usePatchesDoc<any>('bad-doc', { autoClose: true });
+          const { error, loading } = usePatchesDoc<any>('bad-doc');
           capturedError = error;
           capturedLoading = loading;
           return () => h('div');
@@ -311,7 +172,6 @@ describe('Vue Composables', () => {
       const el = document.createElement('div');
       app.mount(el);
 
-      // Wait for open to fail
       await new Promise(resolve => setTimeout(resolve, 10));
 
       expect(capturedError.value).toBeInstanceOf(Error);
@@ -320,20 +180,99 @@ describe('Vue Composables', () => {
 
       app.unmount();
     });
-  });
 
-  describe('usePatchesDoc - lazy mode', () => {
-    it('should return deferred handle with initial state', () => {
-      let capturedData: any;
-      let capturedLoading: any;
-      let capturedPath: any;
+    it('should no-op change before doc is loaded', () => {
+      let capturedChange: any;
 
       const TestComponent = defineComponent({
         setup() {
-          const result = usePatchesDoc<any>();
+          const { change } = usePatchesDoc<any>('doc-1');
+          capturedChange = change;
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      // Should not throw — doc not loaded yet
+      expect(() => {
+        capturedChange((patch: any, root: any) => {
+          patch.replace(root.title!, 'test');
+        });
+      }).not.toThrow();
+
+      app.unmount();
+    });
+  });
+
+  describe('usePatchesDoc - untrack option', () => {
+    it('should not untrack on close by default', async () => {
+      const TestComponent = defineComponent({
+        setup() {
+          usePatchesDoc<any>('doc-1');
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const manager = getDocManager(patches);
+      const closeDocSpy = vi.spyOn(manager, 'closeDoc');
+
+      app.unmount();
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(closeDocSpy).toHaveBeenCalledWith(patches, 'doc-1', false);
+    });
+
+    it('should untrack on close with untrack: true', async () => {
+      const TestComponent = defineComponent({
+        setup() {
+          usePatchesDoc<any>('doc-1', { untrack: true });
+          return () => h('div');
+        },
+      });
+
+      const app = createApp(TestComponent);
+      providePatchesContext(app, patches);
+
+      const el = document.createElement('div');
+      app.mount(el);
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const manager = getDocManager(patches);
+      const closeDocSpy = vi.spyOn(manager, 'closeDoc');
+
+      app.unmount();
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(closeDocSpy).toHaveBeenCalledWith(patches, 'doc-1', true);
+    });
+  });
+
+  describe('usePatchesDoc - reactive mode', () => {
+    it('should start with no doc when ref is null', () => {
+      let capturedData: any;
+      let capturedLoading: any;
+
+      const docId = ref<string | null>(null);
+
+      const TestComponent = defineComponent({
+        setup() {
+          const result = usePatchesDoc<any>(docId);
           capturedData = result.data;
           capturedLoading = result.loading;
-          capturedPath = result.path;
           return () => h('div');
         },
       });
@@ -346,17 +285,18 @@ describe('Vue Composables', () => {
 
       expect(capturedData.value).toBeUndefined();
       expect(capturedLoading.value).toBe(false);
-      expect(capturedPath.value).toBeNull();
 
       app.unmount();
     });
 
-    it('should load a document on demand', async () => {
-      let capturedResult: any;
+    it('should open a document when ref becomes non-null', async () => {
+      const docId = ref<string | null>(null);
+      let capturedDoc: any;
 
       const TestComponent = defineComponent({
         setup() {
-          capturedResult = usePatchesDoc<{ title?: string }>();
+          const result = usePatchesDoc<any>(docId);
+          capturedDoc = result.doc;
           return () => h('div');
         },
       });
@@ -367,24 +307,27 @@ describe('Vue Composables', () => {
       const el = document.createElement('div');
       app.mount(el);
 
-      // Load a document
-      await capturedResult.load('doc-1');
+      docId.value = 'doc-1';
 
-      expect(capturedResult.path.value).toBe('doc-1');
-      expect(capturedResult.doc.value).toBeDefined();
+      await nextTick();
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(capturedDoc.value).toBeDefined();
       expect(patches.getOpenDoc('doc-1')).toBeDefined();
 
       app.unmount();
-      // Clean up
-      await patches.closeDoc('doc-1');
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(patches.getOpenDoc('doc-1')).toBeUndefined();
     });
 
-    it('should close and reset state', async () => {
-      let capturedResult: any;
+    it('should close doc when ref becomes null', async () => {
+      const docId = ref<string | null>('doc-1');
+      let capturedData: any;
 
       const TestComponent = defineComponent({
         setup() {
-          capturedResult = usePatchesDoc<any>();
+          const result = usePatchesDoc<any>(docId);
+          capturedData = result.data;
           return () => h('div');
         },
       });
@@ -395,25 +338,27 @@ describe('Vue Composables', () => {
       const el = document.createElement('div');
       app.mount(el);
 
-      await capturedResult.load('doc-1');
-      expect(capturedResult.path.value).toBe('doc-1');
+      await nextTick();
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(patches.getOpenDoc('doc-1')).toBeDefined();
 
-      await capturedResult.close();
+      docId.value = null;
 
-      expect(capturedResult.path.value).toBeNull();
-      expect(capturedResult.data.value).toBeUndefined();
-      expect(capturedResult.doc.value).toBeUndefined();
+      await nextTick();
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(capturedData.value).toBeUndefined();
       expect(patches.getOpenDoc('doc-1')).toBeUndefined();
 
       app.unmount();
     });
 
-    it('should replace previous document on subsequent load', async () => {
-      let capturedResult: any;
+    it('should swap documents when ref changes', async () => {
+      const docId = ref<string | null>('doc-1');
 
       const TestComponent = defineComponent({
         setup() {
-          capturedResult = usePatchesDoc<any>();
+          usePatchesDoc<any>(docId);
           return () => h('div');
         },
       });
@@ -424,26 +369,31 @@ describe('Vue Composables', () => {
       const el = document.createElement('div');
       app.mount(el);
 
-      await capturedResult.load('doc-1');
-      expect(capturedResult.path.value).toBe('doc-1');
+      await nextTick();
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(patches.getOpenDoc('doc-1')).toBeDefined();
 
-      await capturedResult.load('doc-2');
-      expect(capturedResult.path.value).toBe('doc-2');
+      docId.value = 'doc-2';
 
-      // doc-1 should be closed, doc-2 open
+      await nextTick();
+      await new Promise(resolve => setTimeout(resolve, 20));
+
       expect(patches.getOpenDoc('doc-1')).toBeUndefined();
       expect(patches.getOpenDoc('doc-2')).toBeDefined();
 
       app.unmount();
-      await patches.closeDoc('doc-2');
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(patches.getOpenDoc('doc-2')).toBeUndefined();
     });
 
-    it('should silently no-op change when no doc is loaded', () => {
-      let capturedResult: any;
+    it('should accept a getter function', async () => {
+      const projectId = ref<string | null>('abc');
+      let capturedDoc: any;
 
       const TestComponent = defineComponent({
         setup() {
-          capturedResult = usePatchesDoc<any>();
+          const result = usePatchesDoc<any>(() => projectId.value && `projects/${projectId.value}`);
+          capturedDoc = result.doc;
           return () => h('div');
         },
       });
@@ -453,188 +403,22 @@ describe('Vue Composables', () => {
 
       const el = document.createElement('div');
       app.mount(el);
-
-      // Should not throw
-      expect(() => {
-        capturedResult.change((patch: any, root: any) => {
-          patch.replace(root.title!, 'test');
-        });
-      }).not.toThrow();
-
-      app.unmount();
-    });
-
-    it('should make changes to loaded document', async () => {
-      let capturedResult: any;
-
-      const TestComponent = defineComponent({
-        setup() {
-          capturedResult = usePatchesDoc<{ title?: string }>();
-          return () => h('div');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches);
-
-      const el = document.createElement('div');
-      app.mount(el);
-
-      await capturedResult.load('doc-1');
-
-      capturedResult.change((patch: any, root: any) => {
-        patch.replace(root.title!, 'Hello');
-      });
 
       await nextTick();
-      expect(capturedResult.data.value.title).toBe('Hello');
+      await new Promise(resolve => setTimeout(resolve, 10));
 
-      app.unmount();
-      await patches.closeDoc('doc-1');
-    });
+      expect(capturedDoc.value).toBeDefined();
+      expect(patches.getOpenDoc('projects/abc')).toBeDefined();
 
-    it('should create a document without binding to handle', async () => {
-      let capturedResult: any;
-
-      const TestComponent = defineComponent({
-        setup() {
-          capturedResult = usePatchesDoc<{ title?: string }>();
-          return () => h('div');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches);
-
-      const el = document.createElement('div');
-      app.mount(el);
-
-      // Create a doc — one-shot operation
-      await capturedResult.create('new-doc', { title: 'Created' });
-
-      // Handle should NOT be bound to the created doc
-      expect(capturedResult.path.value).toBeNull();
-      expect(capturedResult.doc.value).toBeUndefined();
-
-      // But the doc should have been created with the state
-      const doc = await patches.openDoc<{ title?: string }>('new-doc');
-      expect(doc.state.title).toBe('Created');
-
-      app.unmount();
-      await patches.closeDoc('new-doc');
-    });
-
-    it('should inject idProp into state on subscribe', async () => {
-      let capturedResult: any;
-
-      const TestComponent = defineComponent({
-        setup() {
-          capturedResult = usePatchesDoc<{ id?: string; name?: string }>({ idProp: 'id' });
-          return () => h('div');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches);
-
-      const el = document.createElement('div');
-      app.mount(el);
-
-      await capturedResult.load('my-doc');
-
-      // Make a change to trigger subscriber
-      capturedResult.change((patch: any, root: any) => {
-        patch.replace(root.name!, 'Test');
-      });
+      projectId.value = null;
 
       await nextTick();
-
-      expect(capturedResult.data.value.id).toBe('my-doc');
-      expect(capturedResult.data.value.name).toBe('Test');
-
-      app.unmount();
-      await patches.closeDoc('my-doc');
-    });
-
-    it('should strip idProp from initial state on create', async () => {
-      let capturedResult: any;
-
-      const TestComponent = defineComponent({
-        setup() {
-          capturedResult = usePatchesDoc<{ id?: string; name?: string }>({ idProp: 'id' });
-          return () => h('div');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches);
-
-      const el = document.createElement('div');
-      app.mount(el);
-
-      // Create with id in state — should be stripped
-      await capturedResult.create('new-doc-2', { id: 'should-be-removed', name: 'Test' });
-
-      const doc = await patches.openDoc<{ id?: string; name?: string }>('new-doc-2');
-      expect(doc.state.name).toBe('Test');
-      expect(doc.state.id).toBeUndefined();
-
-      app.unmount();
-      await patches.closeDoc('new-doc-2');
-    });
-  });
-
-  describe('usePatchesDoc - autoClose untrack option', () => {
-    it('should not untrack on close with autoClose: true', async () => {
-      const TestComponent = defineComponent({
-        setup() {
-          usePatchesDoc<any>('doc-1', { autoClose: true });
-          return () => h('div');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches);
-
-      const el = document.createElement('div');
-      app.mount(el);
-
       await new Promise(resolve => setTimeout(resolve, 10));
 
-      const manager = getDocManager(patches);
-      const closeDocSpy = vi.spyOn(manager, 'closeDoc');
+      expect(capturedDoc.value).toBeUndefined();
+      expect(patches.getOpenDoc('projects/abc')).toBeUndefined();
 
       app.unmount();
-
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      expect(closeDocSpy).toHaveBeenCalledWith(patches, 'doc-1', false);
-    });
-
-    it('should untrack on close with autoClose: "untrack"', async () => {
-      const TestComponent = defineComponent({
-        setup() {
-          usePatchesDoc<any>('doc-1', { autoClose: 'untrack' });
-          return () => h('div');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches);
-
-      const el = document.createElement('div');
-      app.mount(el);
-
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      const manager = getDocManager(patches);
-      const closeDocSpy = vi.spyOn(manager, 'closeDoc');
-
-      app.unmount();
-
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      expect(closeDocSpy).toHaveBeenCalledWith(patches, 'doc-1', true);
     });
   });
 
@@ -648,7 +432,7 @@ describe('Vue Composables', () => {
       });
 
       const app = createApp(TestComponent);
-      providePatchesContext(app, patches); // No sync provided
+      providePatchesContext(app, patches);
 
       const el = document.createElement('div');
       app.mount(el);
@@ -683,52 +467,20 @@ describe('Vue Composables', () => {
       app.mount(el);
 
       expect(capturedConnected.value).toBe(true);
-      expect(capturedSyncing.value).toBe(true); // 'syncing' -> true
+      expect(capturedSyncing.value).toBe(true);
       expect(capturedOnline.value).toBe(true);
 
       app.unmount();
-    });
-
-    it('should subscribe to sync state changes', () => {
-      const mockSync = store<PatchesSyncState>({
-        connected: false,
-        syncStatus: 'unsynced' as const,
-        online: false,
-      });
-
-      const subscribeSpy = vi.spyOn(mockSync, 'subscribe');
-
-      const TestComponent = defineComponent({
-        setup() {
-          usePatchesSync();
-          return () => h('div');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches, mockSync as any);
-
-      const el = document.createElement('div');
-      app.mount(el);
-
-      expect(subscribeSpy).toHaveBeenCalled();
-
-      app.unmount();
-
-      // Unsubscribe should be called on unmount
-      // Note: Hard to test directly, but the pattern is correct
     });
   });
 
   describe('providePatchesDoc and useCurrentDoc', () => {
     it('should provide a document with static docId', async () => {
-      const doc = await patches.openDoc<any>('doc-1');
       let capturedData: any;
       let capturedChange: any;
 
       const TestComponent = defineComponent({
         setup() {
-          // providePatchesDoc returns doc interface and also provides it to children
           const { data, change } = providePatchesDoc<any>('test', 'doc-1');
           capturedData = data;
           capturedChange = change;
@@ -743,27 +495,21 @@ describe('Vue Composables', () => {
       app.mount(el);
 
       await nextTick();
+      await new Promise(resolve => setTimeout(resolve, 10));
 
-      // Should have access to document data
-      expect(capturedData).toBeDefined();
-
-      // Should be able to make changes
       capturedChange((patch: any, root: any) => {
         patch.replace(root.title!, 'Test Title');
       });
 
       await nextTick();
-
-      expect(doc.state.title).toBe('Test Title');
+      expect(capturedData.value.title).toBe('Test Title');
 
       app.unmount();
-      await patches.closeDoc('doc-1');
     });
 
     it('should throw if useCurrentDoc is called without provide', () => {
       const TestComponent = defineComponent({
         setup() {
-          // This should throw
           expect(() => useCurrentDoc('nonexistent')).toThrow('No document found for name "nonexistent"');
           return () => h('div');
         },
@@ -777,57 +523,12 @@ describe('Vue Composables', () => {
       app.unmount();
     });
 
-    it('should handle reactive docId changes with autoClose: false', async () => {
-      await patches.openDoc<any>('doc-1');
-      await patches.openDoc<any>('doc-2');
-
+    it('should handle reactive docId changes', async () => {
       const docIdRef = ref('doc-1');
-      let capturedData: any;
 
       const TestComponent = defineComponent({
         setup() {
-          const { data } = providePatchesDoc<any>('test', docIdRef);
-          capturedData = data;
-          return () => h('div');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches);
-
-      const el = document.createElement('div');
-      app.mount(el);
-
-      await nextTick();
-
-      // Initially using doc-1
-      expect(patches.getOpenDoc('doc-1')).toBeDefined();
-      expect(patches.getOpenDoc('doc-2')).toBeDefined();
-
-      // Switch to doc-2
-      docIdRef.value = 'doc-2';
-
-      await nextTick();
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      // Both docs should still be open (autoClose: false)
-      expect(patches.getOpenDoc('doc-1')).toBeDefined();
-      expect(patches.getOpenDoc('doc-2')).toBeDefined();
-
-      app.unmount();
-
-      await patches.closeDoc('doc-1');
-      await patches.closeDoc('doc-2');
-    });
-
-    it('should handle reactive docId changes with autoClose: true', async () => {
-      const docIdRef = ref('doc-1');
-      let capturedData: any;
-
-      const TestComponent = defineComponent({
-        setup() {
-          const { data } = providePatchesDoc<any>('test', docIdRef, { autoClose: true });
-          capturedData = data;
+          providePatchesDoc<any>('test', docIdRef);
           return () => h('div');
         },
       });
@@ -840,32 +541,22 @@ describe('Vue Composables', () => {
 
       await nextTick();
       await new Promise(resolve => setTimeout(resolve, 10));
-
-      // doc-1 should be open
       expect(patches.getOpenDoc('doc-1')).toBeDefined();
 
-      // Switch to doc-2
       docIdRef.value = 'doc-2';
 
       await nextTick();
       await new Promise(resolve => setTimeout(resolve, 20));
 
-      // doc-1 should be closed, doc-2 should be open
       expect(patches.getOpenDoc('doc-1')).toBeUndefined();
       expect(patches.getOpenDoc('doc-2')).toBeDefined();
 
       app.unmount();
-
       await new Promise(resolve => setTimeout(resolve, 10));
-
-      // doc-2 should be closed after unmount
       expect(patches.getOpenDoc('doc-2')).toBeUndefined();
     });
 
     it('should support multiple named contexts without collision', async () => {
-      await patches.openDoc<any>('user-1');
-      await patches.openDoc<any>('workspace-1');
-
       let capturedUserData: any;
       let capturedWorkspaceData: any;
 
@@ -886,85 +577,10 @@ describe('Vue Composables', () => {
       app.mount(el);
 
       await nextTick();
+      await new Promise(resolve => setTimeout(resolve, 10));
 
-      // Should have access to both documents
       expect(capturedUserData).toBeDefined();
       expect(capturedWorkspaceData).toBeDefined();
-
-      app.unmount();
-      await patches.closeDoc('user-1');
-      await patches.closeDoc('workspace-1');
-    });
-
-    it('should properly manage ref counting across switches', async () => {
-      await patches.openDoc('doc-1');
-      const docIdRef = ref('doc-1');
-
-      const TestComponent = defineComponent({
-        setup() {
-          const { data } = providePatchesDoc<any>('test', docIdRef);
-          return () => h('div', data.value?.title || '');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches);
-
-      const el = document.createElement('div');
-      app.mount(el);
-
-      await nextTick();
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      const manager = getDocManager(patches);
-
-      // Initial ref count for doc-1 should be 1
-      expect(manager.getRefCount('doc-1')).toBe(1);
-
-      // Open doc-2 and switch to it
-      await patches.openDoc('doc-2');
-      docIdRef.value = 'doc-2';
-
-      await nextTick();
-      await new Promise(resolve => setTimeout(resolve, 20));
-
-      // doc-1 ref count should be 0, doc-2 should be 1
-      expect(manager.getRefCount('doc-1')).toBe(0);
-      expect(manager.getRefCount('doc-2')).toBe(1);
-
-      app.unmount();
-
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      // Both should be 0 after unmount
-      expect(manager.getRefCount('doc-1')).toBe(0);
-      expect(manager.getRefCount('doc-2')).toBe(0);
-
-      await patches.closeDoc('doc-1');
-      await patches.closeDoc('doc-2');
-    });
-
-    it('should handle error in explicit mode if doc is not open', async () => {
-      let capturedError: any;
-
-      const TestComponent = defineComponent({
-        setup() {
-          const { error } = providePatchesDoc<any>('test', 'nonexistent-doc');
-          capturedError = error;
-          return () => h('div');
-        },
-      });
-
-      const app = createApp(TestComponent);
-      providePatchesContext(app, patches);
-
-      const el = document.createElement('div');
-      app.mount(el);
-
-      // Error is set synchronously when doc is not open
-      await nextTick();
-      expect(capturedError.value).toBeInstanceOf(Error);
-      expect(capturedError.value.message).toContain('Document "nonexistent-doc" is not open');
 
       app.unmount();
     });
@@ -974,7 +590,7 @@ describe('Vue Composables', () => {
 
       const TestComponent = defineComponent({
         setup() {
-          const { loading } = providePatchesDoc<any>('test', 'doc-1', { autoClose: true });
+          const { loading } = providePatchesDoc<any>('test', 'doc-1');
           capturedLoading = loading;
           return () => h('div');
         },
@@ -986,18 +602,14 @@ describe('Vue Composables', () => {
       const el = document.createElement('div');
       app.mount(el);
 
-      // Initially loading
       expect(capturedLoading.value).toBe(true);
 
       await nextTick();
       await new Promise(resolve => setTimeout(resolve, 10));
 
-      // Should be done loading
       expect(capturedLoading.value).toBe(false);
 
       app.unmount();
-
-      await new Promise(resolve => setTimeout(resolve, 10));
     });
   });
 });

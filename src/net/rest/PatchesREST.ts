@@ -6,6 +6,7 @@ import type {
   CommitChangesOptions,
   DeleteDocOptions,
   CreateBranchMetadata,
+  EditableBranchMetadata,
   EditableVersionMetadata,
   ListVersionsOptions,
   PatchesSnapshot,
@@ -245,7 +246,10 @@ export class PatchesREST implements PatchesConnection {
     });
   }
 
-  // --- Branch Operations (not in PatchesAPI but matches PatchesClient feature parity) ---
+  // --- Branch Operations ---
+  // Note: updateBranch, deleteBranch, and mergeBranch take (docId, branchId) rather than
+  // matching BranchAPI signatures, because the REST URL pattern is /docs/:docId/_branches/:branchId.
+  // Apps using PatchesREST as a branchApi need a thin adapter to bridge the difference.
 
   async listBranches(docId: string, options?: { since?: number }): Promise<Branch[]> {
     const params = options?.since ? `?since=${encodeURIComponent(String(options.since))}` : '';
@@ -255,20 +259,23 @@ export class PatchesREST implements PatchesConnection {
   async createBranch(docId: string, rev: number, metadata?: CreateBranchMetadata): Promise<string> {
     return this._fetch(`/docs/${docId}/_branches`, {
       method: 'POST',
-      body: { rev, ...metadata },
+      body: { branchedAtRev: rev, ...metadata },
     });
   }
 
-  async closeBranch(branchId: string): Promise<void> {
-    await this._fetch(`/docs/${branchId}`, { method: 'DELETE' });
+  async updateBranch(docId: string, branchId: string, metadata: EditableBranchMetadata): Promise<void> {
+    await this._fetch(`/docs/${docId}/_branches/${encodeURIComponent(branchId)}`, {
+      method: 'PUT',
+      body: metadata,
+    });
   }
 
-  async deleteBranch(branchId: string): Promise<void> {
-    await this._fetch(`/docs/${branchId}/_delete-branch`, { method: 'POST' });
+  async deleteBranch(docId: string, branchId: string): Promise<void> {
+    await this._fetch(`/docs/${docId}/_branches/${encodeURIComponent(branchId)}`, { method: 'DELETE' });
   }
 
-  async mergeBranch(branchId: string): Promise<void> {
-    await this._fetch(`/docs/${branchId}/_merge`, { method: 'POST' });
+  async mergeBranch(docId: string, branchId: string): Promise<void> {
+    await this._fetch(`/docs/${docId}/_branches/${encodeURIComponent(branchId)}/_merge`, { method: 'POST' });
   }
 
   // --- Private Helpers ---

@@ -37,15 +37,15 @@ export interface PatchesSyncOptions {
   /**
    * Local store for branch metadata.
    * When provided, enables offline branch support:
-   * - Branch metas are cached locally for offline viewing
-   * - Branches with `pending: true` are created on the server during sync
+   * - Branch metas are cached locally
+   * - Branches with `pendingOp` are synced to the server during sync
    * - Branch document content flows through the standard doc sync pipeline
    */
   branchStore?: BranchClientStore;
   /**
-   * Branch API for syncing pending branch metas.
+   * Server-side Branch API for syncing pending branch operations.
    * Required when branchStore is provided. Typically the same RPC client
-   * used by PatchesBranchClient instances.
+   * used by PatchesBranchClient instances in online mode.
    */
   branchApi?: BranchAPI;
 }
@@ -260,54 +260,61 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     const pendingBranches = await branchStore.listPendingBranches();
 
-    // Process creations first, then deletions, so a create+delete in the same
-    // offline session is handled correctly.
-    const pendingCreates = pendingBranches.filter(b => !b.deleted);
-    const pendingDeletes = pendingBranches.filter(b => b.deleted);
+    // Process in order: creates → updates → deletes
+    const creates = pendingBranches.filter(b => b.pendingOp === 'create');
+    const updates = pendingBranches.filter(b => b.pendingOp === 'update');
+    const deletes = pendingBranches.filter(b => b.pendingOp === 'delete');
 
-    for (const branch of pendingCreates) {
+    for (const branch of creates) {
       if (!this.state.connected) break;
 
       try {
         // Create the branch on the server. The server is idempotent when metadata.id is provided.
         // The server skips initial change creation when contentStartRev is set in the metadata.
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const {
-          docId: sourceDocId,
-          branchedAtRev,
-          createdAt,
-          modifiedAt,
-          status,
-          pending,
-          deleted,
-          ...metadata
-        } = branch;
+        const { docId: sourceDocId, branchedAtRev, createdAt: _1, modifiedAt: _2, pendingOp: _3, deleted: _4, ...metadata } = branch;
         await branchApi.createBranch(sourceDocId, branchedAtRev, metadata);
 
         // Clear the pending flag
-        const synced = { ...branch };
-        delete synced.pending;
+        const synced = { ...branch, pendingOp: undefined };
+        delete synced.pendingOp;
         await branchStore.saveBranches(sourceDocId, [synced]);
       } catch (err) {
-        console.error('Failed to sync pending branch meta:', branch.id, err);
+        console.error('Failed to sync pending branch create:', branch.id, err);
         this.onError.emit(err instanceof Error ? err : new Error(String(err)));
-        // Stop processing further branches — ordering may matter
         break;
       }
     }
 
-    for (const branch of pendingDeletes) {
+    for (const branch of updates) {
+      if (!this.state.connected) break;
+
+      try {
+        // Extract only the editable metadata fields to send to the server
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { id: _id, docId: _did, branchedAtRev: _bar, createdAt: _ca, modifiedAt: _ma, contentStartRev: _csr, pendingOp: _po, deleted: _del, ...metadata } = branch;
+        await branchApi.updateBranch(branch.id, metadata);
+        const synced = { ...branch, pendingOp: undefined };
+        delete synced.pendingOp;
+        await branchStore.saveBranches(branch.docId, [synced]);
+      } catch (err) {
+        console.error('Failed to sync pending branch update:', branch.id, err);
+        this.onError.emit(err instanceof Error ? err : new Error(String(err)));
+        break;
+      }
+    }
+
+    for (const branch of deletes) {
       if (!this.state.connected) break;
 
       try {
         await branchApi.deleteBranch(branch.id);
 
         // Server confirmed the delete — remove the tombstone from the local store
-        await branchStore.deleteBranches([branch.id]);
+        await branchStore.removeBranches([branch.id]);
       } catch (err) {
         console.error('Failed to sync pending branch deletion:', branch.id, err);
         this.onError.emit(err instanceof Error ? err : new Error(String(err)));
-        // Stop processing further deletions — keep tombstone for retry
         break;
       }
     }

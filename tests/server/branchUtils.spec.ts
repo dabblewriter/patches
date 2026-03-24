@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assertBranchMetadata,
-  assertBranchOpenForMerge,
+  assertBranchExists,
   assertNotABranch,
   branchManagerApi,
   createBranchRecord,
@@ -17,7 +17,6 @@ describe('branchUtils', () => {
         listBranches: 'read',
         createBranch: 'write',
         updateBranch: 'write',
-        closeBranch: 'write',
         deleteBranch: 'write',
         mergeBranch: 'write',
       });
@@ -55,9 +54,6 @@ describe('branchUtils', () => {
       expect(() => assertBranchMetadata({ modifiedAt: 12345 } as any)).toThrow('Cannot modify branch field modifiedAt');
     });
 
-    it('should throw for protected field: status', () => {
-      expect(() => assertBranchMetadata({ status: 'closed' } as any)).toThrow('Cannot modify branch field status');
-    });
   });
 
   describe('generateBranchId', () => {
@@ -104,7 +100,6 @@ describe('branchUtils', () => {
       expect(branch.docId).toBe('doc1');
       expect(branch.branchedAtRev).toBe(5);
       expect(branch.contentStartRev).toBe(2);
-      expect(branch.status).toBe('open');
       expect(branch.createdAt).toBeGreaterThanOrEqual(before);
       expect(branch.createdAt).toBeLessThanOrEqual(after);
       expect(branch.modifiedAt).toBeGreaterThanOrEqual(before);
@@ -124,12 +119,10 @@ describe('branchUtils', () => {
     it('should not allow metadata to override required fields', () => {
       const branch = createBranchRecord('branch1', 'doc1', 5, 2, {
         id: 'wrong-id',
-        status: 'closed',
       } as any);
 
       // Required fields should override metadata
       expect(branch.id).toBe('branch1');
-      expect(branch.status).toBe('open');
     });
   });
 
@@ -152,7 +145,6 @@ describe('branchUtils', () => {
           createdAt: Date.now(),
           modifiedAt: Date.now(),
           contentStartRev: 2,
-          status: 'open',
         } as Branch),
       };
 
@@ -160,8 +152,8 @@ describe('branchUtils', () => {
     });
   });
 
-  describe('assertBranchOpenForMerge', () => {
-    it('should not throw for open branch', () => {
+  describe('assertBranchExists', () => {
+    it('should not throw for existing branch', () => {
       const branch: Branch = {
         id: 'branch1',
         docId: 'doc1',
@@ -169,46 +161,13 @@ describe('branchUtils', () => {
         createdAt: Date.now(),
         modifiedAt: Date.now(),
         contentStartRev: 2,
-        status: 'open',
       };
 
-      expect(() => assertBranchOpenForMerge(branch, 'branch1')).not.toThrow();
+      expect(() => assertBranchExists(branch, 'branch1')).not.toThrow();
     });
 
     it('should throw when branch is null', () => {
-      expect(() => assertBranchOpenForMerge(null, 'branch1')).toThrow('Branch with ID branch1 not found.');
-    });
-
-    it('should throw when branch is closed', () => {
-      const branch: Branch = {
-        id: 'branch1',
-        docId: 'doc1',
-        branchedAtRev: 5,
-        createdAt: Date.now(),
-        modifiedAt: Date.now(),
-        contentStartRev: 2,
-        status: 'closed',
-      };
-
-      expect(() => assertBranchOpenForMerge(branch, 'branch1')).toThrow(
-        'Branch branch1 is not open (status: closed). Cannot merge.'
-      );
-    });
-
-    it('should throw when branch is merged', () => {
-      const branch: Branch = {
-        id: 'branch1',
-        docId: 'doc1',
-        branchedAtRev: 5,
-        createdAt: Date.now(),
-        modifiedAt: Date.now(),
-        contentStartRev: 2,
-        status: 'merged',
-      };
-
-      expect(() => assertBranchOpenForMerge(branch, 'branch1')).toThrow(
-        'Branch branch1 is not open (status: merged). Cannot merge.'
-      );
+      expect(() => assertBranchExists(null, 'branch1')).toThrow('Branch with ID branch1 not found.');
     });
   });
 

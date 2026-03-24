@@ -11,19 +11,14 @@ function makeBranch(overrides: Partial<Branch> = {}): Branch {
     branchedAtRev: 5,
     createdAt: 1000,
     modifiedAt: 1000,
-    status: 'open',
     contentStartRev: 2,
     ...overrides,
   };
 }
 
 describe('PatchesBranchClient', () => {
-  let api: {
-    [K in keyof BranchAPI]: ReturnType<typeof vi.fn>;
-  };
-  let localStore: {
-    [K in keyof BranchClientStore]: ReturnType<typeof vi.fn>;
-  };
+  let api: BranchAPI & { [K in keyof BranchAPI]: ReturnType<typeof vi.fn> };
+  let offlineApi: BranchClientStore & { [K in keyof BranchClientStore]: ReturnType<typeof vi.fn> };
   let patches: any;
   let mockAlgorithm: any;
 
@@ -31,15 +26,18 @@ describe('PatchesBranchClient', () => {
     api = {
       listBranches: vi.fn().mockResolvedValue([]),
       createBranch: vi.fn().mockResolvedValue('server-branch-id'),
-      closeBranch: vi.fn().mockResolvedValue(undefined),
+      updateBranch: vi.fn().mockResolvedValue(undefined),
       deleteBranch: vi.fn().mockResolvedValue(undefined),
       mergeBranch: vi.fn().mockResolvedValue(undefined),
     };
-    localStore = {
+    offlineApi = {
       listBranches: vi.fn().mockResolvedValue([]),
+      createBranch: vi.fn().mockResolvedValue('offline-branch-id'),
+      updateBranch: vi.fn().mockResolvedValue(undefined),
+      deleteBranch: vi.fn().mockResolvedValue(undefined),
       loadBranch: vi.fn().mockResolvedValue(undefined),
       saveBranches: vi.fn().mockResolvedValue(undefined),
-      deleteBranches: vi.fn().mockResolvedValue(undefined),
+      removeBranches: vi.fn().mockResolvedValue(undefined),
       listPendingBranches: vi.fn().mockResolvedValue([]),
       getLastModifiedAt: vi.fn().mockResolvedValue(undefined),
     };
@@ -51,31 +49,35 @@ describe('PatchesBranchClient', () => {
       algorithms: { ot: mockAlgorithm },
       trackDocs: vi.fn().mockResolvedValue(undefined),
       deleteDoc: vi.fn().mockResolvedValue(undefined),
+      untrackDocs: vi.fn().mockResolvedValue(undefined),
       onChange: { emit: vi.fn() },
+      getDocAlgorithm: vi.fn().mockReturnValue(mockAlgorithm),
+      getOpenDoc: vi.fn().mockReturnValue(undefined),
+      submitDocChange: vi.fn().mockResolvedValue(undefined),
     };
   });
 
   describe('loadCached', () => {
-    it('should return empty array without local store', async () => {
+    it('should return empty array with online API', async () => {
       const client = new PatchesBranchClient('doc1', api, patches);
       expect(await client.loadCached()).toEqual([]);
     });
 
-    it('should load from local store and set branches state', async () => {
+    it('should load from offline API and set branches state', async () => {
       const cached = [makeBranch()];
-      localStore.listBranches.mockResolvedValue(cached);
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
+      offlineApi.listBranches.mockResolvedValue(cached);
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
 
       const result = await client.loadCached();
 
       expect(result).toEqual(cached);
       expect(client.branches.state).toEqual(cached);
-      expect(localStore.listBranches).toHaveBeenCalledWith('doc1');
+      expect(offlineApi.listBranches).toHaveBeenCalledWith('doc1');
     });
   });
 
   describe('listBranches', () => {
-    it('should do full fetch without local store', async () => {
+    it('should fetch from online API', async () => {
       const branches = [makeBranch()];
       api.listBranches.mockResolvedValue(branches);
       const client = new PatchesBranchClient('doc1', api, patches);
@@ -86,65 +88,24 @@ describe('PatchesBranchClient', () => {
       expect(api.listBranches).toHaveBeenCalledWith('doc1', undefined);
     });
 
-    it('should do full fetch and save to local store on first sync', async () => {
+    it('should read from offline API (local store)', async () => {
       const branches = [makeBranch()];
-      api.listBranches.mockResolvedValue(branches);
-      localStore.getLastModifiedAt.mockResolvedValue(undefined);
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
+      offlineApi.listBranches.mockResolvedValue(branches);
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
 
-      await client.listBranches();
+      const result = await client.listBranches();
 
-      expect(api.listBranches).toHaveBeenCalledWith('doc1', undefined);
-      expect(localStore.saveBranches).toHaveBeenCalledWith('doc1', branches);
+      expect(result).toEqual(branches);
+      expect(offlineApi.listBranches).toHaveBeenCalledWith('doc1', undefined);
     });
 
-    it('should use incremental sync when local store has data', async () => {
-      const existing = [makeBranch({ modifiedAt: 5000 })];
-      localStore.getLastModifiedAt.mockResolvedValue(5000);
-      api.listBranches.mockResolvedValue([makeBranch({ id: 'branch-2', modifiedAt: 6000 })]);
-      localStore.listBranches.mockResolvedValue([...existing, makeBranch({ id: 'branch-2', modifiedAt: 6000 })]);
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
-
-      await client.listBranches();
-
-      expect(api.listBranches).toHaveBeenCalledWith('doc1', { since: 5000 });
-      expect(localStore.saveBranches).toHaveBeenCalledWith('doc1', [makeBranch({ id: 'branch-2', modifiedAt: 6000 })]);
-    });
-
-    it('should handle tombstones during incremental sync', async () => {
-      localStore.getLastModifiedAt.mockResolvedValue(5000);
-      const tombstone = makeBranch({ id: 'deleted-branch', modifiedAt: 6000, deleted: true });
-      const live = makeBranch({ id: 'live-branch', modifiedAt: 6000 });
-      api.listBranches.mockResolvedValue([tombstone, live]);
-      localStore.listBranches.mockResolvedValue([live]);
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
-
-      await client.listBranches();
-
-      expect(localStore.deleteBranches).toHaveBeenCalledWith(['deleted-branch']);
-      expect(localStore.saveBranches).toHaveBeenCalledWith('doc1', [live]);
-    });
-
-    it('should not call save/delete when no incremental updates', async () => {
-      localStore.getLastModifiedAt.mockResolvedValue(5000);
+    it('should pass options through to API', async () => {
       api.listBranches.mockResolvedValue([]);
-      localStore.listBranches.mockResolvedValue([makeBranch()]);
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
-
-      await client.listBranches();
-
-      expect(localStore.saveBranches).not.toHaveBeenCalled();
-      expect(localStore.deleteBranches).not.toHaveBeenCalled();
-    });
-
-    it('should pass explicit since option directly to API', async () => {
-      api.listBranches.mockResolvedValue([]);
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
+      const client = new PatchesBranchClient('doc1', api, patches);
 
       await client.listBranches({ since: 9999 });
 
       expect(api.listBranches).toHaveBeenCalledWith('doc1', { since: 9999 });
-      expect(localStore.getLastModifiedAt).not.toHaveBeenCalled();
     });
   });
 
@@ -164,7 +125,7 @@ describe('PatchesBranchClient', () => {
 
   describe('createBranch (offline with initialState)', () => {
     it('should throw when metadata.id is missing', async () => {
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
 
       await expect(client.createBranch(5, { name: 'No ID' }, { title: 'Test' })).rejects.toThrow(
         'metadata.id is required'
@@ -172,24 +133,18 @@ describe('PatchesBranchClient', () => {
     });
 
     it('should create branch offline with initial state', async () => {
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
 
       const id = await client.createBranch(5, { id: 'my-branch', name: 'Feature' }, { title: 'Hello' });
 
       expect(id).toBe('my-branch');
 
-      // Should save pending branch meta to local store
-      expect(localStore.saveBranches).toHaveBeenCalledWith('doc1', [
-        expect.objectContaining({
-          id: 'my-branch',
-          docId: 'doc1',
-          branchedAtRev: 5,
-          name: 'Feature',
-          status: 'open',
-          pending: true,
-          contentStartRev: 2, // one init change at rev 1, so content starts at 2
-        }),
-      ]);
+      // Should call createBranch on the offline API (store handles pendingOp)
+      expect(offlineApi.createBranch).toHaveBeenCalledWith('doc1', 5, {
+        id: 'my-branch',
+        name: 'Feature',
+        contentStartRev: 2, // one init change at rev 1, so content starts at 2
+      });
 
       // Should track the branch document
       expect(patches.trackDocs).toHaveBeenCalledWith(['my-branch'], 'ot');
@@ -204,25 +159,22 @@ describe('PatchesBranchClient', () => {
 
       // Should emit onChange for sync
       expect(patches.onChange.emit).toHaveBeenCalledWith('my-branch');
-
-      // Should NOT call API
-      expect(api.createBranch).not.toHaveBeenCalled();
     });
 
-    it('should update branches store with new branch', async () => {
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
+    it('should refresh branches after offline create', async () => {
+      offlineApi.listBranches.mockResolvedValue([makeBranch({ id: 'b1', pendingOp: 'create' })]);
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
 
       await client.createBranch(5, { id: 'b1' }, { data: 'test' });
 
+      expect(offlineApi.listBranches).toHaveBeenCalled();
       expect(client.branches.state).toHaveLength(1);
-      expect(client.branches.state[0].id).toBe('b1');
-      expect(client.branches.state[0].pending).toBe(true);
     });
 
     it('should use specified algorithm', async () => {
       const lwwAlgorithm = { handleDocChange: vi.fn().mockResolvedValue([]) };
       patches.algorithms.lww = lwwAlgorithm;
-      const client = new PatchesBranchClient('doc1', api, patches, localStore, { algorithm: 'lww' });
+      const client = new PatchesBranchClient('doc1', offlineApi, patches, { algorithm: 'lww' });
 
       await client.createBranch(3, { id: 'lww-branch' }, { foo: 'bar' });
 
@@ -232,117 +184,85 @@ describe('PatchesBranchClient', () => {
     });
 
     it('should throw when algorithm not found', async () => {
-      const client = new PatchesBranchClient('doc1', api, patches, localStore, { algorithm: 'lww' });
+      const client = new PatchesBranchClient('doc1', offlineApi, patches, { algorithm: 'lww' });
 
       await expect(client.createBranch(3, { id: 'bad' }, { x: 1 })).rejects.toThrow("Algorithm 'lww' not found");
     });
 
     it('should reject branching from a branch', async () => {
-      // Simulate doc1 being a branch itself by having loadBranch return a record
-      localStore.loadBranch.mockResolvedValue(makeBranch({ id: 'doc1', docId: 'original-doc' }));
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
+      offlineApi.loadBranch.mockResolvedValue(makeBranch({ id: 'doc1', docId: 'original-doc' }));
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
 
       await expect(client.createBranch(5, { id: 'nested-branch' }, { data: 'test' })).rejects.toThrow(
         'Cannot create a branch from another branch.'
       );
 
-      expect(localStore.saveBranches).not.toHaveBeenCalled();
+      expect(offlineApi.createBranch).not.toHaveBeenCalled();
       expect(patches.trackDocs).not.toHaveBeenCalled();
     });
 
     it('should allow branching when document is not a branch', async () => {
-      localStore.loadBranch.mockResolvedValue(undefined);
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
+      offlineApi.loadBranch.mockResolvedValue(undefined);
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
 
       const id = await client.createBranch(5, { id: 'ok-branch' }, { data: 'test' });
 
       expect(id).toBe('ok-branch');
-      expect(localStore.loadBranch).toHaveBeenCalledWith('doc1');
+      expect(offlineApi.loadBranch).toHaveBeenCalledWith('doc1');
+    });
+
+    it('should rollback on algorithm failure', async () => {
+      mockAlgorithm.handleDocChange.mockRejectedValue(new Error('Algorithm failed'));
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
+
+      await expect(client.createBranch(5, { id: 'fail-branch' }, { data: 'test' })).rejects.toThrow(
+        'Algorithm failed'
+      );
+
+      // Should rollback by removing the branch and untracking the doc
+      expect(offlineApi.removeBranches).toHaveBeenCalledWith(['fail-branch']);
+      expect(patches.untrackDocs).toHaveBeenCalledWith(['fail-branch']);
     });
   });
 
   describe('deleteBranch', () => {
-    it('should save pending-deleted tombstone to local store and update branches state', async () => {
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
-      const b1 = makeBranch({ id: 'b1' });
-      const b2 = makeBranch({ id: 'b2' });
-      client.branches.state = [b1, b2];
-      localStore.loadBranch.mockResolvedValue(b1);
-
-      await client.deleteBranch('b1');
-
-      // Should NOT call server API
-      expect(api.deleteBranch).not.toHaveBeenCalled();
-      // Should save tombstone with pending + deleted flags
-      expect(localStore.saveBranches).toHaveBeenCalledWith('doc1', [
-        expect.objectContaining({
-          id: 'b1',
-          pending: true,
-          deleted: true,
-        }),
-      ]);
-      expect(client.branches.state).toEqual([b2]);
-    });
-
-    it('should directly remove pending (unsynced) branch from local store', async () => {
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
-      const pendingBranch = makeBranch({ id: 'b1', pending: true });
-      client.branches.state = [pendingBranch];
-      localStore.loadBranch.mockResolvedValue(pendingBranch);
-
-      await client.deleteBranch('b1');
-
-      // Should physically delete — no tombstone needed since server doesn't know about it
-      expect(localStore.deleteBranches).toHaveBeenCalledWith(['b1']);
-      expect(localStore.saveBranches).not.toHaveBeenCalled();
-      expect(api.deleteBranch).not.toHaveBeenCalled();
-      expect(client.branches.state).toEqual([]);
-    });
-
-    it('should call API directly without local store', async () => {
+    it('should call API and update branches state (online)', async () => {
       const client = new PatchesBranchClient('doc1', api, patches);
-      client.branches.state = [makeBranch({ id: 'b1' })];
+      client.branches.state = [makeBranch({ id: 'b1' }), makeBranch({ id: 'b2' })];
 
       await client.deleteBranch('b1');
 
       expect(api.deleteBranch).toHaveBeenCalledWith('b1');
-      expect(client.branches.state).toEqual([]);
+      expect(client.branches.state).toEqual([makeBranch({ id: 'b2' })]);
+    });
+
+    it('should call offline API and update branches state', async () => {
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
+      client.branches.state = [makeBranch({ id: 'b1' }), makeBranch({ id: 'b2' })];
+
+      await client.deleteBranch('b1');
+
+      // Store handles tombstone logic internally
+      expect(offlineApi.deleteBranch).toHaveBeenCalledWith('b1');
+      expect(client.branches.state).toEqual([makeBranch({ id: 'b2' })]);
     });
   });
 
   describe('deleteBranchWithDoc', () => {
     it('should delete both the branch record and the branch document', async () => {
-      const client = new PatchesBranchClient('doc1', api, patches, localStore);
-      const b1 = makeBranch({ id: 'b1' });
-      client.branches.state = [b1];
-      localStore.loadBranch.mockResolvedValue(b1);
+      const client = new PatchesBranchClient('doc1', api, patches);
+      client.branches.state = [makeBranch({ id: 'b1' })];
 
       await client.deleteBranchWithDoc('b1');
 
-      // Should have saved tombstone for branch record
-      expect(localStore.saveBranches).toHaveBeenCalledWith('doc1', [
-        expect.objectContaining({ id: 'b1', pending: true, deleted: true }),
-      ]);
-      // Should have called deleteDoc on the branch document
+      expect(api.deleteBranch).toHaveBeenCalledWith('b1');
       expect(patches.deleteDoc).toHaveBeenCalledWith('b1');
       expect(client.branches.state).toEqual([]);
     });
   });
 
-  describe('closeBranch', () => {
-    it('should call API and refresh branches', async () => {
-      api.listBranches.mockResolvedValue([]);
-      const client = new PatchesBranchClient('doc1', api, patches);
-
-      await client.closeBranch('branch-1');
-
-      expect(api.closeBranch).toHaveBeenCalledWith('branch-1');
-      expect(api.listBranches).toHaveBeenCalled();
-    });
-  });
-
   describe('mergeBranch', () => {
-    it('should call API and refresh branches', async () => {
+    it('should call API and refresh branches (online)', async () => {
       api.listBranches.mockResolvedValue([]);
       const client = new PatchesBranchClient('doc1', api, patches);
 
@@ -350,6 +270,78 @@ describe('PatchesBranchClient', () => {
 
       expect(api.mergeBranch).toHaveBeenCalledWith('branch-1');
       expect(api.listBranches).toHaveBeenCalled();
+    });
+
+    it('should merge locally with offline API', async () => {
+      const branchChanges = [
+        { id: 'c1', ops: [{ op: 'replace', path: '/title', value: 'New' }], rev: 3, baseRev: 2, createdAt: 1, committedAt: 1 },
+        { id: 'c2', ops: [{ op: 'replace', path: '/body', value: 'Text' }], rev: 4, baseRev: 3, createdAt: 2, committedAt: 2 },
+      ];
+      mockAlgorithm.listChanges = vi.fn().mockResolvedValue(branchChanges);
+
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
+      client.branches.state = [makeBranch({ id: 'branch-1', contentStartRev: 3 })];
+
+      await client.mergeBranch('branch-1');
+
+      // Should read changes from branch
+      expect(mockAlgorithm.listChanges).toHaveBeenCalledWith('branch-1', { startAfter: 2 });
+
+      // Should submit each change to source doc via serialized queue with batchId
+      expect(patches.submitDocChange).toHaveBeenCalledTimes(2);
+      expect(patches.submitDocChange).toHaveBeenCalledWith(
+        'doc1',
+        branchChanges[0].ops,
+        { batchId: 'branch-1' }
+      );
+
+      // Should update lastMergedRev
+      expect(offlineApi.updateBranch).toHaveBeenCalledWith('branch-1', { lastMergedRev: 4 });
+
+      // Should trigger sync for source doc
+      expect(patches.onChange.emit).toHaveBeenCalledWith('doc1');
+
+      // Should update local branch state
+      expect(client.branches.state[0].lastMergedRev).toBe(4);
+    });
+
+    it('should use lastMergedRev for subsequent merges', async () => {
+      mockAlgorithm.listChanges = vi.fn().mockResolvedValue([
+        { id: 'c3', ops: [{ op: 'replace', path: '/x', value: 1 }], rev: 5, baseRev: 4, createdAt: 3, committedAt: 3 },
+      ]);
+
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
+      client.branches.state = [makeBranch({ id: 'branch-1', lastMergedRev: 4 })];
+
+      await client.mergeBranch('branch-1');
+
+      expect(mockAlgorithm.listChanges).toHaveBeenCalledWith('branch-1', { startAfter: 4 });
+    });
+
+    it('should no-op when no unmerged changes', async () => {
+      mockAlgorithm.listChanges = vi.fn().mockResolvedValue([]);
+
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
+      client.branches.state = [makeBranch({ id: 'branch-1' })];
+
+      await client.mergeBranch('branch-1');
+
+      expect(mockAlgorithm.handleDocChange).not.toHaveBeenCalled();
+      expect(offlineApi.updateBranch).not.toHaveBeenCalled();
+    });
+
+    it('should throw when branch not found', async () => {
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
+
+      await expect(client.mergeBranch('nonexistent')).rejects.toThrow('Branch nonexistent not found');
+    });
+
+    it('should throw when algorithm lacks listChanges', async () => {
+      delete mockAlgorithm.listChanges;
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
+      client.branches.state = [makeBranch({ id: 'branch-1' })];
+
+      await expect(client.mergeBranch('branch-1')).rejects.toThrow('listChanges');
     });
   });
 

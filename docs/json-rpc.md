@@ -124,7 +124,7 @@ Registered by [OTBranchManager or LWWBranchManager](branching.md) (requires bran
 | `listBranches` | `read`  | `docId`                     | `Branch[]` |
 | `createBranch` | `write` | `docId`, `rev`, `metadata?` | `string`   |
 | `updateBranch` | `write` | `branchId`, `metadata`      | `void`     |
-| `closeBranch`  | `write` | `branchId`, `status?`       | `void`     |
+| `deleteBranch` | `write` | `branchId`                  | `void`     |
 | `mergeBranch`  | `write` | `branchId`                  | `Change[]` |
 
 ## Notifications

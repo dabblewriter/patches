@@ -153,6 +153,12 @@ describe('PatchesSync', () => {
       expect(sync['trackedDocs'].has('doc1')).toBe(true);
       expect(sync['trackedDocs'].has('doc2')).toBe(true);
     });
+
+    it('should throw when branchStore is provided without branchApi', () => {
+      expect(() => new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: {} as any,
+      })).toThrow('branchApi is required when branchStore is provided');
+    });
   });
 
   describe('state management', () => {
@@ -1523,16 +1529,19 @@ describe('PatchesSync', () => {
     beforeEach(() => {
       mockBranchStore = {
         listBranches: vi.fn().mockResolvedValue([]),
+        createBranch: vi.fn().mockResolvedValue('branch-id'),
+        updateBranch: vi.fn().mockResolvedValue(undefined),
+        deleteBranch: vi.fn().mockResolvedValue(undefined),
         loadBranch: vi.fn().mockResolvedValue(undefined),
         saveBranches: vi.fn().mockResolvedValue(undefined),
-        deleteBranches: vi.fn().mockResolvedValue(undefined),
+        removeBranches: vi.fn().mockResolvedValue(undefined),
         listPendingBranches: vi.fn().mockResolvedValue([]),
         getLastModifiedAt: vi.fn().mockResolvedValue(undefined),
       };
       mockBranchApi = {
         listBranches: vi.fn().mockResolvedValue([]),
         createBranch: vi.fn().mockResolvedValue('branch-id'),
-        closeBranch: vi.fn().mockResolvedValue(undefined),
+        updateBranch: vi.fn().mockResolvedValue(undefined),
         deleteBranch: vi.fn().mockResolvedValue(undefined),
         mergeBranch: vi.fn().mockResolvedValue(undefined),
       };
@@ -1544,17 +1553,17 @@ describe('PatchesSync', () => {
       // No errors, no calls
     });
 
-    it('should create pending branches on server and clear pending flag', async () => {
+    it('should create pending branches on server and clear pendingOp', async () => {
       const pendingBranch = {
         id: 'my-branch',
         docId: 'doc1',
         branchedAtRev: 5,
         createdAt: 1000,
         modifiedAt: 1000,
-        status: 'open',
+
         contentStartRev: 2,
         name: 'Feature',
-        pending: true as const,
+        pendingOp: 'create' as const,
       };
       mockBranchStore.listPendingBranches.mockResolvedValue([pendingBranch]);
 
@@ -1566,17 +1575,17 @@ describe('PatchesSync', () => {
 
       await syncWithBranches['syncPendingBranchMetas']();
 
-      // Should create on server with metadata (no docId/branchedAtRev/createdAt/modifiedAt/status/pending)
+      // Should create on server with metadata (no docId/branchedAtRev/createdAt/modifiedAt/pendingOp)
       expect(mockBranchApi.createBranch).toHaveBeenCalledWith('doc1', 5, {
         id: 'my-branch',
         contentStartRev: 2,
         name: 'Feature',
       });
 
-      // Should save without pending flag
+      // Should save without pendingOp
       const savedBranches = mockBranchStore.saveBranches.mock.calls[0][1];
       expect(savedBranches[0].id).toBe('my-branch');
-      expect(savedBranches[0]).not.toHaveProperty('pending');
+      expect(savedBranches[0]).not.toHaveProperty('pendingOp');
     });
 
     it('should stop processing on API error', async () => {
@@ -1586,9 +1595,9 @@ describe('PatchesSync', () => {
         branchedAtRev: 3,
         createdAt: 100,
         modifiedAt: 100,
-        status: 'open',
+
         contentStartRev: 2,
-        pending: true as const,
+        pendingOp: 'create' as const,
       };
       const branch2 = {
         id: 'b2',
@@ -1596,9 +1605,9 @@ describe('PatchesSync', () => {
         branchedAtRev: 4,
         createdAt: 200,
         modifiedAt: 200,
-        status: 'open',
+
         contentStartRev: 2,
-        pending: true as const,
+        pendingOp: 'create' as const,
       };
       mockBranchStore.listPendingBranches.mockResolvedValue([branch1, branch2]);
       mockBranchApi.createBranch.mockRejectedValueOnce(new Error('Network error'));
@@ -1623,9 +1632,9 @@ describe('PatchesSync', () => {
         branchedAtRev: 3,
         createdAt: 100,
         modifiedAt: 100,
-        status: 'open',
+
         contentStartRev: 2,
-        pending: true as const,
+        pendingOp: 'create' as const,
       };
       mockBranchStore.listPendingBranches.mockResolvedValue([branch]);
 
@@ -1648,9 +1657,9 @@ describe('PatchesSync', () => {
         branchedAtRev: 3,
         createdAt: 100,
         modifiedAt: 100,
-        status: 'open',
+
         contentStartRev: 2,
-        pending: true as const,
+        pendingOp: 'create' as const,
       };
       const branch2 = {
         id: 'b2',
@@ -1658,9 +1667,9 @@ describe('PatchesSync', () => {
         branchedAtRev: 1,
         createdAt: 200,
         modifiedAt: 200,
-        status: 'open',
+
         contentStartRev: 2,
-        pending: true as const,
+        pendingOp: 'create' as const,
       };
       mockBranchStore.listPendingBranches.mockResolvedValue([branch1, branch2]);
 
@@ -1685,9 +1694,9 @@ describe('PatchesSync', () => {
         branchedAtRev: 5,
         createdAt: 1000,
         modifiedAt: 2000,
-        status: 'open',
+
         contentStartRev: 2,
-        pending: true as const,
+        pendingOp: 'delete' as const,
         deleted: true as const,
       };
       mockBranchStore.listPendingBranches.mockResolvedValue([deletedBranch]);
@@ -1705,7 +1714,7 @@ describe('PatchesSync', () => {
       // Should NOT call createBranch
       expect(mockBranchApi.createBranch).not.toHaveBeenCalled();
       // Should physically remove tombstone from local store
-      expect(mockBranchStore.deleteBranches).toHaveBeenCalledWith(['del-branch']);
+      expect(mockBranchStore.removeBranches).toHaveBeenCalledWith(['del-branch']);
     });
 
     it('should process creations before deletions', async () => {
@@ -1716,9 +1725,9 @@ describe('PatchesSync', () => {
         branchedAtRev: 3,
         createdAt: 100,
         modifiedAt: 100,
-        status: 'open',
+
         contentStartRev: 2,
-        pending: true as const,
+        pendingOp: 'create' as const,
       };
       const deletedBranch = {
         id: 'old-branch',
@@ -1726,9 +1735,9 @@ describe('PatchesSync', () => {
         branchedAtRev: 5,
         createdAt: 500,
         modifiedAt: 600,
-        status: 'open',
+
         contentStartRev: 2,
-        pending: true as const,
+        pendingOp: 'delete' as const,
         deleted: true as const,
       };
       mockBranchStore.listPendingBranches.mockResolvedValue([deletedBranch, createdBranch]);
@@ -1759,9 +1768,9 @@ describe('PatchesSync', () => {
         branchedAtRev: 3,
         createdAt: 100,
         modifiedAt: 100,
-        status: 'open',
+
         contentStartRev: 2,
-        pending: true as const,
+        pendingOp: 'create' as const,
       };
       mockBranchStore.listPendingBranches.mockResolvedValue([pendingBranch]);
 
@@ -1803,9 +1812,9 @@ describe('PatchesSync', () => {
         branchedAtRev: 5,
         createdAt: 1000,
         modifiedAt: 2000,
-        status: 'open',
+
         contentStartRev: 2,
-        pending: true as const,
+        pendingOp: 'delete' as const,
         deleted: true as const,
       };
       mockBranchStore.listPendingBranches.mockResolvedValue([deletedBranch]);
@@ -1822,7 +1831,37 @@ describe('PatchesSync', () => {
       // Should have tried to delete
       expect(mockBranchApi.deleteBranch).toHaveBeenCalledWith('del-branch');
       // Should NOT have removed the tombstone (kept for retry)
-      expect(mockBranchStore.deleteBranches).not.toHaveBeenCalled();
+      expect(mockBranchStore.removeBranches).not.toHaveBeenCalled();
+    });
+
+    it('should sync pending update operations', async () => {
+      const updatedBranch = {
+        id: 'update-branch',
+        docId: 'doc1',
+        branchedAtRev: 5,
+        createdAt: 1000,
+        modifiedAt: 2000,
+
+        contentStartRev: 2,
+        lastMergedRev: 10,
+        pendingOp: 'update' as const,
+      };
+      mockBranchStore.listPendingBranches.mockResolvedValue([updatedBranch]);
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      // Should call updateBranch with editable metadata (lastMergedRev, name, etc.)
+      expect(mockBranchApi.updateBranch).toHaveBeenCalledWith('update-branch', expect.objectContaining({
+        lastMergedRev: 10,
+      }));
+      const savedBranches = mockBranchStore.saveBranches.mock.calls[0][1];
+      expect(savedBranches[0]).not.toHaveProperty('pendingOp');
     });
   });
 });

@@ -48,7 +48,6 @@ describe('LWWBranchManager', () => {
         listBranches: 'read',
         createBranch: 'write',
         updateBranch: 'write',
-        closeBranch: 'write',
         deleteBranch: 'write',
         mergeBranch: 'write',
       });
@@ -94,7 +93,6 @@ describe('LWWBranchManager', () => {
         id: 'generated-id',
         docId: 'doc1',
         branchedAtRev: 1,
-        status: 'open',
         name: 'Feature Branch',
       });
     });
@@ -207,32 +205,6 @@ describe('LWWBranchManager', () => {
     });
   });
 
-  describe('closeBranch', () => {
-    it('should close branch with default status', async () => {
-      await server.commitChanges('doc1', [
-        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }] },
-      ]);
-      const branchId = await branchManager.createBranch('doc1', 1);
-
-      await branchManager.closeBranch(branchId);
-
-      const branches = await branchManager.listBranches('doc1');
-      expect(branches[0].status).toBe('closed');
-    });
-
-    it('should close branch with specified status', async () => {
-      await server.commitChanges('doc1', [
-        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }] },
-      ]);
-      const branchId = await branchManager.createBranch('doc1', 1);
-
-      await branchManager.closeBranch(branchId, 'archived');
-
-      const branches = await branchManager.listBranches('doc1');
-      expect(branches[0].status).toBe('archived');
-    });
-  });
-
   describe('deleteBranch', () => {
     it('should replace branch with tombstone', async () => {
       await server.commitChanges('doc1', [
@@ -259,18 +231,6 @@ describe('LWWBranchManager', () => {
       await expect(branchManager.mergeBranch('nonexistent')).rejects.toThrow('Branch with ID nonexistent not found.');
     });
 
-    it('should throw when branch is not open', async () => {
-      await server.commitChanges('doc1', [
-        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }] },
-      ]);
-      const branchId = await branchManager.createBranch('doc1', 1);
-      await branchManager.closeBranch(branchId, 'merged');
-
-      await expect(branchManager.mergeBranch(branchId)).rejects.toThrow(
-        `Branch ${branchId} is not open (status: merged). Cannot merge.`
-      );
-    });
-
     it('should return empty array when no changes to merge', async () => {
       await server.commitChanges('doc1', [
         { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }] },
@@ -281,9 +241,8 @@ describe('LWWBranchManager', () => {
       const result = await branchManager.mergeBranch(branchId);
 
       expect(result).toEqual([]);
-      // Branch should remain open (not closed)
       const branches = await branchManager.listBranches('doc1');
-      expect(branches[0].status).toBe('open');
+
     });
 
     it('should merge branch changes to source document', async () => {
@@ -310,9 +269,9 @@ describe('LWWBranchManager', () => {
       const sourceDoc = await getDocState(server, 'doc1');
       expect(sourceDoc.state.name).toBe('Bob');
 
-      // Verify branch stays open with lastMergedRev set
+      // Verify lastMergedRev set
       const branches = await branchManager.listBranches('doc1');
-      expect(branches[0].status).toBe('open');
+
       expect(branches[0].lastMergedRev).toBeDefined();
     });
 
@@ -341,9 +300,8 @@ describe('LWWBranchManager', () => {
       const sourceDoc = await getDocState(server, 'doc1');
       expect(sourceDoc.state.name).toBe('SourceValue'); // ts=3000 > ts=2000
 
-      // Branch stays open
       const branches = await branchManager.listBranches('doc1');
-      expect(branches[0].status).toBe('open');
+
     });
 
     it('should handle merge with multiple fields', async () => {
@@ -426,9 +384,9 @@ describe('LWWBranchManager', () => {
         count: 5, // From concurrent source change (ts=1500)
       });
 
-      // 7. Verify branch stays open with lastMergedRev
+      // 7. Verify lastMergedRev
       let branches = await branchManager.listBranches('doc1');
-      expect(branches[0].status).toBe('open');
+
       expect(branches[0].lastMergedRev).toBeDefined();
       const firstMergedRev = branches[0].lastMergedRev;
 

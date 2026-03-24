@@ -5,6 +5,7 @@ import type {
   ChangeInput,
   DeleteDocOptions,
   CreateBranchMetadata,
+  EditableBranchMetadata,
   EditableVersionMetadata,
   ListBranchesOptions,
   ListVersionsOptions,
@@ -196,12 +197,12 @@ export class PatchesClient implements PatchesAPI {
   }
 
   /**
-   * Closes a branch on the server.
-   * @param branchId - The ID of the branch to close.
-   * @returns A promise resolving when the branch is closed.
+   * Updates a branch's metadata on the server.
+   * @param branchId - The ID of the branch to update.
+   * @param metadata - The metadata to update.
    */
-  async closeBranch(branchId: string): Promise<void> {
-    return this.rpc.call('closeBranch', branchId);
+  async updateBranch(branchId: string, metadata: EditableBranchMetadata): Promise<void> {
+    return this.rpc.call('updateBranch', branchId, metadata);
   }
 
   /**

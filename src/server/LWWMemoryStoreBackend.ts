@@ -252,7 +252,7 @@ export class LWWMemoryStoreBackend
     this.branches.set(branch.id, branch);
   }
 
-  async updateBranch(branchId: string, updates: Partial<Pick<Branch, 'status' | 'name' | 'metadata'>>): Promise<void> {
+  async updateBranch(branchId: string, updates: Partial<Pick<Branch, 'name' | 'metadata'>>): Promise<void> {
     const branch = this.branches.get(branchId);
     if (branch) {
       Object.assign(branch, updates);
@@ -269,7 +269,6 @@ export class LWWMemoryStoreBackend
         branchedAtRev: branch.branchedAtRev,
         createdAt: branch.createdAt,
         modifiedAt: Date.now(),
-        status: branch.status,
         contentStartRev: branch.contentStartRev,
         deleted: true,
       });

@@ -94,12 +94,6 @@ export class PatchesBranchClient {
     return branchId;
   }
 
-  /** Close a branch without merging its changes. */
-  async closeBranch(branchId: string): Promise<void> {
-    await this.api.closeBranch(branchId);
-    await this.listBranches();
-  }
-
   /**
    * Delete a branch.
    * The API implementation handles tombstones (offline store) or direct deletion (online).
@@ -127,8 +121,8 @@ export class PatchesBranchClient {
    * on the source doc, then updates `lastMergedRev` locally.
    */
   async mergeBranch(branchId: string): Promise<void> {
-    if ('mergeBranch' in this.api) {
-      await this.api.mergeBranch(branchId);
+    if (!this.isOffline) {
+      await (this.api as BranchAPI).mergeBranch(branchId);
       await this.listBranches();
       return;
     }
@@ -194,8 +188,8 @@ export class PatchesBranchClient {
       }
     } catch (err) {
       // Rollback: remove saved branch meta and untrack doc so we don't leave inconsistent state
-      if ('removeBranches' in this.api) {
-        await this.api.removeBranches([branchDocId]);
+      if (this.isOffline) {
+        await (this.api as BranchClientStore).removeBranches([branchDocId]);
       }
       await this.patches.untrackDocs([branchDocId]);
       throw err;
@@ -216,7 +210,6 @@ export class PatchesBranchClient {
     // 1. Get branch metadata
     const branch = this.branches.state.find(b => b.id === branchId);
     if (!branch) throw new Error(`Branch ${branchId} not found`);
-    if (branch.status !== 'open') throw new Error(`Branch ${branchId} is not open (status: ${branch.status})`);
 
     const sourceDocId = branch.docId;
 
@@ -234,14 +227,9 @@ export class PatchesBranchClient {
 
     const lastBranchRev = branchChanges[branchChanges.length - 1].rev;
 
-    // 4. Get the source doc's algorithm and re-stamp changes
-    const sourceAlgorithm = this.patches.getDocAlgorithm(sourceDocId)
-      ?? this.patches.algorithms[this.patches.defaultAlgorithm];
-    if (!sourceAlgorithm) throw new Error(`No algorithm found for source document ${sourceDocId}`);
-
-    const sourceDoc = this.patches.getOpenDoc(sourceDocId);
+    // 4. Submit branch changes to source doc through the serialized change queue
     for (const change of branchChanges) {
-      await sourceAlgorithm.handleDocChange(sourceDocId, change.ops, sourceDoc, { batchId: branchId });
+      await this.patches.submitDocChange(sourceDocId, change.ops, { batchId: branchId });
     }
 
     // 5. Update lastMergedRev on the branch

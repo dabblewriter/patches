@@ -153,6 +153,12 @@ describe('PatchesSync', () => {
       expect(sync['trackedDocs'].has('doc1')).toBe(true);
       expect(sync['trackedDocs'].has('doc2')).toBe(true);
     });
+
+    it('should throw when branchStore is provided without branchApi', () => {
+      expect(() => new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: {} as any,
+      })).toThrow('branchApi is required when branchStore is provided');
+    });
   });
 
   describe('state management', () => {
@@ -1525,7 +1531,6 @@ describe('PatchesSync', () => {
         listBranches: vi.fn().mockResolvedValue([]),
         createBranch: vi.fn().mockResolvedValue('branch-id'),
         updateBranch: vi.fn().mockResolvedValue(undefined),
-        closeBranch: vi.fn().mockResolvedValue(undefined),
         deleteBranch: vi.fn().mockResolvedValue(undefined),
         loadBranch: vi.fn().mockResolvedValue(undefined),
         saveBranches: vi.fn().mockResolvedValue(undefined),
@@ -1537,7 +1542,6 @@ describe('PatchesSync', () => {
         listBranches: vi.fn().mockResolvedValue([]),
         createBranch: vi.fn().mockResolvedValue('branch-id'),
         updateBranch: vi.fn().mockResolvedValue(undefined),
-        closeBranch: vi.fn().mockResolvedValue(undefined),
         deleteBranch: vi.fn().mockResolvedValue(undefined),
         mergeBranch: vi.fn().mockResolvedValue(undefined),
       };
@@ -1556,7 +1560,7 @@ describe('PatchesSync', () => {
         branchedAtRev: 5,
         createdAt: 1000,
         modifiedAt: 1000,
-        status: 'open',
+
         contentStartRev: 2,
         name: 'Feature',
         pendingOp: 'create' as const,
@@ -1571,7 +1575,7 @@ describe('PatchesSync', () => {
 
       await syncWithBranches['syncPendingBranchMetas']();
 
-      // Should create on server with metadata (no docId/branchedAtRev/createdAt/modifiedAt/status/pendingOp)
+      // Should create on server with metadata (no docId/branchedAtRev/createdAt/modifiedAt/pendingOp)
       expect(mockBranchApi.createBranch).toHaveBeenCalledWith('doc1', 5, {
         id: 'my-branch',
         contentStartRev: 2,
@@ -1591,7 +1595,7 @@ describe('PatchesSync', () => {
         branchedAtRev: 3,
         createdAt: 100,
         modifiedAt: 100,
-        status: 'open',
+
         contentStartRev: 2,
         pendingOp: 'create' as const,
       };
@@ -1601,7 +1605,7 @@ describe('PatchesSync', () => {
         branchedAtRev: 4,
         createdAt: 200,
         modifiedAt: 200,
-        status: 'open',
+
         contentStartRev: 2,
         pendingOp: 'create' as const,
       };
@@ -1628,7 +1632,7 @@ describe('PatchesSync', () => {
         branchedAtRev: 3,
         createdAt: 100,
         modifiedAt: 100,
-        status: 'open',
+
         contentStartRev: 2,
         pendingOp: 'create' as const,
       };
@@ -1653,7 +1657,7 @@ describe('PatchesSync', () => {
         branchedAtRev: 3,
         createdAt: 100,
         modifiedAt: 100,
-        status: 'open',
+
         contentStartRev: 2,
         pendingOp: 'create' as const,
       };
@@ -1663,7 +1667,7 @@ describe('PatchesSync', () => {
         branchedAtRev: 1,
         createdAt: 200,
         modifiedAt: 200,
-        status: 'open',
+
         contentStartRev: 2,
         pendingOp: 'create' as const,
       };
@@ -1690,7 +1694,7 @@ describe('PatchesSync', () => {
         branchedAtRev: 5,
         createdAt: 1000,
         modifiedAt: 2000,
-        status: 'open',
+
         contentStartRev: 2,
         pendingOp: 'delete' as const,
         deleted: true as const,
@@ -1721,7 +1725,7 @@ describe('PatchesSync', () => {
         branchedAtRev: 3,
         createdAt: 100,
         modifiedAt: 100,
-        status: 'open',
+
         contentStartRev: 2,
         pendingOp: 'create' as const,
       };
@@ -1731,7 +1735,7 @@ describe('PatchesSync', () => {
         branchedAtRev: 5,
         createdAt: 500,
         modifiedAt: 600,
-        status: 'open',
+
         contentStartRev: 2,
         pendingOp: 'delete' as const,
         deleted: true as const,
@@ -1764,7 +1768,7 @@ describe('PatchesSync', () => {
         branchedAtRev: 3,
         createdAt: 100,
         modifiedAt: 100,
-        status: 'open',
+
         contentStartRev: 2,
         pendingOp: 'create' as const,
       };
@@ -1808,7 +1812,7 @@ describe('PatchesSync', () => {
         branchedAtRev: 5,
         createdAt: 1000,
         modifiedAt: 2000,
-        status: 'open',
+
         contentStartRev: 2,
         pendingOp: 'delete' as const,
         deleted: true as const,
@@ -1830,32 +1834,6 @@ describe('PatchesSync', () => {
       expect(mockBranchStore.removeBranches).not.toHaveBeenCalled();
     });
 
-    it('should sync pending close operations', async () => {
-      const closedBranch = {
-        id: 'close-branch',
-        docId: 'doc1',
-        branchedAtRev: 5,
-        createdAt: 1000,
-        modifiedAt: 2000,
-        status: 'closed',
-        contentStartRev: 2,
-        pendingOp: 'close' as const,
-      };
-      mockBranchStore.listPendingBranches.mockResolvedValue([closedBranch]);
-
-      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
-        branchStore: mockBranchStore,
-        branchApi: mockBranchApi,
-      });
-      syncWithBranches['updateState']({ connected: true });
-
-      await syncWithBranches['syncPendingBranchMetas']();
-
-      expect(mockBranchApi.closeBranch).toHaveBeenCalledWith('close-branch');
-      const savedBranches = mockBranchStore.saveBranches.mock.calls[0][1];
-      expect(savedBranches[0]).not.toHaveProperty('pendingOp');
-    });
-
     it('should sync pending update operations', async () => {
       const updatedBranch = {
         id: 'update-branch',
@@ -1863,7 +1841,7 @@ describe('PatchesSync', () => {
         branchedAtRev: 5,
         createdAt: 1000,
         modifiedAt: 2000,
-        status: 'open',
+
         contentStartRev: 2,
         lastMergedRev: 10,
         pendingOp: 'update' as const,

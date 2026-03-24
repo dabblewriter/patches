@@ -9,7 +9,7 @@ import type {
  * Client-side branch storage interface that doubles as a BranchAPI-compatible layer.
  *
  * Implements the same method signatures as BranchAPI (listBranches, createBranch,
- * closeBranch, deleteBranch, updateBranch) so PatchesBranchClient can call a single
+ * deleteBranch, updateBranch) so PatchesBranchClient can call a single
  * interface regardless of online/offline mode.
  *
  * All mutating methods set `pendingOp` on the branch record so PatchesSync knows
@@ -32,14 +32,6 @@ export interface BranchClientStore {
    * Returns the branch document ID.
    */
   createBranch(docId: string, rev: number, metadata?: CreateBranchMetadata): Promise<string>;
-
-  /**
-   * Closes a branch locally, setting `status: 'closed'`.
-   * If the branch has `pendingOp: 'create'` (never synced), keeps it as 'create'
-   * but updates the status — PatchesSync will create it with status closed.
-   * Otherwise sets `pendingOp: 'close'`.
-   */
-  closeBranch(branchId: string): Promise<void>;
 
   /**
    * Deletes a branch locally.

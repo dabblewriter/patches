@@ -492,7 +492,6 @@ describe('LWWMemoryStoreBackend', () => {
       contentStartRev: 2,
       createdAt: Date.now(),
       modifiedAt: Date.now(),
-      status: 'open',
     });
 
     describe('createBranch', () => {
@@ -539,15 +538,6 @@ describe('LWWMemoryStoreBackend', () => {
     });
 
     describe('updateBranch', () => {
-      it('updates branch status', async () => {
-        await store.createBranch(createTestBranch('branch1', 'doc1'));
-
-        await store.updateBranch('branch1', { status: 'merged' });
-
-        const branch = await store.loadBranch('branch1');
-        expect(branch?.status).toBe('merged');
-      });
-
       it('updates branch name', async () => {
         await store.createBranch(createTestBranch('branch1', 'doc1'));
 
@@ -559,7 +549,7 @@ describe('LWWMemoryStoreBackend', () => {
 
       it('does nothing for non-existent branch', async () => {
         // Should not throw
-        await store.updateBranch('nonexistent', { status: 'closed' });
+        await store.updateBranch('nonexistent', { name: 'test' });
       });
     });
 
@@ -602,16 +592,6 @@ describe('LWWMemoryStoreBackend', () => {
       });
     });
 
-    describe('closeBranch via updateBranch', () => {
-      it('sets status to closed', async () => {
-        await store.createBranch(createTestBranch('branch1', 'doc1'));
-
-        await store.updateBranch('branch1', { status: 'closed' });
-
-        const branch = await store.loadBranch('branch1');
-        expect(branch?.status).toBe('closed');
-      });
-    });
   });
 
   describe('testing utilities (extended)', () => {
@@ -624,7 +604,6 @@ describe('LWWMemoryStoreBackend', () => {
         contentStartRev: 2,
         createdAt: Date.now(),
         modifiedAt: Date.now(),
-        status: 'open',
       });
 
       store.clear();
@@ -657,7 +636,6 @@ describe('LWWMemoryStoreBackend', () => {
         contentStartRev: 2,
         createdAt: Date.now(),
         modifiedAt: Date.now(),
-        status: 'open',
       });
 
       const branches = store.getBranches();

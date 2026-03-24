@@ -1,6 +1,6 @@
 import { createId } from 'crypto-id';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
-import type { Branch, BranchStatus, CreateBranchMetadata, EditableBranchMetadata } from '../types.js';
+import type { Branch, CreateBranchMetadata, EditableBranchMetadata } from '../types.js';
 
 /**
  * Standard API definition for branch managers.
@@ -10,7 +10,6 @@ export const branchManagerApi: ApiDefinition = {
   listBranches: 'read',
   createBranch: 'write',
   updateBranch: 'write',
-  closeBranch: 'write',
   deleteBranch: 'write',
   mergeBranch: 'write',
 } as const;
@@ -24,7 +23,6 @@ const nonModifiableBranchFields = new Set([
   'branchedAtRev',
   'createdAt',
   'modifiedAt',
-  'status',
   'contentStartRev',
 ]);
 
@@ -83,7 +81,6 @@ export function createBranchRecord(
     contentStartRev,
     createdAt: now,
     modifiedAt: now,
-    status: 'open',
   };
 }
 
@@ -108,17 +105,14 @@ export async function assertNotABranch(store: BranchLoader, docId: string): Prom
 }
 
 /**
- * Validates that a branch exists and is open for merging.
+ * Validates that a branch exists.
  * @param branch - The branch to validate (may be null).
  * @param branchId - The branch ID (for error messages).
- * @throws Error if branch not found or not open.
+ * @throws Error if branch not found.
  */
-export function assertBranchOpenForMerge(branch: Branch | null, branchId: string): asserts branch is Branch {
+export function assertBranchExists(branch: Branch | null, branchId: string): asserts branch is Branch {
   if (!branch) {
     throw new Error(`Branch with ID ${branchId} not found.`);
-  }
-  if (branch.status !== 'open') {
-    throw new Error(`Branch ${branchId} is not open (status: ${branch.status}). Cannot merge.`);
   }
 }
 
@@ -143,18 +137,3 @@ export async function wrapMergeCommit<T>(
   }
 }
 
-/**
- * Standard close branch operation.
- * @param store - Store with updateBranch capability.
- * @param branchId - The branch to close.
- * @param status - The status to set (defaults to 'closed').
- */
-export async function closeBranch(
-  store: {
-    updateBranch(branchId: string, updates: Partial<Pick<Branch, 'status' | 'name' | 'modifiedAt'>>): Promise<void>;
-  },
-  branchId: string,
-  status?: Exclude<BranchStatus, 'open'> | null
-): Promise<void> {
-  await store.updateBranch(branchId, { status: status ?? 'closed', modifiedAt: Date.now() });
-}

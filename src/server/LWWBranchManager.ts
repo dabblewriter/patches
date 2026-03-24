@@ -1,7 +1,6 @@
 import { JSONPatch } from '../json-patch/JSONPatch.js';
 import type {
   Branch,
-  BranchStatus,
   Change,
   CreateBranchMetadata,
   EditableBranchMetadata,
@@ -10,7 +9,7 @@ import type {
 import type { BranchManager } from './BranchManager.js';
 import {
   assertBranchMetadata,
-  assertBranchOpenForMerge,
+  assertBranchExists,
   assertNotABranch,
   branchManagerApi,
   createBranchRecord,
@@ -131,15 +130,6 @@ export class LWWBranchManager implements BranchManager {
   }
 
   /**
-   * Closes a branch with the specified status.
-   * @param branchId - The branch document ID.
-   * @param status - The status to set (defaults to 'closed').
-   */
-  async closeBranch(branchId: string, status?: Exclude<BranchStatus, 'open'> | null): Promise<void> {
-    await this.store.updateBranch(branchId, { status: status ?? 'closed', modifiedAt: Date.now() });
-  }
-
-  /**
    * Deletes a branch, replacing the record with a tombstone.
    */
   async deleteBranch(branchId: string): Promise<void> {
@@ -163,12 +153,12 @@ export class LWWBranchManager implements BranchManager {
   async mergeBranch(branchId: string): Promise<Change[]> {
     // Load and validate branch
     const branch = await this.store.loadBranch(branchId);
-    assertBranchOpenForMerge(branch, branchId);
+    assertBranchExists(branch, branchId);
 
     const sourceDocId = branch.docId;
 
     // Get only unmerged changes: since lastMergedRev (if previously merged) or branchedAtRev
-    const sinceRev = branch.lastMergedRev ?? branch.branchedAtRev;
+    const sinceRev = branch.lastMergedRev ?? (branch.contentStartRev ?? 1) - 1;
     const branchChanges = await this.lwwServer.getChangesSince(branchId, sinceRev);
 
     if (branchChanges.length === 0) {

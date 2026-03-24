@@ -4,7 +4,6 @@ import { createChange } from '../data/change.js';
 import { createVersionMetadata } from '../data/version.js';
 import type {
   Branch,
-  BranchStatus,
   Change,
   CreateBranchMetadata,
   EditableBranchMetadata,
@@ -13,7 +12,7 @@ import type {
 import type { BranchManager } from './BranchManager.js';
 import {
   assertBranchMetadata,
-  assertBranchOpenForMerge,
+  assertBranchExists,
   assertNotABranch,
   branchManagerApi,
   createBranchRecord,
@@ -134,15 +133,6 @@ export class OTBranchManager implements BranchManager {
   }
 
   /**
-   * Closes a branch, marking it as merged or deleted.
-   * @param branchId - The ID of the branch to close.
-   * @param status - The status to set for the branch.
-   */
-  async closeBranch(branchId: string, status?: Exclude<BranchStatus, 'open'>): Promise<void> {
-    await this.store.updateBranch(branchId, { status: status ?? 'closed', modifiedAt: Date.now() });
-  }
-
-  /**
    * Deletes a branch, replacing the record with a tombstone.
    */
   async deleteBranch(branchId: string): Promise<void> {
@@ -165,7 +155,7 @@ export class OTBranchManager implements BranchManager {
   async mergeBranch(branchId: string): Promise<Change[]> {
     // Load and validate branch
     const branch = await this.store.loadBranch(branchId);
-    assertBranchOpenForMerge(branch, branchId);
+    assertBranchExists(branch, branchId);
 
     const sourceDocId = branch.docId;
     const branchStartRevOnSource = branch.branchedAtRev;

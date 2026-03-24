@@ -197,15 +197,6 @@ export class PatchesClient implements PatchesAPI {
   }
 
   /**
-   * Closes a branch on the server.
-   * @param branchId - The ID of the branch to close.
-   * @returns A promise resolving when the branch is closed.
-   */
-  async closeBranch(branchId: string): Promise<void> {
-    return this.rpc.call('closeBranch', branchId);
-  }
-
-  /**
    * Updates a branch's metadata on the server.
    * @param branchId - The ID of the branch to update.
    * @param metadata - The metadata to update.

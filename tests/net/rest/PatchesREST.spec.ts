@@ -481,14 +481,6 @@ describe('PatchesREST', () => {
       expect(JSON.parse(init?.body as string)).toMatchObject({ rev: 5 });
     });
 
-    it('should DELETE to close branch', async () => {
-      globalThis.fetch = mockFetchResponse(undefined, 204);
-      await rest.closeBranch('doc1/_branches/branch-abc');
-      const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
-      expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch-abc');
-      expect(init?.method).toBe('DELETE');
-    });
-
     it('should POST to merge branch', async () => {
       globalThis.fetch = mockFetchResponse(undefined, 204);
       await rest.mergeBranch('doc1/_branches/branch-abc');

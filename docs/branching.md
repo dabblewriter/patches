@@ -41,7 +41,7 @@ Patches supports two sync algorithms, and each has its own branch manager:
 **OT branching** (via `OTBranchManager`) works like git. The branch captures the source at a specific revision. When merging, the system checks if the source has new changes since the branch was created:
 
 - **Fast-forward merge:** No concurrent changes on source. Branch changes become part of the main timeline as-is.
-- **Divergent merge:** Source has new changes. Branch changes get flattened and transformed against source changes.
+- **Divergent merge:** Source has new changes. Each branch change is re-stamped with `baseRev` at the branch point and `batchId: branchId`, then transformed individually against concurrent source changes.
 
 **LWW branching** (via `LWWBranchManager`) is simpler. Each field carries a timestamp. When merging, timestamps resolve conflicts automatically. No transformation needed. Later timestamp wins.
 
@@ -92,18 +92,15 @@ interface Branch {
   branchedAtRev: number; // Revision on source where branch was created
   createdAt: number; // Unix timestamp (milliseconds)
   name?: string; // Human-readable name
-  status: BranchStatus; // 'open' | 'merged' | 'closed'
   lastMergedRev?: number; // Branch rev through which changes were last merged
+  deleted?: true; // Tombstone marker for incremental sync
 }
-
-type BranchStatus = 'open' | 'merged' | 'closed';
 ```
 
 List branches for a document:
 
 ```typescript
 const branches = await branchManager.listBranches('source-doc-id');
-// Returns all branches, including merged and closed ones
 ```
 
 Update branch metadata:
@@ -114,11 +111,10 @@ await branchManager.updateBranch(branchDocId, {
 });
 ```
 
-Close a branch without merging:
+Delete a branch:
 
 ```typescript
-await branchManager.closeBranch(branchDocId, 'closed');
-// Status can be 'merged' or 'closed'
+await branchManager.deleteBranch(branchDocId);
 ```
 
 ## Merging Back
@@ -128,13 +124,13 @@ Merging applies branch changes to the source document. Branches support **multip
 ```typescript
 // First merge
 const changes1 = await branchManager.mergeBranch(branchDocId);
-// Branch stays open — make more edits...
+// Branch stays around — make more edits...
 
 // Second merge — only new changes since first merge
 const changes2 = await branchManager.mergeBranch(branchDocId);
 
-// Close explicitly when done
-await branchManager.closeBranch(branchDocId);
+// Delete when done
+await branchManager.deleteBranch(branchDocId);
 ```
 
 ### OT Merge Approach
@@ -237,20 +233,19 @@ doc.change(state => {
   state.colors.text = '#ffffff';
 });
 
-// 3. Check branch status
+// 3. List branches
 const branches = await branchManager.listBranches('main-doc');
-const activeBranches = branches.filter(b => b.status === 'open');
-console.log(`${activeBranches.length} active branches`);
+console.log(`${branches.length} branches`);
 
-// 4. Merge when ready (branch stays open for further edits)
+// 4. Merge when ready (branch stays around for further edits)
 const changes = await branchManager.mergeBranch(branchDocId);
 console.log(`Merged ${changes.length} changes`);
 
 // 5. Merge again after more edits (only new changes since last merge)
 const moreChanges = await branchManager.mergeBranch(branchDocId);
 
-// 6. Close when done (or close without merging)
-await branchManager.closeBranch(branchDocId, 'closed');
+// 6. Delete when done
+await branchManager.deleteBranch(branchDocId);
 ```
 
 The branch manager handles all the complexity. You just create branches, work on them, and merge when ready.

@@ -97,14 +97,13 @@ const branches = await branchManager.listBranches('main-proposal');
 console.log(`Found ${branches.length} branches`);
 
 for (const branch of branches) {
-  console.log(`${branch.name} (${branch.status}) - created ${new Date(branch.createdAt)}`);
+  console.log(`${branch.name} - created ${new Date(branch.createdAt)}`);
 }
 ```
 
 Returns all branches for a document. Filter in your application code:
 
 ```typescript
-const openBranches = branches.filter(b => b.status === 'open');
 const myBranches = branches.filter(b => b.createdBy === currentUser.id);
 ```
 
@@ -118,8 +117,8 @@ interface Branch {
   docId: string; // The source document ID
   branchedAtRev: number; // Revision where branching occurred
   createdAt: number; // Unix timestamp (ms)
-  status: BranchStatus; // 'open' | 'closed' | 'merged' | 'archived' | 'abandoned'
   name?: string; // Optional human-readable name
+  lastMergedRev?: number; // Branch rev through which changes were last merged
   [metadata: string]: any; // Your custom metadata
 }
 ```
@@ -136,7 +135,7 @@ await branchManager.updateBranch(branchDocId, {
 });
 ```
 
-You can update `name` and any custom metadata. Protected fields (`id`, `docId`, `branchedAtRev`, `createdAt`, `status`) cannot be modified this way.
+You can update `name` and any custom metadata. Protected fields (`id`, `docId`, `branchedAtRev`, `createdAt`) cannot be modified this way.
 
 ### Merging a Branch
 
@@ -150,28 +149,13 @@ console.log(`Applied ${changes.length} changes to source document`);
 
 What happens:
 
-1. All changes from the branch are applied to the source document
+1. Unmerged changes from the branch are applied to the source document
 2. For OT: Conflicts are resolved via operational transformation
 3. For LWW: Timestamps determine winners automatically
-4. The branch status is set to `'merged'`
+4. `lastMergedRev` is updated so subsequent merges only pick up new changes
 5. Returns the changes that were committed to the source
 
-If the branch has no changes, it's marked as merged and an empty array is returned.
-
-### Closing a Branch
-
-```typescript
-// closeBranch(branchId: string, status?: Exclude<BranchStatus, 'open'>): Promise<void>
-
-// Default status is 'closed'
-await branchManager.closeBranch(branchDocId);
-
-// Or specify a status
-await branchManager.closeBranch(branchDocId, 'abandoned');
-await branchManager.closeBranch(branchDocId, 'archived');
-```
-
-This updates the branch status but doesn't delete anything. Valid statuses: `'closed'`, `'merged'`, `'archived'`, `'abandoned'`.
+Branches support multiple merges — merge, keep editing, merge again. Delete the branch when you're done.
 
 ## OT vs LWW Branching
 
@@ -271,7 +255,6 @@ class DocumentWorkflow {
     return branches.map(branch => ({
       id: branch.id,
       name: branch.name,
-      status: branch.status,
       createdBy: branch.createdBy || 'Unknown',
       url: `/documents/${branch.id}`,
     }));

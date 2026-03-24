@@ -11,7 +11,6 @@ function makeBranch(overrides: Partial<Branch> = {}): Branch {
     branchedAtRev: 5,
     createdAt: 1000,
     modifiedAt: 1000,
-    status: 'open',
     contentStartRev: 2,
     ...overrides,
   };
@@ -28,7 +27,6 @@ describe('PatchesBranchClient', () => {
       listBranches: vi.fn().mockResolvedValue([]),
       createBranch: vi.fn().mockResolvedValue('server-branch-id'),
       updateBranch: vi.fn().mockResolvedValue(undefined),
-      closeBranch: vi.fn().mockResolvedValue(undefined),
       deleteBranch: vi.fn().mockResolvedValue(undefined),
       mergeBranch: vi.fn().mockResolvedValue(undefined),
     };
@@ -36,7 +34,6 @@ describe('PatchesBranchClient', () => {
       listBranches: vi.fn().mockResolvedValue([]),
       createBranch: vi.fn().mockResolvedValue('offline-branch-id'),
       updateBranch: vi.fn().mockResolvedValue(undefined),
-      closeBranch: vi.fn().mockResolvedValue(undefined),
       deleteBranch: vi.fn().mockResolvedValue(undefined),
       loadBranch: vi.fn().mockResolvedValue(undefined),
       saveBranches: vi.fn().mockResolvedValue(undefined),
@@ -56,6 +53,7 @@ describe('PatchesBranchClient', () => {
       onChange: { emit: vi.fn() },
       getDocAlgorithm: vi.fn().mockReturnValue(mockAlgorithm),
       getOpenDoc: vi.fn().mockReturnValue(undefined),
+      submitDocChange: vi.fn().mockResolvedValue(undefined),
     };
   });
 
@@ -221,8 +219,9 @@ describe('PatchesBranchClient', () => {
         'Algorithm failed'
       );
 
-      // Should rollback by removing the branch
+      // Should rollback by removing the branch and untracking the doc
       expect(offlineApi.removeBranches).toHaveBeenCalledWith(['fail-branch']);
+      expect(patches.untrackDocs).toHaveBeenCalledWith(['fail-branch']);
     });
   });
 
@@ -262,18 +261,6 @@ describe('PatchesBranchClient', () => {
     });
   });
 
-  describe('closeBranch', () => {
-    it('should call API and refresh branches', async () => {
-      api.listBranches.mockResolvedValue([]);
-      const client = new PatchesBranchClient('doc1', api, patches);
-
-      await client.closeBranch('branch-1');
-
-      expect(api.closeBranch).toHaveBeenCalledWith('branch-1');
-      expect(api.listBranches).toHaveBeenCalled();
-    });
-  });
-
   describe('mergeBranch', () => {
     it('should call API and refresh branches (online)', async () => {
       api.listBranches.mockResolvedValue([]);
@@ -300,12 +287,11 @@ describe('PatchesBranchClient', () => {
       // Should read changes from branch
       expect(mockAlgorithm.listChanges).toHaveBeenCalledWith('branch-1', { startAfter: 2 });
 
-      // Should submit each change to source doc with batchId
-      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledTimes(2);
-      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith(
+      // Should submit each change to source doc via serialized queue with batchId
+      expect(patches.submitDocChange).toHaveBeenCalledTimes(2);
+      expect(patches.submitDocChange).toHaveBeenCalledWith(
         'doc1',
         branchChanges[0].ops,
-        undefined,
         { batchId: 'branch-1' }
       );
 
@@ -348,13 +334,6 @@ describe('PatchesBranchClient', () => {
       const client = new PatchesBranchClient('doc1', offlineApi, patches);
 
       await expect(client.mergeBranch('nonexistent')).rejects.toThrow('Branch nonexistent not found');
-    });
-
-    it('should throw when branch is not open', async () => {
-      const client = new PatchesBranchClient('doc1', offlineApi, patches);
-      client.branches.state = [makeBranch({ id: 'branch-1', status: 'closed' })];
-
-      await expect(client.mergeBranch('branch-1')).rejects.toThrow('not open');
     });
 
     it('should throw when algorithm lacks listChanges', async () => {

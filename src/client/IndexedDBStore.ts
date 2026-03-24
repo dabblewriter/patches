@@ -294,46 +294,24 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
       contentStartRev: metadata?.contentStartRev ?? 0,
       createdAt: now,
       modifiedAt: now,
-      status: 'open',
       pendingOp: 'create',
     };
     await this._saveBranch(docId, branch);
     return branchDocId;
   }
 
-  async closeBranch(branchId: string): Promise<void> {
-    const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
-    const existing = await branchStore.get<StoredBranch>(branchId);
-    if (!existing) throw new Error(`Branch ${branchId} not found`);
-    existing.status = 'closed';
-    existing.modifiedAt = Date.now();
-    // If never synced, keep pendingOp as 'create' — PatchesSync will create it with status closed
-    if (existing.pendingOp !== 'create') existing.pendingOp = 'close';
-    existing._pending = 1;
-    await branchStore.put<StoredBranch>(existing);
-    await tx.complete();
-  }
-
   async deleteBranch(branchId: string): Promise<void> {
     const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
     const existing = await branchStore.get<StoredBranch>(branchId);
+    if (!existing) throw new Error(`Branch ${branchId} not found`);
 
-    if (existing?.pendingOp === 'create') {
+    if (existing.pendingOp === 'create') {
       // Never synced — just remove it, no server call needed
       await branchStore.delete(branchId);
     } else {
       // Save as a tombstone for PatchesSync to delete on the server
-      const docId = existing?._docId ?? '';
       const tombstone: StoredBranch = {
-        ...(existing ?? {
-          id: branchId,
-          docId,
-          branchedAtRev: 0,
-          createdAt: 0,
-          status: 'open' as const,
-          contentStartRev: 0,
-          _docId: docId,
-        }),
+        ...existing,
         modifiedAt: Date.now(),
         pendingOp: 'delete',
         deleted: true,
@@ -373,14 +351,17 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
     await Promise.all(
       branches.map(async branch => {
+        const existing = await branchStore.get<StoredBranch>(branch.id);
+
+        // Don't overwrite branches with pending local operations — the pending op
+        // hasn't been synced yet and server data is stale relative to the local mutation.
+        if (existing?.pendingOp && !branch.pendingOp) return;
+
         const stored: StoredBranch = { ...branch, _docId: docId };
         // lastMergedRev max-wins: two clients may merge the same branch independently,
         // so always keep the higher value to avoid rolling back merge progress.
-        if (stored.lastMergedRev != null) {
-          const existing = await branchStore.get<StoredBranch>(branch.id);
-          if (existing?.lastMergedRev != null && existing.lastMergedRev > stored.lastMergedRev) {
-            stored.lastMergedRev = existing.lastMergedRev;
-          }
+        if (existing?.lastMergedRev != null && (stored.lastMergedRev == null || existing.lastMergedRev > stored.lastMergedRev)) {
+          stored.lastMergedRev = existing.lastMergedRev;
         }
         if (branch.pendingOp) stored._pending = 1;
         return branchStore.put<StoredBranch>(stored);

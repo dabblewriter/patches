@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OTBranchManager, assertBranchMetadata } from '../../src/server/OTBranchManager';
 import type { PatchesServer } from '../../src/server/PatchesServer';
 import type { BranchingStoreBackend, OTStoreBackend } from '../../src/server/types';
-import type { Branch, BranchStatus, Change, EditableBranchMetadata, VersionMetadata } from '../../src/types';
+import type { Branch, Change, EditableBranchMetadata, VersionMetadata } from '../../src/types';
 
 // Mock the dependencies
 vi.mock('crypto-id', () => ({
@@ -37,7 +37,6 @@ describe('OTBranchManager', () => {
       createBranch: vi.fn(),
       updateBranch: vi.fn(),
       deleteBranch: vi.fn(),
-      closeBranch: vi.fn(),
       // OTStoreBackend methods (extends ServerStoreBackend and VersioningStoreBackend)
       deleteDoc: vi.fn(),
       saveChanges: vi.fn(),
@@ -78,7 +77,7 @@ describe('OTBranchManager', () => {
           branchedAtRev: 5,
           createdAt: now,
           modifiedAt: now,
-          status: 'open',
+  
           name: 'Feature Branch',
         },
         {
@@ -193,7 +192,6 @@ describe('OTBranchManager', () => {
         contentStartRev: 2,
         createdAt: expect.any(Number),
         modifiedAt: expect.any(Number),
-        status: 'open',
       });
       expect(result).toBe('generated-id');
     });
@@ -209,7 +207,6 @@ describe('OTBranchManager', () => {
         contentStartRev: 2,
         createdAt: expect.any(Number),
         modifiedAt: expect.any(Number),
-        status: 'open',
       });
     });
 
@@ -218,6 +215,9 @@ describe('OTBranchManager', () => {
 
       expect(result).toBe('generated-id');
       expect(mockStore.createBranch).toHaveBeenCalledWith(expect.objectContaining({ contentStartRev: 4 }));
+      // Should NOT create initial changes or version — the client already created them
+      expect(mockStore.saveChanges).not.toHaveBeenCalled();
+      expect(mockStore.createVersion).not.toHaveBeenCalled();
     });
 
     it('should be idempotent when metadata.id matches existing branch', async () => {
@@ -227,7 +227,7 @@ describe('OTBranchManager', () => {
         branchedAtRev: 5,
         createdAt: Date.now(),
         modifiedAt: Date.now(),
-        status: 'open',
+
         contentStartRev: 2,
       };
       vi.mocked(mockStore.loadBranch).mockResolvedValue(existing);
@@ -247,7 +247,7 @@ describe('OTBranchManager', () => {
         branchedAtRev: 5,
         createdAt: Date.now(),
         modifiedAt: Date.now(),
-        status: 'open',
+
         contentStartRev: 2,
       };
       vi.mocked(mockStore.loadBranch).mockResolvedValue(existing);
@@ -264,7 +264,7 @@ describe('OTBranchManager', () => {
         branchedAtRev: 1,
         createdAt: Date.now(),
         modifiedAt: Date.now(),
-        status: 'open',
+
       };
 
       vi.mocked(mockStore.loadBranch).mockResolvedValue(existingBranch);
@@ -341,30 +341,6 @@ describe('OTBranchManager', () => {
     });
   });
 
-  describe('closeBranch', () => {
-    it('should close branch with default status and modifiedAt', async () => {
-      vi.mocked(mockStore.updateBranch).mockResolvedValue();
-
-      await branchManager.closeBranch('branch1');
-
-      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
-        status: 'closed',
-        modifiedAt: expect.any(Number),
-      });
-    });
-
-    it('should close branch with specific status', async () => {
-      vi.mocked(mockStore.updateBranch).mockResolvedValue();
-
-      await branchManager.closeBranch('branch1', 'merged');
-
-      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
-        status: 'merged',
-        modifiedAt: expect.any(Number),
-      });
-    });
-  });
-
   describe('deleteBranch', () => {
     it('should delegate to store.deleteBranch', async () => {
       vi.mocked(mockStore.deleteBranch).mockResolvedValue();
@@ -383,7 +359,6 @@ describe('OTBranchManager', () => {
       contentStartRev: 2,
       createdAt: Date.now(),
       modifiedAt: Date.now(),
-      status: 'open',
       name: 'Feature Branch',
     };
 
@@ -470,15 +445,6 @@ describe('OTBranchManager', () => {
       await expect(branchManager.mergeBranch('nonexistent')).rejects.toThrow('Branch with ID nonexistent not found.');
     });
 
-    it('should throw error for non-open branch', async () => {
-      const closedBranch = { ...mockBranch, status: 'merged' as BranchStatus };
-      vi.mocked(mockStore.loadBranch).mockResolvedValue(closedBranch);
-
-      await expect(branchManager.mergeBranch('branch1')).rejects.toThrow(
-        'Branch branch1 is not open (status: merged). Cannot merge.'
-      );
-    });
-
     it('should return empty array when no changes to merge', async () => {
       vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
@@ -487,6 +453,32 @@ describe('OTBranchManager', () => {
       // Should NOT update branch or close it when there's nothing to merge
       expect(mockStore.updateBranch).not.toHaveBeenCalled();
       expect(result).toEqual([]);
+    });
+
+    it('should use max-wins for lastMergedRev on concurrent merges', async () => {
+      const committedChanges = mockBranchChanges.map((c, i) => ({
+        ...c,
+        baseRev: 5,
+        rev: 6 + i,
+        batchId: 'branch1',
+      }));
+      vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: committedChanges });
+
+      // After commit, simulate another client having already merged with a higher rev
+      let loadCallCount = 0;
+      vi.mocked(mockStore.loadBranch).mockImplementation(async () => {
+        loadCallCount++;
+        if (loadCallCount === 1) return mockBranch; // First call: initial load
+        return { ...mockBranch, lastMergedRev: 10 }; // Second call: post-commit, concurrent merge set it to 10
+      });
+
+      await branchManager.mergeBranch('branch1');
+
+      // Should use the higher value (10) from concurrent merge, not our local value (2)
+      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
+        lastMergedRev: 10,
+        modifiedAt: expect.any(Number),
+      });
     });
 
     it('should handle commit errors gracefully', async () => {
@@ -628,7 +620,7 @@ describe('assertBranchMetadata', () => {
   });
 
   it('should throw error for non-modifiable fields', () => {
-    const invalidFields = ['id', 'docId', 'branchedAtRev', 'createdAt', 'modifiedAt', 'status', 'contentStartRev'];
+    const invalidFields = ['id', 'docId', 'branchedAtRev', 'createdAt', 'modifiedAt', 'contentStartRev'];
 
     invalidFields.forEach(field => {
       const metadata = { [field]: 'value' } as any;

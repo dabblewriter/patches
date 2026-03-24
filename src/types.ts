@@ -86,9 +86,6 @@ export interface DocSyncState {
   isLoaded: boolean;
 }
 
-/** Status options for a branch */
-export type BranchStatus = 'open' | 'closed' | 'merged' | 'archived' | 'abandoned';
-
 export interface Branch {
   /** The ID of the branch document. */
   id: string;
@@ -98,12 +95,10 @@ export interface Branch {
   branchedAtRev: number;
   /** Unix timestamp in milliseconds when the branch was created. */
   createdAt: number;
-  /** Unix timestamp in milliseconds when the branch was last modified. Updated on status/metadata changes. */
+  /** Unix timestamp in milliseconds when the branch was last modified. Updated on metadata changes. */
   modifiedAt: number;
   /** Optional user-friendly name for the branch. */
   name?: string;
-  /** Current status of the branch. */
-  status: BranchStatus;
   /**
    * The first revision on the branch that contains user content (after initialization changes).
    * Initialization changes (e.g. the root-replace that seeds the branch with source state)
@@ -121,7 +116,7 @@ export interface Branch {
   lastMergedRev?: number;
 
   /** The pending operation to sync to the server. Set by BranchClientStore methods. */
-  pendingOp?: 'create' | 'close' | 'update' | 'delete';
+  pendingOp?: 'create' | 'update' | 'delete';
 
   /** True when this branch has been deleted. Stored as a tombstone for incremental sync. */
   deleted?: true;
@@ -132,15 +127,7 @@ export interface Branch {
 
 export type EditableBranchMetadata = Disallowed<
   Branch,
-  | 'id'
-  | 'docId'
-  | 'branchedAtRev'
-  | 'createdAt'
-  | 'modifiedAt'
-  | 'status'
-  | 'contentStartRev'
-  | 'pendingOp'
-  | 'deleted'
+  'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'contentStartRev' | 'pendingOp' | 'deleted'
 >;
 
 /**
@@ -151,7 +138,7 @@ export type EditableBranchMetadata = Disallowed<
  *   initial changes offline (the server uses this to know where user content begins during merge).
  */
 export type CreateBranchMetadata = Omit<
-  Disallowed<Branch, 'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'status' | 'pendingOp' | 'deleted'>,
+  Disallowed<Branch, 'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'pendingOp' | 'deleted'>,
   'contentStartRev'
 > & {
   contentStartRev?: number;

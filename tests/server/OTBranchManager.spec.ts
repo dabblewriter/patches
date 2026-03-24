@@ -75,18 +75,18 @@ describe('OTBranchManager', () => {
           id: 'branch1',
           docId: 'doc1',
           branchedAtRev: 5,
+          contentStartRev: 2,
           createdAt: now,
           modifiedAt: now,
-  
           name: 'Feature Branch',
         },
         {
           id: 'branch2',
           docId: 'doc1',
           branchedAtRev: 3,
+          contentStartRev: 2,
           createdAt: now,
           modifiedAt: now,
-          status: 'merged',
           name: 'Bug Fix Branch',
         },
       ];
@@ -262,6 +262,7 @@ describe('OTBranchManager', () => {
         id: 'branch1',
         docId: 'original-doc',
         branchedAtRev: 1,
+        contentStartRev: 2,
         createdAt: Date.now(),
         modifiedAt: Date.now(),
 

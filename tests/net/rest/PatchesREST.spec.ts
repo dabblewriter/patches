@@ -472,21 +472,52 @@ describe('PatchesREST', () => {
       expect(url).toBe('https://api.example.com/docs/doc1/_branches');
     });
 
+    it('should GET branches list with since param', async () => {
+      globalThis.fetch = mockFetchResponse([]);
+      await rest.listBranches('doc1', { since: 9999 });
+      const [url] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/docs/doc1/_branches?since=9999');
+    });
+
     it('should POST to create branch', async () => {
       globalThis.fetch = mockFetchResponse('branch-id');
-      await rest.createBranch('doc1', 5);
+      await rest.createBranch('doc1', 5, { name: 'Feature' });
       const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
       expect(url).toBe('https://api.example.com/docs/doc1/_branches');
       expect(init?.method).toBe('POST');
-      expect(JSON.parse(init?.body as string)).toMatchObject({ rev: 5 });
+      expect(JSON.parse(init?.body as string)).toEqual({ branchedAtRev: 5, name: 'Feature' });
+    });
+
+    it('should PUT to update branch', async () => {
+      globalThis.fetch = mockFetchResponse({ ok: true });
+      await rest.updateBranch('doc1', 'branch-abc', { name: 'Renamed' });
+      const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch-abc');
+      expect(init?.method).toBe('PUT');
+      expect(JSON.parse(init?.body as string)).toEqual({ name: 'Renamed' });
+    });
+
+    it('should DELETE branch', async () => {
+      globalThis.fetch = mockFetchResponse(undefined, 204);
+      await rest.deleteBranch('doc1', 'branch-abc');
+      const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch-abc');
+      expect(init?.method).toBe('DELETE');
     });
 
     it('should POST to merge branch', async () => {
       globalThis.fetch = mockFetchResponse(undefined, 204);
-      await rest.mergeBranch('doc1/_branches/branch-abc');
+      await rest.mergeBranch('doc1', 'branch-abc');
       const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
       expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch-abc/_merge');
       expect(init?.method).toBe('POST');
+    });
+
+    it('should encode branchId in URL', async () => {
+      globalThis.fetch = mockFetchResponse(undefined, 204);
+      await rest.deleteBranch('doc1', 'branch/with/slashes');
+      const [url] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch%2Fwith%2Fslashes');
     });
   });
 });

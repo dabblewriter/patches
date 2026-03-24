@@ -17,8 +17,8 @@ function makeBranch(overrides: Partial<Branch> = {}): Branch {
 }
 
 describe('PatchesBranchClient', () => {
-  let api: { [K in keyof BranchAPI]: ReturnType<typeof vi.fn> };
-  let offlineApi: { [K in keyof BranchClientStore]: ReturnType<typeof vi.fn> };
+  let api: BranchAPI & { [K in keyof BranchAPI]: ReturnType<typeof vi.fn> };
+  let offlineApi: BranchClientStore & { [K in keyof BranchClientStore]: ReturnType<typeof vi.fn> };
   let patches: any;
   let mockAlgorithm: any;
 

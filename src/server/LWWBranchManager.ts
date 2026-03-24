@@ -165,8 +165,7 @@ export class LWWBranchManager implements BranchManager {
       return [];
     }
 
-    // Track the branch rev for lastMergedRev update
-    const branchRev = await this.store.getCurrentRev(branchId);
+    const lastBranchRev = branchChanges[branchChanges.length - 1].rev;
 
     // LWW merge: commit the branch changes to the source document
     // Timestamps will automatically resolve any conflicts
@@ -177,7 +176,7 @@ export class LWWBranchManager implements BranchManager {
     // Update lastMergedRev so next merge picks up only new changes.
     // Max-wins: another client may have merged concurrently with a higher rev.
     const currentBranch = await this.store.loadBranch(branchId);
-    const effectiveLastMergedRev = Math.max(branchRev, currentBranch?.lastMergedRev ?? 0);
+    const effectiveLastMergedRev = Math.max(lastBranchRev, currentBranch?.lastMergedRev ?? 0);
     await this.store.updateBranch(branchId, { lastMergedRev: effectiveLastMergedRev, modifiedAt: Date.now() });
     return committedChanges;
   }

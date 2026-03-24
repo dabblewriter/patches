@@ -24,6 +24,8 @@ const nonModifiableBranchFields = new Set([
   'createdAt',
   'modifiedAt',
   'contentStartRev',
+  'pendingOp',
+  'deleted',
 ]);
 
 /**

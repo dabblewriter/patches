@@ -153,6 +153,7 @@ export function usePatchesDoc<T extends object>(
 
   // Normalize to an accessor that returns string | null
   const source = typeof docId === 'string' ? () => docId : () => (docId as Accessor<string | null | undefined | false>)() || null;
+  let currentId: string | null = null;
 
   const [docResource] = createResource(source, async id => {
     return await manager.openDoc<T>(patches, id, openDocOpts);
@@ -162,6 +163,7 @@ export function usePatchesDoc<T extends object>(
     const currentSource = source();
     const loadedDoc = docResource();
     if (currentSource && loadedDoc) {
+      currentId = currentSource;
       const unsub = setupDoc(loadedDoc);
       onCleanup(() => unsub());
     } else {
@@ -175,25 +177,27 @@ export function usePatchesDoc<T extends object>(
 
   // Close previous doc when source changes
   createEffect((prevId: string | null | undefined) => {
-    const currentId = source();
-    if (prevId && prevId !== currentId) {
+    const id = source();
+    if (prevId && prevId !== id) {
+      currentId = null;
       manager.closeDoc(patches, prevId, shouldUntrack);
     }
-    return currentId;
+    return id;
   });
 
   baseReturn.close = async () => {
-    const id = source();
-    if (id) {
+    if (currentId) {
+      const id = currentId;
+      currentId = null;
       resetSignals();
       await manager.closeDoc(patches, id, shouldUntrack);
     }
   };
 
   onCleanup(() => {
-    const id = source();
-    if (id) {
-      manager.closeDoc(patches, id, shouldUntrack);
+    if (currentId) {
+      manager.closeDoc(patches, currentId, shouldUntrack);
+      currentId = null;
     }
   });
 

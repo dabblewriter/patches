@@ -21,19 +21,8 @@
  *
  * @example
  * ```typescript
- * // Component - explicit lifecycle
- * const { patches } = usePatchesContext()
- * onMounted(() => patches.openDoc('doc-123'))
- * onBeforeUnmount(() => patches.closeDoc('doc-123'))
+ * // Component
  * const { data, loading, change } = usePatchesDoc('doc-123')
- * ```
- *
- * @example
- * ```typescript
- * // Component - auto lifecycle
- * const { data, loading, change } = usePatchesDoc('doc-123', {
- *   autoClose: true
- * })
  * ```
  *
  * @module @dabble/patches/vue
@@ -56,9 +45,7 @@ export {
   providePatchesDoc,
   useCurrentDoc,
   type UsePatchesDocOptions,
-  type UsePatchesDocLazyOptions,
   type UsePatchesDocReturn,
-  type UsePatchesDocLazyReturn,
   type UsePatchesSyncReturn,
 } from './composables.js';
 

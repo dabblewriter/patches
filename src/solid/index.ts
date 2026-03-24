@@ -22,9 +22,7 @@
  * }
  *
  * function MyComponent() {
- *   const { data, loading, change } = usePatchesDoc('doc-123', {
- *     autoClose: true
- *   });
+ *   const { data, loading, change } = usePatchesDoc('doc-123');
  *
  *   return <Show when={!loading()} fallback={<div>Loading...</div>}>
  *     <div>{data()?.title}</div>
@@ -44,9 +42,7 @@ export {
   usePatchesSync,
   createPatchesDoc,
   type UsePatchesDocOptions,
-  type UsePatchesDocLazyOptions,
   type UsePatchesDocReturn,
-  type UsePatchesDocLazyReturn,
   type UsePatchesSyncReturn,
   type PatchesDocProviderProps,
   type MaybeAccessor,

@@ -22,196 +22,13 @@ describe('Solid Primitives', () => {
     await patches.close();
   });
 
-  describe('usePatchesDoc - explicit mode (default)', () => {
-    it('should throw error if doc not open', () => {
-      // Error is thrown synchronously inside createEffect during createRoot execution
-      expect(() => {
-        createRoot(dispose => {
-          const TestComponent = () => {
-            usePatchesDoc('doc-1');
-            return null;
-          };
-
-          const App = () =>
-            (
-              <PatchesProvider patches={patches}>
-                <TestComponent />
-              </PatchesProvider>
-            ) as JSX.Element;
-
-          App();
-          // Don't call dispose() - error will throw before we get here
-        });
-      }).toThrow('Document "doc-1" is not open');
-    });
-
-    it('should return reactive document state', async () => {
-      await patches.openDoc('doc-1');
-
-      await createRoot(async dispose => {
-        let data: any;
-        let loading: any;
-        let rev: any;
-
-        const TestComponent = () => {
-          const doc = usePatchesDoc<any>(() => 'doc-1');
-          data = doc.data;
-          loading = doc.loading;
-          rev = doc.rev;
-          return null;
-        };
-
-        const App = () =>
-          (
-            <PatchesProvider patches={patches}>
-              <TestComponent />
-            </PatchesProvider>
-          ) as JSX.Element;
-
-        App();
-
-        // Wait for effects to run
-        await tick();
-
-        // Initial state
-        expect(data() === null || typeof data() === 'object').toBe(true);
-        expect(loading()).toBe(false);
-        expect(rev()).toBe(0);
-
-        dispose();
-      });
-
-      await patches.closeDoc('doc-1');
-    });
-
-    it('should update reactively when document changes', async () => {
-      await patches.openDoc<{ title?: string }>('doc-1');
-      const doc = patches.getOpenDoc<{ title?: string }>('doc-1')!;
-
-      await createRoot(async dispose => {
-        let data: any;
-
-        const TestComponent = () => {
-          const docState = usePatchesDoc<{ title?: string }>(() => 'doc-1');
-          data = docState.data;
-          return null;
-        };
-
-        const App = () =>
-          (
-            <PatchesProvider patches={patches}>
-              <TestComponent />
-            </PatchesProvider>
-          ) as JSX.Element;
-
-        App();
-
-        // Wait for effects to run
-        await tick();
-
-        // Make a change
-        doc.change((patch, root) => {
-          patch.replace(root.title!, 'Hello World');
-        });
-
-        // Wait for async algorithm handler
-        await tick();
-
-        // Now check state
-        expect(data()?.title).toBe('Hello World');
-
-        dispose();
-      });
-
-      await patches.closeDoc('doc-1');
-    });
-
-    it('should provide change helper', async () => {
-      await patches.openDoc<{ count?: number }>('doc-1');
-
-      await createRoot(async dispose => {
-        let change: any;
-        let data: any;
-
-        const TestComponent = () => {
-          const docState = usePatchesDoc<{ count?: number }>(() => 'doc-1');
-          change = docState.change;
-          data = docState.data;
-          return null;
-        };
-
-        const App = () =>
-          (
-            <PatchesProvider patches={patches}>
-              <TestComponent />
-            </PatchesProvider>
-          ) as JSX.Element;
-
-        App();
-
-        // Wait for effects to run
-        await tick();
-
-        // Use change helper
-        change((patch: any, root: any) => {
-          patch.replace(root.count!, 42);
-        });
-
-        // Wait for async algorithm handler
-        await tick();
-
-        expect(data()?.count).toBe(42);
-
-        dispose();
-      });
-
-      await patches.closeDoc('doc-1');
-    });
-
-    it('should increment and decrement ref count', async () => {
-      await patches.openDoc('doc-1');
-      const manager = getDocManager(patches);
-
-      expect(manager.getRefCount('doc-1')).toBe(0);
-
-      await createRoot(async dispose => {
-        const TestComponent = () => {
-          usePatchesDoc('doc-1');
-          return null;
-        };
-
-        const App = () =>
-          (
-            <PatchesProvider patches={patches}>
-              <TestComponent />
-            </PatchesProvider>
-          ) as JSX.Element;
-
-        App();
-
-        // Wait for effects to run
-        await tick();
-
-        // Should increment ref count
-        expect(manager.getRefCount('doc-1')).toBe(1);
-
-        dispose();
-
-        // Should decrement ref count on cleanup
-        expect(manager.getRefCount('doc-1')).toBe(0);
-      });
-
-      await patches.closeDoc('doc-1');
-    });
-  });
-
-  describe('usePatchesDoc - auto mode', () => {
-    it('should open document on mount', async () => {
+  describe('usePatchesDoc - static string', () => {
+    it('should auto-open and return reactive document state', async () => {
       await createRoot(async dispose => {
         let doc: any;
 
         const TestComponent = () => {
-          const docState = usePatchesDoc<any>(() => 'doc-1', { autoClose: true });
+          const docState = usePatchesDoc<any>(() => 'doc-1', {});
           doc = docState.doc;
           return null;
         };
@@ -240,7 +57,7 @@ describe('Solid Primitives', () => {
 
       await createRoot(async dispose => {
         const TestComponent = () => {
-          usePatchesDoc<any>(() => 'doc-1', { autoClose: true });
+          usePatchesDoc<any>(() => 'doc-1', {});
           return null;
         };
 
@@ -271,12 +88,12 @@ describe('Solid Primitives', () => {
       closeDocSpy.mockRestore();
     });
 
-    it('should close and untrack with autoClose: "untrack"', async () => {
+    it('should close and untrack with untrack: true', async () => {
       const closeDocSpy = vi.spyOn(patches, 'closeDoc');
 
       await createRoot(async dispose => {
         const TestComponent = () => {
-          usePatchesDoc<any>(() => 'doc-1', { autoClose: 'untrack' });
+          usePatchesDoc<any>(() => 'doc-1', { untrack: true });
           return null;
         };
 
@@ -312,12 +129,12 @@ describe('Solid Primitives', () => {
 
       await createRoot(async dispose => {
         const TestComponent1 = () => {
-          usePatchesDoc<any>(() => 'doc-1', { autoClose: true });
+          usePatchesDoc<any>(() => 'doc-1', {});
           return null;
         };
 
         const TestComponent2 = () => {
-          usePatchesDoc<any>(() => 'doc-1', { autoClose: true });
+          usePatchesDoc<any>(() => 'doc-1', {});
           return null;
         };
 
@@ -370,7 +187,6 @@ describe('Solid Primitives', () => {
 
           const TestComponent = () => {
             const docState = usePatchesDoc<any>(() => 'non-existent-doc', {
-              autoClose: true,
             });
             error = docState.error;
             loading = docState.loading;
@@ -415,19 +231,17 @@ describe('Solid Primitives', () => {
     });
   });
 
-  describe('usePatchesDoc - lazy mode', () => {
-    it('should start with no doc loaded', async () => {
+  describe('usePatchesDoc - reactive mode', () => {
+    it('should start with no doc when accessor returns null', async () => {
       await createRoot(async dispose => {
         let data: any;
         let loading: any;
-        let path: any;
         let doc: any;
 
         const TestComponent = () => {
-          const docState = usePatchesDoc<{ title?: string }>();
+          const docState = usePatchesDoc<{ title?: string }>(() => null);
           data = docState.data;
           loading = docState.loading;
-          path = docState.path;
           doc = docState.doc;
           return null;
         };
@@ -445,26 +259,20 @@ describe('Solid Primitives', () => {
 
         expect(data()).toBeUndefined();
         expect(loading()).toBe(false);
-        expect(path()).toBeNull();
         expect(doc()).toBeUndefined();
 
         dispose();
       });
     });
 
-    it('should load a document', async () => {
+    it('should open doc when accessor becomes non-null', async () => {
       await createRoot(async dispose => {
-        let data: any;
-        let path: any;
+        const [docId, setDocId] = createSignal<string | null>(null);
         let doc: any;
-        let load: any;
 
         const TestComponent = () => {
-          const docState = usePatchesDoc<{ title?: string }>();
-          data = docState.data;
-          path = docState.path;
+          const docState = usePatchesDoc<any>(docId);
           doc = docState.doc;
-          load = docState.load;
           return null;
         };
 
@@ -479,71 +287,30 @@ describe('Solid Primitives', () => {
 
         await tick();
 
-        await load('doc-1');
+        expect(doc()).toBeUndefined();
 
-        expect(path()).toBe('doc-1');
+        setDocId('doc-1');
+
+        await new Promise(resolve => setTimeout(resolve, 10));
+
         expect(doc()).toBeDefined();
-        expect(data()).toBeDefined();
-
-        dispose();
-
-        // Clean up — lazy mode doesn't auto-close
-        await patches.closeDoc('doc-1');
-      });
-    });
-
-    it('should close previous doc when loading a new one', async () => {
-      await createRoot(async dispose => {
-        let path: any;
-        let load: any;
-
-        const TestComponent = () => {
-          const docState = usePatchesDoc<any>();
-          path = docState.path;
-          load = docState.load;
-          return null;
-        };
-
-        const App = () =>
-          (
-            <PatchesProvider patches={patches}>
-              <TestComponent />
-            </PatchesProvider>
-          ) as JSX.Element;
-
-        App();
-
-        await tick();
-
-        await load('doc-1');
-        expect(path()).toBe('doc-1');
         expect(patches.getOpenDoc('doc-1')).toBeDefined();
 
-        await load('doc-2');
-        expect(path()).toBe('doc-2');
-        expect(patches.getOpenDoc('doc-2')).toBeDefined();
-        expect(patches.getOpenDoc('doc-1')).toBeUndefined();
-
         dispose();
-        await patches.closeDoc('doc-2');
+
+        await new Promise(resolve => setTimeout(resolve, 10));
+        expect(patches.getOpenDoc('doc-1')).toBeUndefined();
       });
     });
 
-    it('should close and reset state', async () => {
+    it('should swap documents when accessor changes', async () => {
       await createRoot(async dispose => {
-        let data: any;
-        let path: any;
+        const [docId, setDocId] = createSignal<string | null>('doc-1');
         let doc: any;
-        let load: any;
-        let closeFn: any;
 
         const TestComponent = () => {
-          const docState = usePatchesDoc<any>();
-          data = docState.data;
-          path = docState.path;
+          const docState = usePatchesDoc<any>(docId);
           doc = docState.doc;
-          load = docState.load;
-          closeFn = docState.close;
           return null;
         };
 
@@ -556,14 +323,52 @@ describe('Solid Primitives', () => {
 
         App();
 
-        await tick();
+        await new Promise(resolve => setTimeout(resolve, 10));
 
-        await load('doc-1');
-        expect(path()).toBe('doc-1');
+        expect(patches.getOpenDoc('doc-1')).toBeDefined();
 
-        await closeFn();
-        expect(path()).toBeNull();
-        expect(doc()).toBeUndefined();
+        setDocId('doc-2');
+
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        expect(patches.getOpenDoc('doc-1')).toBeUndefined();
+        expect(patches.getOpenDoc('doc-2')).toBeDefined();
+
+        dispose();
+
+        await new Promise(resolve => setTimeout(resolve, 10));
+        expect(patches.getOpenDoc('doc-2')).toBeUndefined();
+      });
+    });
+
+    it('should close doc when accessor becomes null', async () => {
+      await createRoot(async dispose => {
+        const [docId, setDocId] = createSignal<string | null>('doc-1');
+        let data: any;
+
+        const TestComponent = () => {
+          const docState = usePatchesDoc<any>(docId);
+          data = docState.data;
+          return null;
+        };
+
+        const App = () =>
+          (
+            <PatchesProvider patches={patches}>
+              <TestComponent />
+            </PatchesProvider>
+          ) as JSX.Element;
+
+        App();
+
+        await new Promise(resolve => setTimeout(resolve, 10));
+
+        expect(patches.getOpenDoc('doc-1')).toBeDefined();
+
+        setDocId(null);
+
+        await new Promise(resolve => setTimeout(resolve, 10));
+
         expect(data()).toBeUndefined();
         expect(patches.getOpenDoc('doc-1')).toBeUndefined();
 
@@ -571,12 +376,12 @@ describe('Solid Primitives', () => {
       });
     });
 
-    it('should silently no-op change before load', async () => {
+    it('should silently no-op change when no doc is loaded', async () => {
       await createRoot(async dispose => {
         let change: any;
 
         const TestComponent = () => {
-          const docState = usePatchesDoc<{ count?: number }>();
+          const docState = usePatchesDoc<{ count?: number }>(() => null);
           change = docState.change;
           return null;
         };
@@ -603,15 +408,10 @@ describe('Solid Primitives', () => {
       });
     });
 
-    it('should create a document (one-shot)', async () => {
+    it('should close document on dispose', async () => {
       await createRoot(async dispose => {
-        let create: any;
-        let path: any;
-
         const TestComponent = () => {
-          const docState = usePatchesDoc<{ title?: string }>();
-          create = docState.create;
-          path = docState.path;
+          usePatchesDoc<any>(() => 'doc-1');
           return null;
         };
 
@@ -624,48 +424,15 @@ describe('Solid Primitives', () => {
 
         App();
 
-        await tick();
+        await new Promise(resolve => setTimeout(resolve, 10));
 
-        await create('new-doc', { title: 'Created!' });
-
-        // Doc should not be loaded into this handle after create
-        expect(path()).toBeNull();
-        expect(patches.getOpenDoc('new-doc')).toBeUndefined();
+        expect(patches.getOpenDoc('doc-1')).toBeDefined();
 
         dispose();
-      });
-    });
 
-    it('should inject idProp into state', async () => {
-      await createRoot(async dispose => {
-        let data: any;
-        let load: any;
+        await new Promise(resolve => setTimeout(resolve, 10));
 
-        const TestComponent = () => {
-          const docState = usePatchesDoc<{ id?: string; title?: string }>({ idProp: 'id' });
-          data = docState.data;
-          load = docState.load;
-          return null;
-        };
-
-        const App = () =>
-          (
-            <PatchesProvider patches={patches}>
-              <TestComponent />
-            </PatchesProvider>
-          ) as JSX.Element;
-
-        App();
-
-        await tick();
-
-        await load('my-doc-path');
-
-        expect(data()).toBeDefined();
-        expect(data()?.id).toBe('my-doc-path');
-
-        dispose();
-        await patches.closeDoc('my-doc-path');
+        expect(patches.getOpenDoc('doc-1')).toBeUndefined();
       });
     });
   });
@@ -867,7 +634,7 @@ describe('Solid Primitives', () => {
       await patches.closeDoc('doc-2');
     });
 
-    it('should support autoClose option', async () => {
+    it('should auto-open and close document', async () => {
       const { Provider, useDoc } = createPatchesDoc<any>('test');
 
       await createRoot(async dispose => {
@@ -882,7 +649,7 @@ describe('Solid Primitives', () => {
         const App = () =>
           (
             <PatchesProvider patches={patches}>
-              <Provider docId="doc-1" autoClose>
+              <Provider docId="doc-1">
                 <ChildComponent />
               </Provider>
             </PatchesProvider>
@@ -905,7 +672,7 @@ describe('Solid Primitives', () => {
       });
     });
 
-    it('should support autoClose: "untrack" option', async () => {
+    it('should support untrack option', async () => {
       const { Provider, useDoc } = createPatchesDoc<any>('test-untrack');
       const closeDocSpy = vi.spyOn(patches, 'closeDoc');
 
@@ -918,7 +685,7 @@ describe('Solid Primitives', () => {
         const App = () =>
           (
             <PatchesProvider patches={patches}>
-              <Provider docId="doc-1" autoClose="untrack">
+              <Provider docId="doc-1" untrack>
                 <ChildComponent />
               </Provider>
             </PatchesProvider>

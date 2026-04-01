@@ -21,6 +21,7 @@ interface PendingOp {
   op: string;
   ts: number;
   value: any;
+  soft?: boolean;
 }
 
 /** A change being sent to the server */
@@ -43,7 +44,7 @@ interface Snapshot {
  * - docs<{ docId: string; committedRev: number; deleted?: boolean }> (primary key: docId) [shared with OT]
  * - snapshots<{ docId: string; rev: number; state: any }> (primary key: docId) [shared with OT]
  * - committedOps<{ docId: string; op: string; path: string; from?: string; value?: any }> (primary key: [docId, path])
- * - pendingOps<{ docId: string; path: string; op: string; ts: number; value: any }> (primary key: [docId, path])
+ * - pendingOps<{ docId: string; path: string; op: string; ts: number; value: any; soft?: boolean }> (primary key: [docId, path])
  * - sendingChanges<{ docId: string; change: Change }> (primary key: docId)
  *
  * This store manages field-level operations for LWW conflict resolution:
@@ -185,6 +186,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
         path: op.path,
         value: op.value,
         ts: op.ts,
+        ...(op.soft ? { soft: true } : undefined),
       }));
       state = applyPatch(state, pendingOps, { partial: true });
     }
@@ -299,6 +301,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
       path: op.path,
       value: op.value,
       ts: op.ts,
+      ...(op.soft ? { soft: true } : undefined),
     }));
   }
 
@@ -332,6 +335,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
           op: op.op,
           ts: op.ts ?? Date.now(),
           value: op.value,
+          ...(op.soft ? { soft: true } : undefined),
         })
       )
     );
@@ -457,6 +461,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
       path: op.path,
       value: op.value,
       ts: op.ts,
+      ...(op.soft ? { soft: true } : undefined),
     }));
 
     return [createChange(baseRev, baseRev + 1, opsArray)];

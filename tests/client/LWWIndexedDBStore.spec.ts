@@ -681,6 +681,61 @@ describe('LWWIndexedDBStore', () => {
     });
   });
 
+  describe('soft flag preservation', () => {
+    it('should preserve soft flag through savePendingOps and getPendingOps', async () => {
+      const ts = Date.now();
+      const ops: JSONPatchOp[] = [
+        { op: 'add', path: '/collection', value: { name: 'Default' }, ts, soft: true },
+        { op: 'replace', path: '/title', value: 'Test', ts },
+      ];
+      await store.savePendingOps('doc1', ops);
+
+      const pendingStore = mockStores.get('pendingOps');
+      // Verify soft op was stored with soft flag
+      expect(pendingStore?.put).toHaveBeenCalledWith(expect.objectContaining({ path: '/collection', soft: true }));
+      // Verify non-soft op was stored without soft flag
+      const nonSoftCall = pendingStore?.put.mock.calls.find((call: any[]) => call[0].path === '/title');
+      expect(nonSoftCall?.[0]).not.toHaveProperty('soft');
+
+      const result = await store.getPendingOps('doc1');
+      const softOp = result.find(op => op.path === '/collection');
+      const normalOp = result.find(op => op.path === '/title');
+
+      expect(softOp?.soft).toBe(true);
+      expect(normalOp?.soft).toBeUndefined();
+    });
+
+    it('should preserve soft flag in getDoc pending ops', async () => {
+      const docsStore = createMockIDBStore();
+      const snapshotsStore = createMockIDBStore();
+      const pendingOpsStore = createMockIDBStore();
+      const ts = Date.now();
+
+      docsStore.data.set('"doc1"', { docId: 'doc1', committedRev: 5 });
+      snapshotsStore.data.set('"doc1"', { docId: 'doc1', state: {}, rev: 5 });
+      pendingOpsStore.data.set('["doc1","/collection"]', {
+        docId: 'doc1',
+        path: '/collection',
+        op: 'add',
+        ts,
+        value: { name: 'Default' },
+        soft: true,
+      });
+
+      mockStores.set('docs', docsStore);
+      mockStores.set('snapshots', snapshotsStore);
+      mockStores.set('committedOps', createMockIDBStore());
+      mockStores.set('pendingOps', pendingOpsStore);
+      mockStores.set('sendingChanges', createMockIDBStore());
+
+      const result = await store.getDoc('doc1');
+
+      expect(result?.changes).toHaveLength(1);
+      const changeOps = result?.changes[0].ops;
+      expect(changeOps?.[0].soft).toBe(true);
+    });
+  });
+
   describe('document reconstruction with nested paths', () => {
     it('should handle nested paths correctly', async () => {
       const docsStore = createMockIDBStore();

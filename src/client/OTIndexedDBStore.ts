@@ -43,14 +43,14 @@ export class OTIndexedDBStore implements OTClientStore {
 
     // Subscribe to upgrade event to create OT-specific stores
     this.db.onUpgrade((db, _oldVersion, _transaction) => {
-      this.createOTStores(db);
+      OTIndexedDBStore.upgradeStores(db);
     });
   }
 
   /**
    * Creates OT-specific object stores during database upgrade.
    */
-  protected createOTStores(db: IDBDatabase): void {
+  static upgradeStores(db: IDBDatabase): void {
     if (!db.objectStoreNames.contains('committedChanges')) {
       db.createObjectStore('committedChanges', { keyPath: ['docId', 'rev'] });
     }

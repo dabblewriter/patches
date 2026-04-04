@@ -43,14 +43,6 @@ export interface MultiAlgorithmIndexedDBFactoryOptions extends MultiAlgorithmFac
   dbName: string;
 }
 
-/**
- * Options for external-DB factory functions with multiple algorithms.
- */
-export interface MultiAlgorithmExternalDBFactoryOptions extends MultiAlgorithmFactoryOptions {
-  /** An externally-managed IDBDatabase (or a Promise resolving to one). */
-  db: IDBDatabase | Promise<IDBDatabase>;
-}
-
 // --- OT-only factories ---
 
 /**
@@ -164,13 +156,16 @@ export function createMultiAlgorithmIndexedDBPatches(options: MultiAlgorithmInde
 /**
  * Creates a Patches instance with both OT and LWW algorithms using an externally-managed
  * IDBDatabase. The caller is responsible for opening the database and calling
- * `IndexedDBStore.upgrade()` during `onupgradeneeded` to create the required stores.
+ * `upgradePatchesDB()` during `onupgradeneeded` to create the required stores.
  *
  * Use this when you want to host Patches stores inside your own IndexedDB database
  * rather than having Patches open a separate one.
  */
-export function createMultiAlgorithmExternalDBPatches(options: MultiAlgorithmExternalDBFactoryOptions): Patches {
-  const baseStore = new IndexedDBStore(options.db);
+export function createMultiAlgorithmExternalDBPatches(
+  db: IDBDatabase | Promise<IDBDatabase>,
+  options: MultiAlgorithmFactoryOptions = {}
+): Patches {
+  const baseStore = new IndexedDBStore(db);
   const otStore = new OTIndexedDBStore(baseStore);
   const lwwStore = new LWWIndexedDBStore(baseStore);
 
@@ -183,4 +178,15 @@ export function createMultiAlgorithmExternalDBPatches(options: MultiAlgorithmExt
     metadata: options.metadata,
     docOptions: options.docOptions,
   });
+}
+
+/**
+ * Creates all Patches object stores in an externally-managed database.
+ * Call this from your `onupgradeneeded` handler when hosting Patches stores
+ * inside your own IndexedDB database.
+ */
+export function upgradePatchesDB(db: IDBDatabase, transaction: IDBTransaction): void {
+  IndexedDBStore.upgradeSharedStores(db, transaction);
+  OTIndexedDBStore.upgradeStores(db);
+  LWWIndexedDBStore.upgradeStores(db);
 }

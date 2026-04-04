@@ -73,8 +73,8 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
       this.dbName = dbOrName;
 
       // Subscribe to own upgrade signal to create shared stores
-      this.onUpgrade((db, oldVersion, transaction) => {
-        this.createSharedStores(db, oldVersion, transaction);
+      this.onUpgrade((db, _oldVersion, transaction) => {
+        IndexedDBStore.upgradeSharedStores(db, transaction);
       });
 
       if (this.dbName) {
@@ -84,12 +84,9 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
   }
 
   /**
-   * Creates all Patches object stores in an externally-managed database.
-   * Call this from your `onupgradeneeded` handler when hosting Patches stores
-   * inside your own IndexedDB database.
+   * Creates shared object stores (docs, snapshots, branches) during database upgrade.
    */
-  static upgrade(db: IDBDatabase, oldVersion: number, transaction: IDBTransaction): void {
-    // Shared stores
+  static upgradeSharedStores(db: IDBDatabase, transaction: IDBTransaction): void {
     if (!db.objectStoreNames.contains('docs')) {
       const docsStore = db.createObjectStore('docs', { keyPath: 'docId' });
       docsStore.createIndex('algorithm', 'algorithm', { unique: false });
@@ -103,55 +100,6 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
       branchStore.createIndex('_pending', '_pending', { unique: false });
     } else {
       const branchStore = transaction.objectStore('branches');
-      if (!branchStore.indexNames.contains('_pending')) {
-        branchStore.createIndex('_pending', '_pending', { unique: false });
-      }
-    }
-
-    // OT stores
-    if (!db.objectStoreNames.contains('committedChanges')) {
-      db.createObjectStore('committedChanges', { keyPath: ['docId', 'rev'] });
-    }
-    if (!db.objectStoreNames.contains('pendingChanges')) {
-      db.createObjectStore('pendingChanges', { keyPath: ['docId', 'rev'] });
-    }
-
-    // LWW stores
-    if (!db.objectStoreNames.contains('committedOps')) {
-      db.createObjectStore('committedOps', { keyPath: ['docId', 'path'] });
-    }
-    if (!db.objectStoreNames.contains('pendingOps')) {
-      db.createObjectStore('pendingOps', { keyPath: ['docId', 'path'] });
-    }
-    if (!db.objectStoreNames.contains('sendingChanges')) {
-      db.createObjectStore('sendingChanges', { keyPath: 'docId' });
-    }
-  }
-
-  /**
-   * Creates shared object stores used by all sync algorithms.
-   */
-  protected createSharedStores(db: IDBDatabase, _oldVersion: number, _transaction: IDBTransaction): void {
-    // Create docs store
-    if (!db.objectStoreNames.contains('docs')) {
-      const docsStore = db.createObjectStore('docs', { keyPath: 'docId' });
-      // Create index on algorithm field for efficient filtering
-      docsStore.createIndex('algorithm', 'algorithm', { unique: false });
-    }
-
-    // Create snapshots store
-    if (!db.objectStoreNames.contains('snapshots')) {
-      db.createObjectStore('snapshots', { keyPath: 'docId' });
-    }
-
-    // Create branches store
-    if (!db.objectStoreNames.contains('branches')) {
-      const branchStore = db.createObjectStore('branches', { keyPath: 'id' });
-      branchStore.createIndex('_docId', '_docId', { unique: false });
-      branchStore.createIndex('_pending', '_pending', { unique: false });
-    } else {
-      // Upgrade path: add _pending index to existing branches store
-      const branchStore = _transaction.objectStore('branches');
       if (!branchStore.indexNames.contains('_pending')) {
         branchStore.createIndex('_pending', '_pending', { unique: false });
       }

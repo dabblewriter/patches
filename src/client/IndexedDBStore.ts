@@ -157,6 +157,7 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
    * database without closing it (the caller owns the lifecycle).
    */
   async close(): Promise<void> {
+    if (!this.db) return;
     await this.dbPromise.promise;
     if (this.db) {
       if (!this.external) {

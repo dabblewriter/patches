@@ -187,6 +187,6 @@ export function createMultiAlgorithmExternalDBPatches(
  */
 export function upgradePatchesDB(db: IDBDatabase, transaction: IDBTransaction): void {
   IndexedDBStore.upgradeSharedStores(db, transaction);
-  OTIndexedDBStore.upgradeStores(db);
-  LWWIndexedDBStore.upgradeStores(db);
+  OTIndexedDBStore.upgradeStores(db, transaction);
+  LWWIndexedDBStore.upgradeStores(db, transaction);
 }

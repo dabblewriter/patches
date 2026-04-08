@@ -185,6 +185,75 @@ try {
 }
 ```
 
+## External Database Hosting
+
+By default, each Patches instance opens its own IndexedDB database. That works fine for simple apps, but if your app already has its own IndexedDB database, you now have two. Two databases means two version-upgrade lifecycles, two sets of connection management, and potential contention when both try to upgrade simultaneously.
+
+External DB hosting lets you put Patches' object stores inside your own database. One database, one upgrade, one connection.
+
+### Setup
+
+Two functions make this work:
+
+- **`upgradePatchesDB(db, transaction)`** creates all the object stores Patches needs. Call it from your `onupgradeneeded` handler alongside your own store creation.
+- **`createMultiAlgorithmExternalDBPatches(db, options?)`** creates a Patches instance that uses your database instead of opening its own.
+
+```typescript
+import { upgradePatchesDB, createMultiAlgorithmExternalDBPatches } from '@dabble/patches';
+
+const request = indexedDB.open('my-app', 1);
+
+request.onupgradeneeded = () => {
+  const db = request.result;
+  const transaction = request.transaction!;
+
+  // Create your own stores
+  db.createObjectStore('appSettings', { keyPath: 'key' });
+
+  // Create Patches stores in the same database
+  upgradePatchesDB(db, transaction);
+};
+
+request.onsuccess = () => {
+  const patches = createMultiAlgorithmExternalDBPatches(request.result, {
+    metadata: { user: { id: 'user-123' } },
+  });
+};
+```
+
+You can also pass a `Promise<IDBDatabase>` instead of a resolved database if your DB setup is async.
+
+### What Changes in External Mode
+
+Most things work identically. The differences are all about lifecycle ownership:
+
+- **`close()`** detaches Patches from the database without closing it. Your app still owns the connection.
+- **`deleteDB()`** is a no-op. Patches won't delete a database it doesn't own.
+- **`setName()`** throws. Renaming doesn't make sense when you provided the database.
+
+### Version Management
+
+This is the one thing you need to think about carefully. When Patches manages its own database, it handles IndexedDB versioning internally. With an external database, that's your responsibility.
+
+`upgradePatchesDB` uses `contains()` checks before creating stores, so it's safe to call on every version upgrade. It won't recreate stores that already exist. But if a future version of Patches needs new stores, you'll need to bump your database version and call `upgradePatchesDB` again in your upgrade handler.
+
+A straightforward pattern:
+
+```typescript
+request.onupgradeneeded = event => {
+  const db = request.result;
+  const transaction = request.transaction!;
+
+  if (event.oldVersion < 1) {
+    // v1: initial setup
+    db.createObjectStore('appSettings', { keyPath: 'key' });
+  }
+
+  // Always call — it's idempotent and handles its own migrations
+  upgradePatchesDB(db, transaction);
+};
+```
+
 ## Why Local-First Matters
 
 Using Patches with a persistent store gives you:

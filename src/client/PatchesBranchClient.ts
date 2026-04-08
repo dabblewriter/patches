@@ -2,7 +2,7 @@ import { store, type Store } from 'easy-signal';
 import { breakChanges, type SizeCalculator } from '../algorithms/ot/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import type { BranchAPI } from '../net/protocol/types.js';
-import type { Branch, CreateBranchMetadata, ListBranchesOptions } from '../types.js';
+import type { Branch, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
 import type { BranchClientStore } from './BranchClientStore.js';
 import type { Patches } from './Patches.js';
 import type { AlgorithmName } from './PatchesStore.js';
@@ -92,6 +92,14 @@ export class PatchesBranchClient {
     const branchId = await this.api.createBranch(this.id, rev, metadata);
     await this.listBranches();
     return branchId;
+  }
+
+  /**
+   * Update branch metadata (e.g. name).
+   */
+  async updateBranch(branchId: string, metadata: EditableBranchMetadata): Promise<void> {
+    await this.api.updateBranch(branchId, metadata);
+    this.branches.state = this.branches.state.map(b => (b.id === branchId ? { ...b, ...metadata } : b));
   }
 
   /**

@@ -215,13 +215,35 @@ describe('PatchesBranchClient', () => {
       mockAlgorithm.handleDocChange.mockRejectedValue(new Error('Algorithm failed'));
       const client = new PatchesBranchClient('doc1', offlineApi, patches);
 
-      await expect(client.createBranch(5, { id: 'fail-branch' }, { data: 'test' })).rejects.toThrow(
-        'Algorithm failed'
-      );
+      await expect(client.createBranch(5, { id: 'fail-branch' }, { data: 'test' })).rejects.toThrow('Algorithm failed');
 
       // Should rollback by removing the branch and untracking the doc
       expect(offlineApi.removeBranches).toHaveBeenCalledWith(['fail-branch']);
       expect(patches.untrackDocs).toHaveBeenCalledWith(['fail-branch']);
+    });
+  });
+
+  describe('updateBranch', () => {
+    it('should call API and update local branches state (online)', async () => {
+      const client = new PatchesBranchClient('doc1', api, patches);
+      client.branches.state = [makeBranch({ id: 'b1', name: 'old' }), makeBranch({ id: 'b2' })];
+
+      await client.updateBranch('b1', { name: 'new name' });
+
+      expect(api.updateBranch).toHaveBeenCalledWith('b1', { name: 'new name' });
+      expect(client.branches.state.find(b => b.id === 'b1')!.name).toBe('new name');
+      // Other branches unchanged
+      expect(client.branches.state.find(b => b.id === 'b2')).toEqual(makeBranch({ id: 'b2' }));
+    });
+
+    it('should call offline API and update local branches state', async () => {
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
+      client.branches.state = [makeBranch({ id: 'b1', name: 'old' })];
+
+      await client.updateBranch('b1', { name: 'renamed' });
+
+      expect(offlineApi.updateBranch).toHaveBeenCalledWith('b1', { name: 'renamed' });
+      expect(client.branches.state.find(b => b.id === 'b1')!.name).toBe('renamed');
     });
   });
 
@@ -274,8 +296,22 @@ describe('PatchesBranchClient', () => {
 
     it('should merge locally with offline API', async () => {
       const branchChanges = [
-        { id: 'c1', ops: [{ op: 'replace', path: '/title', value: 'New' }], rev: 3, baseRev: 2, createdAt: 1, committedAt: 1 },
-        { id: 'c2', ops: [{ op: 'replace', path: '/body', value: 'Text' }], rev: 4, baseRev: 3, createdAt: 2, committedAt: 2 },
+        {
+          id: 'c1',
+          ops: [{ op: 'replace', path: '/title', value: 'New' }],
+          rev: 3,
+          baseRev: 2,
+          createdAt: 1,
+          committedAt: 1,
+        },
+        {
+          id: 'c2',
+          ops: [{ op: 'replace', path: '/body', value: 'Text' }],
+          rev: 4,
+          baseRev: 3,
+          createdAt: 2,
+          committedAt: 2,
+        },
       ];
       mockAlgorithm.listChanges = vi.fn().mockResolvedValue(branchChanges);
 
@@ -289,11 +325,7 @@ describe('PatchesBranchClient', () => {
 
       // Should submit each change to source doc via serialized queue with batchId
       expect(patches.submitDocChange).toHaveBeenCalledTimes(2);
-      expect(patches.submitDocChange).toHaveBeenCalledWith(
-        'doc1',
-        branchChanges[0].ops,
-        { batchId: 'branch-1' }
-      );
+      expect(patches.submitDocChange).toHaveBeenCalledWith('doc1', branchChanges[0].ops, { batchId: 'branch-1' });
 
       // Should update lastMergedRev
       expect(offlineApi.updateBranch).toHaveBeenCalledWith('branch-1', { lastMergedRev: 4 });
@@ -306,9 +338,18 @@ describe('PatchesBranchClient', () => {
     });
 
     it('should use lastMergedRev for subsequent merges', async () => {
-      mockAlgorithm.listChanges = vi.fn().mockResolvedValue([
-        { id: 'c3', ops: [{ op: 'replace', path: '/x', value: 1 }], rev: 5, baseRev: 4, createdAt: 3, committedAt: 3 },
-      ]);
+      mockAlgorithm.listChanges = vi
+        .fn()
+        .mockResolvedValue([
+          {
+            id: 'c3',
+            ops: [{ op: 'replace', path: '/x', value: 1 }],
+            rev: 5,
+            baseRev: 4,
+            createdAt: 3,
+            committedAt: 3,
+          },
+        ]);
 
       const client = new PatchesBranchClient('doc1', offlineApi, patches);
       client.branches.state = [makeBranch({ id: 'branch-1', lastMergedRev: 4 })];

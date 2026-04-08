@@ -61,15 +61,15 @@ export class LWWIndexedDBStore implements LWWClientStore {
     this.db = !db || typeof db === 'string' ? new IndexedDBStore(db) : db;
 
     // Subscribe to upgrade event to create LWW-specific stores
-    this.db.onUpgrade((db, _oldVersion, _transaction) => {
-      this.createLWWStores(db);
+    this.db.onUpgrade((db, _oldVersion, transaction) => {
+      LWWIndexedDBStore.upgradeStores(db, transaction);
     });
   }
 
   /**
    * Creates LWW-specific object stores during database upgrade.
    */
-  protected createLWWStores(db: IDBDatabase): void {
+  static upgradeStores(db: IDBDatabase, _transaction: IDBTransaction): void {
     if (!db.objectStoreNames.contains('committedOps')) {
       db.createObjectStore('committedOps', { keyPath: ['docId', 'path'] });
     }

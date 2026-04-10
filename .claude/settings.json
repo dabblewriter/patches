@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "agent",
+            "prompt": "Check if any code files were modified in the current git working tree (git diff --name-only HEAD and git diff --name-only --cached). If no code files (.ts, .tsx, .js, .jsx, .vue, .svelte, .css, .scss) were modified, respond {\"ok\": true}. Otherwise run these checks:\n1. npm run type:check\n2. npm run lint\n3. npm run format:check\nIf all pass, respond {\"ok\": true}. If any fail, respond {\"ok\": false, \"reason\": \"<which check failed and key error output>\"}.",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

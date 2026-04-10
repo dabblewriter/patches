@@ -53,7 +53,6 @@ describe('branchUtils', () => {
     it('should throw for protected field: modifiedAt', () => {
       expect(() => assertBranchMetadata({ modifiedAt: 12345 } as any)).toThrow('Cannot modify branch field modifiedAt');
     });
-
   });
 
   describe('generateBranchId', () => {

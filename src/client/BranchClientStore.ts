@@ -1,9 +1,4 @@
-import type {
-  Branch,
-  CreateBranchMetadata,
-  EditableBranchMetadata,
-  ListBranchesOptions,
-} from '../types.js';
+import type { Branch, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
 
 /**
  * Client-side branch storage interface that doubles as a BranchAPI-compatible layer.

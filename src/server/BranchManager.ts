@@ -1,10 +1,4 @@
-import type {
-  Branch,
-  Change,
-  CreateBranchMetadata,
-  EditableBranchMetadata,
-  ListBranchesOptions,
-} from '../types.js';
+import type { Branch, Change, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
 
 /**
  * Interface for managing document branches.

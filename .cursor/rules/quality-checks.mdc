@@ -1,0 +1,25 @@
+---
+description: Run lint, type, and format checks after code changes
+alwaysApply: true
+---
+
+# Quality Checks
+
+After making code changes, **always verify that type, lint, and format checks pass** before considering the task complete.
+
+## Commands
+
+1. `npm run type:check`
+2. `npm run lint`
+3. `npm run format:check`
+
+## Fixing Failures
+
+- **Type errors**: Fix the source code to satisfy tsc
+- **Lint errors**: Fix manually (this project has no auto-fix script)
+- **Format errors**: Run `npm run format` to auto-fix, then re-run `format:check` to confirm
+
+## When to Skip
+
+- No code files were modified (only README, docs, config comments)
+- The user explicitly says to skip checks

@@ -152,7 +152,8 @@ export function usePatchesDoc<T extends object>(
   const { setupDoc, resetSignals, setError, baseReturn } = createDocReactiveState<T>(!!sync);
 
   // Normalize to an accessor that returns string | null
-  const source = typeof docId === 'string' ? () => docId : () => (docId as Accessor<string | null | undefined | false>)() || null;
+  const source =
+    typeof docId === 'string' ? () => docId : () => (docId as Accessor<string | null | undefined | false>)() || null;
   let currentId: string | null = null;
 
   const [docResource] = createResource(source, async id => {

@@ -56,9 +56,7 @@ function DocumentViewer(props: { documentId: string }) {
     <Show when={!loading()} fallback={<div>Loading...</div>}>
       <Show when={!error()} fallback={<div>Error: {error()!.message}</div>}>
         <h1>{data()?.title}</h1>
-        <button onClick={() => change((patch, root) => patch.replace(root.title!, 'New Title'))}>
-          Update
-        </button>
+        <button onClick={() => change((patch, root) => patch.replace(root.title!, 'New Title'))}>Update</button>
       </Show>
     </Show>
   );
@@ -76,9 +74,7 @@ import { usePatchesDoc } from '@dabble/patches/solid';
 const [projectId, setProjectId] = createSignal<string | null>('abc');
 
 // Automatically opens/closes as the ID changes
-const { data, change } = usePatchesDoc<Project>(
-  () => projectId() && `projects/${projectId()}/content`
-);
+const { data, change } = usePatchesDoc<Project>(() => projectId() && `projects/${projectId()}/content`);
 
 // Swap docs
 setProjectId('def');
@@ -134,13 +130,13 @@ const { Provider, useDoc } = createPatchesDoc<User>('user');
 // Static
 <Provider docId="user-123">
   <UserProfile />
-</Provider>
+</Provider>;
 
 // Reactive
 const [activeId, setActiveId] = createSignal('design-1');
 <Provider docId={activeId}>
   <WhiteboardCanvas />
-</Provider>
+</Provider>;
 
 // Child component
 function UserProfile() {
@@ -162,16 +158,12 @@ Reactively manages multiple documents based on a reactive list of paths.
 ```tsx
 const [paths] = createSignal(['projects/a', 'projects/b']);
 
-const { data, close } = createManagedDocs<ProjectMeta, Record<string, ProjectMeta>>(
-  paths,
-  {},
-  (data, path, state) => {
-    const id = path.split('/').pop()!;
-    data = { ...data };
-    state ? (data[id] = state) : delete data[id];
-    return data;
-  },
-);
+const { data, close } = createManagedDocs<ProjectMeta, Record<string, ProjectMeta>>(paths, {}, (data, path, state) => {
+  const id = path.split('/').pop()!;
+  data = { ...data };
+  state ? (data[id] = state) : delete data[id];
+  return data;
+});
 ```
 
 ### `fillPath(template, params)`

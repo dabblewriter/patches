@@ -142,9 +142,7 @@ Injects a document provided by `providePatchesDoc`. Throws if not found.
 Reactively manages multiple documents based on a reactive list of paths. Opens documents as paths appear, closes them as paths disappear, and aggregates all state through a reducer function.
 
 ```typescript
-const projectPaths = computed(() =>
-  Object.keys(workspace?.projects || {}).map(id => `projects/${id}`)
-);
+const projectPaths = computed(() => Object.keys(workspace?.projects || {}).map(id => `projects/${id}`));
 
 const { data: metas, close } = useManagedDocs<ProjectMeta, Record<string, ProjectMeta>>(
   projectPaths,
@@ -154,7 +152,7 @@ const { data: metas, close } = useManagedDocs<ProjectMeta, Record<string, Projec
     data = { ...data };
     state ? (data[id] = state) : delete data[id];
     return data;
-  },
+  }
 );
 ```
 
@@ -205,9 +203,11 @@ import { usePatchesDoc, fillPath } from '@dabble/patches/vue';
 export const useProjectStore = defineStore('project', () => {
   const projectId = ref<string | null>(null);
 
-  const { data: project, change, close } = usePatchesDoc<Project>(
-    () => projectId.value && fillPath('projects/:id/content', { id: projectId.value })
-  );
+  const {
+    data: project,
+    change,
+    close,
+  } = usePatchesDoc<Project>(() => projectId.value && fillPath('projects/:id/content', { id: projectId.value }));
 
   const title = computed(() => project.value?.title ?? '');
 

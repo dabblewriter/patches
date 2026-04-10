@@ -186,8 +186,7 @@ describe('Solid Primitives', () => {
           let loading: any;
 
           const TestComponent = () => {
-            const docState = usePatchesDoc<any>(() => 'non-existent-doc', {
-            });
+            const docState = usePatchesDoc<any>(() => 'non-existent-doc', {});
             error = docState.error;
             loading = docState.loading;
             return null;

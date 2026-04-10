@@ -138,4 +138,3 @@ export async function wrapMergeCommit<T>(
     throw new Error(`Merge failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 }
-

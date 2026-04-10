@@ -242,7 +242,6 @@ describe('LWWBranchManager', () => {
 
       expect(result).toEqual([]);
       const branches = await branchManager.listBranches('doc1');
-
     });
 
     it('should merge branch changes to source document', async () => {
@@ -301,7 +300,6 @@ describe('LWWBranchManager', () => {
       expect(sourceDoc.state.name).toBe('SourceValue'); // ts=3000 > ts=2000
 
       const branches = await branchManager.listBranches('doc1');
-
     });
 
     it('should handle merge with multiple fields', async () => {

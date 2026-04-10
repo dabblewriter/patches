@@ -1,11 +1,5 @@
 import { JSONPatch } from '../json-patch/JSONPatch.js';
-import type {
-  Branch,
-  Change,
-  CreateBranchMetadata,
-  EditableBranchMetadata,
-  ListBranchesOptions,
-} from '../types.js';
+import type { Branch, Change, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
 import type { BranchManager } from './BranchManager.js';
 import {
   assertBranchMetadata,

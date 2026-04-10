@@ -265,7 +265,6 @@ describe('OTBranchManager', () => {
         contentStartRev: 2,
         createdAt: Date.now(),
         modifiedAt: Date.now(),
-
       };
 
       vi.mocked(mockStore.loadBranch).mockResolvedValue(existingBranch);

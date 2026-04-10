@@ -338,18 +338,16 @@ describe('PatchesBranchClient', () => {
     });
 
     it('should use lastMergedRev for subsequent merges', async () => {
-      mockAlgorithm.listChanges = vi
-        .fn()
-        .mockResolvedValue([
-          {
-            id: 'c3',
-            ops: [{ op: 'replace', path: '/x', value: 1 }],
-            rev: 5,
-            baseRev: 4,
-            createdAt: 3,
-            committedAt: 3,
-          },
-        ]);
+      mockAlgorithm.listChanges = vi.fn().mockResolvedValue([
+        {
+          id: 'c3',
+          ops: [{ op: 'replace', path: '/x', value: 1 }],
+          rev: 5,
+          baseRev: 4,
+          createdAt: 3,
+          committedAt: 3,
+        },
+      ]);
 
       const client = new PatchesBranchClient('doc1', offlineApi, patches);
       client.branches.state = [makeBranch({ id: 'branch-1', lastMergedRev: 4 })];

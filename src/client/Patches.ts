@@ -297,11 +297,7 @@ export class Patches {
    * Used by PatchesBranchClient to merge branch changes without racing
    * against concurrent user edits on the same document.
    */
-  submitDocChange(
-    docId: string,
-    ops: JSONPatchOp[],
-    metadata: Record<string, any> = {}
-  ): Promise<void> {
+  submitDocChange(docId: string, ops: JSONPatchOp[], metadata: Record<string, any> = {}): Promise<void> {
     const managed = this.docs.get(docId);
     const algorithm = this.getDocAlgorithm(docId) ?? this.algorithms[this.defaultAlgorithm];
     if (!algorithm) throw new Error(`No algorithm found for document ${docId}`);

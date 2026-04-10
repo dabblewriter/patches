@@ -42,15 +42,15 @@ export class OTIndexedDBStore implements OTClientStore {
     this.db = !db || typeof db === 'string' ? new IndexedDBStore(db) : db;
 
     // Subscribe to upgrade event to create OT-specific stores
-    this.db.onUpgrade((db, _oldVersion, _transaction) => {
-      this.createOTStores(db);
+    this.db.onUpgrade((db, _oldVersion, transaction) => {
+      OTIndexedDBStore.upgradeStores(db, transaction);
     });
   }
 
   /**
    * Creates OT-specific object stores during database upgrade.
    */
-  protected createOTStores(db: IDBDatabase): void {
+  static upgradeStores(db: IDBDatabase, _transaction: IDBTransaction): void {
     if (!db.objectStoreNames.contains('committedChanges')) {
       db.createObjectStore('committedChanges', { keyPath: ['docId', 'rev'] });
     }
@@ -178,7 +178,7 @@ export class OTIndexedDBStore implements OTClientStore {
    */
   @blockable
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
-    const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.db.transaction(
+    const [tx, snapshots, committedChanges, , docsStore] = await this.db.transaction(
       ['snapshots', 'committedChanges', 'pendingChanges', 'docs'],
       'readwrite'
     );
@@ -189,7 +189,6 @@ export class OTIndexedDBStore implements OTClientStore {
       docsStore.put<TrackedDoc>({ docId, committedRev: rev, algorithm: 'ot' }),
       snapshots.put<Snapshot>({ docId, state, rev }),
       committedChanges.delete([docId, 0], [docId, Infinity]),
-      pendingChanges.delete([docId, 0], [docId, Infinity]),
     ]);
 
     await tx.complete();
@@ -228,6 +227,24 @@ export class OTIndexedDBStore implements OTClientStore {
     const result = await pendingChanges.getAll<Change>([docId, 0], [docId, Infinity]);
     await tx.complete();
     return result;
+  }
+
+  /**
+   * Lists all changes (committed + pending) for a document, sorted by rev.
+   * @param docId - The document ID.
+   * @param options.startAfter - Only return changes with rev > startAfter.
+   */
+  @blockable
+  async listChanges(docId: string, options?: { startAfter?: number }): Promise<Change[]> {
+    const startRev = (options?.startAfter ?? -1) + 1;
+    const [tx, committedChanges, pendingChanges] = await this.db.transaction(
+      ['committedChanges', 'pendingChanges'],
+      'readonly'
+    );
+    const committed = await committedChanges.getAll<Change>([docId, startRev], [docId, Infinity]);
+    const pending = await pendingChanges.getAll<Change>([docId, startRev], [docId, Infinity]);
+    await tx.complete();
+    return [...committed, ...pending].sort((a, b) => a.rev - b.rev);
   }
 
   // ─── Server Changes ─────────────────────────────────────────────────────

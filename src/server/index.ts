@@ -28,7 +28,7 @@ export { RevConflictError } from './RevConflictError.js';
 // Utilities
 export {
   assertBranchMetadata,
-  assertBranchOpenForMerge,
+  assertBranchExists,
   assertNotABranch,
   branchManagerApi,
   createBranchRecord,

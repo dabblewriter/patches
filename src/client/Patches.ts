@@ -293,6 +293,22 @@ export class Patches {
   }
 
   /**
+   * Submits ops for a document through the serialized change queue.
+   * Used by PatchesBranchClient to merge branch changes without racing
+   * against concurrent user edits on the same document.
+   */
+  submitDocChange(
+    docId: string,
+    ops: JSONPatchOp[],
+    metadata: Record<string, any> = {}
+  ): Promise<void> {
+    const managed = this.docs.get(docId);
+    const algorithm = this.getDocAlgorithm(docId) ?? this.algorithms[this.defaultAlgorithm];
+    if (!algorithm) throw new Error(`No algorithm found for document ${docId}`);
+    return this._handleDocChange(docId, ops, managed?.doc as PatchesDoc<any>, algorithm, metadata);
+  }
+
+  /**
    * Internal handler for doc changes. Called when doc.onChange emits ops.
    * Serializes calls per docId to prevent concurrent handleDocChange from
    * creating changes with the same rev (which would overwrite each other

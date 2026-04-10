@@ -152,3 +152,41 @@ export function createMultiAlgorithmIndexedDBPatches(options: MultiAlgorithmInde
     docOptions: options.docOptions,
   });
 }
+
+/**
+ * Creates a Patches instance with both OT and LWW algorithms using an externally-managed
+ * IDBDatabase. The caller is responsible for opening the database and calling
+ * `upgradePatchesDB()` during `onupgradeneeded` to create the required stores.
+ *
+ * Use this when you want to host Patches stores inside your own IndexedDB database
+ * rather than having Patches open a separate one.
+ */
+export function createMultiAlgorithmExternalDBPatches(
+  db: IDBDatabase | Promise<IDBDatabase>,
+  options: MultiAlgorithmFactoryOptions = {}
+): Patches {
+  const baseStore = new IndexedDBStore(db);
+  const otStore = new OTIndexedDBStore(baseStore);
+  const lwwStore = new LWWIndexedDBStore(baseStore);
+
+  const otAlgorithm = new OTAlgorithm(otStore, options.docOptions);
+  const lwwAlgorithm = new LWWAlgorithm(lwwStore);
+
+  return new Patches({
+    algorithms: { ot: otAlgorithm, lww: lwwAlgorithm },
+    defaultAlgorithm: options.defaultAlgorithm ?? 'ot',
+    metadata: options.metadata,
+    docOptions: options.docOptions,
+  });
+}
+
+/**
+ * Creates all Patches object stores in an externally-managed database.
+ * Call this from your `onupgradeneeded` handler when hosting Patches stores
+ * inside your own IndexedDB database.
+ */
+export function upgradePatchesDB(db: IDBDatabase, transaction: IDBTransaction): void {
+  IndexedDBStore.upgradeSharedStores(db, transaction);
+  OTIndexedDBStore.upgradeStores(db, transaction);
+  LWWIndexedDBStore.upgradeStores(db, transaction);
+}

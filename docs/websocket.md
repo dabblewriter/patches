@@ -78,7 +78,7 @@ const committed = await ws.commitChanges('doc-1', myChanges);
 
 - `listBranches(docId)` - List document branches
 - `createBranch(docId, rev, metadata?)` - Create a branch at a revision
-- `closeBranch(branchId)` - Close a branch
+- `deleteBranch(branchId)` - Delete a branch
 - `mergeBranch(branchId)` - Merge a branch back
 
 **Events:**
@@ -203,7 +203,7 @@ const branches = new OTBranchManager(branchStore, otServer);
 
 // Register their methods with the RPC server
 rpc.register(history); // Adds listVersions, createVersion, getVersionState, etc.
-rpc.register(branches); // Adds listBranches, createBranch, closeBranch, mergeBranch
+rpc.register(branches); // Adds listBranches, createBranch, deleteBranch, mergeBranch
 ```
 
 When you register these managers, their methods become available to clients automatically. See [PatchesHistoryManager](PatchesHistoryManager.md) and [PatchesBranchManager](PatchesBranchManager.md) for details.

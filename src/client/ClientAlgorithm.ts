@@ -64,6 +64,17 @@ export interface ClientAlgorithm {
   ): Promise<Change[]>;
 
   /**
+   * Lists all changes (committed + pending) for a document.
+   * Used by PatchesBranchClient for client-side offline merge to read branch changes.
+   * Optional — only OT algorithms with IndexedDB stores support this.
+   *
+   * @param docId Document identifier
+   * @param options.startAfter Only return changes with rev > startAfter
+   * @returns Changes sorted by rev
+   */
+  listChanges?(docId: string, options?: { startAfter?: number }): Promise<Change[]>;
+
+  /**
    * Read-only check for whether a document has any pending local data.
    * - OT: Checks pendingChanges
    * - LWW: Checks both pendingOps and sendingChange

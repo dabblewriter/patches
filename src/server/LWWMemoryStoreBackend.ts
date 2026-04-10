@@ -228,11 +228,17 @@ export class LWWMemoryStoreBackend
 
   // === Branching ===
 
-  async listBranches(docId: string): Promise<Branch[]> {
+  async listBranches(docId: string, options?: { since?: number }): Promise<Branch[]> {
     const result: Branch[] = [];
+    const since = options?.since ?? 0;
     for (const branch of this.branches.values()) {
-      if (branch.docId === docId) {
-        result.push(branch);
+      if (branch.docId !== docId) continue;
+      if (since) {
+        // Incremental: include tombstones so clients can clean up
+        if (branch.modifiedAt > since) result.push(branch);
+      } else {
+        // Full list: exclude tombstones
+        if (!branch.deleted) result.push(branch);
       }
     }
     return result;
@@ -246,10 +252,26 @@ export class LWWMemoryStoreBackend
     this.branches.set(branch.id, branch);
   }
 
-  async updateBranch(branchId: string, updates: Partial<Pick<Branch, 'status' | 'name' | 'metadata'>>): Promise<void> {
+  async updateBranch(branchId: string, updates: Partial<Pick<Branch, 'name' | 'metadata'>>): Promise<void> {
     const branch = this.branches.get(branchId);
     if (branch) {
       Object.assign(branch, updates);
+    }
+  }
+
+  async deleteBranch(branchId: string): Promise<void> {
+    const branch = this.branches.get(branchId);
+    if (branch) {
+      // Replace with tombstone
+      this.branches.set(branchId, {
+        id: branch.id,
+        docId: branch.docId,
+        branchedAtRev: branch.branchedAtRev,
+        createdAt: branch.createdAt,
+        modifiedAt: Date.now(),
+        contentStartRev: branch.contentStartRev,
+        deleted: true,
+      });
     }
   }
 

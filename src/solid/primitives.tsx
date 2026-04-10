@@ -6,11 +6,9 @@ import {
   createEffect,
   onCleanup,
   type Accessor,
-  type Resource,
 } from 'solid-js';
 import type { OpenDocOptions } from '../client/Patches.js';
 import type { PatchesDoc } from '../client/PatchesDoc.js';
-import { JSONPatch } from '../json-patch/JSONPatch.js';
 import type { DocSyncStatus, ChangeMutator } from '../types.js';
 import type { Unsubscriber } from 'easy-signal';
 import type { PatchesSyncState } from '../net/PatchesSync.js';
@@ -18,169 +16,70 @@ import { usePatchesContext } from './context.js';
 import { getDocManager } from './doc-manager.js';
 
 /**
- * Options for usePatchesDoc primitive (eager mode with docId).
+ * Options for usePatchesDoc primitive.
  */
 export interface UsePatchesDocOptions extends OpenDocOptions {
   /**
-   * Controls document lifecycle management on cleanup.
-   *
-   * - `false` (default): Explicit mode. Assumes doc is already open. Throws if not.
-   * - `true`: Opens doc on mount with ref counting, closes on cleanup (doc stays tracked).
-   * - `'untrack'`: Opens doc on mount, closes AND untracks on cleanup (removes from sync).
-   *
-   * @default false
+   * When true, the document is removed from sync tracking on close.
+   * By default documents stay tracked after closing.
    */
-  autoClose?: boolean | 'untrack';
+  untrack?: boolean;
 }
 
 /**
- * Options for usePatchesDoc primitive (lazy mode without docId).
- */
-export interface UsePatchesDocLazyOptions {
-  /**
-   * Inject doc.id into state under this key on every state update.
-   * Useful when the document ID is derived from the path but needed in the data.
-   */
-  idProp?: string;
-}
-
-/**
- * Return type for usePatchesDoc primitive (eager mode).
+ * Return type for usePatchesDoc primitive.
  */
 export interface UsePatchesDocReturn<T extends object> {
-  /**
-   * Accessor for the document state.
-   * Updated whenever the document changes (local or remote).
-   */
+  /** Accessor for the document state. */
   data: Accessor<T | undefined>;
-
-  /**
-   * Whether the document is currently loading/syncing.
-   * - `true` during initial load or updates
-   * - `false` when fully synced
-   */
+  /** Whether the document is currently loading. */
   loading: Accessor<boolean>;
-
-  /**
-   * Error that occurred during sync, if any.
-   */
+  /** Error that occurred during sync, if any. */
   error: Accessor<Error | undefined>;
-
-  /**
-   * The committed revision number.
-   * Increments each time the server confirms changes.
-   */
+  /** The committed revision number. */
   rev: Accessor<number>;
-
-  /**
-   * Whether there are pending local changes not yet committed by server.
-   */
+  /** Whether there are pending local changes not yet committed by server. */
   hasPending: Accessor<boolean>;
-
-  /**
-   * Make changes to the document.
-   *
-   * @example
-   * ```typescript
-   * change((patch, root) => {
-   *   patch.replace(root.title!, 'New Title')
-   * })
-   * ```
-   */
+  /** Make changes to the document. No-ops if the document is not loaded. */
   change: (mutator: ChangeMutator<T>) => void;
-
-  /**
-   * The underlying PatchesDoc instance.
-   * Useful for advanced operations.
-   */
-  doc: Accessor<PatchesDoc<T> | undefined>;
-}
-
-/**
- * Return type for usePatchesDoc primitive (lazy mode).
- * Extends the eager return type with lifecycle management methods.
- */
-export interface UsePatchesDocLazyReturn<T extends object> extends UsePatchesDocReturn<T> {
-  /**
-   * Current document path. `null` when no document is loaded.
-   */
-  path: Accessor<string | null>;
-
-  /**
-   * Open a document by path. Closes any previously loaded document first.
-   *
-   * @param docPath - The document path to open
-   * @param options - Optional algorithm and metadata overrides
-   */
-  load: (docPath: string, options?: OpenDocOptions) => Promise<void>;
-
-  /**
-   * Close the current document, unsubscribe, and reset all state.
-   * Calls `patches.closeDoc()` but does not untrack — tracking is managed separately.
-   */
+  /** Close the document and reset state. Useful for explicit cleanup. */
   close: () => Promise<void>;
-
-  /**
-   * Create a new document: open it, set initial state, then close it.
-   * A one-shot operation that doesn't bind the document to this handle.
-   *
-   * @param docPath - The document path to create
-   * @param initialState - Initial state object or JSONPatch to apply
-   * @param options - Optional algorithm and metadata overrides
-   */
-  create: (docPath: string, initialState: T | JSONPatch, options?: OpenDocOptions) => Promise<void>;
+  /** The underlying PatchesDoc instance. */
+  doc: Accessor<PatchesDoc<T> | undefined>;
 }
 
 // --- Shared reactive state factory ---
 
-interface DocReactiveStateOptions<T extends object> {
-  initialLoading?: boolean;
-  hasSyncContext?: boolean;
-  transformState?: (state: T, doc: PatchesDoc<T>) => T;
-  changeBehavior: 'throw' | 'noop';
-}
-
 /**
- * Creates the shared reactive state, subscription wiring, and change helper
- * used by all doc primitive modes (eager, lazy, provider).
+ * Creates the shared reactive state, subscription wiring, and change helper.
  * @internal
  */
-function createDocReactiveState<T extends object>(options: DocReactiveStateOptions<T>) {
-  const { initialLoading = true, hasSyncContext = false, transformState, changeBehavior } = options;
-
+function createDocReactiveState<T extends object>(hasSyncContext: boolean) {
   const [doc, setDoc] = createSignal<PatchesDoc<T> | undefined>(undefined);
   const [data, setData] = createSignal<T | undefined>(undefined);
-  const [loading, setLoading] = createSignal<boolean>(initialLoading);
+  const [loading, setLoading] = createSignal<boolean>(false);
   const [error, setError] = createSignal<Error | undefined>();
   const [rev, setRev] = createSignal<number>(0);
   const [hasPending, setHasPending] = createSignal<boolean>(false);
 
   function setupDoc(patchesDoc: PatchesDoc<T>): Unsubscriber {
     setDoc(patchesDoc);
-
-    // Track whether the initial load has completed. Once loaded, loading stays false.
     let loaded = false;
 
     function updateLoading(): void {
       if (loaded) return;
-
       if (patchesDoc.isLoaded.state) {
         loaded = true;
         setLoading(false);
       } else if (patchesDoc.syncStatus.state === 'syncing') {
         setLoading(true);
       } else if (!hasSyncContext) {
-        // No sync configured — doc is as loaded as it'll get
         loaded = true;
         setLoading(false);
       }
-      // With sync context: leave loading unchanged (waiting for sync to start)
     }
 
     const unsubState = patchesDoc.subscribe(state => {
-      if (transformState && state) {
-        state = transformState(state, patchesDoc);
-      }
       setData(() => state as T);
       setRev(patchesDoc.committedRev);
       setHasPending(patchesDoc.hasPending);
@@ -208,259 +107,114 @@ function createDocReactiveState<T extends object>(options: DocReactiveStateOptio
   }
 
   function change(mutator: ChangeMutator<T>) {
-    if (changeBehavior === 'throw') {
-      const currentDoc = doc();
-      if (!currentDoc) {
-        throw new Error('Cannot make changes: document not loaded yet');
-      }
-      currentDoc.change(mutator);
-    } else {
-      doc()?.change(mutator);
-    }
+    doc()?.change(mutator);
   }
 
-  const baseReturn: UsePatchesDocReturn<T> = {
-    data,
-    loading,
-    error,
-    rev,
-    hasPending,
-    change,
-    doc,
-  };
+  // close is set by usePatchesDoc after construction
+  const baseReturn = { data, loading, error, rev, hasPending, change, doc } as UsePatchesDocReturn<T>;
 
-  return {
-    doc,
-    setDoc,
-    data,
-    setData,
-    loading,
-    setLoading,
-    error,
-    setError,
-    rev,
-    setRev,
-    hasPending,
-    setHasPending,
-    setupDoc,
-    resetSignals,
-    change,
-    baseReturn,
-  };
+  return { setupDoc, resetSignals, setError, baseReturn };
 }
 
-// --- usePatchesDoc overloads ---
+// --- usePatchesDoc ---
+
+/**
+ * Type for document ID — can be a static string or accessor function.
+ */
+export type MaybeAccessor<T> = T | Accessor<T>;
 
 /**
  * Solid primitive for reactive Patches document state.
  *
- * ## Eager Mode (with docId)
- *
- * Provides reactive access to an already-open Patches document.
- *
- * @example
- * ```tsx
- * // Explicit lifecycle — you control open/close
- * const { data, loading, change } = usePatchesDoc(() => props.docId)
- *
- * // Auto lifecycle — opens on mount, closes on cleanup
- * const { data, loading, change } = usePatchesDoc(() => props.docId, { autoClose: true })
- * ```
- *
- * ## Lazy Mode (without docId)
- *
- * Returns a deferred handle with `load()`, `close()`, and `create()` methods.
- * Does NOT register `onCleanup` — caller manages lifecycle.
+ * Opens the document automatically and closes it on cleanup (or when the
+ * accessor value changes). Accepts a static string or an accessor. When the
+ * value is falsy, no document is loaded.
  *
  * @example
  * ```tsx
- * const { data, load, close, change, create } = usePatchesDoc<Project>()
+ * // Static
+ * const { data, change } = usePatchesDoc('doc-123')
  *
- * // Later, when the user navigates:
- * await load('projects/abc/content')
- *
- * // When leaving:
- * await close()
+ * // Reactive — swaps automatically
+ * const [projectId, setProjectId] = createSignal<string | null>('abc')
+ * const { data, change } = usePatchesDoc(() => projectId() && `projects/${projectId()}`)
  * ```
  */
 export function usePatchesDoc<T extends object>(
-  docId: MaybeAccessor<string>,
+  docId: MaybeAccessor<string | null | undefined | false>,
   options?: UsePatchesDocOptions
-): UsePatchesDocReturn<T>;
-export function usePatchesDoc<T extends object>(options?: UsePatchesDocLazyOptions): UsePatchesDocLazyReturn<T>;
-export function usePatchesDoc<T extends object>(
-  docIdOrOptions?: MaybeAccessor<string> | UsePatchesDocLazyOptions,
-  options?: UsePatchesDocOptions
-): UsePatchesDocReturn<T> | UsePatchesDocLazyReturn<T> {
-  // Determine mode based on first argument
-  if (typeof docIdOrOptions === 'string' || typeof docIdOrOptions === 'function') {
-    return _usePatchesDocEager<T>(docIdOrOptions as MaybeAccessor<string>, options ?? {});
-  }
-  return _usePatchesDocLazy<T>(docIdOrOptions ?? {});
-}
-
-/**
- * Eager mode implementation — the original behavior.
- */
-function _usePatchesDocEager<T extends object>(
-  docId: MaybeAccessor<string>,
-  options: UsePatchesDocOptions
 ): UsePatchesDocReturn<T> {
   const { patches, sync } = usePatchesContext();
-  const { autoClose = false, algorithm, metadata } = options;
-  const shouldUntrack = autoClose === 'untrack';
+  const { untrack: shouldUntrack = false, algorithm, metadata } = options ?? {};
   const openDocOpts: OpenDocOptions = { algorithm, metadata };
   const manager = getDocManager(patches);
 
-  const { setupDoc, setError, setLoading, baseReturn } = createDocReactiveState<T>({
-    initialLoading: !!autoClose,
-    hasSyncContext: !!sync,
-    changeBehavior: 'throw',
+  const { setupDoc, resetSignals, setError, baseReturn } = createDocReactiveState<T>(!!sync);
+
+  // Normalize to an accessor that returns string | null
+  const source = typeof docId === 'string' ? () => docId : () => (docId as Accessor<string | null | undefined | false>)() || null;
+  let currentId: string | null = null;
+
+  const [docResource] = createResource(source, async id => {
+    return await manager.openDoc<T>(patches, id, openDocOpts);
   });
 
-  const docIdAccessor = toAccessor(docId);
+  createEffect(() => {
+    const currentSource = source();
+    const loadedDoc = docResource();
+    if (currentSource && loadedDoc) {
+      currentId = currentSource;
+      const unsub = setupDoc(loadedDoc);
+      onCleanup(() => unsub());
+    } else {
+      resetSignals();
+    }
+    const resourceError = docResource.error;
+    if (resourceError) {
+      setError(resourceError);
+    }
+  });
 
-  if (autoClose) {
-    const [docResource] = createResource(docIdAccessor, async id => {
-      return await manager.openDoc<T>(patches, id, openDocOpts);
-    });
+  // Close previous doc when source changes
+  createEffect((prevId: string | null | undefined) => {
+    const id = source();
+    if (prevId && prevId !== id) {
+      currentId = null;
+      manager.closeDoc(patches, prevId, shouldUntrack);
+    }
+    return id;
+  });
 
-    createEffect(() => {
-      const loadedDoc = docResource();
-      if (loadedDoc) {
-        const unsub = setupDoc(loadedDoc);
-        onCleanup(() => unsub());
-      }
-      const resourceError = docResource.error;
-      if (resourceError) {
-        setError(resourceError);
-        setLoading(false);
-      }
-    });
+  baseReturn.close = async () => {
+    if (currentId) {
+      const id = currentId;
+      currentId = null;
+      resetSignals();
+      await manager.closeDoc(patches, id, shouldUntrack);
+    }
+  };
 
-    onCleanup(() => {
-      const id = docIdAccessor();
-      manager.closeDoc(patches, id, shouldUntrack);
-    });
-  } else {
-    createEffect(() => {
-      const id = docIdAccessor();
-      const patchesDoc = patches.getOpenDoc<T>(id);
-
-      if (!patchesDoc) {
-        throw new Error(
-          `Document "${id}" is not open. Either open it with patches.openDoc() first, or use { autoClose: true } option.`
-        );
-      }
-
-      manager.incrementRefCount(id);
-
-      const unsub = setupDoc(patchesDoc);
-
-      onCleanup(() => {
-        unsub();
-        manager.decrementRefCount(id);
-      });
-    });
-  }
+  onCleanup(() => {
+    if (currentId) {
+      manager.closeDoc(patches, currentId, shouldUntrack);
+      currentId = null;
+    }
+  });
 
   return baseReturn;
-}
-
-/**
- * Lazy mode implementation — deferred loading without onCleanup.
- * Caller manages lifecycle via load()/close().
- */
-function _usePatchesDocLazy<T extends object>(options: UsePatchesDocLazyOptions): UsePatchesDocLazyReturn<T> {
-  const { patches, sync } = usePatchesContext();
-  const { idProp } = options;
-
-  const { setupDoc, resetSignals, setError, setLoading, baseReturn } = createDocReactiveState<T>({
-    initialLoading: false,
-    hasSyncContext: !!sync,
-    changeBehavior: 'noop',
-    transformState: idProp ? (state, patchesDoc) => ({ ...state, [idProp]: patchesDoc.id }) as T : undefined,
-  });
-
-  let unsubscribe: Unsubscriber | null = null;
-  const [path, setPath] = createSignal<string | null>(null);
-
-  function teardown() {
-    unsubscribe?.();
-    unsubscribe = null;
-    resetSignals();
-  }
-
-  async function load(docPath: string, options?: OpenDocOptions) {
-    if (path()) {
-      const prevPath = path()!;
-      teardown();
-      await patches.closeDoc(prevPath);
-    }
-
-    setPath(docPath);
-    setLoading(true);
-
-    try {
-      const patchesDoc = await patches.openDoc<T>(docPath, options);
-      unsubscribe = setupDoc(patchesDoc);
-    } catch (err) {
-      setError(err as Error);
-      setLoading(false);
-    }
-  }
-
-  async function close() {
-    if (path()) {
-      const prevPath = path()!;
-      teardown();
-      setPath(null);
-      await patches.closeDoc(prevPath);
-    }
-  }
-
-  async function create(docPath: string, initialState: T | JSONPatch, options?: OpenDocOptions) {
-    const newDoc = await patches.openDoc<T>(docPath, options);
-    newDoc.change((patch, root) => {
-      if (initialState instanceof JSONPatch) {
-        patch.ops = initialState.ops;
-      } else {
-        const state = { ...initialState };
-        if (idProp) delete (state as Record<string, unknown>)[idProp];
-        patch.replace(root, state);
-      }
-    });
-    await patches.closeDoc(docPath);
-  }
-
-  return { ...baseReturn, path, load, close, create };
 }
 
 /**
  * Return type for usePatchesSync primitive.
  */
 export interface UsePatchesSyncReturn {
-  /**
-   * Whether the WebSocket connection is established.
-   */
   connected: Accessor<boolean>;
-
-  /**
-   * Whether documents are currently syncing with the server.
-   */
   syncing: Accessor<boolean>;
-
-  /**
-   * Whether the client believes it has network connectivity.
-   */
   online: Accessor<boolean>;
 }
 
 /**
  * Solid primitive for reactive Patches sync state.
- *
- * Provides reactive access to PatchesSync connection and sync status.
- * Useful for showing "Offline" banners, global loading indicators, etc.
  *
  * @example
  * ```tsx
@@ -472,10 +226,6 @@ export interface UsePatchesSyncReturn {
  *   </Show>
  * );
  * ```
- *
- * @returns Reactive sync state
- * @throws Error if Patches context not provided
- * @throws Error if PatchesSync was not provided to context
  */
 export function usePatchesSync(): UsePatchesSyncReturn {
   const { sync } = usePatchesContext();
@@ -498,163 +248,48 @@ export function usePatchesSync(): UsePatchesSyncReturn {
     unsubscribe();
   });
 
-  return {
-    connected,
-    syncing,
-    online,
-  };
+  return { connected, syncing, online };
 }
 
-/**
- * Type for document ID - can be static string or accessor function.
- */
-export type MaybeAccessor<T> = T | Accessor<T>;
-
-/**
- * Helper to convert MaybeAccessor to Accessor.
- */
-function toAccessor<T>(value: MaybeAccessor<T>): Accessor<T> {
-  return typeof value === 'function' ? (value as Accessor<T>) : () => value;
-}
-
-/**
- * Context value for named document contexts.
- */
-interface NamedDocContext<T extends object> {
-  value: UsePatchesDocReturn<T>;
-}
+// --- createPatchesDoc (Provider pattern) ---
 
 /**
  * Props for the Provider component returned by createPatchesDoc.
  */
 export interface PatchesDocProviderProps extends OpenDocOptions {
   docId: MaybeAccessor<string>;
-  autoClose?: boolean | 'untrack';
+  untrack?: boolean;
   children: any;
 }
 
 /**
  * Creates a named document context that can be provided to child components.
  *
- * This enables child components to access the document using the returned `useDoc` hook
- * without needing to pass the docId down through props. Supports both static and
- * reactive docIds.
- *
- * ## Use Cases
- *
- * **Static document (user settings):**
+ * @example
  * ```tsx
  * const { Provider, useDoc } = createPatchesDoc<User>('user');
  *
  * <Provider docId="user-123">
  *   <UserProfile />
  * </Provider>
- * ```
  *
- * **Reactive document (multi-tab):**
- * ```tsx
- * const { Provider, useDoc } = createPatchesDoc<Whiteboard>('whiteboard');
+ * // Reactive
  * const [activeTabId, setActiveTabId] = createSignal('design-1');
- *
  * <Provider docId={activeTabId}>
  *   <WhiteboardCanvas />
  * </Provider>
  * ```
- *
- * **With autoClose:**
- * ```tsx
- * const { Provider, useDoc } = createPatchesDoc<Doc>('document');
- * const [currentDocId, setCurrentDocId] = createSignal('doc-1');
- *
- * <Provider docId={currentDocId} autoClose>
- *   <DocumentEditor />
- * </Provider>
- * ```
- *
- * @param name - Unique identifier for this document context (e.g., 'whiteboard', 'user')
- * @returns Object with Provider component and useDoc hook
  */
 export function createPatchesDoc<T extends object>(name: string) {
   const Context = createContext<UsePatchesDocReturn<T>>();
 
   function Provider(props: PatchesDocProviderProps) {
-    const { patches, sync } = usePatchesContext();
-    const manager = getDocManager(patches);
-    const autoClose = props.autoClose ?? false;
-    const shouldUntrack = autoClose === 'untrack';
-    const openDocOpts: OpenDocOptions = { algorithm: props.algorithm, metadata: props.metadata };
+    const result = usePatchesDoc<T>(
+      typeof props.docId === 'function' ? (props.docId as Accessor<string>) : props.docId,
+      { untrack: props.untrack, algorithm: props.algorithm, metadata: props.metadata }
+    );
 
-    const { setupDoc, setError, setLoading, baseReturn } = createDocReactiveState<T>({
-      initialLoading: !!autoClose,
-      hasSyncContext: !!sync,
-      changeBehavior: 'throw',
-    });
-
-    const docIdAccessor = toAccessor(props.docId);
-
-    if (autoClose) {
-      const [docResource] = createResource(docIdAccessor, async id => {
-        return await manager.openDoc<T>(patches, id, openDocOpts);
-      });
-
-      createEffect(() => {
-        const loadedDoc = docResource();
-        if (loadedDoc) {
-          const unsub = setupDoc(loadedDoc);
-          onCleanup(() => unsub());
-        }
-        const resourceError = docResource.error;
-        if (resourceError) {
-          setError(resourceError);
-          setLoading(false);
-        }
-      });
-
-      createEffect((prevId: string | undefined) => {
-        const currentId = docIdAccessor();
-
-        if (prevId && prevId !== currentId) {
-          manager.closeDoc(patches, prevId, shouldUntrack);
-        }
-
-        return currentId;
-      });
-
-      onCleanup(() => {
-        const id = docIdAccessor();
-        manager.closeDoc(patches, id, shouldUntrack);
-      });
-    } else {
-      createEffect((prevId: string | undefined) => {
-        const id = docIdAccessor();
-
-        if (prevId && prevId !== id) {
-          manager.decrementRefCount(prevId);
-        }
-
-        const patchesDoc = patches.getOpenDoc<T>(id);
-        if (!patchesDoc) {
-          throw new Error(
-            `Document "${id}" is not open. Either open it with patches.openDoc() first, or use autoClose option.`
-          );
-        }
-
-        manager.incrementRefCount(id);
-
-        const unsub = setupDoc(patchesDoc);
-
-        onCleanup(() => unsub());
-
-        return id;
-      });
-
-      onCleanup(() => {
-        const id = docIdAccessor();
-        manager.decrementRefCount(id);
-      });
-    }
-
-    return <Context.Provider value={baseReturn} children={props.children} />;
+    return <Context.Provider value={result} children={props.children} />;
   }
 
   function useDoc(): UsePatchesDocReturn<T> {
@@ -670,8 +305,5 @@ export function createPatchesDoc<T extends object>(name: string) {
     return context;
   }
 
-  return {
-    Provider,
-    useDoc,
-  };
+  return { Provider, useDoc };
 }

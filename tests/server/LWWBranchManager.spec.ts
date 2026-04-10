@@ -48,7 +48,7 @@ describe('LWWBranchManager', () => {
         listBranches: 'read',
         createBranch: 'write',
         updateBranch: 'write',
-        closeBranch: 'write',
+        deleteBranch: 'write',
         mergeBranch: 'write',
       });
     });
@@ -93,7 +93,6 @@ describe('LWWBranchManager', () => {
         id: 'generated-id',
         docId: 'doc1',
         branchedAtRev: 1,
-        status: 'open',
         name: 'Feature Branch',
       });
     });
@@ -138,6 +137,40 @@ describe('LWWBranchManager', () => {
       );
     });
 
+    it('should skip initial change creation when contentStartRev is set', async () => {
+      const branchId = await branchManager.createBranch('doc1', 0, { name: 'Offline', contentStartRev: 4 });
+
+      const branches = await branchManager.listBranches('doc1');
+      const branch = branches.find(b => b.id === branchId);
+      expect(branch?.contentStartRev).toBe(4);
+    });
+
+    it('should be idempotent when metadata.id matches existing branch', async () => {
+      await server.commitChanges('doc1', [
+        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }] },
+      ]);
+      const branchId = await branchManager.createBranch('doc1', 1, { id: 'my-branch' });
+
+      // Create again with same ID — should be a no-op
+      const result = await branchManager.createBranch('doc1', 1, { id: 'my-branch' });
+      expect(result).toBe(branchId);
+
+      // Should still only have one branch
+      const branches = await branchManager.listBranches('doc1');
+      expect(branches.filter(b => b.id === 'my-branch')).toHaveLength(1);
+    });
+
+    it('should throw when metadata.id matches branch for different doc', async () => {
+      await server.commitChanges('doc1', [
+        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }] },
+      ]);
+      await branchManager.createBranch('doc1', 1, { id: 'shared-id' });
+
+      await expect(branchManager.createBranch('doc2', 1, { id: 'shared-id' })).rejects.toThrow(
+        'already exists for a different document'
+      );
+    });
+
     it('should use custom branch ID generator if provided', async () => {
       // Add custom ID generator to store
       (store as any).createBranchId = vi.fn(() => 'custom-branch-id');
@@ -172,29 +205,24 @@ describe('LWWBranchManager', () => {
     });
   });
 
-  describe('closeBranch', () => {
-    it('should close branch with default status', async () => {
+  describe('deleteBranch', () => {
+    it('should replace branch with tombstone', async () => {
       await server.commitChanges('doc1', [
         { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }] },
       ]);
-      const branchId = await branchManager.createBranch('doc1', 1);
+      const branchId = await branchManager.createBranch('doc1', 1, { name: 'Doomed' });
 
-      await branchManager.closeBranch(branchId);
+      await branchManager.deleteBranch(branchId);
 
+      // Full list should not include deleted branch
       const branches = await branchManager.listBranches('doc1');
-      expect(branches[0].status).toBe('closed');
-    });
+      expect(branches.find(b => b.id === branchId)).toBeUndefined();
 
-    it('should close branch with specified status', async () => {
-      await server.commitChanges('doc1', [
-        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }] },
-      ]);
-      const branchId = await branchManager.createBranch('doc1', 1);
-
-      await branchManager.closeBranch(branchId, 'archived');
-
-      const branches = await branchManager.listBranches('doc1');
-      expect(branches[0].status).toBe('archived');
+      // Incremental list should include tombstone
+      const allBranches = await branchManager.listBranches('doc1', { since: 1 });
+      const tombstone = allBranches.find(b => b.id === branchId);
+      expect(tombstone).toBeDefined();
+      expect(tombstone!.deleted).toBe(true);
     });
   });
 
@@ -203,19 +231,7 @@ describe('LWWBranchManager', () => {
       await expect(branchManager.mergeBranch('nonexistent')).rejects.toThrow('Branch with ID nonexistent not found.');
     });
 
-    it('should throw when branch is not open', async () => {
-      await server.commitChanges('doc1', [
-        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }] },
-      ]);
-      const branchId = await branchManager.createBranch('doc1', 1);
-      await branchManager.closeBranch(branchId, 'merged');
-
-      await expect(branchManager.mergeBranch(branchId)).rejects.toThrow(
-        `Branch ${branchId} is not open (status: merged). Cannot merge.`
-      );
-    });
-
-    it('should close branch when no changes to merge', async () => {
+    it('should return empty array when no changes to merge', async () => {
       await server.commitChanges('doc1', [
         { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 1000 }] },
       ]);
@@ -226,7 +242,7 @@ describe('LWWBranchManager', () => {
 
       expect(result).toEqual([]);
       const branches = await branchManager.listBranches('doc1');
-      expect(branches[0].status).toBe('merged');
+
     });
 
     it('should merge branch changes to source document', async () => {
@@ -253,9 +269,10 @@ describe('LWWBranchManager', () => {
       const sourceDoc = await getDocState(server, 'doc1');
       expect(sourceDoc.state.name).toBe('Bob');
 
-      // Verify branch closed
+      // Verify lastMergedRev set
       const branches = await branchManager.listBranches('doc1');
-      expect(branches[0].status).toBe('merged');
+
+      expect(branches[0].lastMergedRev).toBeDefined();
     });
 
     it('should resolve conflicts using LWW (later timestamp wins)', async () => {
@@ -282,6 +299,9 @@ describe('LWWBranchManager', () => {
 
       const sourceDoc = await getDocState(server, 'doc1');
       expect(sourceDoc.state.name).toBe('SourceValue'); // ts=3000 > ts=2000
+
+      const branches = await branchManager.listBranches('doc1');
+
     });
 
     it('should handle merge with multiple fields', async () => {
@@ -364,9 +384,25 @@ describe('LWWBranchManager', () => {
         count: 5, // From concurrent source change (ts=1500)
       });
 
-      // 7. Verify branch is closed
-      const branches = await branchManager.listBranches('doc1');
-      expect(branches[0].status).toBe('merged');
+      // 7. Verify lastMergedRev
+      let branches = await branchManager.listBranches('doc1');
+
+      expect(branches[0].lastMergedRev).toBeDefined();
+      const firstMergedRev = branches[0].lastMergedRev;
+
+      // 8. Make more changes on branch and merge again
+      await server.commitChanges(branchId, [
+        { id: 'c4', ops: [{ op: 'replace', path: '/title', value: 'Second Edit', ts: 3000 }] },
+      ]);
+      await branchManager.mergeBranch(branchId);
+
+      // 9. Verify second merge applied
+      const sourceDoc2 = await getDocState(server, 'doc1');
+      expect(sourceDoc2.state.title).toBe('Second Edit');
+
+      // 10. lastMergedRev should have advanced
+      branches = await branchManager.listBranches('doc1');
+      expect(branches[0].lastMergedRev).toBeGreaterThan(firstMergedRev!);
     });
   });
 });

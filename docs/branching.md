@@ -6,13 +6,16 @@ The use case is simple: experimentation without fear. Want to try a radical rede
 
 **Table of Contents**
 
-- [How Branching Works](#how-branching-works)
-- [OT vs LWW Branching](#ot-vs-lww-branching)
-- [Creating a Branch](#creating-a-branch)
-- [Branch Metadata](#branch-metadata)
-- [Merging Back](#merging-back)
-- [Design Decisions](#design-decisions)
-- [Practical Example](#practical-example)
+- [Branching and Merging in Patches](#branching-and-merging-in-patches)
+  - [How Branching Works](#how-branching-works)
+  - [OT vs LWW Branching](#ot-vs-lww-branching)
+  - [Creating a Branch](#creating-a-branch)
+  - [Branch Metadata](#branch-metadata)
+  - [Merging Back](#merging-back)
+    - [OT Merge Approach](#ot-merge-approach)
+    - [LWW Merge Approach](#lww-merge-approach)
+  - [Design Decisions](#design-decisions)
+  - [Practical Example](#practical-example)
 
 ## How Branching Works
 
@@ -38,7 +41,7 @@ Patches supports two sync algorithms, and each has its own branch manager:
 **OT branching** (via `OTBranchManager`) works like git. The branch captures the source at a specific revision. When merging, the system checks if the source has new changes since the branch was created:
 
 - **Fast-forward merge:** No concurrent changes on source. Branch changes become part of the main timeline as-is.
-- **Divergent merge:** Source has new changes. Branch changes get flattened and transformed against source changes.
+- **Divergent merge:** Source has new changes. Each branch change is re-stamped with `baseRev` at the branch point and `batchId: branchId`, then transformed individually against concurrent source changes.
 
 **LWW branching** (via `LWWBranchManager`) is simpler. Each field carries a timestamp. When merging, timestamps resolve conflicts automatically. No transformation needed. Later timestamp wins.
 
@@ -89,17 +92,15 @@ interface Branch {
   branchedAtRev: number; // Revision on source where branch was created
   createdAt: number; // Unix timestamp (milliseconds)
   name?: string; // Human-readable name
-  status: BranchStatus; // 'open' | 'merged' | 'closed'
+  lastMergedRev?: number; // Branch rev through which changes were last merged
+  deleted?: true; // Tombstone marker for incremental sync
 }
-
-type BranchStatus = 'open' | 'merged' | 'closed';
 ```
 
 List branches for a document:
 
 ```typescript
 const branches = await branchManager.listBranches('source-doc-id');
-// Returns all branches, including merged and closed ones
 ```
 
 Update branch metadata:
@@ -110,66 +111,64 @@ await branchManager.updateBranch(branchDocId, {
 });
 ```
 
-Close a branch without merging:
+Delete a branch:
 
 ```typescript
-await branchManager.closeBranch(branchDocId, 'closed');
-// Status can be 'merged' or 'closed'
+await branchManager.deleteBranch(branchDocId);
 ```
 
 ## Merging Back
 
-Merging applies branch changes to the source document:
+Merging applies branch changes to the source document. Branches support **multiple merges** — the branch stays open after each merge, and `lastMergedRev` tracks which branch revision was last merged. Subsequent merges only pick up new changes.
 
 ```typescript
-const committedChanges = await branchManager.mergeBranch(branchDocId);
-console.log(`Merged ${committedChanges.length} changes back to source`);
+// First merge
+const changes1 = await branchManager.mergeBranch(branchDocId);
+// Branch stays around — make more edits...
+
+// Second merge — only new changes since first merge
+const changes2 = await branchManager.mergeBranch(branchDocId);
+
+// Delete when done
+await branchManager.deleteBranch(branchDocId);
 ```
 
 ### OT Merge Approach
 
-The [OTBranchManager](PatchesBranchManager.md) handles two scenarios:
-
-**Fast-forward merge** (no concurrent changes on source):
+The [OTBranchManager](PatchesBranchManager.md) preserves original branch changes and uses `batchId` for correct transformation:
 
 ```
-Source: [rev 40] [rev 41] [rev 42] ─────────────────────────────────────[rev 43] [rev 44] [rev 45]
-                              │                                             ↑
-                              └── Branch created ── [change A] [change B] ──┘
-                                                                          merge
-```
-
-The branch changes (A, B) are committed individually to the source. Their version history shows `origin: 'main'` because they're now part of the main timeline. Clean and simple.
-
-**Divergent merge** (source has new changes since branching):
-
-```
-Source: [rev 40] [rev 41] [rev 42] [rev 43 (Bob)] [rev 44 (Carol)] ───────[rev 45]
-                              │                                               ↑
-                              └── Branch created ── [change A] [change B] ────┘
-                                                                            merge (flattened + transformed)
+Source: [rev 40] [rev 41] [rev 42] [rev 43 (Bob)] [rev 44 (Carol)] ─────[rev 45] [rev 46]
+                              │                                             ↑        ↑
+                              └── Branch created ── [change A] [change B] ──┘────────┘
+                                                                          (each transformed independently)
 ```
 
 When Alice merges her branch:
 
-1. Branch changes get copied to source with `origin: 'branch'` in version metadata
-2. All branch changes get flattened into a single change
-3. That flattened change gets transformed against concurrent source changes
-4. Result is committed to source
+1. Branch versions get copied to source with `origin: 'branch'` in version metadata
+2. Unmerged branch changes (since `lastMergedRev`) are re-stamped with `baseRev` set to the branch point and `batchId: branchId`
+3. Original change IDs are preserved — this makes merges idempotent (safe to retry if the network drops after commit but before acknowledgment)
+4. `commitChanges` uses the `batchId` to skip transformation against previously-merged changes from the same branch (they share the same causal context)
+5. Each change gets transformed individually against truly concurrent source changes
+6. `lastMergedRev` is updated on the branch record
 
-Why flatten? Transforming 1,000 individual branch changes against 500 source changes would be slow. Flattening gives the same end result with better performance. The original version history is preserved with `origin: 'branch'` for traceability.
+Why `batchId`? All changes in a branch are created in the context of each other. Change 500 knows about change 5, even across multiple merges. Using the branch ID as the batch ID ensures they're never transformed against each other.
+
+Why preserve original changes instead of flattening? Idempotency. If changes are flattened into a new change with a new ID, a retry after a failed acknowledgment would create a duplicate with a different ID — the server can't detect it as a duplicate, and the document gets corrupted. Preserving original IDs means the server's ID-based deduplication catches retries automatically. This also enables offline merge: two clients merging the same branch produce identical change IDs, so deduplication prevents corruption.
 
 ### LWW Merge Approach
 
 The `LWWBranchManager` approach is simpler:
 
-1. Get all field changes made on the branch
+1. Get field changes made on the branch since last merge (or since creation)
 2. Commit them to the source document
 3. Timestamps automatically resolve conflicts
+4. Update `lastMergedRev` on the branch
 
 No transformation. No flattening. Just timestamp comparison. If the branch wrote to `/settings/theme` with timestamp 1738761234567 and source has an older timestamp, branch wins. If source has a newer timestamp, source wins.
 
-This works because LWW conflicts don't need intelligent merging. The last writer wins, and that's the expected behavior.
+This works because LWW conflicts don't need intelligent merging. The last writer wins, and that's the expected behavior. LWW merge is naturally idempotent — merging the same ops multiple times produces the same result.
 
 ## Design Decisions
 
@@ -177,11 +176,11 @@ This works because LWW conflicts don't need intelligent merging. The last writer
 
 The initial branch version uses the source's revision number. When you branch at rev 42, the branch's first version is at rev 42. This means no translation needed when merging. The revision numbers just work.
 
-**Why flatten changes for divergent merges?**
+**Why not flatten changes for merge?**
 
-Performance. A branch with 10,000 tiny changes merged against 5,000 source changes would require transforming each branch change against each source change. Flattening collapses the branch into one change, making merge fast regardless of branch size.
+Flattening creates a new change with a new ID. That destroys idempotency — if a merge is retried (network failure after commit, before acknowledgment), the second attempt creates a different change ID for the same content. The server can't deduplicate it, and the document gets double-applied ops.
 
-The tradeoff: you lose the granular branch history in the transformation. But the original versions are preserved with `origin: 'branch'` metadata for auditing.
+Preserving original branch changes with their original IDs means the server's existing ID-based deduplication handles retries correctly. The tradeoff is more transformation work (N changes × committed ops instead of 1 × committed ops), but correctness beats performance here.
 
 **Why no nested branches?**
 
@@ -196,7 +195,7 @@ When a client goes offline, their changes are essentially a branch. They diverge
 Patches handles this the same way:
 
 - No concurrent server changes while offline? Changes merge like a fast-forward.
-- Concurrent server changes? Offline changes get marked `origin: 'offline-branch'` and flattened for transformation.
+- Concurrent server changes? Offline changes get marked `origin: 'offline-branch'` and each change is transformed individually against the concurrent changes.
 
 This consistency means the same algorithms handle both explicit branching and implicit offline divergence.
 
@@ -234,18 +233,19 @@ doc.change(state => {
   state.colors.text = '#ffffff';
 });
 
-// 3. Check branch status
+// 3. List branches
 const branches = await branchManager.listBranches('main-doc');
-const activeBranches = branches.filter(b => b.status === 'open');
-console.log(`${activeBranches.length} active branches`);
+console.log(`${branches.length} branches`);
 
-// 4. Merge when ready
+// 4. Merge when ready (branch stays around for further edits)
 const changes = await branchManager.mergeBranch(branchDocId);
 console.log(`Merged ${changes.length} changes`);
-// Branch status is now 'merged'
 
-// 5. Or close without merging
-// await branchManager.closeBranch(branchDocId, 'closed');
+// 5. Merge again after more edits (only new changes since last merge)
+const moreChanges = await branchManager.mergeBranch(branchDocId);
+
+// 6. Delete when done
+await branchManager.deleteBranch(branchDocId);
 ```
 
 The branch manager handles all the complexity. You just create branches, work on them, and merge when ready.

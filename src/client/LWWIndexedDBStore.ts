@@ -21,6 +21,7 @@ interface PendingOp {
   op: string;
   ts: number;
   value: any;
+  soft?: boolean;
 }
 
 /** A change being sent to the server */
@@ -43,7 +44,7 @@ interface Snapshot {
  * - docs<{ docId: string; committedRev: number; deleted?: boolean }> (primary key: docId) [shared with OT]
  * - snapshots<{ docId: string; rev: number; state: any }> (primary key: docId) [shared with OT]
  * - committedOps<{ docId: string; op: string; path: string; from?: string; value?: any }> (primary key: [docId, path])
- * - pendingOps<{ docId: string; path: string; op: string; ts: number; value: any }> (primary key: [docId, path])
+ * - pendingOps<{ docId: string; path: string; op: string; ts: number; value: any; soft?: boolean }> (primary key: [docId, path])
  * - sendingChanges<{ docId: string; change: Change }> (primary key: docId)
  *
  * This store manages field-level operations for LWW conflict resolution:
@@ -60,15 +61,15 @@ export class LWWIndexedDBStore implements LWWClientStore {
     this.db = !db || typeof db === 'string' ? new IndexedDBStore(db) : db;
 
     // Subscribe to upgrade event to create LWW-specific stores
-    this.db.onUpgrade((db, _oldVersion, _transaction) => {
-      this.createLWWStores(db);
+    this.db.onUpgrade((db, _oldVersion, transaction) => {
+      LWWIndexedDBStore.upgradeStores(db, transaction);
     });
   }
 
   /**
    * Creates LWW-specific object stores during database upgrade.
    */
-  protected createLWWStores(db: IDBDatabase): void {
+  static upgradeStores(db: IDBDatabase, _transaction: IDBTransaction): void {
     if (!db.objectStoreNames.contains('committedOps')) {
       db.createObjectStore('committedOps', { keyPath: ['docId', 'path'] });
     }
@@ -185,6 +186,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
         path: op.path,
         value: op.value,
         ts: op.ts,
+        ...(op.soft ? { soft: true } : undefined),
       }));
       state = applyPatch(state, pendingOps, { partial: true });
     }
@@ -202,7 +204,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
 
   /**
    * Saves the current document state to storage.
-   * Clears all committed fields and pending ops.
+   * Clears committed fields (subsumed by the snapshot) but preserves pending ops.
    */
   @blockable
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
@@ -299,6 +301,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
       path: op.path,
       value: op.value,
       ts: op.ts,
+      ...(op.soft ? { soft: true } : undefined),
     }));
   }
 
@@ -332,6 +335,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
           op: op.op,
           ts: op.ts ?? Date.now(),
           value: op.value,
+          ...(op.soft ? { soft: true } : undefined),
         })
       )
     );
@@ -370,7 +374,13 @@ export class LWWIndexedDBStore implements LWWClientStore {
   }
 
   /**
-   * Clear sendingChange after server ack, move ops to committed.
+   * Move sending ops to committed, then clear the sending slot.
+   * committedRev is NOT updated here — applyServerChanges owns that using the
+   * server's actual rev. Updating it here would bump the rev above the server's
+   * real value for noop changes (where the server doesn't create a new rev).
+   *
+   * Call this BEFORE applyServerChanges so that server corrections (which run
+   * after) overwrite any stale ops for fields the server won via LWW.
    */
   @blockable
   async confirmSendingChange(docId: string): Promise<void> {
@@ -389,11 +399,11 @@ export class LWWIndexedDBStore implements LWWClientStore {
     await Promise.all(sending.change.ops.map(op => committedOps.put<CommittedOp>({ ...op, docId })));
 
     // Update committed rev
-    const changeRev = sending.change.rev;
-    if (changeRev !== undefined) {
+    const rev = sending.change.rev;
+    if (rev !== undefined) {
       const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0, algorithm: 'lww' as const };
-      if (changeRev > docMeta.committedRev) {
-        await docsStore.put({ ...docMeta, committedRev: changeRev });
+      if (rev > docMeta.committedRev) {
+        await docsStore.put({ ...docMeta, committedRev: rev });
       }
     }
 
@@ -451,6 +461,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
       path: op.path,
       value: op.value,
       ts: op.ts,
+      ...(op.soft ? { soft: true } : undefined),
     }));
 
     return [createChange(baseRev, baseRev + 1, opsArray)];

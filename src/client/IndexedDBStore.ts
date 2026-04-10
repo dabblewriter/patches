@@ -1,13 +1,36 @@
-import type { PatchesSnapshot, PatchesState } from '../types.js';
+import { createId } from 'crypto-id';
+import type {
+  Branch,
+  CreateBranchMetadata,
+  EditableBranchMetadata,
+  ListBranchesOptions,
+  PatchesSnapshot,
+  PatchesState,
+} from '../types.js';
 import { deferred, type Deferred } from '../utils/deferred.js';
 import { signal } from 'easy-signal';
+import type { BranchClientStore } from './BranchClientStore.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
+
+/** Branch meta stored in IndexedDB, keyed by branch id */
+interface StoredBranch extends Branch {
+  /** Source docId index for querying all branches of a doc */
+  _docId: string;
+  /** Numeric pending flag for IndexedDB indexing (1 when pending, absent otherwise) */
+  _pending?: 1;
+}
 
 /**
  * IndexedDB store providing common database operations for all sync algorithms.
  *
  * Can be used as a standalone store or as a shared database connection
  * for multiple algorithm-specific stores (OT, LWW).
+ *
+ * Supports two modes:
+ * - **Managed mode** (pass a `dbName`): Opens and owns the database lifecycle.
+ * - **External mode** (pass an `IDBDatabase` or `Promise<IDBDatabase>`): Uses a
+ *   caller-provided database. The caller owns the lifecycle; `close()` detaches
+ *   without closing, `deleteDB()` is a no-op, and `setName()` throws.
  *
  * Provides:
  * - Database lifecycle management (open, close, delete)
@@ -17,12 +40,13 @@ import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
  * - Revision tracking
  * - Extensibility via onUpgrade signal for algorithm-specific stores
  */
-export class IndexedDBStore implements PatchesStore {
-  private static readonly DB_VERSION = 1;
+export class IndexedDBStore implements PatchesStore, BranchClientStore {
+  private static readonly DB_VERSION = 2;
 
   protected db: IDBDatabase | null = null;
   protected dbName?: string;
   protected dbPromise: Deferred<IDBDatabase>;
+  protected external: boolean;
 
   /**
    * Signal emitted during database upgrade, allowing algorithm-specific stores
@@ -30,34 +54,55 @@ export class IndexedDBStore implements PatchesStore {
    */
   readonly onUpgrade = signal<(db: IDBDatabase, oldVersion: number, transaction: IDBTransaction) => void>();
 
-  constructor(dbName?: string) {
-    this.dbName = dbName;
+  constructor(dbOrName?: string | IDBDatabase | Promise<IDBDatabase>) {
     this.dbPromise = deferred<IDBDatabase>();
 
-    // Subscribe to own upgrade signal to create shared stores
-    this.onUpgrade((db, oldVersion, transaction) => {
-      this.createSharedStores(db, oldVersion, transaction);
-    });
+    if (dbOrName != null && typeof dbOrName !== 'string') {
+      // External mode: caller owns the database
+      this.external = true;
+      Promise.resolve(dbOrName).then(
+        db => {
+          this.db = db;
+          this.dbPromise.resolve(db);
+        },
+        err => this.dbPromise.reject(err)
+      );
+    } else {
+      // Managed mode: we open and own the database
+      this.external = false;
+      this.dbName = dbOrName;
 
-    if (this.dbName) {
-      this.initDB();
+      // Subscribe to own upgrade signal to create shared stores
+      this.onUpgrade((db, _oldVersion, transaction) => {
+        IndexedDBStore.upgradeSharedStores(db, transaction);
+      });
+
+      if (this.dbName) {
+        this.initDB();
+      }
     }
   }
 
   /**
-   * Creates shared object stores used by all sync algorithms.
+   * Creates shared object stores (docs, snapshots, branches) during database upgrade.
    */
-  protected createSharedStores(db: IDBDatabase, _oldVersion: number, _transaction: IDBTransaction): void {
-    // Create docs store
+  static upgradeSharedStores(db: IDBDatabase, transaction: IDBTransaction): void {
     if (!db.objectStoreNames.contains('docs')) {
       const docsStore = db.createObjectStore('docs', { keyPath: 'docId' });
-      // Create index on algorithm field for efficient filtering
       docsStore.createIndex('algorithm', 'algorithm', { unique: false });
     }
-
-    // Create snapshots store
     if (!db.objectStoreNames.contains('snapshots')) {
       db.createObjectStore('snapshots', { keyPath: 'docId' });
+    }
+    if (!db.objectStoreNames.contains('branches')) {
+      const branchStore = db.createObjectStore('branches', { keyPath: 'id' });
+      branchStore.createIndex('_docId', '_docId', { unique: false });
+      branchStore.createIndex('_pending', '_pending', { unique: false });
+    } else {
+      const branchStore = transaction.objectStore('branches');
+      if (!branchStore.indexNames.contains('_pending')) {
+        branchStore.createIndex('_pending', '_pending', { unique: false });
+      }
     }
   }
 
@@ -88,8 +133,12 @@ export class IndexedDBStore implements PatchesStore {
   /**
    * Set the name of the database, loads a new database connection.
    * @param dbName - The new name of the database.
+   * @throws When using an externally-provided database.
    */
   setName(dbName: string) {
+    if (this.external) {
+      throw new Error('Cannot set name on an externally-provided database');
+    }
     this.dbName = dbName;
     if (this.db) {
       this.db.close();
@@ -103,19 +152,28 @@ export class IndexedDBStore implements PatchesStore {
    * Closes the database connection. After calling this method, the store
    * will no longer be usable. A new instance must be created to reopen
    * the database.
+   *
+   * When using an externally-provided database, this detaches from the
+   * database without closing it (the caller owns the lifecycle).
    */
   async close(): Promise<void> {
+    if (!this.db) return;
     await this.dbPromise.promise;
     if (this.db) {
-      this.db.close();
+      if (!this.external) {
+        this.db.close();
+      }
       this.db = null;
       this.dbPromise = deferred();
       this.dbPromise.reject(new Error('Store has been closed'));
     }
   }
 
+  /**
+   * Deletes the database. No-op when using an externally-provided database.
+   */
   async deleteDB(): Promise<void> {
-    if (!this.dbName) return;
+    if (this.external || !this.dbName) return;
     await this.close();
     await new Promise<void>((resolve, reject) => {
       const request = indexedDB.deleteDatabase(this.dbName!);
@@ -248,6 +306,152 @@ export class IndexedDBStore implements PatchesStore {
     await tx.complete();
     return docMeta?.committedRev ?? 0;
   }
+
+  // ─── Branch Methods (BranchClientStore) ─────────────────────────────────
+
+  // --- BranchAPI-compatible methods ---
+
+  async listBranches(docId: string, _options?: ListBranchesOptions): Promise<Branch[]> {
+    const [tx, branchStore] = await this.transaction(['branches'], 'readonly');
+    const results = await branchStore.getAllByIndex<StoredBranch>('_docId', docId);
+    await tx.complete();
+    return results.filter(b => !b.deleted).map(stripInternal);
+  }
+
+  async createBranch(docId: string, rev: number, metadata?: CreateBranchMetadata): Promise<string> {
+    const branchDocId = metadata?.id ?? createId(22);
+    const now = Date.now();
+    const branch: Branch = {
+      ...metadata,
+      id: branchDocId,
+      docId,
+      branchedAtRev: rev,
+      contentStartRev: metadata?.contentStartRev ?? 0,
+      createdAt: now,
+      modifiedAt: now,
+      pendingOp: 'create',
+    };
+    await this._saveBranch(docId, branch);
+    return branchDocId;
+  }
+
+  async deleteBranch(branchId: string): Promise<void> {
+    const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
+    const existing = await branchStore.get<StoredBranch>(branchId);
+    if (!existing) throw new Error(`Branch ${branchId} not found`);
+
+    if (existing.pendingOp === 'create') {
+      // Never synced — just remove it, no server call needed
+      await branchStore.delete(branchId);
+    } else {
+      // Save as a tombstone for PatchesSync to delete on the server
+      const tombstone: StoredBranch = {
+        ...existing,
+        modifiedAt: Date.now(),
+        pendingOp: 'delete',
+        deleted: true,
+        _pending: 1,
+      };
+      await branchStore.put<StoredBranch>(tombstone);
+    }
+    await tx.complete();
+  }
+
+  async updateBranch(branchId: string, metadata: EditableBranchMetadata): Promise<void> {
+    const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
+    const existing = await branchStore.get<StoredBranch>(branchId);
+    if (!existing) throw new Error(`Branch ${branchId} not found`);
+    Object.assign(existing, metadata);
+    existing.modifiedAt = Date.now();
+    // If never synced, keep pendingOp as 'create'
+    if (existing.pendingOp !== 'create') existing.pendingOp = 'update';
+    existing._pending = 1;
+    await branchStore.put<StoredBranch>(existing);
+    await tx.complete();
+  }
+
+  // --- Internal methods ---
+
+  async loadBranch(branchId: string): Promise<Branch | undefined> {
+    const [tx, branchStore] = await this.transaction(['branches'], 'readonly');
+    const result = await branchStore.get<StoredBranch>(branchId);
+    await tx.complete();
+    return result ? stripInternal(result) : undefined;
+  }
+
+  // --- Sync-facing methods ---
+
+  async saveBranches(docId: string, branches: Branch[]): Promise<void> {
+    if (branches.length === 0) return;
+    const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
+    await Promise.all(
+      branches.map(async branch => {
+        const existing = await branchStore.get<StoredBranch>(branch.id);
+
+        // Don't overwrite branches with pending local operations — the pending op
+        // hasn't been synced yet and server data is stale relative to the local mutation.
+        if (existing?.pendingOp && !branch.pendingOp) return;
+
+        const stored: StoredBranch = { ...branch, _docId: docId };
+        // lastMergedRev max-wins: two clients may merge the same branch independently,
+        // so always keep the higher value to avoid rolling back merge progress.
+        if (
+          existing?.lastMergedRev != null &&
+          (stored.lastMergedRev == null || existing.lastMergedRev > stored.lastMergedRev)
+        ) {
+          stored.lastMergedRev = existing.lastMergedRev;
+        }
+        if (branch.pendingOp) stored._pending = 1;
+        return branchStore.put<StoredBranch>(stored);
+      })
+    );
+    await tx.complete();
+  }
+
+  async removeBranches(branchIds: string[]): Promise<void> {
+    if (branchIds.length === 0) return;
+    const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
+    await Promise.all(branchIds.map(id => branchStore.delete(id)));
+    await tx.complete();
+  }
+
+  async listPendingBranches(): Promise<Branch[]> {
+    const [tx, branchStore] = await this.transaction(['branches'], 'readonly');
+    const results = await branchStore.getAllByIndex<StoredBranch>('_pending', 1);
+    await tx.complete();
+    return results.map(stripInternal);
+  }
+
+  async getLastModifiedAt(docId: string): Promise<number | undefined> {
+    const [tx, branchStore] = await this.transaction(['branches'], 'readonly');
+    const branches = await branchStore.getAllByIndex<StoredBranch>('_docId', docId);
+    await tx.complete();
+
+    if (branches.length === 0) return undefined;
+
+    let max = 0;
+    for (const b of branches) {
+      if (!b.pendingOp && !b.deleted && b.modifiedAt > max) max = b.modifiedAt;
+    }
+    return max || undefined;
+  }
+
+  // --- Private helpers ---
+
+  private async _saveBranch(docId: string, branch: Branch): Promise<void> {
+    const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
+    const stored: StoredBranch = { ...branch, _docId: docId };
+    if (branch.pendingOp) stored._pending = 1;
+    await branchStore.put<StoredBranch>(stored);
+    await tx.complete();
+  }
+}
+
+/** Strip internal IndexedDB fields from stored branch */
+function stripInternal(stored: StoredBranch): Branch {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { _docId, _pending, ...branch } = stored;
+  return branch;
 }
 
 export class IDBTransactionWrapper {

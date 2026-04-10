@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OTBranchManager, assertBranchMetadata } from '../../src/server/OTBranchManager';
 import type { PatchesServer } from '../../src/server/PatchesServer';
 import type { BranchingStoreBackend, OTStoreBackend } from '../../src/server/types';
-import type { Branch, BranchStatus, Change, EditableBranchMetadata, VersionMetadata } from '../../src/types';
+import type { Branch, Change, EditableBranchMetadata, VersionMetadata } from '../../src/types';
 
 // Mock the dependencies
 vi.mock('crypto-id', () => ({
@@ -36,7 +36,7 @@ describe('OTBranchManager', () => {
       loadBranch: vi.fn(),
       createBranch: vi.fn(),
       updateBranch: vi.fn(),
-      closeBranch: vi.fn(),
+      deleteBranch: vi.fn(),
       // OTStoreBackend methods (extends ServerStoreBackend and VersioningStoreBackend)
       deleteDoc: vi.fn(),
       saveChanges: vi.fn(),
@@ -69,21 +69,24 @@ describe('OTBranchManager', () => {
 
   describe('listBranches', () => {
     it('should list branches for a document', async () => {
+      const now = Date.now();
       const mockBranches: Branch[] = [
         {
           id: 'branch1',
           docId: 'doc1',
           branchedAtRev: 5,
-          createdAt: Date.now(),
-          status: 'open',
+          contentStartRev: 2,
+          createdAt: now,
+          modifiedAt: now,
           name: 'Feature Branch',
         },
         {
           id: 'branch2',
           docId: 'doc1',
           branchedAtRev: 3,
-          createdAt: Date.now(),
-          status: 'merged',
+          contentStartRev: 2,
+          createdAt: now,
+          modifiedAt: now,
           name: 'Bug Fix Branch',
         },
       ];
@@ -92,8 +95,16 @@ describe('OTBranchManager', () => {
 
       const result = await branchManager.listBranches('doc1');
 
-      expect(mockStore.listBranches).toHaveBeenCalledWith('doc1');
+      expect(mockStore.listBranches).toHaveBeenCalledWith('doc1', undefined);
       expect(result).toEqual(mockBranches);
+    });
+
+    it('should pass since option to store', async () => {
+      vi.mocked(mockStore.listBranches).mockResolvedValue([]);
+
+      await branchManager.listBranches('doc1', { since: 1234567890 });
+
+      expect(mockStore.listBranches).toHaveBeenCalledWith('doc1', { since: 1234567890 });
     });
 
     it('should handle empty branch list', async () => {
@@ -178,8 +189,9 @@ describe('OTBranchManager', () => {
         id: 'generated-id',
         docId: 'doc1',
         branchedAtRev: 5,
+        contentStartRev: 2,
         createdAt: expect.any(Number),
-        status: 'open',
+        modifiedAt: expect.any(Number),
       });
       expect(result).toBe('generated-id');
     });
@@ -192,9 +204,57 @@ describe('OTBranchManager', () => {
         id: 'generated-id',
         docId: 'doc1',
         branchedAtRev: 3,
+        contentStartRev: 2,
         createdAt: expect.any(Number),
-        status: 'open',
+        modifiedAt: expect.any(Number),
       });
+    });
+
+    it('should skip initial change creation when contentStartRev is set', async () => {
+      const result = await branchManager.createBranch('doc1', 5, { name: 'Offline', contentStartRev: 4 });
+
+      expect(result).toBe('generated-id');
+      expect(mockStore.createBranch).toHaveBeenCalledWith(expect.objectContaining({ contentStartRev: 4 }));
+      // Should NOT create initial changes or version — the client already created them
+      expect(mockStore.saveChanges).not.toHaveBeenCalled();
+      expect(mockStore.createVersion).not.toHaveBeenCalled();
+    });
+
+    it('should be idempotent when metadata.id matches existing branch', async () => {
+      const existing: Branch = {
+        id: 'my-branch',
+        docId: 'doc1',
+        branchedAtRev: 5,
+        createdAt: Date.now(),
+        modifiedAt: Date.now(),
+
+        contentStartRev: 2,
+      };
+      vi.mocked(mockStore.loadBranch).mockResolvedValue(existing);
+
+      const result = await branchManager.createBranch('doc1', 5, { id: 'my-branch' });
+
+      expect(result).toBe('my-branch');
+      // Should NOT create anything new
+      expect(mockStore.createBranch).not.toHaveBeenCalled();
+      expect(mockStore.saveChanges).not.toHaveBeenCalled();
+    });
+
+    it('should throw when metadata.id matches branch for different doc', async () => {
+      const existing: Branch = {
+        id: 'my-branch',
+        docId: 'other-doc',
+        branchedAtRev: 5,
+        createdAt: Date.now(),
+        modifiedAt: Date.now(),
+
+        contentStartRev: 2,
+      };
+      vi.mocked(mockStore.loadBranch).mockResolvedValue(existing);
+
+      await expect(branchManager.createBranch('doc1', 5, { id: 'my-branch' })).rejects.toThrow(
+        'already exists for a different document'
+      );
     });
 
     it('should throw error when trying to branch from a branch', async () => {
@@ -202,8 +262,10 @@ describe('OTBranchManager', () => {
         id: 'branch1',
         docId: 'original-doc',
         branchedAtRev: 1,
+        contentStartRev: 2,
         createdAt: Date.now(),
-        status: 'open',
+        modifiedAt: Date.now(),
+
       };
 
       vi.mocked(mockStore.loadBranch).mockResolvedValue(existingBranch);
@@ -256,7 +318,7 @@ describe('OTBranchManager', () => {
   });
 
   describe('updateBranch', () => {
-    it('should update branch metadata', async () => {
+    it('should update branch metadata with modifiedAt', async () => {
       const metadata: EditableBranchMetadata = {
         name: 'Updated Branch',
         description: 'Updated description',
@@ -266,7 +328,10 @@ describe('OTBranchManager', () => {
 
       await branchManager.updateBranch('branch1', metadata);
 
-      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', metadata);
+      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
+        ...metadata,
+        modifiedAt: expect.any(Number),
+      });
     });
 
     it('should propagate store errors', async () => {
@@ -277,21 +342,13 @@ describe('OTBranchManager', () => {
     });
   });
 
-  describe('closeBranch', () => {
-    it('should close branch with default status', async () => {
-      vi.mocked(mockStore.updateBranch).mockResolvedValue();
+  describe('deleteBranch', () => {
+    it('should delegate to store.deleteBranch', async () => {
+      vi.mocked(mockStore.deleteBranch).mockResolvedValue();
 
-      await branchManager.closeBranch('branch1');
+      await branchManager.deleteBranch('branch1');
 
-      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', { status: 'closed' });
-    });
-
-    it('should close branch with specific status', async () => {
-      vi.mocked(mockStore.updateBranch).mockResolvedValue();
-
-      await branchManager.closeBranch('branch1', 'merged');
-
-      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', { status: 'merged' });
+      expect(mockStore.deleteBranch).toHaveBeenCalledWith('branch1');
     });
   });
 
@@ -300,8 +357,9 @@ describe('OTBranchManager', () => {
       id: 'branch1',
       docId: 'doc1',
       branchedAtRev: 5,
+      contentStartRev: 2,
       createdAt: Date.now(),
-      status: 'open',
+      modifiedAt: Date.now(),
       name: 'Feature Branch',
     };
 
@@ -352,37 +410,33 @@ describe('OTBranchManager', () => {
       vi.mocked(mockStore.updateBranch).mockResolvedValue();
     });
 
-    it('should merge branch successfully', async () => {
-      const flattenedChange = {
-        id: 'merged-change',
+    it('should merge branch successfully with original change IDs preserved', async () => {
+      const committedChanges: Change[] = mockBranchChanges.map((c, i) => ({
+        ...c,
         baseRev: 5,
-        rev: 7,
-        ops: [
-          { op: 'replace', path: '/title', value: 'New Title' },
-          { op: 'add', path: '/section', value: 'New Section' },
-        ],
-        createdAt: Date.now(),
-        committedAt: Date.now(),
-        metadata: {},
-      };
+        rev: 6 + i,
+        batchId: 'branch1',
+      }));
 
-      const committedChanges: Change[] = [flattenedChange];
-
-      vi.mocked(createChange).mockReturnValue(flattenedChange);
       vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: committedChanges });
 
       const result = await branchManager.mergeBranch('branch1');
 
       expect(mockStore.loadBranch).toHaveBeenCalledWith('branch1');
-      expect(mockStore.listChanges).toHaveBeenCalledWith('branch1', {});
+      expect(mockStore.listChanges).toHaveBeenCalledWith('branch1', { startAfter: 1 });
       expect(mockStore.listVersions).toHaveBeenCalledWith('branch1', { origin: 'main' });
-      expect(createChange).toHaveBeenCalledWith(
-        5,
-        7,
-        mockBranchChanges.flatMap(c => c.ops)
-      );
-      expect(mockServer.commitChanges).toHaveBeenCalledWith('doc1', [flattenedChange]);
-      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', { status: 'merged' });
+      // Should send original changes re-stamped with baseRev and batchId
+      expect(mockServer.commitChanges).toHaveBeenCalledWith('doc1', [
+        expect.objectContaining({ id: 'change1', baseRev: 5, rev: 6, batchId: 'branch1' }),
+        expect.objectContaining({ id: 'change2', baseRev: 5, rev: 7, batchId: 'branch1' }),
+      ]);
+      // Should NOT call createChange (no flattening)
+      expect(createChange).not.toHaveBeenCalled();
+      // Should update lastMergedRev instead of closing branch
+      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
+        lastMergedRev: 2,
+        modifiedAt: expect.any(Number),
+      });
       expect(result).toEqual(committedChanges);
     });
 
@@ -392,39 +446,44 @@ describe('OTBranchManager', () => {
       await expect(branchManager.mergeBranch('nonexistent')).rejects.toThrow('Branch with ID nonexistent not found.');
     });
 
-    it('should throw error for non-open branch', async () => {
-      const closedBranch = { ...mockBranch, status: 'merged' as BranchStatus };
-      vi.mocked(mockStore.loadBranch).mockResolvedValue(closedBranch);
-
-      await expect(branchManager.mergeBranch('branch1')).rejects.toThrow(
-        'Branch branch1 is not open (status: merged). Cannot merge.'
-      );
-    });
-
-    it('should handle branch with no changes', async () => {
+    it('should return empty array when no changes to merge', async () => {
       vi.mocked(mockStore.listChanges).mockResolvedValue([]);
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
       const result = await branchManager.mergeBranch('branch1');
 
-      expect(consoleSpy).toHaveBeenCalledWith('Branch branch1 has no changes to merge.');
-      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', { status: 'merged' });
+      // Should NOT update branch or close it when there's nothing to merge
+      expect(mockStore.updateBranch).not.toHaveBeenCalled();
       expect(result).toEqual([]);
+    });
 
-      consoleSpy.mockRestore();
+    it('should use max-wins for lastMergedRev on concurrent merges', async () => {
+      const committedChanges = mockBranchChanges.map((c, i) => ({
+        ...c,
+        baseRev: 5,
+        rev: 6 + i,
+        batchId: 'branch1',
+      }));
+      vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: committedChanges });
+
+      // After commit, simulate another client having already merged with a higher rev
+      let loadCallCount = 0;
+      vi.mocked(mockStore.loadBranch).mockImplementation(async () => {
+        loadCallCount++;
+        if (loadCallCount === 1) return mockBranch; // First call: initial load
+        return { ...mockBranch, lastMergedRev: 10 }; // Second call: post-commit, concurrent merge set it to 10
+      });
+
+      await branchManager.mergeBranch('branch1');
+
+      // Should use the higher value (10) from concurrent merge, not our local value (2)
+      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
+        lastMergedRev: 10,
+        modifiedAt: expect.any(Number),
+      });
     });
 
     it('should handle commit errors gracefully', async () => {
       const commitError = new Error('Commit failed');
-      vi.mocked(createChange).mockReturnValue({
-        id: 'merged-change',
-        baseRev: 5,
-        rev: 7,
-        ops: [],
-        createdAt: Date.now(),
-        committedAt: Date.now(),
-        metadata: {},
-      });
       vi.mocked(mockServer.commitChanges).mockRejectedValue(commitError);
 
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -434,6 +493,41 @@ describe('OTBranchManager', () => {
       expect(consoleSpy).toHaveBeenCalledWith('Failed to merge branch branch1 into doc1:', commitError);
 
       consoleSpy.mockRestore();
+    });
+
+    it('should use lastMergedRev when branch was previously merged', async () => {
+      const previouslyMergedBranch = {
+        ...mockBranch,
+        lastMergedRev: 5, // Already merged through rev 5
+      };
+      vi.mocked(mockStore.loadBranch).mockResolvedValue(previouslyMergedBranch);
+
+      const newChanges: Change[] = [
+        {
+          id: 'change3',
+          rev: 6,
+          baseRev: 5,
+          ops: [{ op: 'replace', path: '/footer', value: 'New Footer' }],
+          createdAt: Date.now(),
+          committedAt: Date.now(),
+          metadata: {},
+        },
+      ];
+      vi.mocked(mockStore.listChanges).mockResolvedValue(newChanges);
+
+      vi.mocked(mockServer.commitChanges).mockResolvedValue({
+        changes: newChanges.map(c => ({ ...c, baseRev: 5, rev: 6, batchId: 'branch1' })),
+      });
+
+      await branchManager.mergeBranch('branch1');
+
+      // Should query changes after lastMergedRev, not contentStartRev
+      expect(mockStore.listChanges).toHaveBeenCalledWith('branch1', { startAfter: 5 });
+      // Should update lastMergedRev to the latest branch rev
+      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
+        lastMergedRev: 6,
+        modifiedAt: expect.any(Number),
+      });
     });
 
     it('should create versions for all branch versions', async () => {
@@ -482,36 +576,31 @@ describe('OTBranchManager', () => {
           endRev: 2,
           startRev: 5,
         });
-      vi.mocked(createChange).mockReturnValue({
-        id: 'merged-change',
-        baseRev: 5,
-        rev: 7,
-        ops: [],
-        createdAt: Date.now(),
-        committedAt: Date.now(),
-        metadata: {},
-      });
       vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: [] });
 
       await branchManager.mergeBranch('branch1');
 
       expect(mockStore.createVersion).toHaveBeenCalledTimes(2);
-      expect(createVersionMetadata).toHaveBeenNthCalledWith(1, {
-        ...multipleVersions[0],
-        origin: 'branch',
-        startRev: 5,
-        groupId: 'branch1',
-        branchName: 'Feature Branch',
-        parentId: undefined,
-      });
-      expect(createVersionMetadata).toHaveBeenNthCalledWith(2, {
-        ...multipleVersions[1],
-        origin: 'branch',
-        startRev: 5,
-        groupId: 'branch1',
-        branchName: 'Feature Branch',
-        parentId: 'new-version1',
-      });
+      expect(createVersionMetadata).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          origin: 'branch',
+          startRev: 5,
+          groupId: 'branch1',
+          branchName: 'Feature Branch',
+          parentId: undefined,
+        })
+      );
+      expect(createVersionMetadata).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          origin: 'branch',
+          startRev: 5,
+          groupId: 'branch1',
+          branchName: 'Feature Branch',
+          parentId: 'new-version1',
+        })
+      );
     });
   });
 });
@@ -532,7 +621,7 @@ describe('assertBranchMetadata', () => {
   });
 
   it('should throw error for non-modifiable fields', () => {
-    const invalidFields = ['id', 'docId', 'branchedAtRev', 'createdAt', 'status'];
+    const invalidFields = ['id', 'docId', 'branchedAtRev', 'createdAt', 'modifiedAt', 'contentStartRev'];
 
     invalidFields.forEach(field => {
       const metadata = { [field]: 'value' } as any;

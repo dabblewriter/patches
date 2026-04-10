@@ -153,6 +153,12 @@ describe('PatchesSync', () => {
       expect(sync['trackedDocs'].has('doc1')).toBe(true);
       expect(sync['trackedDocs'].has('doc2')).toBe(true);
     });
+
+    it('should throw when branchStore is provided without branchApi', () => {
+      expect(() => new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: {} as any,
+      })).toThrow('branchApi is required when branchStore is provided');
+    });
   });
 
   describe('state management', () => {
@@ -1361,6 +1367,501 @@ describe('PatchesSync', () => {
       // Sync now calls algorithm.getPendingToSend, not store.getPendingChanges
       expect(mockAlgorithm.getPendingToSend).toHaveBeenCalledWith('doc1');
       expect(mockAlgorithm.getPendingToSend).toHaveBeenCalledWith('doc2');
+    });
+  });
+
+  describe('syncDoc serialGate: one in-flight at a time per doc', () => {
+    beforeEach(() => {
+      sync['updateState']({ connected: true });
+      sync['trackedDocs'].add('doc1');
+    });
+
+    it('should run exactly one follow-up sync when changes arrive during in-flight', async () => {
+      let resolveFirst!: () => void;
+      const callCount = { value: 0 };
+
+      // Spy on flushDoc (called inside syncDoc) to track actual send attempts
+      // Since syncDoc is the gate, we count via flushDoc invocations
+      const flushSpy = vi.spyOn(sync as any, 'flushDoc').mockResolvedValue(undefined);
+      mockAlgorithm.getPendingToSend
+        .mockResolvedValueOnce([{ id: 'a', rev: 1, baseRev: 0, ops: [], createdAt: 0, committedAt: 0 }])
+        .mockResolvedValueOnce([{ id: 'b', rev: 2, baseRev: 1, ops: [], createdAt: 0, committedAt: 0 }])
+        .mockResolvedValue(null);
+
+      // Gate is on syncDoc itself now; hold it open via flushDoc
+      let resolveFlush!: () => void;
+      flushSpy.mockImplementationOnce(
+        () =>
+          new Promise<void>(r => {
+            resolveFlush = r;
+          })
+      );
+
+      // First call: in-flight (blocked inside flushDoc)
+      const p1 = sync['syncDoc']('doc1');
+      // Two more: should collapse to one queued follow-up
+      sync['syncDoc']('doc1');
+      sync['syncDoc']('doc1');
+
+      await Promise.resolve();
+      // Only one flush started
+      expect(flushSpy).toHaveBeenCalledTimes(1);
+
+      // Unblock the first
+      resolveFlush();
+      await p1;
+      await vi.waitFor(() => flushSpy.mock.calls.length === 2);
+
+      // Exactly one follow-up flush (not two)
+      expect(flushSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('should not run a follow-up when no additional triggers arrived', async () => {
+      mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      mockWebSocket.getChangesSince.mockResolvedValue([]);
+
+      await sync['syncDoc']('doc1');
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // getCommittedRev called exactly once (one syncDoc run, no follow-up)
+      expect(mockAlgorithm.getCommittedRev).toHaveBeenCalledTimes(1);
+    });
+
+    it('should be a no-op after disconnect (syncDoc returns early)', async () => {
+      let resolveFlush!: () => void;
+      const flushSpy = vi.spyOn(sync as any, 'flushDoc').mockImplementation(
+        () =>
+          new Promise<void>(r => {
+            resolveFlush = r;
+          })
+      );
+      mockAlgorithm.getPendingToSend.mockResolvedValue([
+        { id: 'a', rev: 1, baseRev: 0, ops: [], createdAt: 0, committedAt: 0 },
+      ]);
+
+      const p1 = sync['syncDoc']('doc1'); // in-flight
+      sync['syncDoc']('doc1'); // queued
+
+      // Wait for getPendingToSend to resolve so flushDoc is actually called
+      await vi.waitFor(() => flushSpy.mock.calls.length > 0);
+
+      const connectionHandler = vi.mocked(mockWebSocket.onStateChange).mock.calls[0][0];
+      connectionHandler('disconnected');
+
+      resolveFlush();
+      await p1;
+      // Let follow-up attempt settle
+      await vi.waitFor(() => true);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Follow-up ran but returned early (not connected), so only one flush
+      expect(flushSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should be a no-op after doc is untracked (syncDoc returns early)', async () => {
+      let resolveFlush!: () => void;
+      const flushSpy = vi.spyOn(sync as any, 'flushDoc').mockImplementation(
+        () =>
+          new Promise<void>(r => {
+            resolveFlush = r;
+          })
+      );
+      mockAlgorithm.getPendingToSend.mockResolvedValue([
+        { id: 'a', rev: 1, baseRev: 0, ops: [], createdAt: 0, committedAt: 0 },
+      ]);
+
+      const p1 = sync['syncDoc']('doc1'); // in-flight
+      sync['syncDoc']('doc1'); // queued
+
+      const untrackHandler = vi.mocked(mockPatches.onUntrackDocs).mock.calls[0][0];
+      await untrackHandler(['doc1']); // removes doc1 from trackedDocs
+
+      resolveFlush();
+      await p1;
+      await vi.waitFor(() => true);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Follow-up ran but returned early (not tracked), so only one flush
+      expect(flushSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should gate each docId independently', async () => {
+      let resolveDoc1!: () => void;
+      const flushCalls: string[] = [];
+
+      vi.spyOn(sync as any, 'flushDoc').mockImplementation(function (this: any, ...args: unknown[]) {
+        const [docId] = args as [string];
+        flushCalls.push(docId);
+        if (docId === 'doc1' && flushCalls.filter(id => id === 'doc1').length === 1) {
+          return new Promise<void>(resolve => {
+            resolveDoc1 = resolve;
+          });
+        }
+        return Promise.resolve();
+      });
+      mockAlgorithm.getPendingToSend.mockResolvedValue([
+        { id: 'a', rev: 1, baseRev: 0, ops: [], createdAt: 0, committedAt: 0 },
+      ]);
+
+      sync['trackedDocs'].add('doc2');
+
+      const doc1Promise = sync['syncDoc']('doc1');
+      await sync['syncDoc']('doc2');
+
+      // doc2 completed; doc1 still in-flight
+      expect(flushCalls.filter(id => id === 'doc1').length).toBe(1);
+      expect(flushCalls.filter(id => id === 'doc2').length).toBe(1);
+
+      resolveDoc1();
+      await doc1Promise;
+    });
+  });
+
+  describe('syncPendingBranchMetas', () => {
+    let mockBranchStore: any;
+    let mockBranchApi: any;
+
+    beforeEach(() => {
+      mockBranchStore = {
+        listBranches: vi.fn().mockResolvedValue([]),
+        createBranch: vi.fn().mockResolvedValue('branch-id'),
+        updateBranch: vi.fn().mockResolvedValue(undefined),
+        deleteBranch: vi.fn().mockResolvedValue(undefined),
+        loadBranch: vi.fn().mockResolvedValue(undefined),
+        saveBranches: vi.fn().mockResolvedValue(undefined),
+        removeBranches: vi.fn().mockResolvedValue(undefined),
+        listPendingBranches: vi.fn().mockResolvedValue([]),
+        getLastModifiedAt: vi.fn().mockResolvedValue(undefined),
+      };
+      mockBranchApi = {
+        listBranches: vi.fn().mockResolvedValue([]),
+        createBranch: vi.fn().mockResolvedValue('branch-id'),
+        updateBranch: vi.fn().mockResolvedValue(undefined),
+        deleteBranch: vi.fn().mockResolvedValue(undefined),
+        mergeBranch: vi.fn().mockResolvedValue(undefined),
+      };
+    });
+
+    it('should do nothing without branchStore', async () => {
+      sync['updateState']({ connected: true });
+      await sync['syncPendingBranchMetas']();
+      // No errors, no calls
+    });
+
+    it('should create pending branches on server and clear pendingOp', async () => {
+      const pendingBranch = {
+        id: 'my-branch',
+        docId: 'doc1',
+        branchedAtRev: 5,
+        createdAt: 1000,
+        modifiedAt: 1000,
+
+        contentStartRev: 2,
+        name: 'Feature',
+        pendingOp: 'create' as const,
+      };
+      mockBranchStore.listPendingBranches.mockResolvedValue([pendingBranch]);
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      // Should create on server with metadata (no docId/branchedAtRev/createdAt/modifiedAt/pendingOp)
+      expect(mockBranchApi.createBranch).toHaveBeenCalledWith('doc1', 5, {
+        id: 'my-branch',
+        contentStartRev: 2,
+        name: 'Feature',
+      });
+
+      // Should save without pendingOp
+      const savedBranches = mockBranchStore.saveBranches.mock.calls[0][1];
+      expect(savedBranches[0].id).toBe('my-branch');
+      expect(savedBranches[0]).not.toHaveProperty('pendingOp');
+    });
+
+    it('should stop processing on API error', async () => {
+      const branch1 = {
+        id: 'b1',
+        docId: 'doc1',
+        branchedAtRev: 3,
+        createdAt: 100,
+        modifiedAt: 100,
+
+        contentStartRev: 2,
+        pendingOp: 'create' as const,
+      };
+      const branch2 = {
+        id: 'b2',
+        docId: 'doc1',
+        branchedAtRev: 4,
+        createdAt: 200,
+        modifiedAt: 200,
+
+        contentStartRev: 2,
+        pendingOp: 'create' as const,
+      };
+      mockBranchStore.listPendingBranches.mockResolvedValue([branch1, branch2]);
+      mockBranchApi.createBranch.mockRejectedValueOnce(new Error('Network error'));
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      // Should have tried first but not second
+      expect(mockBranchApi.createBranch).toHaveBeenCalledTimes(1);
+      expect(mockBranchStore.saveBranches).not.toHaveBeenCalled();
+    });
+
+    it('should stop if disconnected mid-sync', async () => {
+      const branch = {
+        id: 'b1',
+        docId: 'doc1',
+        branchedAtRev: 3,
+        createdAt: 100,
+        modifiedAt: 100,
+
+        contentStartRev: 2,
+        pendingOp: 'create' as const,
+      };
+      mockBranchStore.listPendingBranches.mockResolvedValue([branch]);
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      // Not connected
+      syncWithBranches['updateState']({ connected: false });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      expect(mockBranchApi.createBranch).not.toHaveBeenCalled();
+    });
+
+    it('should query all pending branches regardless of docId', async () => {
+      const branch1 = {
+        id: 'b1',
+        docId: 'doc1',
+        branchedAtRev: 3,
+        createdAt: 100,
+        modifiedAt: 100,
+
+        contentStartRev: 2,
+        pendingOp: 'create' as const,
+      };
+      const branch2 = {
+        id: 'b2',
+        docId: 'doc2',
+        branchedAtRev: 1,
+        createdAt: 200,
+        modifiedAt: 200,
+
+        contentStartRev: 2,
+        pendingOp: 'create' as const,
+      };
+      mockBranchStore.listPendingBranches.mockResolvedValue([branch1, branch2]);
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      // Should create both branches from different docs
+      expect(mockBranchApi.createBranch).toHaveBeenCalledTimes(2);
+      expect(mockBranchApi.createBranch).toHaveBeenCalledWith('doc1', 3, expect.objectContaining({ id: 'b1' }));
+      expect(mockBranchApi.createBranch).toHaveBeenCalledWith('doc2', 1, expect.objectContaining({ id: 'b2' }));
+    });
+
+    it('should sync pending branch deletions to server and remove tombstone', async () => {
+      const deletedBranch = {
+        id: 'del-branch',
+        docId: 'doc1',
+        branchedAtRev: 5,
+        createdAt: 1000,
+        modifiedAt: 2000,
+
+        contentStartRev: 2,
+        pendingOp: 'delete' as const,
+        deleted: true as const,
+      };
+      mockBranchStore.listPendingBranches.mockResolvedValue([deletedBranch]);
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      // Should call deleteBranch on server
+      expect(mockBranchApi.deleteBranch).toHaveBeenCalledWith('del-branch');
+      // Should NOT call createBranch
+      expect(mockBranchApi.createBranch).not.toHaveBeenCalled();
+      // Should physically remove tombstone from local store
+      expect(mockBranchStore.removeBranches).toHaveBeenCalledWith(['del-branch']);
+    });
+
+    it('should process creations before deletions', async () => {
+      const callOrder: string[] = [];
+      const createdBranch = {
+        id: 'new-branch',
+        docId: 'doc1',
+        branchedAtRev: 3,
+        createdAt: 100,
+        modifiedAt: 100,
+
+        contentStartRev: 2,
+        pendingOp: 'create' as const,
+      };
+      const deletedBranch = {
+        id: 'old-branch',
+        docId: 'doc1',
+        branchedAtRev: 5,
+        createdAt: 500,
+        modifiedAt: 600,
+
+        contentStartRev: 2,
+        pendingOp: 'delete' as const,
+        deleted: true as const,
+      };
+      mockBranchStore.listPendingBranches.mockResolvedValue([deletedBranch, createdBranch]);
+      mockBranchApi.createBranch.mockImplementation(() => {
+        callOrder.push('create');
+        return Promise.resolve('new-branch');
+      });
+      mockBranchApi.deleteBranch.mockImplementation(() => {
+        callOrder.push('delete');
+        return Promise.resolve();
+      });
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      expect(callOrder).toEqual(['create', 'delete']);
+    });
+
+    it('should emit onBranchMetasSynced after syncing pending branches', async () => {
+      const pendingBranch = {
+        id: 'b1',
+        docId: 'doc1',
+        branchedAtRev: 3,
+        createdAt: 100,
+        modifiedAt: 100,
+
+        contentStartRev: 2,
+        pendingOp: 'create' as const,
+      };
+      mockBranchStore.listPendingBranches.mockResolvedValue([pendingBranch]);
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      const handler = vi.fn();
+      syncWithBranches.onBranchMetasSynced(handler);
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      expect(handler).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not emit onBranchMetasSynced when no pending branches', async () => {
+      mockBranchStore.listPendingBranches.mockResolvedValue([]);
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      const handler = vi.fn();
+      syncWithBranches.onBranchMetasSynced(handler);
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('should stop processing deletions on error and keep tombstone', async () => {
+      const deletedBranch = {
+        id: 'del-branch',
+        docId: 'doc1',
+        branchedAtRev: 5,
+        createdAt: 1000,
+        modifiedAt: 2000,
+
+        contentStartRev: 2,
+        pendingOp: 'delete' as const,
+        deleted: true as const,
+      };
+      mockBranchStore.listPendingBranches.mockResolvedValue([deletedBranch]);
+      mockBranchApi.deleteBranch.mockRejectedValueOnce(new Error('Network error'));
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      // Should have tried to delete
+      expect(mockBranchApi.deleteBranch).toHaveBeenCalledWith('del-branch');
+      // Should NOT have removed the tombstone (kept for retry)
+      expect(mockBranchStore.removeBranches).not.toHaveBeenCalled();
+    });
+
+    it('should sync pending update operations', async () => {
+      const updatedBranch = {
+        id: 'update-branch',
+        docId: 'doc1',
+        branchedAtRev: 5,
+        createdAt: 1000,
+        modifiedAt: 2000,
+
+        contentStartRev: 2,
+        lastMergedRev: 10,
+        pendingOp: 'update' as const,
+      };
+      mockBranchStore.listPendingBranches.mockResolvedValue([updatedBranch]);
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      // Should call updateBranch with editable metadata (lastMergedRev, name, etc.)
+      expect(mockBranchApi.updateBranch).toHaveBeenCalledWith('update-branch', expect.objectContaining({
+        lastMergedRev: 10,
+      }));
+      const savedBranches = mockBranchStore.saveBranches.mock.calls[0][1];
+      expect(savedBranches[0]).not.toHaveProperty('pendingOp');
     });
   });
 });

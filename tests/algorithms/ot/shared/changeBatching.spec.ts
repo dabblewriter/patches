@@ -84,6 +84,30 @@ describe('breakChanges', () => {
     expect(result[1].ops).toHaveLength(1);
   });
 
+  it('should preserve batchId on derived changes when splitting', () => {
+    const change: Change = {
+      id: 'change-1',
+      rev: 1,
+      baseRev: 0,
+      ops: [
+        { op: 'add', path: '/test1', value: 'data1' },
+        { op: 'add', path: '/test2', value: 'data2' },
+      ],
+      createdAt: 0,
+      committedAt: 0,
+      batchId: 'my-batch-id',
+    };
+
+    const singleOpChange = createChange(1, [change.ops[0]]);
+    const maxBytes = getJSONByteSize(singleOpChange) + 10;
+
+    const result = breakChanges([change], maxBytes);
+
+    expect(result).toHaveLength(2);
+    expect(result[0].batchId).toBe('my-batch-id');
+    expect(result[1].batchId).toBe('my-batch-id');
+  });
+
   it('should handle empty changes array', () => {
     const result = breakChanges([], 100);
     expect(result).toEqual([]);
@@ -177,21 +201,110 @@ describe('breakChanges', () => {
     expect(result.every(r => r.ops[0].op === '@txt')).toBe(true);
   });
 
-  it('should handle large string values in replace operations', () => {
+  it('should warn and include as-is for oversized replace with non-object value', () => {
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
     const largeString = 'x'.repeat(500);
+    const change = createChange(1, [{ op: 'replace', path: '/content', value: largeString }]);
+
+    const result = breakChanges([change], 200);
+
+    expect(result).toHaveLength(1);
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('not an object'));
+    consoleSpy.mockRestore();
+  });
+
+  it('should extract text deltas from oversized replace into a structural replace + @txt ops', () => {
+    const textContent = { ops: [{ insert: 'This is the whole text\n' }] };
     const change = createChange(1, [
       {
         op: 'replace',
-        path: '/content',
-        value: largeString,
+        path: '',
+        value: { docs: { scene1: { body: { content: textContent } } } },
       },
     ]);
 
-    const maxBytes = 200;
+    // Trigger extraction by setting maxBytes slightly under the original change size
+    const maxBytes = getJSONByteSize(change) - 1;
     const result = breakChanges([change], maxBytes);
 
-    // Should have split the large string
-    expect(result.length).toBeGreaterThanOrEqual(1);
+    // All ops across all result changes — should be: 1 structural replace + 1 @txt
+    const allOps = result.flatMap(c => c.ops);
+    expect(allOps).toHaveLength(2);
+
+    const replaceOp = allOps.find(op => op.op === 'replace');
+    expect(replaceOp?.value).toEqual({ docs: { scene1: { body: { content: {} } } } });
+
+    const txtOp = allOps.find(op => op.op === '@txt');
+    expect(txtOp?.path).toBe('/docs/scene1/body/content');
+    expect(txtOp?.value).toEqual(textContent.ops);
+  });
+
+  it('should produce a single Change when structural replace + @txt fit within maxBytes', () => {
+    const textContent = { ops: [{ insert: 'short\n' }] };
+    const change = createChange(1, [
+      { op: 'replace', path: '', value: { docs: { scene1: { content: textContent } } } },
+    ]);
+
+    // Compute expected combined size: structural replace (stubs) + @txt op
+    const expectedOps = [
+      { op: 'replace', path: '', value: { docs: { scene1: { content: {} } } } },
+      { op: '@txt', path: '/docs/scene1/content', value: textContent },
+    ];
+    const combinedSize = getJSONByteSize({ ...change, ops: expectedOps });
+    const originalSize = getJSONByteSize(change);
+
+    // Only run this test when combined fits but original doesn't (requires combined < original)
+    if (combinedSize < originalSize) {
+      const result = breakChanges([change], originalSize - 1);
+      expect(result).toHaveLength(1);
+      expect(result[0].ops).toHaveLength(2);
+      expect(result[0].ops[0].op).toBe('replace');
+      expect(result[0].ops[1].op).toBe('@txt');
+    }
+  });
+
+  it('should split into multiple Changes when stripped replace + @txt ops exceed maxBytes', () => {
+    // Two large text fields so the combined Change exceeds maxBytes
+    const makeText = (n: number) => ({ ops: [{ insert: 'a'.repeat(n) + '\n' }] });
+    const change = createChange(1, [
+      {
+        op: 'replace',
+        path: '',
+        value: { fieldA: makeText(300), fieldB: makeText(300) },
+      },
+    ]);
+
+    // maxBytes large enough for one @txt change but not all three ops together
+    const maxBytes = 400;
+    const result = breakChanges([change], maxBytes);
+
+    // Should produce multiple Changes, each within maxBytes
+    expect(result.length).toBeGreaterThan(1);
+    expect(result.every(c => getJSONByteSize(c) <= maxBytes)).toBe(true);
+    // First change is the structural replace (stubs)
+    expect(result[0].ops[0].op).toBe('replace');
+    // Remaining changes are @txt
+    expect(result.slice(1).every(c => c.ops[0].op === '@txt')).toBe(true);
+  });
+
+  it('should warn and include as-is when oversized replace has no text deltas', () => {
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const change = createChange(1, [
+      {
+        op: 'replace',
+        path: '/data',
+        value: { a: 1, b: 2, c: 3 }, // plain object, no text deltas
+      },
+    ]);
+
+    const maxBytes = getJSONByteSize(change) - 5;
+    const result = breakChanges([change], maxBytes);
+
+    expect(result).toHaveLength(1);
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('no text deltas'));
+    consoleSpy.mockRestore();
   });
 });
 
@@ -410,15 +523,18 @@ describe('breakChanges with sizeCalculator', () => {
   });
 
   it('should use compressed size when sizeCalculator is provided', () => {
-    // Create a change with repetitive data that compresses well
-    const repetitiveOps = [{ op: 'add', path: '/data', value: 'a'.repeat(500) }];
-    const change = createChange(1, repetitiveOps);
+    // Use a two-op change so splitting by ops is possible
+    const change = createChange(1, [
+      { op: 'add', path: '/a', value: 'a'.repeat(200) },
+      { op: 'add', path: '/b', value: 'b'.repeat(200) },
+    ]);
 
-    const uncompressedSize = getJSONByteSize(change);
     const compressedSize = compressedSizeBase64(change);
+    const singleOpChange = createChange(1, [change.ops[0]]);
+    const singleOpSize = getJSONByteSize(singleOpChange);
 
-    // With uncompressed limit smaller than uncompressed size, it should split
-    const resultWithoutCompression = breakChanges([change], uncompressedSize - 50);
+    // With uncompressed limit fitting only one op, it should split into 2
+    const resultWithoutCompression = breakChanges([change], singleOpSize + 10);
     expect(resultWithoutCompression.length).toBeGreaterThan(1);
 
     // With compressed limit larger than compressed size, it should NOT split

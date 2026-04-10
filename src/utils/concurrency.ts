@@ -55,6 +55,72 @@ export function blockableResponse<T extends (docId: string, ...args: any[]) => P
 }
 
 /**
+ * Wraps a function so that only one invocation per key runs at a time.
+ * While in-flight, any additional calls for the same key are collapsed into
+ * exactly one queued follow-up. When the in-flight call finishes, the follow-up
+ * runs once (picking up all work that accumulated in the window). Further calls
+ * while the follow-up is itself in-flight queue another single follow-up, and
+ * so on — naturally serialising all work without ever dropping it.
+ *
+ * Contrast with `singleInvocation(true)`, which collapses concurrent calls but
+ * does not schedule a follow-up, so work that arrives mid-flight is lost until
+ * the next external trigger.
+ *
+ * ### Example
+ * ```ts
+ * const syncDoc = serialGate(async (docId: string) => {
+ *   const pending = await store.getPending(docId);
+ *   await server.commit(docId, pending);
+ * });
+ *
+ * // Three rapid calls: only one commitChanges in-flight at a time,
+ * // one follow-up picks up everything that arrived during the window.
+ * syncDoc('doc1');
+ * syncDoc('doc1');
+ * syncDoc('doc1');
+ * ```
+ */
+export function serialGate<T extends (key: string, ...args: any[]) => Promise<void>>(target: T): T {
+  // Per-instance state so the decorator is safe when applied to prototype methods
+  // and correct when multiple instances exist. WeakMap allows GC of unused instances.
+  type State = { inFlight: Map<string, Promise<void>>; queued: Set<string> };
+  const instances = new WeakMap<object, State>();
+
+  function getState(thisArg: object): State {
+    let state = instances.get(thisArg);
+    if (!state) {
+      state = { inFlight: new Map(), queued: new Set() };
+      instances.set(thisArg, state);
+    }
+    return state;
+  }
+
+  function run(thisArg: object, key: string, args: any[]): Promise<void> {
+    const { inFlight, queued } = getState(thisArg);
+    const promise = (target.apply(thisArg, [key, ...args]) as Promise<void>).finally(() => {
+      if (inFlight.get(key) === promise) {
+        inFlight.delete(key);
+        if (queued.has(key)) {
+          queued.delete(key);
+          run(thisArg, key, args);
+        }
+      }
+    });
+    inFlight.set(key, promise);
+    return promise;
+  }
+
+  return function (this: object, key: string, ...args: any[]) {
+    const { inFlight, queued } = getState(this);
+    if (inFlight.has(key)) {
+      queued.add(key);
+      return inFlight.get(key)!;
+    }
+    return run(this, key, args);
+  } as T;
+}
+
+/**
  * Wrap a function to only return the result of the first call.
  *
  * ### Examples:

@@ -32,6 +32,16 @@ export interface OTClientStore extends PatchesStore {
   savePendingChanges(docId: string, changes: Change[]): Promise<void>;
 
   /**
+   * Lists all changes (committed + pending) for a document, sorted by rev.
+   * Used by PatchesBranchClient for client-side offline merge to read branch changes.
+   *
+   * @param docId Document identifier
+   * @param options.startAfter Only return changes with rev > startAfter
+   * @returns Changes sorted by rev
+   */
+  listChanges?(docId: string, options?: { startAfter?: number }): Promise<Change[]>;
+
+  /**
    * Atomically applies server-confirmed changes and updates pending changes.
    *
    * This is the core sync operation that must be atomic: server changes become

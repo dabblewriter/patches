@@ -12,6 +12,7 @@
 ## Overview
 
 Patches is a TypeScript library for real-time collaborative apps. It implements two sync algorithms:
+
 - **OT (Operational Transformation)**: centralized server, conflict rebasing, for collaborative editing
 - **LWW (Last-Write-Wins)**: timestamp-based resolution, for settings and preferences
 
@@ -50,27 +51,27 @@ docs/           — architecture and API documentation
 
 Read these when working in a specific area:
 
-| File | Contents |
-|------|----------|
-| `docs/operational-transformation.md` | OT algorithm, change flow, rebasing |
-| `docs/last-write-wins.md` | LWW algorithm, conflict resolution |
-| `docs/algorithms.md` | Pure algorithm functions reference |
-| `docs/OTServer.md` | OTServer API and internals |
-| `docs/LWWServer.md` | LWWServer API and internals |
-| `docs/Patches.md` | Client Patches class API |
-| `docs/PatchesDoc.md` | PatchesDoc API |
-| `docs/PatchesSync.md` | PatchesSync and networking |
-| `docs/PatchesBranchManager.md` | Branching and merging |
-| `docs/PatchesHistoryManager.md` | History and versioning |
-| `docs/branching.md` | Branching concepts and workflows |
-| `docs/net.md` | Transport layer |
-| `docs/websocket.md` | WebSocket protocol |
-| `docs/sse-rest.md` | SSE + REST transport |
-| `docs/concurrency.md` | Concurrency utilities for custom backends |
-| `docs/json-patch.md` | JSON Patch format |
-| `src/vue/README.md` | Vue 3 integration |
-| `src/solid/README.md` | Solid.js integration |
-| `src/micro/README.md` | Micro sync system |
+| File                                 | Contents                                  |
+| ------------------------------------ | ----------------------------------------- |
+| `docs/operational-transformation.md` | OT algorithm, change flow, rebasing       |
+| `docs/last-write-wins.md`            | LWW algorithm, conflict resolution        |
+| `docs/algorithms.md`                 | Pure algorithm functions reference        |
+| `docs/OTServer.md`                   | OTServer API and internals                |
+| `docs/LWWServer.md`                  | LWWServer API and internals               |
+| `docs/Patches.md`                    | Client Patches class API                  |
+| `docs/PatchesDoc.md`                 | PatchesDoc API                            |
+| `docs/PatchesSync.md`                | PatchesSync and networking                |
+| `docs/PatchesBranchManager.md`       | Branching and merging                     |
+| `docs/PatchesHistoryManager.md`      | History and versioning                    |
+| `docs/branching.md`                  | Branching concepts and workflows          |
+| `docs/net.md`                        | Transport layer                           |
+| `docs/websocket.md`                  | WebSocket protocol                        |
+| `docs/sse-rest.md`                   | SSE + REST transport                      |
+| `docs/concurrency.md`                | Concurrency utilities for custom backends |
+| `docs/json-patch.md`                 | JSON Patch format                         |
+| `src/vue/README.md`                  | Vue 3 integration                         |
+| `src/solid/README.md`                | Solid.js integration                      |
+| `src/micro/README.md`                | Micro sync system                         |
 
 ## Testing
 
@@ -81,8 +82,9 @@ Tests mirror `src/` in `tests/`. Always run and fix tests when writing or refact
 
 ## Before Committing
 
-Run in order, fix any issues before committing:
+After making code changes, always verify that type, lint, and format checks pass before considering the task complete.
 
-1. `npm run lint:fix`
-2. `npm run build`
-3. `npm run test`
+1. `npm run type:check`
+2. `npm run lint`
+3. `npm run format:check`
+4. `npm run test`

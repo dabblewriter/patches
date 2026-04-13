@@ -398,10 +398,12 @@ export class LWWIndexedDBStore implements LWWClientStore {
     // Move ops to committed, deleting child-path ops to match server saveOps behavior.
     // Without this, a parent write (e.g. replace /trash {}) would leave stale child ops
     // (e.g. /trash/collectionId/name) that re-create nested structure on doc rebuild.
-    await Promise.all(sending.change.ops.map(async op => {
-      await committedOps.delete([docId, op.path + '/'], [docId, op.path + '/\uffff']);
-      await committedOps.put<CommittedOp>({ ...op, docId });
-    }));
+    await Promise.all(
+      sending.change.ops.map(async op => {
+        await committedOps.delete([docId, op.path + '/'], [docId, op.path + '/\uffff']);
+        await committedOps.put<CommittedOp>({ ...op, docId });
+      })
+    );
 
     // Update committed rev
     const rev = sending.change.rev;
@@ -430,10 +432,12 @@ export class LWWIndexedDBStore implements LWWClientStore {
     // Without this, a parent write (e.g. replace /trash {}) would leave stale child ops
     // (e.g. /trash/collectionId/name) that re-create nested structure on doc rebuild.
     const allOps = serverChanges.flatMap(change => change.ops);
-    await Promise.all(allOps.map(async op => {
-      await committedOps.delete([docId, op.path + '/'], [docId, op.path + '/\uffff']);
-      await committedOps.put<CommittedOp>({ ...op, docId });
-    }));
+    await Promise.all(
+      allOps.map(async op => {
+        await committedOps.delete([docId, op.path + '/'], [docId, op.path + '/\uffff']);
+        await committedOps.put<CommittedOp>({ ...op, docId });
+      })
+    );
 
     // Note: Don't clear sendingChange here - these are changes from other clients,
     // not confirmation of our own change. Only confirmSendingChange should clear it.

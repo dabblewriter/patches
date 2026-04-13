@@ -293,83 +293,15 @@ describe('PatchesBranchClient', () => {
       expect(api.listBranches).toHaveBeenCalled();
     });
 
-    it('should merge locally with offline API', async () => {
-      const branchChanges = [
-        {
-          id: 'c1',
-          ops: [{ op: 'replace', path: '/title', value: 'New' }],
-          rev: 3,
-          baseRev: 2,
-          createdAt: 1,
-          committedAt: 1,
-        },
-        {
-          id: 'c2',
-          ops: [{ op: 'replace', path: '/body', value: 'Text' }],
-          rev: 4,
-          baseRev: 3,
-          createdAt: 2,
-          committedAt: 2,
-        },
-      ];
-      mockAlgorithm.listChanges = vi.fn().mockResolvedValue(branchChanges);
-
+    it('should throw when using offline API', async () => {
       const client = new PatchesBranchClient('doc1', offlineApi, patches);
-      client.branches.state = [makeBranch({ id: 'branch-1', contentStartRev: 3 })];
 
-      await client.mergeBranch('branch-1');
-
-      // Should read changes from branch
-      expect(mockAlgorithm.listChanges).toHaveBeenCalledWith('branch-1', { startAfter: 2 });
-
-      // Should submit each change to source doc via serialized queue with batchId
-      expect(patches.submitDocChange).toHaveBeenCalledTimes(2);
-      expect(patches.submitDocChange).toHaveBeenCalledWith('doc1', branchChanges[0].ops, { batchId: 'branch-1' });
-
-      // Should update lastMergedRev
-      expect(offlineApi.updateBranch).toHaveBeenCalledWith('branch-1', { lastMergedRev: 4 });
-
-      // Should trigger sync for source doc
-      expect(patches.onChange.emit).toHaveBeenCalledWith('doc1');
-
-      // Should update local branch state
-      expect(client.branches.state[0].lastMergedRev).toBe(4);
+      await expect(client.mergeBranch('branch-1')).rejects.toThrow('server connection');
     });
 
-    it('should use lastMergedRev for subsequent merges', async () => {
-      mockAlgorithm.listChanges = vi.fn().mockResolvedValue([
-        {
-          id: 'c3',
-          ops: [{ op: 'replace', path: '/x', value: 1 }],
-          rev: 5,
-          baseRev: 4,
-          createdAt: 3,
-          committedAt: 3,
-        },
-      ]);
-
-      const client = new PatchesBranchClient('doc1', offlineApi, patches);
-      client.branches.state = [makeBranch({ id: 'branch-1', lastMergedRev: 4 })];
-
-      await client.mergeBranch('branch-1');
-
-      expect(mockAlgorithm.listChanges).toHaveBeenCalledWith('branch-1', { startAfter: 4 });
-    });
-
-    it('should no-op when no unmerged changes', async () => {
-      mockAlgorithm.listChanges = vi.fn().mockResolvedValue([]);
-
-      const client = new PatchesBranchClient('doc1', offlineApi, patches);
-      client.branches.state = [makeBranch({ id: 'branch-1' })];
-
-      await client.mergeBranch('branch-1');
-
-      expect(mockAlgorithm.handleDocChange).not.toHaveBeenCalled();
-      expect(offlineApi.updateBranch).not.toHaveBeenCalled();
-    });
-
-    it('should throw when branch not found', async () => {
-      const client = new PatchesBranchClient('doc1', offlineApi, patches);
+    it('should propagate server errors from online API', async () => {
+      api.mergeBranch.mockRejectedValue(new Error('Branch nonexistent not found'));
+      const client = new PatchesBranchClient('doc1', api, patches);
 
       await expect(client.mergeBranch('nonexistent')).rejects.toThrow('Branch nonexistent not found');
     });

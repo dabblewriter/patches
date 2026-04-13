@@ -155,9 +155,12 @@ describe('PatchesSync', () => {
     });
 
     it('should throw when branchStore is provided without branchApi', () => {
-      expect(() => new PatchesSync(mockPatches, 'ws://localhost:8080', {
-        branchStore: {} as any,
-      })).toThrow('branchApi is required when branchStore is provided');
+      expect(
+        () =>
+          new PatchesSync(mockPatches, 'ws://localhost:8080', {
+            branchStore: {} as any,
+          })
+      ).toThrow('branchApi is required when branchStore is provided');
     });
   });
 
@@ -1857,9 +1860,12 @@ describe('PatchesSync', () => {
       await syncWithBranches['syncPendingBranchMetas']();
 
       // Should call updateBranch with editable metadata (lastMergedRev, name, etc.)
-      expect(mockBranchApi.updateBranch).toHaveBeenCalledWith('update-branch', expect.objectContaining({
-        lastMergedRev: 10,
-      }));
+      expect(mockBranchApi.updateBranch).toHaveBeenCalledWith(
+        'update-branch',
+        expect.objectContaining({
+          lastMergedRev: 10,
+        })
+      );
       const savedBranches = mockBranchStore.saveBranches.mock.calls[0][1];
       expect(savedBranches[0]).not.toHaveProperty('pendingOp');
     });

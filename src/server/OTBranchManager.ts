@@ -2,13 +2,7 @@ import { getStateAtRevision } from '../algorithms/ot/server/getStateAtRevision.j
 import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import { createVersionMetadata } from '../data/version.js';
-import type {
-  Branch,
-  Change,
-  CreateBranchMetadata,
-  EditableBranchMetadata,
-  ListBranchesOptions,
-} from '../types.js';
+import type { Branch, Change, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
 import type { BranchManager } from './BranchManager.js';
 import {
   assertBranchMetadata,

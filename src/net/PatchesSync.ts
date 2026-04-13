@@ -271,8 +271,17 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       try {
         // Create the branch on the server. The server is idempotent when metadata.id is provided.
         // The server skips initial change creation when contentStartRev is set in the metadata.
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { docId: sourceDocId, branchedAtRev, createdAt: _1, modifiedAt: _2, pendingOp: _3, deleted: _4, ...metadata } = branch;
+        /* eslint-disable @typescript-eslint/no-unused-vars */
+        const {
+          docId: sourceDocId,
+          branchedAtRev,
+          createdAt: _1,
+          modifiedAt: _2,
+          pendingOp: _3,
+          deleted: _4,
+          ...metadata
+        } = branch;
+        /* eslint-enable @typescript-eslint/no-unused-vars */
         await branchApi.createBranch(sourceDocId, branchedAtRev, metadata);
 
         // Clear the pending flag
@@ -291,8 +300,19 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
       try {
         // Extract only the editable metadata fields to send to the server
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { id: _id, docId: _did, branchedAtRev: _bar, createdAt: _ca, modifiedAt: _ma, contentStartRev: _csr, pendingOp: _po, deleted: _del, ...metadata } = branch;
+        /* eslint-disable @typescript-eslint/no-unused-vars */
+        const {
+          id: _id,
+          docId: _did,
+          branchedAtRev: _bar,
+          createdAt: _ca,
+          modifiedAt: _ma,
+          contentStartRev: _csr,
+          pendingOp: _po,
+          deleted: _del,
+          ...metadata
+        } = branch;
+        /* eslint-enable @typescript-eslint/no-unused-vars */
         await branchApi.updateBranch(branch.id, metadata);
         const synced = { ...branch, pendingOp: undefined };
         delete synced.pendingOp;

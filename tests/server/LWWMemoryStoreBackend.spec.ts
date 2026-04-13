@@ -591,7 +591,6 @@ describe('LWWMemoryStoreBackend', () => {
         await store.deleteBranch('nonexistent');
       });
     });
-
   });
 
   describe('testing utilities (extended)', () => {

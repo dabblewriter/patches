@@ -226,8 +226,14 @@ export class LWWInMemoryStore implements LWWClientStore {
     const buf = this.docs.get(docId);
     if (!buf?.sendingChange) return;
 
-    // Move ops to committed fields (store the value directly)
+    // Move ops to committed fields, deleting child-path entries to match server
+    // saveOps behavior. Without this, a parent write (e.g. replace /trash {}) leaves
+    // stale child entries that re-create nested structure on doc rebuild.
     for (const op of buf.sendingChange.ops) {
+      const childPrefix = op.path + '/';
+      for (const key of buf.committedFields.keys()) {
+        if (key.startsWith(childPrefix)) buf.committedFields.delete(key);
+      }
       buf.committedFields.set(op.path, op.value);
     }
 
@@ -245,9 +251,15 @@ export class LWWInMemoryStore implements LWWClientStore {
   async applyServerChanges(docId: string, serverChanges: Change[]): Promise<void> {
     const buf = this.getOrCreateBuffer(docId);
 
-    // Convert server changes to committed fields (store values directly)
+    // Store server ops, deleting child-path entries to match server saveOps behavior.
+    // Without this, a parent write (e.g. replace /trash {}) leaves stale child entries
+    // that re-create nested structure on doc rebuild.
     for (const change of serverChanges) {
       for (const op of change.ops) {
+        const childPrefix = op.path + '/';
+        for (const key of buf.committedFields.keys()) {
+          if (key.startsWith(childPrefix)) buf.committedFields.delete(key);
+        }
         buf.committedFields.set(op.path, op.value);
       }
     }

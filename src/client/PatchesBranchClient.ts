@@ -7,6 +7,10 @@ import type { BranchClientStore } from './BranchClientStore.js';
 import type { Patches } from './Patches.js';
 import type { AlgorithmName } from './PatchesStore.js';
 
+// Error message when attempting offline merge
+const OFFLINE_MERGE_ERROR =
+  'Branch merging requires a server connection. Use a BranchAPI or call the server merge endpoint directly.';
+
 export interface PatchesBranchClientOptions {
   /** Maximum size in bytes for a single change in storage. Used to break large initial changes. */
   maxStorageBytes?: number;
@@ -23,8 +27,8 @@ export interface PatchesBranchClientOptions {
  * (offline-first, local store handles caching/pending/tombstones). The API shape
  * determines merge behavior:
  *
- * - `BranchAPI` has `mergeBranch` — server performs the merge
- * - `BranchClientStore` has `updateBranch` — client merges locally, updates `lastMergedRev`
+ * - `BranchAPI` — server performs the merge via `mergeBranch`
+ * - `BranchClientStore` — merge is not supported; call the server merge endpoint directly
  */
 export class PatchesBranchClient {
   /** Document ID */
@@ -123,19 +127,17 @@ export class PatchesBranchClient {
   /**
    * Merge a branch's changes back into this document.
    *
-   * Online (BranchAPI with `mergeBranch`): server performs the merge.
-   * Offline (BranchClientStore with `updateBranch`): client reads branch changes,
-   * re-stamps them with `batchId: branchId`, submits via algorithm.handleDocChange
-   * on the source doc, then updates `lastMergedRev` locally.
+   * Requires a `BranchAPI` (online mode) — the server performs the merge.
+   * Throws if the API is a `BranchClientStore` (offline-first mode) because
+   * client stores don't maintain full change history needed for correct merging.
+   * Offline-first consumers should call the server merge endpoint directly.
    */
   async mergeBranch(branchId: string): Promise<void> {
-    if (!this.isOffline) {
-      await (this.api as BranchAPI).mergeBranch(branchId);
-      await this.listBranches();
-      return;
+    if (this.isOffline) {
+      throw new Error(OFFLINE_MERGE_ERROR);
     }
-
-    await this._mergeBranchLocally(branchId);
+    await (this.api as BranchAPI).mergeBranch(branchId);
+    await this.listBranches();
   }
 
   /** Clear state */
@@ -210,45 +212,5 @@ export class PatchesBranchClient {
     this.patches.onChange.emit(branchDocId);
 
     return branchDocId;
-  }
-
-  private async _mergeBranchLocally(branchId: string): Promise<void> {
-    const offlineApi = this.api as BranchClientStore;
-
-    // 1. Get branch metadata
-    const branch = this.branches.state.find(b => b.id === branchId);
-    if (!branch) throw new Error(`Branch ${branchId} not found`);
-
-    const sourceDocId = branch.docId;
-
-    // 2. Get the algorithm for reading branch changes
-    const algorithmName = this.options?.algorithm ?? this.patches.defaultAlgorithm;
-    const algorithm = this.patches.algorithms[algorithmName];
-    if (!algorithm?.listChanges) {
-      throw new Error('Offline merge requires an algorithm with listChanges support');
-    }
-
-    // 3. Get unmerged branch changes (after lastMergedRev or contentStartRev)
-    const startAfter = branch.lastMergedRev ?? (branch.contentStartRev ?? 2) - 1;
-    const branchChanges = await algorithm.listChanges(branchId, { startAfter });
-    if (branchChanges.length === 0) return;
-
-    const lastBranchRev = branchChanges[branchChanges.length - 1].rev;
-
-    // 4. Submit branch changes to source doc through the serialized change queue
-    for (const change of branchChanges) {
-      await this.patches.submitDocChange(sourceDocId, change.ops, { batchId: branchId });
-    }
-
-    // 5. Update lastMergedRev on the branch
-    await offlineApi.updateBranch(branchId, { lastMergedRev: lastBranchRev });
-
-    // 6. Trigger sync for source doc
-    this.patches.onChange.emit(sourceDocId);
-
-    // 7. Update local branch state
-    this.branches.state = this.branches.state.map(b =>
-      b.id === branchId ? { ...b, lastMergedRev: lastBranchRev } : b
-    );
   }
 }

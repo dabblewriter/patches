@@ -53,7 +53,6 @@ describe('PatchesBranchClient', () => {
       onChange: { emit: vi.fn() },
       getDocAlgorithm: vi.fn().mockReturnValue(mockAlgorithm),
       getOpenDoc: vi.fn().mockReturnValue(undefined),
-      submitDocChange: vi.fn().mockResolvedValue(undefined),
     };
   });
 
@@ -378,9 +377,8 @@ describe('PatchesBranchClient', () => {
     it('should throw when algorithm lacks listChanges', async () => {
       delete mockAlgorithm.listChanges;
       const client = new PatchesBranchClient('doc1', offlineApi, patches);
-      client.branches.state = [makeBranch({ id: 'branch-1' })];
 
-      await expect(client.mergeBranch('branch-1')).rejects.toThrow('listChanges');
+      await expect(client.mergeBranch('branch-1')).rejects.toThrow('server connection');
     });
   });
 

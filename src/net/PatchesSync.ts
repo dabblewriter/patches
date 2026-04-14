@@ -481,8 +481,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           const snapshot = await this.connection.getDoc(docId);
           // Save via algorithm's store
           await algorithm.store.saveDoc(docId, snapshot);
-          // Update synced doc with the server's revision
-          this._updateDocSyncState(docId, { committedRev: snapshot.rev });
+          // Read back the actual committed rev (store may compute from changes)
+          const savedRev = await algorithm.getCommittedRev(docId);
+          this._updateDocSyncState(docId, { committedRev: savedRev });
           // Import into doc if open (use BaseDoc.import)
           if (baseDoc) {
             baseDoc.import({ ...snapshot, changes: [] });

@@ -184,11 +184,15 @@ export class OTIndexedDBStore implements OTClientStore {
     );
 
     const { rev, state } = docState;
+    const changes = (docState as PatchesSnapshot).changes;
+    const committedRev = changes?.length ? changes[changes.length - 1].rev : rev;
+
+    await committedChanges.delete([docId, 0], [docId, Infinity]);
 
     await Promise.all([
-      docsStore.put<TrackedDoc>({ docId, committedRev: rev, algorithm: 'ot' }),
+      docsStore.put<TrackedDoc>({ docId, committedRev, algorithm: 'ot' }),
       snapshots.put<Snapshot>({ docId, state, rev }),
-      committedChanges.delete([docId, 0], [docId, Infinity]),
+      ...(changes?.map((change: Change) => committedChanges.put<StoredChange>({ ...change, docId })) ?? []),
     ]);
 
     await tx.complete();

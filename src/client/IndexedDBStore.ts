@@ -265,10 +265,12 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
       docIds.map(async docId => {
         const existing = await docsStore.get<TrackedDoc>(docId);
         if (existing) {
-          // If exists but deleted, undelete it and update algorithm if provided
+          // If exists but deleted, undelete it, reset committedRev (data was
+          // wiped by deleteDoc), and update algorithm if provided
           if (existing.deleted) {
             await docsStore.put({
               ...existing,
+              committedRev: 0,
               deleted: undefined,
               ...(algorithm && { algorithm }),
             });

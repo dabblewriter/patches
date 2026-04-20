@@ -430,17 +430,7 @@ describe('assertVersionMetadata', () => {
   });
 
   it('should throw error for non-modifiable fields', () => {
-    const invalidFields = [
-      'id',
-      'parentId',
-      'groupId',
-      'origin',
-      'branchName',
-      'startedAt',
-      'endedAt',
-      'rev',
-      'baseRev',
-    ];
+    const invalidFields = ['id', 'parentId', 'groupId', 'origin', 'startedAt', 'endedAt', 'rev', 'baseRev'];
 
     invalidFields.forEach(field => {
       const metadata = { [field]: 'value' } as any;

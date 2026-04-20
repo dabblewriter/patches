@@ -103,9 +103,8 @@ export class OTBranchManager implements BranchManager {
         endedAt: now,
         endRev: rev,
         startRev: rev,
-        name: metadata?.name,
         groupId: branchDocId,
-        branchName: metadata?.name,
+        ...(metadata?.name !== undefined && { name: metadata.name }),
       });
       await this.store.createVersion(branchDocId, initialVersionMetadata, initChanges);
     }
@@ -172,14 +171,15 @@ export class OTBranchManager implements BranchManager {
     // are harmless (they reference a groupId that was never fully merged).
     let lastVersionId: string | undefined;
     for (const v of branchVersions) {
-      const newVersionMetadata = createVersionMetadata({
+      const base = {
         ...v,
-        origin: 'branch',
+        origin: 'branch' as const,
         startRev: branchStartRevOnSource,
         groupId: branchId,
-        branchName: branch.name,
         parentId: lastVersionId,
-      });
+      };
+      if (base.parentId === undefined) delete base.parentId;
+      const newVersionMetadata = createVersionMetadata(base);
       const changes = await this.store.loadVersionChanges?.(branchId, v.id);
       await this.store.createVersion(sourceDocId, newVersionMetadata, changes);
       lastVersionId = newVersionMetadata.id;

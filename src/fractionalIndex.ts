@@ -8,9 +8,6 @@ const SMALLEST_INTEGER = 'A00000000000000000000000000';
 const LARGEST_INTEGER = 'zzzzzzzzzzzzzzzzzzzzzzzzzzz';
 const ZERO = digits[0];
 
-fractionalIndex.sort = sortByOrder;
-fractionalIndex.heal = healDuplicateOrders;
-
 /**
  * Generate a fractional index which is a sortable string(s) between a and b. Use an empty string or null/undefined to
  * represent the start and end of the range.
@@ -227,13 +224,8 @@ function validatestring(key: string, lowValue: boolean): void {
   }
 }
 
-/** Order field parameter type: field name, or false when values are order strings directly */
-type OrderFieldParam = string | false;
-
-function createOrderGetter<T>(orderField: OrderFieldParam): (value: T) => string {
-  return orderField === false
-    ? (value: T) => value as string
-    : (value: T) => (value as Record<string, string>)[orderField];
+function createOrderGetter(orderField: string | false): (value: any) => string {
+  return orderField === false ? (value: any) => value as string : (value: any) => value[orderField];
 }
 
 /**
@@ -253,11 +245,17 @@ function createOrderGetter<T>(orderField: OrderFieldParam): (value: T) => string
  * const sorted = sortByOrder({ b: 'a2', a: 'a1' }, false);
  * // [['a', 'a1'], ['b', 'a2']]
  */
-export function sortByOrder<T extends Record<string, unknown> | string>(
+export function sortByOrder<T extends Record<O, string>, O extends string = 'order'>(
   items: Record<string, T>,
-  orderField: OrderFieldParam = 'order'
-): Array<[string, T]> {
-  const getOrder = createOrderGetter<T>(orderField);
+  orderField?: O
+): Array<[string, T]>;
+export function sortByOrder(items: Record<string, string>, orderField: false): Array<[string, string]>;
+export function sortByOrder(items: Record<string, any>, orderField: string | false = 'order'): Array<[string, any]> {
+  return sortByOrderImpl(items, orderField);
+}
+
+function sortByOrderImpl(items: Record<string, any>, orderField: string | false): Array<[string, any]> {
+  const getOrder = createOrderGetter(orderField);
   return Object.entries(items).sort((a, b) => {
     const orderA = getOrder(a[1]);
     const orderB = getOrder(b[1]);
@@ -296,13 +294,18 @@ export function sortByOrder<T extends Record<string, unknown> | string>(
  * // Values are the order strings directly
  * const fixes = healDuplicateOrders({ a: 'a1', b: 'a1' }, false);
  */
-export function healDuplicateOrders<T extends Record<string, unknown> | string>(
+export function healDuplicateOrders<T extends Record<O, string>, O extends string = 'order'>(
   items: Record<string, T>,
-  orderField: OrderFieldParam = 'order'
+  orderField?: O
+): Record<string, string> | null;
+export function healDuplicateOrders(items: Record<string, string>, orderField: false): Record<string, string> | null;
+export function healDuplicateOrders(
+  items: Record<string, any>,
+  orderField: string | false = 'order'
 ): Record<string, string> | null {
-  const getOrder = createOrderGetter<T>(orderField);
+  const getOrder = createOrderGetter(orderField);
   const fixes: Record<string, string> = {};
-  const entries = sortByOrder(items, orderField);
+  const entries = sortByOrderImpl(items, orderField);
 
   if (entries.length < 2) return null;
 
@@ -334,3 +337,11 @@ export function healDuplicateOrders<T extends Record<string, unknown> | string>(
 
   return Object.keys(fixes).length > 0 ? fixes : null;
 }
+
+Object.assign(fractionalIndex, { sort: sortByOrder, heal: healDuplicateOrders });
+/* eslint-disable no-var, @typescript-eslint/no-namespace */
+export declare namespace fractionalIndex {
+  var sort: typeof sortByOrder;
+  var heal: typeof healDuplicateOrders;
+}
+/* eslint-enable no-var */

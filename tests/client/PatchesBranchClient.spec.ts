@@ -47,6 +47,7 @@ describe('PatchesBranchClient', () => {
     patches = {
       defaultAlgorithm: 'ot',
       algorithms: { ot: mockAlgorithm },
+      docOptions: {},
       trackDocs: vi.fn().mockResolvedValue(undefined),
       deleteDoc: vi.fn().mockResolvedValue(undefined),
       untrackDocs: vi.fn().mockResolvedValue(undefined),

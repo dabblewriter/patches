@@ -293,6 +293,108 @@ describe('LWWDoc', () => {
     });
   });
 
+  describe('applyChanges — server echo of own pending changes', () => {
+    it('does NOT notify subscribers when a server-committed change is a pure echo of a local change', () => {
+      // 1. User makes a local change → applies optimistically + emits.
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
+      doc.change((patch, path) => {
+        patch.replace(path.text, 'world');
+      });
+      expect(callback).toHaveBeenCalledTimes(1);
+
+      // 2. Local-confirmation path (committedAt === 0) — no extra emit.
+      const localOps = (doc.onChange.emit as any).mock.calls[0][0];
+      const localChange = createChange('echo-id', 1, localOps, false);
+      doc.applyChanges([localChange], true);
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(doc.hasPending).toBe(true);
+
+      // 3. Server commits and broadcasts back the same change id (pure echo). Skip the spurious emit.
+      const echoed = createChange('echo-id', 1, localOps, true);
+      const stateBefore = doc.state;
+      doc.applyChanges([echoed], false);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(doc.state).toBe(stateBefore);
+      expect(doc.committedRev).toBe(1);
+      expect(doc.hasPending).toBe(false);
+      expect(doc.state).toEqual({ text: 'world', count: 0 });
+    });
+
+    it('DOES notify subscribers for foreign server changes (no matching pending id)', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
+      const foreign = createChange('foreign', 1, [{ op: 'replace', path: '/text', value: 'remote' }], true);
+      doc.applyChanges([foreign]);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(doc.state.text).toBe('remote');
+    });
+
+    it('DOES notify when the server batch mixes echoes with foreign ops', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
+      // Local change applied + locally confirmed
+      doc.change((patch, path) => patch.replace(path.text, 'mine'));
+      const localOps = (doc.onChange.emit as any).mock.calls[0][0];
+      doc.applyChanges([createChange('mine', 1, localOps, false)], true);
+      expect(callback).toHaveBeenCalledTimes(1);
+
+      // Server batch: our echo + a foreign change
+      const echoed = createChange('mine', 1, localOps, true);
+      const foreign = createChange('foreign', 2, [{ op: 'replace', path: '/count', value: 9 }], true);
+      doc.applyChanges([echoed, foreign], false);
+
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(doc.state).toEqual({ text: 'mine', count: 9 });
+    });
+
+    it('does not skip when an echo arrives in a batch that also contains a fresh local change', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
+      // Track a local change first
+      doc.change((patch, path) => patch.replace(path.text, 'a'));
+      const opsA = (doc.onChange.emit as any).mock.calls[0][0];
+      doc.applyChanges([createChange('a', 1, opsA, false)], true);
+      expect(callback).toHaveBeenCalledTimes(1);
+
+      // Mixed batch: echo of 'a' + a brand-new local change 'b' arriving via worker-tab sync
+      const echoOfA = createChange('a', 1, opsA, true);
+      const freshLocal = createChange('b', 2, [{ op: 'replace', path: '/count', value: 7 }], false);
+      doc.applyChanges([echoOfA, freshLocal], true);
+
+      // Mixed batch should still recompute since fresh local ops need to land on _baseState.
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(doc.state.count).toBe(7);
+    });
+
+    it('handles multi-change pure-echo batches without notifying subscribers', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
+      doc.change((patch, path) => patch.replace(path.text, 'a'));
+      const opsA = (doc.onChange.emit as any).mock.calls[0][0];
+      doc.applyChanges([createChange('a', 1, opsA, false)], true);
+
+      doc.change((patch, path) => patch.replace(path.count, 1));
+      const opsB = (doc.onChange.emit as any).mock.calls[1][0];
+      doc.applyChanges([createChange('b', 2, opsB, false)], true);
+
+      expect(callback).toHaveBeenCalledTimes(2);
+
+      doc.applyChanges([createChange('a', 1, opsA, true), createChange('b', 2, opsB, true)], false);
+
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(doc.committedRev).toBe(2);
+      expect(doc.hasPending).toBe(false);
+    });
+  });
+
   describe('updateSyncStatus', () => {
     it('should update sync status and notify subscribers', async () => {
       const syncListener = vi.fn();

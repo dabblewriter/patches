@@ -136,11 +136,21 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         throw new Error('Cannot apply committed changes to a doc that is not at the correct revision');
       }
 
+      // Pure echo: every server change confirms one of our own pending changes (no foreign
+      // concurrent ops). The recomputed state is data-identical to the current state, so we
+      // skip _recomputeState() to avoid emitting a redundant store update with a fresh object
+      // identity. UI subscribers (Vue shallowRef, Svelte stores, etc.) see no spurious update
+      // mid-typing.
+      const priorPendingIds = new Set(this._pendingChanges.map(c => c.id));
+      const isPureEcho = serverChanges.every(c => priorPendingIds.has(c.id));
+
       this._committedState = applyChangesToState(this._committedState, serverChanges);
       this._committedRev = serverChanges[serverChanges.length - 1].rev;
       this._pendingChanges = rebasedPending;
       this._checkLoaded();
-      this._recomputeState();
+      if (!isPureEcho) {
+        this._recomputeState();
+      }
     } else {
       this._pendingChanges.push(...changes);
       this._checkLoaded();

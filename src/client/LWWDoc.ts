@@ -26,6 +26,15 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
   protected _hasPending: boolean;
   /** Confirmed state (from algorithm pipeline), used to recompute after server changes. */
   protected _baseState: T;
+  /**
+   * IDs of pending local changes that have been applied to `_baseState` via the local-confirmation
+   * path (`committedAt === 0`) but not yet echoed back from the server. When the server later
+   * broadcasts a committed change with the same id, we know it is a pure echo: re-applying its
+   * ops to `_baseState` is idempotent (same `replace`/timestamps) and `_recomputeState()` would
+   * just produce a structurally-identical state with a fresh object identity, causing a spurious
+   * store emit. We skip both in that case.
+   */
+  protected _inFlightChangeIds: Set<string> = new Set();
 
   /**
    * Creates an instance of LWWDoc.
@@ -41,6 +50,7 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
     if (snapshot?.changes && snapshot.changes.length > 0) {
       const allOps = snapshot.changes.flatMap(c => c.ops);
       this.state = applyPatch(this.state, allOps, { partial: true });
+      for (const c of snapshot.changes) this._inFlightChangeIds.add(c.id);
     }
     this._baseState = this.state;
     this._checkLoaded();
@@ -64,6 +74,7 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
     this._committedRev = snapshot.rev;
     this._hasPending = (snapshot.changes?.length ?? 0) > 0;
     this._optimisticOps = [];
+    this._inFlightChangeIds.clear();
 
     let currentState = snapshot.state;
     if (snapshot.changes && snapshot.changes.length > 0) {
@@ -72,6 +83,7 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
         snapshot.changes.flatMap(c => c.ops),
         { partial: true }
       );
+      for (const c of snapshot.changes) this._inFlightChangeIds.add(c.id);
     }
 
     this._baseState = currentState;
@@ -124,7 +136,27 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
     this._hasPending = hasPending ?? hasPendingChanges;
     this._checkLoaded();
 
+    // Pure-echo detection must read the in-flight set BEFORE we mutate it. A pure echo means
+    // every change in this batch is a server-confirmation of a local change we already applied
+    // (no foreign concurrent ops, no fresh local changes mixed in).
+    const isPureEcho = hasServerChanges && !hasPendingChanges && changes.every(c => this._inFlightChangeIds.has(c.id));
+
+    // Maintain the in-flight tracker uniformly: add any new local changes, retire any echoed
+    // server change ids. This is independent of which branch we take below.
+    for (const c of changes) {
+      if (c.committedAt > 0) {
+        this._inFlightChangeIds.delete(c.id);
+      } else {
+        this._inFlightChangeIds.add(c.id);
+      }
+    }
+
     if (hasServerChanges) {
+      // For pure echoes, _baseState already has these ops applied (via the local-confirmation
+      // path), so re-applying is wasteful and the recomputed state would be data-identical
+      // with a fresh object identity, causing a spurious store emit. Skip both.
+      if (isPureEcho) return;
+
       const allOps = changes.flatMap(c => c.ops);
       this._baseState = applyPatch(this._baseState, allOps, { partial: true });
       this._recomputeState();

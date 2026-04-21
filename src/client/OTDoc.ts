@@ -89,15 +89,40 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
 
   /**
    * Imports document state from a snapshot (e.g., for recovery when out of sync).
-   * Resets state and treats all imported changes as pending.
+   * Resets committed/pending state from the snapshot but PRESERVES outstanding
+   * optimistic ops (re-applied on top of the new state, dropping any that fail).
+   *
+   * Why preserve optimistic ops: import() can be called by sync recovery /
+   * cross-tab snapshot broadcast paths while the user is mid-typing. Wiping
+   * `_optimisticOps` would silently regress the input back to the snapshot
+   * value, causing visible "text jumps" and lost characters.
+   *
+   * Stale-snapshot guard: snapshots older than the current `_committedRev`
+   * are ignored — we already know more than the caller does.
    */
   import(snapshot: PatchesSnapshot<T>): void {
+    if (snapshot.rev < this._committedRev) return;
     this._committedState = snapshot.state;
     this._committedRev = snapshot.rev;
     this._pendingChanges = snapshot.changes;
-    this._optimisticOps = [];
     this._checkLoaded();
-    this.state = createStateFromSnapshot(snapshot);
+
+    let newState: T = createStateFromSnapshot(snapshot);
+    if (this._optimisticOps.length > 0) {
+      const surviving: typeof this._optimisticOps = [];
+      for (const ops of this._optimisticOps) {
+        try {
+          newState = applyPatch(newState, ops, { strict: true });
+          surviving.push(ops);
+        } catch {
+          // Optimistic ops created against the prior state may not apply cleanly
+          // to the imported state (e.g., parent path was replaced). Drop them
+          // — the algorithm will retry/reissue any genuinely pending work.
+        }
+      }
+      this._optimisticOps = surviving;
+    }
+    this.state = newState;
   }
 
   /**

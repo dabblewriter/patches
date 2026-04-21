@@ -138,3 +138,52 @@ describe('OTDoc — applyChanges echo-skip', () => {
     expect(doc.hasPending).toBe(false);
   });
 });
+
+describe('OTDoc — import preserves optimistic ops', () => {
+  let doc: InstanceType<typeof OTDoc<TestDoc>>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(1700000000000);
+    doc = new OTDoc<TestDoc>('doc-1', makeSnapshot({ title: 'hello', count: 0 }, 5));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('preserves outstanding optimistic ops when importing a fresher snapshot (no text-jump)', () => {
+    // Mid-typing: change() pushes ops onto _optimisticOps, no local-confirmation yet.
+    doc.change((patch, path) => patch.replace(path.title, 'world'));
+    doc.change((patch, path) => patch.replace(path.count, 42));
+    expect(doc.state).toEqual({ title: 'world', count: 42 });
+
+    // Fresher snapshot for an unrelated field — must NOT regress in-flight typing.
+    doc.import(makeSnapshot({ title: 'hello', count: 0 }, 10));
+
+    expect(doc.committedRev).toBe(10);
+    expect(doc.state).toEqual({ title: 'world', count: 42 });
+  });
+
+  it('drops optimistic ops that no longer apply cleanly to the imported state', () => {
+    // Seed an optimistic op that removes `title`. The op is recorded in _optimisticOps.
+    doc.change((patch, path) => patch.remove(path.title));
+    expect(doc.state).toEqual({ count: 0 });
+
+    // Imported snapshot has no `title` either — replaying the remove against a
+    // missing path throws under strict mode, so the op is dropped.
+    doc.import(makeSnapshot({ count: 99 } as TestDoc, 10));
+
+    expect(doc.committedRev).toBe(10);
+    expect(doc.state).toEqual({ count: 99 });
+  });
+
+  it('ignores stale snapshots whose rev is older than current committedRev', () => {
+    // doc starts at rev 5
+    doc.import(makeSnapshot({ title: 'stale' }, 3));
+
+    expect(doc.committedRev).toBe(5);
+    expect(doc.state).toEqual({ title: 'hello', count: 0 });
+  });
+});

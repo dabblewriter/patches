@@ -1,4 +1,5 @@
 import { applyPatch } from '../json-patch/applyPatch.js';
+import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change, PatchesSnapshot } from '../types.js';
 import { BaseDoc } from './BaseDoc.js';
 
@@ -27,14 +28,21 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
   /** Confirmed state (from algorithm pipeline), used to recompute after server changes. */
   protected _baseState: T;
   /**
-   * IDs of pending local changes that have been applied to `_baseState` via the local-confirmation
-   * path (`committedAt === 0`) but not yet echoed back from the server. When the server later
-   * broadcasts a committed change with the same id, we know it is a pure echo: re-applying its
-   * ops to `_baseState` is idempotent (same `replace`/timestamps) and `_recomputeState()` would
-   * just produce a structurally-identical state with a fresh object identity, causing a spurious
-   * store emit. We skip both in that case.
+   * Content keys of pending local ops that have been applied to `_baseState` via the
+   * local-confirmation path (`committedAt === 0`) but not yet echoed back from the server.
+   *
+   * We key by op CONTENT (JSON.stringify) rather than by Change id because the LWW
+   * algorithm coalesces pending ops in its store and reissues a fresh sending Change
+   * (with a new id) in `getPendingToSend()`. The server then echoes that re-issued id
+   * back, so id-based echo detection would always fail. Op content (path + op + value
+   * + ts) survives the reissue intact, since the LWW algorithm preserves the original
+   * timestamped ops end-to-end.
+   *
+   * On a pure echo we skip both `_baseState += ops` (already applied locally) and
+   * `_recomputeState()` (would just produce a structurally-identical state with a
+   * fresh object identity, causing a spurious store emit mid-typing).
    */
-  protected _inFlightChangeIds: Set<string> = new Set();
+  protected _inFlightOpKeys: Set<string> = new Set();
 
   /**
    * Creates an instance of LWWDoc.
@@ -50,7 +58,7 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
     if (snapshot?.changes && snapshot.changes.length > 0) {
       const allOps = snapshot.changes.flatMap(c => c.ops);
       this.state = applyPatch(this.state, allOps, { partial: true });
-      for (const c of snapshot.changes) this._inFlightChangeIds.add(c.id);
+      for (const op of allOps) this._inFlightOpKeys.add(opKey(op));
     }
     this._baseState = this.state;
     this._checkLoaded();
@@ -68,27 +76,48 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
 
   /**
    * Imports document state from a snapshot (e.g., for recovery when out of sync).
-   * Resets state completely from the snapshot.
+   * Resets `_baseState` from the snapshot but PRESERVES outstanding optimistic ops
+   * (re-applied on top of the new state, dropping any that fail).
+   *
+   * Why preserve optimistic ops: import() can be called by sync recovery /
+   * cross-tab snapshot broadcast paths while the user is mid-typing. Wiping
+   * `_optimisticOps` would silently regress the input back to the snapshot
+   * value, causing visible "text jumps" and lost characters.
+   *
+   * Stale-snapshot guard: snapshots older than the current `_committedRev`
+   * are ignored — we already know more than the caller does.
    */
   import(snapshot: PatchesSnapshot<T>): void {
+    if (snapshot.rev < this._committedRev) return;
     this._committedRev = snapshot.rev;
     this._hasPending = (snapshot.changes?.length ?? 0) > 0;
-    this._optimisticOps = [];
-    this._inFlightChangeIds.clear();
+    this._inFlightOpKeys.clear();
 
-    let currentState = snapshot.state;
+    let baseState = snapshot.state;
     if (snapshot.changes && snapshot.changes.length > 0) {
-      currentState = applyPatch(
-        currentState,
-        snapshot.changes.flatMap(c => c.ops),
-        { partial: true }
-      );
-      for (const c of snapshot.changes) this._inFlightChangeIds.add(c.id);
+      const allOps = snapshot.changes.flatMap(c => c.ops);
+      baseState = applyPatch(baseState, allOps, { partial: true });
+      for (const op of allOps) this._inFlightOpKeys.add(opKey(op));
     }
+    this._baseState = baseState;
 
-    this._baseState = currentState;
+    let nextState = baseState;
+    if (this._optimisticOps.length > 0) {
+      const surviving: typeof this._optimisticOps = [];
+      for (const ops of this._optimisticOps) {
+        try {
+          nextState = applyPatch(nextState, ops, { strict: true });
+          surviving.push(ops);
+        } catch {
+          // Optimistic ops created against the prior state may not apply cleanly
+          // to the imported state. Drop them — the algorithm's pendingOps store
+          // is the source of truth for genuinely pending work.
+        }
+      }
+      this._optimisticOps = surviving;
+    }
     this._checkLoaded();
-    this.state = currentState;
+    this.state = nextState;
   }
 
   /**
@@ -137,17 +166,23 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
     this._checkLoaded();
 
     // Pure-echo detection must read the in-flight set BEFORE we mutate it. A pure echo means
-    // every change in this batch is a server-confirmation of a local change we already applied
-    // (no foreign concurrent ops, no fresh local changes mixed in).
-    const isPureEcho = hasServerChanges && !hasPendingChanges && changes.every(c => this._inFlightChangeIds.has(c.id));
+    // every server-side op in this batch matches the content of an op we previously applied
+    // locally (no foreign concurrent ops, no fresh local ops mixed in).
+    //
+    // We key by op CONTENT rather than Change id because the LWW algorithm reissues a
+    // fresh sending Change id in `getPendingToSend()` — see _inFlightOpKeys docstring.
+    const isPureEcho =
+      hasServerChanges &&
+      !hasPendingChanges &&
+      changes.every(c => c.ops.every(op => this._inFlightOpKeys.has(opKey(op))));
 
-    // Maintain the in-flight tracker uniformly: add any new local changes, retire any echoed
-    // server change ids. This is independent of which branch we take below.
+    // Maintain the in-flight tracker uniformly: add new local op keys, retire any echoed
+    // server op keys. This is independent of which branch we take below.
     for (const c of changes) {
       if (c.committedAt > 0) {
-        this._inFlightChangeIds.delete(c.id);
+        for (const op of c.ops) this._inFlightOpKeys.delete(opKey(op));
       } else {
-        this._inFlightChangeIds.add(c.id);
+        for (const op of c.ops) this._inFlightOpKeys.add(opKey(op));
       }
     }
 
@@ -172,4 +207,17 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
       }
     }
   }
+}
+
+/**
+ * Stable content key for an op. Two ops produced from the same source (same path, op,
+ * value, and `ts` from LWWAlgorithm) round-trip through JSON with identical key order in
+ * V8/JavaScriptCore, so JSON.stringify is sufficient as an equality fingerprint.
+ *
+ * Orphan keys (ops that were consolidated away in the algorithm's pending store before
+ * being sent) remain in `_inFlightOpKeys` indefinitely. They're bounded by session
+ * length and act as harmless extra positives for the echo check.
+ */
+function opKey(op: JSONPatchOp): string {
+  return JSON.stringify(op);
 }

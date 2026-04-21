@@ -204,6 +204,41 @@ describe('LWWDoc', () => {
 
       expect(callback).toHaveBeenCalled();
     });
+
+    it('preserves outstanding optimistic ops when importing a fresher snapshot (no text-jump)', () => {
+      // Simulate user mid-typing: change() pushes ops onto _optimisticOps, no local-confirmation yet.
+      doc.change((patch, path) => patch.replace(path.text, 'world'));
+      doc.change((patch, path) => patch.replace(path.count, 42));
+      expect(doc.state).toEqual({ text: 'world', count: 42 });
+
+      // Server pushes a fresher snapshot of an unrelated field — must NOT regress in-flight typing.
+      doc.import(createSnapshot({ text: 'hello', count: 0, extra: 'remote' }, 5));
+
+      expect(doc.committedRev).toBe(5);
+      expect(doc.state).toEqual({ text: 'world', count: 42, extra: 'remote' });
+    });
+
+    it('drops optimistic ops that no longer apply cleanly to the imported state', () => {
+      // Seed an optimistic op that removes `text`. The op is recorded in _optimisticOps
+      // and applied to the optimistic state.
+      doc.change((patch, path) => patch.remove(path.text));
+      expect(doc.state).toEqual({ count: 0 });
+
+      // Imported snapshot has no `text` either — replaying the remove against a
+      // missing path throws under strict mode, so the op is dropped.
+      doc.import(createSnapshot({ count: 99 }, 5));
+
+      expect(doc.committedRev).toBe(5);
+      expect(doc.state).toEqual({ count: 99 });
+    });
+
+    it('ignores stale snapshots whose rev is older than current committedRev', () => {
+      const fresh = new LWWDoc('test-doc', createSnapshot({ text: 'fresh' }, 10));
+      fresh.import(createSnapshot({ text: 'stale' }, 3));
+
+      expect(fresh.committedRev).toBe(10);
+      expect(fresh.state).toEqual({ text: 'fresh' });
+    });
   });
 
   describe('applyChanges', () => {
@@ -371,6 +406,32 @@ describe('LWWDoc', () => {
       // Mixed batch should still recompute since fresh local ops need to land on _baseState.
       expect(callback).toHaveBeenCalledTimes(2);
       expect(doc.state.count).toBe(7);
+    });
+
+    it('detects pure echo even when the server reissues the change id (LWW algorithm behavior)', () => {
+      // Regression: LWWAlgorithm.getPendingToSend creates a NEW Change id when packaging
+      // pending ops to send to the server. The server then commits and echoes that fresh
+      // id back. Echo detection must therefore key on op CONTENT, not change id, otherwise
+      // the recompute fires and the user's input "jumps" mid-typing.
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
+      doc.change((patch, path) => patch.replace(path.text, 'world'));
+      const localOps = (doc.onChange.emit as any).mock.calls[0][0];
+
+      // Local-confirmation uses the original Change id created by LWWAlgorithm.handleDocChange.
+      doc.applyChanges([createChange('local-original-id', 1, localOps, false)], true);
+      expect(callback).toHaveBeenCalledTimes(1);
+
+      // Server echoes back with a DIFFERENT id (LWWAlgorithm.getPendingToSend reissued it),
+      // but the ops content is preserved end-to-end.
+      const stateBefore = doc.state;
+      doc.applyChanges([createChange('reissued-server-id', 1, localOps, true)], false);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(doc.state).toBe(stateBefore);
+      expect(doc.committedRev).toBe(1);
+      expect(doc.hasPending).toBe(false);
     });
 
     it('handles multi-change pure-echo batches without notifying subscribers', () => {

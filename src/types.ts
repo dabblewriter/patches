@@ -197,8 +197,6 @@ export interface VersionMetadata {
   origin: 'main' | 'offline-branch' | 'branch';
   /** Was this version created while offline? Tracks creation context separately from timeline position. */
   isOffline?: boolean;
-  /** User-defined name if origin is 'branch'. */
-  branchName?: string;
   /** Whether this version was auto-saved immediately before restoring a previous version. */
   beforeRestored?: boolean;
   /** Unix timestamp in milliseconds of version start. */
@@ -219,7 +217,7 @@ type Disallowed<T, K extends keyof T> = Pick<T, Exclude<keyof T, K>> & {
 
 export type EditableVersionMetadata = Disallowed<
   VersionMetadata,
-  'id' | 'parentId' | 'groupId' | 'origin' | 'branchName' | 'startedAt' | 'endedAt' | 'endRev' | 'startRev'
+  'id' | 'parentId' | 'groupId' | 'origin' | 'startedAt' | 'endedAt' | 'endRev' | 'startRev'
 >;
 
 /**

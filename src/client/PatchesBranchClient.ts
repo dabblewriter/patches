@@ -1,5 +1,5 @@
 import { store, type Store } from 'easy-signal';
-import { breakChanges, type SizeCalculator } from '../algorithms/ot/shared/changeBatching.js';
+import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import type { BranchAPI } from '../net/protocol/types.js';
 import type { Branch, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
@@ -12,10 +12,6 @@ const OFFLINE_MERGE_ERROR =
   'Branch merging requires a server connection. Use a BranchAPI or call the server merge endpoint directly.';
 
 export interface PatchesBranchClientOptions {
-  /** Maximum size in bytes for a single change in storage. Used to break large initial changes. */
-  maxStorageBytes?: number;
-  /** Custom size calculator for change size measurement. */
-  sizeCalculator?: SizeCalculator;
   /** Algorithm to use for the branch document (defaults to the Patches instance default). */
   algorithm?: AlgorithmName;
 }
@@ -171,8 +167,9 @@ export class PatchesBranchClient {
 
     // Break the change into multiple if it exceeds the storage size limit
     let initChanges = [rootReplace];
-    if (this.options?.maxStorageBytes) {
-      initChanges = breakChanges(initChanges, this.options.maxStorageBytes, this.options.sizeCalculator);
+    const options = this.patches.docOptions;
+    if (options.maxStorageBytes) {
+      initChanges = breakChanges(initChanges, options.maxStorageBytes, options.sizeCalculator);
     }
 
     // contentStartRev is the first revision after all init changes

@@ -5,7 +5,6 @@ const nonModifiableVersionFields = new Set([
   'parentId',
   'groupId',
   'origin',
-  'branchName',
   'startedAt',
   'endedAt',
   'rev',

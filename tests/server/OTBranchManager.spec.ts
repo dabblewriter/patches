@@ -126,7 +126,7 @@ describe('OTBranchManager', () => {
       endRev: 5,
       startRev: 5,
       groupId: 'generated-id',
-      branchName: 'Test Branch',
+      name: 'Test Branch',
     };
 
     // Source document version used by getStateAtRevision
@@ -179,7 +179,6 @@ describe('OTBranchManager', () => {
         startRev: 5,
         name: 'Test Branch',
         groupId: 'generated-id',
-        branchName: 'Test Branch',
       });
       expect(mockStore.saveChanges).toHaveBeenCalledWith('generated-id', expect.any(Array));
       expect(mockStore.createVersion).toHaveBeenCalledWith('generated-id', mockVersion, expect.any(Array));
@@ -389,7 +388,6 @@ describe('OTBranchManager', () => {
         parentId: undefined,
         groupId: 'branch1',
         origin: 'main',
-        branchName: 'Feature Branch',
         startedAt: Date.now(),
         endedAt: Date.now(),
         endRev: 2,
@@ -536,7 +534,7 @@ describe('OTBranchManager', () => {
           parentId: undefined,
           groupId: 'branch1',
           origin: 'main',
-          branchName: 'Feature Branch',
+          name: 'Feature Branch',
           startedAt: Date.now(),
           endedAt: Date.now(),
           endRev: 1,
@@ -547,7 +545,7 @@ describe('OTBranchManager', () => {
           parentId: undefined,
           groupId: 'branch1',
           origin: 'main',
-          branchName: 'Feature Branch',
+          name: 'Feature Branch',
           startedAt: Date.now(),
           endedAt: Date.now(),
           endRev: 2,
@@ -586,17 +584,20 @@ describe('OTBranchManager', () => {
           origin: 'branch',
           startRev: 5,
           groupId: 'branch1',
-          branchName: 'Feature Branch',
-          parentId: undefined,
+          name: 'Feature Branch',
         })
       );
+      // First iteration has no prior version — parentId key must be omitted,
+      // not set to undefined (Firestore rejects undefined values).
+      const firstCallArg = vi.mocked(createVersionMetadata).mock.calls[0][0];
+      expect(Object.hasOwn(firstCallArg, 'parentId')).toBe(false);
       expect(createVersionMetadata).toHaveBeenNthCalledWith(
         2,
         expect.objectContaining({
           origin: 'branch',
           startRev: 5,
           groupId: 'branch1',
-          branchName: 'Feature Branch',
+          name: 'Feature Branch',
           parentId: 'new-version1',
         })
       );

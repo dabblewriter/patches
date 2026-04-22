@@ -68,9 +68,26 @@ export class LWWAlgorithm implements ClientAlgorithm {
     const committedRev = doc?.committedRev ?? (await this.store.getCommittedRev(docId));
     const changes = [createChange(committedRev, committedRev + 1, timedOps, metadata)];
 
-    // Apply changes to doc if provided (local change always means pending)
+    // Apply changes to doc if provided (local change always means pending).
+    //
+    // Echo-tracking override: the doc tracks `opsToSave` (the consolidated ops
+    // that will actually be sent to the server) instead of `timedOps` (the
+    // user-intent ops carried in the Change). Without the override, combinable
+    // ops like `@inc` would never echo-match — `timedOps` carries `@inc 1` but
+    // the server echoes back `@inc 2` after consolidation. Using `opsToSave`
+    // lets the doc match the server echo exactly.
+    //
+    // Retire prior pending op keys at paths now overwritten by `opsToSave`,
+    // preventing orphan-key accumulation during fast typing.
     if (doc) {
-      (doc as LWWDoc<T>).applyChanges(changes, true);
+      const existingByPath = new Map(existingOps.map(op => [op.path, op]));
+      const retiredInFlightOps = opsToSave
+        .map(op => existingByPath.get(op.path))
+        .filter((op): op is JSONPatchOp => op !== undefined);
+      (doc as LWWDoc<T>).applyChanges(changes, true, {
+        inFlightOpsOverride: opsToSave,
+        retiredInFlightOps,
+      });
     }
 
     return changes;

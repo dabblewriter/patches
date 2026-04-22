@@ -166,8 +166,12 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // skip _recomputeState() to avoid emitting a redundant store update with a fresh object
       // identity. UI subscribers (Vue shallowRef, Svelte stores, etc.) see no spurious update
       // mid-typing.
+      //
+      // The `serverChanges.length > 0` guard is currently redundant (the outer branch only
+      // runs when `changes[0].committedAt > 0`, which guarantees at least one server change),
+      // but defends against `[].every() === true` if a future refactor weakens the invariant.
       const priorPendingIds = new Set(this._pendingChanges.map(c => c.id));
-      const isPureEcho = serverChanges.every(c => priorPendingIds.has(c.id));
+      const isPureEcho = serverChanges.length > 0 && serverChanges.every(c => priorPendingIds.has(c.id));
 
       this._committedState = applyChangesToState(this._committedState, serverChanges);
       this._committedRev = serverChanges[serverChanges.length - 1].rev;

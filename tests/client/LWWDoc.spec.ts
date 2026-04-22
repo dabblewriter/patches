@@ -408,6 +408,102 @@ describe('LWWDoc', () => {
       expect(doc.state.count).toBe(7);
     });
 
+    it('detects pure echo for combinable ops via inFlightOpsOverride (consolidated ops)', () => {
+      // Regression: LWWAlgorithm consolidates same-path combinable ops (`@inc`, `@bit`,
+      // `@max`, `@min`) in its store before sending. The local-confirm Change carries the
+      // user's raw intent op (e.g. `@inc 1`), but the server echoes back the consolidated
+      // op (e.g. `@inc 2` after two increments). Without the override, _inFlightOpKeys
+      // would track `@inc 1` content and miss the `@inc 2` echo → spurious recompute.
+      //
+      // The algorithm passes `opsToSave` (consolidated ops) as `inFlightOpsOverride`
+      // to make the in-flight tracker match what actually ships to the server.
+      const counterDoc = new LWWDoc<any>('counter', createSnapshot({ count: 0 }, 0));
+      const callback = vi.fn();
+      counterDoc.subscribe(callback, false);
+
+      // First @inc 1: store becomes [@inc 1 @ts1000], local-confirm carries [@inc 1 @ts1000].
+      // Override matches the c.ops here so behaviour is identical to the non-override path.
+      const inc1 = { op: '@inc', path: '/count', value: 1, ts: 1000 };
+      counterDoc.applyChanges([createChange('local-1', 1, [inc1], false)], true, {
+        inFlightOpsOverride: [inc1],
+        retiredInFlightOps: [],
+      });
+
+      // Second @inc 1: algorithm consolidates with existing → opsToSave = [@inc 2 @ts2000].
+      // Local-confirm Change still carries the user-intent [@inc 1 @ts2000] (not the consolidated op).
+      // Override tells the doc to track `@inc 2` and retire the orphan `@inc 1 @ts1000` key.
+      const inc1Again = { op: '@inc', path: '/count', value: 1, ts: 2000 };
+      const inc2Consolidated = { op: '@inc', path: '/count', value: 2, ts: 2000 };
+      counterDoc.applyChanges([createChange('local-2', 1, [inc1Again], false)], true, {
+        inFlightOpsOverride: [inc2Consolidated],
+        retiredInFlightOps: [inc1],
+      });
+
+      const callbackCallsBeforeEcho = callback.mock.calls.length;
+
+      // Server commits and echoes back the CONSOLIDATED op with a fresh change id.
+      // Echo detection should match on op content (`@inc 2 @ts2000`) → skip recompute.
+      counterDoc.applyChanges([createChange('reissued-server-id', 1, [inc2Consolidated], true)], false);
+
+      expect(callback).toHaveBeenCalledTimes(callbackCallsBeforeEcho);
+      expect(counterDoc.committedRev).toBe(1);
+      expect(counterDoc.hasPending).toBe(false);
+    });
+
+    it('retiredInFlightOps prunes orphan keys to bound memory under fast typing', () => {
+      // Every keystroke into the same field generates a new pending op that supersedes
+      // the previous one in the algorithm's store. Without retirement, _inFlightOpKeys
+      // would accumulate one orphan per keystroke since the algorithm only ever ships
+      // (and the server only ever echoes) the latest consolidated op.
+      const titleDoc = new LWWDoc<any>('t', createSnapshot({ title: '' }, 0));
+
+      const ops = [
+        { op: 'replace', path: '/title', value: 'T', ts: 1 },
+        { op: 'replace', path: '/title', value: 'Te', ts: 2 },
+        { op: 'replace', path: '/title', value: 'Tes', ts: 3 },
+        { op: 'replace', path: '/title', value: 'Test', ts: 4 },
+      ];
+
+      let prior: any = null;
+      for (const op of ops) {
+        titleDoc.applyChanges([createChange(`local-${op.value}`, 1, [op], false)], true, {
+          inFlightOpsOverride: [op],
+          retiredInFlightOps: prior ? [prior] : [],
+        });
+        prior = op;
+      }
+
+      // Only the most recent op key should remain — orphans from intermediate keystrokes are pruned.
+      // We assert this indirectly: the final echo of just the last op should match (echo skip works).
+      const callback = vi.fn();
+      titleDoc.subscribe(callback, false);
+      titleDoc.applyChanges([createChange('server-echo', 1, [ops[3]], true)], false);
+
+      expect(callback).not.toHaveBeenCalled();
+      expect(titleDoc.committedRev).toBe(1);
+      expect(titleDoc.hasPending).toBe(false);
+
+      // And: a hypothetical echo of an orphan-aged op (which should NOT be in the set
+      // anymore because retirement pruned it) would fall through to recompute, proving
+      // the orphan key is gone. We don't actually receive such an echo in production —
+      // the server only ever sees the latest consolidated op — but this confirms the
+      // retirement actually mutated the set.
+      const titleDoc2 = new LWWDoc<any>('t2', createSnapshot({ title: '' }, 0));
+      titleDoc2.applyChanges([createChange('local-T', 1, [ops[0]], false)], true, {
+        inFlightOpsOverride: [ops[0]],
+        retiredInFlightOps: [],
+      });
+      titleDoc2.applyChanges([createChange('local-Te', 1, [ops[1]], false)], true, {
+        inFlightOpsOverride: [ops[1]],
+        retiredInFlightOps: [ops[0]],
+      });
+      const cb2 = vi.fn();
+      titleDoc2.subscribe(cb2, false);
+      // Echo of the now-retired ops[0] should NOT be detected as a pure echo.
+      titleDoc2.applyChanges([createChange('foreign', 1, [ops[0]], true)], false);
+      expect(cb2).toHaveBeenCalled();
+    });
+
     it('detects pure echo even when the server reissues the change id (LWW algorithm behavior)', () => {
       // Regression: LWWAlgorithm.getPendingToSend creates a NEW Change id when packaging
       // pending ops to send to the server. The server then commits and echoes that fresh

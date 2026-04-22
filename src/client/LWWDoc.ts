@@ -144,8 +144,28 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
    * @param changes Array of changes to apply
    * @param hasPending If provided, overrides the inferred pending state.
    *   Used by LWWAlgorithm which knows the true pending state from the store.
+   * @param options Algorithm-only escape hatches for in-flight echo tracking:
+   *   - `inFlightOpsOverride`: tracks these ops in `_inFlightOpKeys` (and uses
+   *     them for echo detection) on local-confirm changes, INSTEAD of `c.ops`.
+   *     Required for combinable ops (`@inc`/`@bit`/`@max`/`@min`) where the
+   *     local-confirm Change carries the user's raw intent op but the algorithm
+   *     ships a consolidated op to the server. Without the override, the server
+   *     echo of the consolidated op wouldn't match any tracked key and we'd
+   *     emit a spurious recompute.
+   *   - `retiredInFlightOps`: drops these keys from `_inFlightOpKeys` on the
+   *     same call. Used by the algorithm to prune prior pending-op keys at
+   *     paths that are about to be overwritten by `inFlightOpsOverride`,
+   *     preventing unbounded orphan accumulation during fast typing into the
+   *     same field.
+   *
+   *   External callers (Worker-Tab sync, tests) should leave `options` undefined
+   *   and the legacy `c.ops`-based tracker will run.
    */
-  override applyChanges(changes: Change[], hasPending?: boolean): void {
+  override applyChanges(
+    changes: Change[],
+    hasPending?: boolean,
+    options?: { inFlightOpsOverride?: JSONPatchOp[]; retiredInFlightOps?: JSONPatchOp[] }
+  ): void {
     if (changes.length === 0) return;
 
     let lastCommittedRev = this._committedRev;
@@ -177,12 +197,18 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
       changes.every(c => c.ops.every(op => this._inFlightOpKeys.has(opKey(op))));
 
     // Maintain the in-flight tracker uniformly: add new local op keys, retire any echoed
-    // server op keys. This is independent of which branch we take below.
+    // server op keys. The algorithm may override which ops to track on the local-confirm
+    // path (see options docstring) — required for combinable ops to be echo-detectable
+    // and to prune orphan keys at consolidated paths.
+    if (options?.retiredInFlightOps) {
+      for (const op of options.retiredInFlightOps) this._inFlightOpKeys.delete(opKey(op));
+    }
     for (const c of changes) {
       if (c.committedAt > 0) {
         for (const op of c.ops) this._inFlightOpKeys.delete(opKey(op));
       } else {
-        for (const op of c.ops) this._inFlightOpKeys.add(opKey(op));
+        const opsToTrack = options?.inFlightOpsOverride ?? c.ops;
+        for (const op of opsToTrack) this._inFlightOpKeys.add(opKey(op));
       }
     }
 

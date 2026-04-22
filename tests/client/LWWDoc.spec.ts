@@ -204,6 +204,41 @@ describe('LWWDoc', () => {
 
       expect(callback).toHaveBeenCalled();
     });
+
+    it('preserves outstanding optimistic ops when importing a fresher snapshot (no text-jump)', () => {
+      // Simulate user mid-typing: change() pushes ops onto _optimisticOps, no local-confirmation yet.
+      doc.change((patch, path) => patch.replace(path.text, 'world'));
+      doc.change((patch, path) => patch.replace(path.count, 42));
+      expect(doc.state).toEqual({ text: 'world', count: 42 });
+
+      // Server pushes a fresher snapshot of an unrelated field — must NOT regress in-flight typing.
+      doc.import(createSnapshot({ text: 'hello', count: 0, extra: 'remote' }, 5));
+
+      expect(doc.committedRev).toBe(5);
+      expect(doc.state).toEqual({ text: 'world', count: 42, extra: 'remote' });
+    });
+
+    it('drops optimistic ops that no longer apply cleanly to the imported state', () => {
+      // Seed an optimistic op that removes `text`. The op is recorded in _optimisticOps
+      // and applied to the optimistic state.
+      doc.change((patch, path) => patch.remove(path.text));
+      expect(doc.state).toEqual({ count: 0 });
+
+      // Imported snapshot has no `text` either — replaying the remove against a
+      // missing path throws under strict mode, so the op is dropped.
+      doc.import(createSnapshot({ count: 99 }, 5));
+
+      expect(doc.committedRev).toBe(5);
+      expect(doc.state).toEqual({ count: 99 });
+    });
+
+    it('ignores stale snapshots whose rev is older than current committedRev', () => {
+      const fresh = new LWWDoc('test-doc', createSnapshot({ text: 'fresh' }, 10));
+      fresh.import(createSnapshot({ text: 'stale' }, 3));
+
+      expect(fresh.committedRev).toBe(10);
+      expect(fresh.state).toEqual({ text: 'fresh' });
+    });
   });
 
   describe('applyChanges', () => {
@@ -290,6 +325,230 @@ describe('LWWDoc', () => {
       doc.applyChanges([]);
 
       expect(callback).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('applyChanges — server echo of own pending changes', () => {
+    it('does NOT notify subscribers when a server-committed change is a pure echo of a local change', () => {
+      // 1. User makes a local change → applies optimistically + emits.
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
+      doc.change((patch, path) => {
+        patch.replace(path.text, 'world');
+      });
+      expect(callback).toHaveBeenCalledTimes(1);
+
+      // 2. Local-confirmation path (committedAt === 0) — no extra emit.
+      const localOps = (doc.onChange.emit as any).mock.calls[0][0];
+      const localChange = createChange('echo-id', 1, localOps, false);
+      doc.applyChanges([localChange], true);
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(doc.hasPending).toBe(true);
+
+      // 3. Server commits and broadcasts back the same change id (pure echo). Skip the spurious emit.
+      const echoed = createChange('echo-id', 1, localOps, true);
+      const stateBefore = doc.state;
+      doc.applyChanges([echoed], false);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(doc.state).toBe(stateBefore);
+      expect(doc.committedRev).toBe(1);
+      expect(doc.hasPending).toBe(false);
+      expect(doc.state).toEqual({ text: 'world', count: 0 });
+    });
+
+    it('DOES notify subscribers for foreign server changes (no matching pending id)', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
+      const foreign = createChange('foreign', 1, [{ op: 'replace', path: '/text', value: 'remote' }], true);
+      doc.applyChanges([foreign]);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(doc.state.text).toBe('remote');
+    });
+
+    it('DOES notify when the server batch mixes echoes with foreign ops', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
+      // Local change applied + locally confirmed
+      doc.change((patch, path) => patch.replace(path.text, 'mine'));
+      const localOps = (doc.onChange.emit as any).mock.calls[0][0];
+      doc.applyChanges([createChange('mine', 1, localOps, false)], true);
+      expect(callback).toHaveBeenCalledTimes(1);
+
+      // Server batch: our echo + a foreign change
+      const echoed = createChange('mine', 1, localOps, true);
+      const foreign = createChange('foreign', 2, [{ op: 'replace', path: '/count', value: 9 }], true);
+      doc.applyChanges([echoed, foreign], false);
+
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(doc.state).toEqual({ text: 'mine', count: 9 });
+    });
+
+    it('does not skip when an echo arrives in a batch that also contains a fresh local change', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
+      // Track a local change first
+      doc.change((patch, path) => patch.replace(path.text, 'a'));
+      const opsA = (doc.onChange.emit as any).mock.calls[0][0];
+      doc.applyChanges([createChange('a', 1, opsA, false)], true);
+      expect(callback).toHaveBeenCalledTimes(1);
+
+      // Mixed batch: echo of 'a' + a brand-new local change 'b' arriving via worker-tab sync
+      const echoOfA = createChange('a', 1, opsA, true);
+      const freshLocal = createChange('b', 2, [{ op: 'replace', path: '/count', value: 7 }], false);
+      doc.applyChanges([echoOfA, freshLocal], true);
+
+      // Mixed batch should still recompute since fresh local ops need to land on _baseState.
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(doc.state.count).toBe(7);
+    });
+
+    it('detects pure echo for combinable ops via inFlightOpsOverride (consolidated ops)', () => {
+      // Regression: LWWAlgorithm consolidates same-path combinable ops (`@inc`, `@bit`,
+      // `@max`, `@min`) in its store before sending. The local-confirm Change carries the
+      // user's raw intent op (e.g. `@inc 1`), but the server echoes back the consolidated
+      // op (e.g. `@inc 2` after two increments). Without the override, _inFlightOpKeys
+      // would track `@inc 1` content and miss the `@inc 2` echo → spurious recompute.
+      //
+      // The algorithm passes `opsToSave` (consolidated ops) as `inFlightOpsOverride`
+      // to make the in-flight tracker match what actually ships to the server.
+      const counterDoc = new LWWDoc<any>('counter', createSnapshot({ count: 0 }, 0));
+      const callback = vi.fn();
+      counterDoc.subscribe(callback, false);
+
+      // First @inc 1: store becomes [@inc 1 @ts1000], local-confirm carries [@inc 1 @ts1000].
+      // Override matches the c.ops here so behaviour is identical to the non-override path.
+      const inc1 = { op: '@inc', path: '/count', value: 1, ts: 1000 };
+      counterDoc.applyChanges([createChange('local-1', 1, [inc1], false)], true, {
+        inFlightOpsOverride: [inc1],
+        retiredInFlightOps: [],
+      });
+
+      // Second @inc 1: algorithm consolidates with existing → opsToSave = [@inc 2 @ts2000].
+      // Local-confirm Change still carries the user-intent [@inc 1 @ts2000] (not the consolidated op).
+      // Override tells the doc to track `@inc 2` and retire the orphan `@inc 1 @ts1000` key.
+      const inc1Again = { op: '@inc', path: '/count', value: 1, ts: 2000 };
+      const inc2Consolidated = { op: '@inc', path: '/count', value: 2, ts: 2000 };
+      counterDoc.applyChanges([createChange('local-2', 1, [inc1Again], false)], true, {
+        inFlightOpsOverride: [inc2Consolidated],
+        retiredInFlightOps: [inc1],
+      });
+
+      const callbackCallsBeforeEcho = callback.mock.calls.length;
+
+      // Server commits and echoes back the CONSOLIDATED op with a fresh change id.
+      // Echo detection should match on op content (`@inc 2 @ts2000`) → skip recompute.
+      counterDoc.applyChanges([createChange('reissued-server-id', 1, [inc2Consolidated], true)], false);
+
+      expect(callback).toHaveBeenCalledTimes(callbackCallsBeforeEcho);
+      expect(counterDoc.committedRev).toBe(1);
+      expect(counterDoc.hasPending).toBe(false);
+    });
+
+    it('retiredInFlightOps prunes orphan keys to bound memory under fast typing', () => {
+      // Every keystroke into the same field generates a new pending op that supersedes
+      // the previous one in the algorithm's store. Without retirement, _inFlightOpKeys
+      // would accumulate one orphan per keystroke since the algorithm only ever ships
+      // (and the server only ever echoes) the latest consolidated op.
+      const titleDoc = new LWWDoc<any>('t', createSnapshot({ title: '' }, 0));
+
+      const ops = [
+        { op: 'replace', path: '/title', value: 'T', ts: 1 },
+        { op: 'replace', path: '/title', value: 'Te', ts: 2 },
+        { op: 'replace', path: '/title', value: 'Tes', ts: 3 },
+        { op: 'replace', path: '/title', value: 'Test', ts: 4 },
+      ];
+
+      let prior: any = null;
+      for (const op of ops) {
+        titleDoc.applyChanges([createChange(`local-${op.value}`, 1, [op], false)], true, {
+          inFlightOpsOverride: [op],
+          retiredInFlightOps: prior ? [prior] : [],
+        });
+        prior = op;
+      }
+
+      // Only the most recent op key should remain — orphans from intermediate keystrokes are pruned.
+      // We assert this indirectly: the final echo of just the last op should match (echo skip works).
+      const callback = vi.fn();
+      titleDoc.subscribe(callback, false);
+      titleDoc.applyChanges([createChange('server-echo', 1, [ops[3]], true)], false);
+
+      expect(callback).not.toHaveBeenCalled();
+      expect(titleDoc.committedRev).toBe(1);
+      expect(titleDoc.hasPending).toBe(false);
+
+      // And: a hypothetical echo of an orphan-aged op (which should NOT be in the set
+      // anymore because retirement pruned it) would fall through to recompute, proving
+      // the orphan key is gone. We don't actually receive such an echo in production —
+      // the server only ever sees the latest consolidated op — but this confirms the
+      // retirement actually mutated the set.
+      const titleDoc2 = new LWWDoc<any>('t2', createSnapshot({ title: '' }, 0));
+      titleDoc2.applyChanges([createChange('local-T', 1, [ops[0]], false)], true, {
+        inFlightOpsOverride: [ops[0]],
+        retiredInFlightOps: [],
+      });
+      titleDoc2.applyChanges([createChange('local-Te', 1, [ops[1]], false)], true, {
+        inFlightOpsOverride: [ops[1]],
+        retiredInFlightOps: [ops[0]],
+      });
+      const cb2 = vi.fn();
+      titleDoc2.subscribe(cb2, false);
+      // Echo of the now-retired ops[0] should NOT be detected as a pure echo.
+      titleDoc2.applyChanges([createChange('foreign', 1, [ops[0]], true)], false);
+      expect(cb2).toHaveBeenCalled();
+    });
+
+    it('detects pure echo even when the server reissues the change id (LWW algorithm behavior)', () => {
+      // Regression: LWWAlgorithm.getPendingToSend creates a NEW Change id when packaging
+      // pending ops to send to the server. The server then commits and echoes that fresh
+      // id back. Echo detection must therefore key on op CONTENT, not change id, otherwise
+      // the recompute fires and the user's input "jumps" mid-typing.
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
+      doc.change((patch, path) => patch.replace(path.text, 'world'));
+      const localOps = (doc.onChange.emit as any).mock.calls[0][0];
+
+      // Local-confirmation uses the original Change id created by LWWAlgorithm.handleDocChange.
+      doc.applyChanges([createChange('local-original-id', 1, localOps, false)], true);
+      expect(callback).toHaveBeenCalledTimes(1);
+
+      // Server echoes back with a DIFFERENT id (LWWAlgorithm.getPendingToSend reissued it),
+      // but the ops content is preserved end-to-end.
+      const stateBefore = doc.state;
+      doc.applyChanges([createChange('reissued-server-id', 1, localOps, true)], false);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(doc.state).toBe(stateBefore);
+      expect(doc.committedRev).toBe(1);
+      expect(doc.hasPending).toBe(false);
+    });
+
+    it('handles multi-change pure-echo batches without notifying subscribers', () => {
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
+      doc.change((patch, path) => patch.replace(path.text, 'a'));
+      const opsA = (doc.onChange.emit as any).mock.calls[0][0];
+      doc.applyChanges([createChange('a', 1, opsA, false)], true);
+
+      doc.change((patch, path) => patch.replace(path.count, 1));
+      const opsB = (doc.onChange.emit as any).mock.calls[1][0];
+      doc.applyChanges([createChange('b', 2, opsB, false)], true);
+
+      expect(callback).toHaveBeenCalledTimes(2);
+
+      doc.applyChanges([createChange('a', 1, opsA, true), createChange('b', 2, opsB, true)], false);
+
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(doc.committedRev).toBe(2);
+      expect(doc.hasPending).toBe(false);
     });
   });
 

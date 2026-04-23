@@ -3,6 +3,7 @@ import { runWithObject } from './state.js';
 import type { ApplyJSONPatchOptions, JSONPatchOp, JSONPatchOpHandlerMap } from './types.js';
 import { exit } from './utils/exit.js';
 import { getType } from './utils/getType.js';
+import { isSoftOp, pathExistsInState } from './utils/softWrites.js';
 
 /**
  * Applies a sequence of JSON patch operations to an object.
@@ -30,6 +31,12 @@ export function applyPatch(
   return runWithObject(object, types, patches.length > 1, state => {
     for (let i = 0, imax = patches.length; i < imax; i++) {
       const patch = patches[i];
+      // Soft ops (explicit `soft: true`, plus the empty-container `add` convention)
+      // must not overwrite existing data. Check the live state — earlier ops in
+      // this same patch may have just created the path — and skip when present.
+      if (isSoftOp(patch) && pathExistsInState(state.root[''], patch.path)) {
+        continue;
+      }
       const handler = getType(state, patch)?.apply;
       const error = handler ? handler(state, '' + patch.path, patch.from || patch.value) : `[op:${patch.op}] unknown`;
       if (error) {

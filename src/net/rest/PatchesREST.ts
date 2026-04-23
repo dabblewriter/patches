@@ -20,6 +20,8 @@ import { onlineState } from '../websocket/onlineState.js';
 import { normalizeIds } from './utils.js';
 
 const SESSION_STORAGE_KEY = 'patches-clientId';
+const REQUEST_TIMEOUT_MS = 30_000;
+const CONNECT_TIMEOUT_MS = 30_000;
 
 /**
  * Options for creating a PatchesREST instance.
@@ -111,10 +113,24 @@ export class PatchesREST implements PatchesConnection {
       this.eventSource = es;
       let settled = false;
 
+      // Hard timeout for the initial handshake. EventSource has no built-in
+      // connect timeout: a reachable-but-unresponsive server can leave the
+      // promise pending until the browser's TCP timeout (~minutes). Fail fast
+      // so callers can fall back to the offline path.
+      const timer = globalThis.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        es.close();
+        if (this.eventSource === es) this.eventSource = null;
+        this._setState('error');
+        reject(new Error('SSE connection timed out'));
+      }, CONNECT_TIMEOUT_MS);
+
       es.onopen = () => {
         this._setState('connected');
         if (!settled) {
           settled = true;
+          globalThis.clearTimeout(timer);
           resolve();
         }
       };
@@ -123,6 +139,7 @@ export class PatchesREST implements PatchesConnection {
         if (!settled) {
           // First error during initial connection — reject the promise
           settled = true;
+          globalThis.clearTimeout(timer);
           this._setState('error');
           reject(new Error('SSE connection failed'));
           return;
@@ -308,6 +325,7 @@ export class PatchesREST implements PatchesConnection {
         ...headers,
       },
       body: hasBody ? JSON.stringify(init!.body) : undefined,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     if (!response.ok) {

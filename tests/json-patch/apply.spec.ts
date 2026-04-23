@@ -265,4 +265,55 @@ describe('applyPatch', () => {
       });
     });
   });
+
+  describe('soft ops', () => {
+    it('skips explicit soft add when path already exists', () => {
+      const result = applyPatch({ trash: { orphans: { name: 'Trash', projects: { A: 'a0' } } } }, [
+        { op: 'add', path: '/trash/orphans', value: { name: 'Trash', projects: {} }, soft: true },
+      ]);
+      expect(result).toEqual({ trash: { orphans: { name: 'Trash', projects: { A: 'a0' } } } });
+    });
+
+    it('skips explicit soft replace when path already exists', () => {
+      const result = applyPatch({ name: 'Alice' }, [{ op: 'replace', path: '/name', value: 'Bob', soft: true }]);
+      expect(result).toEqual({ name: 'Alice' });
+    });
+
+    it('applies soft add when path does not exist', () => {
+      const result = applyPatch({}, [
+        { op: 'add', path: '/trash/orphans', value: { name: 'Trash', projects: {} }, soft: true },
+      ]);
+      expect(result).toEqual({ trash: { orphans: { name: 'Trash', projects: {} } } });
+    });
+
+    it('skips empty-container add when target already exists (implicit soft)', () => {
+      const result = applyPatch({ users: { '1': 'Alice' } }, [{ op: 'add', path: '/users', value: {} }]);
+      expect(result).toEqual({ users: { '1': 'Alice' } });
+    });
+
+    it('preserves earlier sibling writes when a soft add follows in the same patch', () => {
+      // Regression: trashProject() in dabble-writer applied
+      //   1. add /trash/orphans = { projects: {} } (soft)
+      //   2. add /trash/orphans/projects/B = order
+      // against state where /trash/orphans/projects already held A. Without the
+      // soft-skip the first op clobbered A; with it, both A and B coexist.
+      const result = applyPatch({ trash: { orphans: { name: 'Trash', projects: { A: 'a0' } } } }, [
+        { op: 'add', path: '/trash/orphans', value: { name: 'Trash', projects: {} }, soft: true },
+        { op: 'add', path: '/trash/orphans/projects/B', value: 'a1' },
+      ]);
+      expect(result).toEqual({
+        trash: { orphans: { name: 'Trash', projects: { A: 'a0', B: 'a1' } } },
+      });
+    });
+
+    it('honours soft after a sibling op in the same patch creates the path', () => {
+      // The first op creates /a, the second is a soft add at /a — must be a no-op.
+      const result = applyPatch({}, [
+        { op: 'add', path: '/a', value: { initial: true } },
+        { op: 'add', path: '/a', value: {}, soft: true },
+        { op: 'add', path: '/a/extra', value: 1 },
+      ]);
+      expect(result).toEqual({ a: { initial: true, extra: 1 } });
+    });
+  });
 });

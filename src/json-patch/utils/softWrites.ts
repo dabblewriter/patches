@@ -31,21 +31,27 @@ export function updateSoftWrites(overPath: string, ops: JSONPatchOp[], originalV
 }
 
 /**
+ * Returns true when an op carries soft semantics — either an explicit
+ * `soft: true` flag, or an empty-container `add` (treated as initialization
+ * by convention). Mirrors the check used by the LWW consolidation algorithm.
+ */
+export function isSoftOp(op: JSONPatchOp): boolean {
+  return op.soft === true || (op.op === 'add' && isEmptyContainer(op.value));
+}
+
+/**
  * Filters out soft writes that would overwrite existing data in state.
  * Used when baseRev: 0 is jumped forward, bypassing normal transformation.
  */
 export function filterSoftWritesAgainstState(ops: JSONPatchOp[], state: any): JSONPatchOp[] {
   return ops.filter(op => {
-    // Check if this is a soft write (explicit soft flag or empty container add)
-    const isSoft = op.soft || (op.op === 'add' && isEmptyContainer(op.value));
-    if (!isSoft) return true;
-
-    // Check if path already exists in state - keep op if path doesn't exist
+    if (!isSoftOp(op)) return true;
+    // Keep op only when path doesn't already exist in state
     return !pathExistsInState(state, op.path);
   });
 }
 
-function pathExistsInState(state: any, path: string): boolean {
+export function pathExistsInState(state: any, path: string): boolean {
   if (!path) return state !== undefined;
   const keys = toKeys(path);
   let current = state;

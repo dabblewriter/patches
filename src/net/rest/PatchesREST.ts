@@ -18,6 +18,7 @@ import type { PatchesConnection } from '../PatchesConnection.js';
 import type { ConnectionState } from '../protocol/types.js';
 import { onlineState } from '../websocket/onlineState.js';
 import { normalizeIds } from './utils.js';
+import type { Invite } from '../invite.js';
 
 const SESSION_STORAGE_KEY = 'patches-clientId';
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -295,6 +296,41 @@ export class PatchesREST implements PatchesConnection {
     await this._fetch(`/docs/${docId}/_branches/${encodeURIComponent(branchId)}/_merge`, { method: 'POST' });
   }
 
+  // --- Invites & membership (pup REST) ---
+
+  /**
+   * Fetch a single invite addressed to the authenticated user.
+   * `GET /docs/:docId/_invites/:inviteId`
+   */
+  async getInvite(docId: string, inviteId: string): Promise<Invite> {
+    return this._fetch(`/docs/${docId}/_invites/${encodeURIComponent(inviteId)}`);
+  }
+
+  /**
+   * Accept or decline an invite. Returns whether the server applied a role
+   * change (`ok` from `{ ok: boolean }`).
+   * `POST /docs/:docId/_invites/:inviteId` body `{ accept: boolean }`
+   */
+  async acceptInvite(docId: string, inviteId: string, accept: boolean): Promise<boolean> {
+    const result = await this._fetch<{ ok: boolean }>(`/docs/${docId}/_invites/${encodeURIComponent(inviteId)}`, {
+      method: 'POST',
+      body: { accept },
+    });
+    return Boolean(result?.ok);
+  }
+
+  /**
+   * Remove the authenticated user from `roles.users` (non-owners only).
+   * `POST /docs/:docId/_self/leave`
+   */
+  async leaveProject(docId: string): Promise<boolean> {
+    const result = await this._fetch<{ ok: boolean }>(`/docs/${docId}/_self/leave`, {
+      method: 'POST',
+      body: {},
+    });
+    return Boolean(result?.ok);
+  }
+
   // --- Private Helpers ---
 
   private _setState(state: ConnectionState) {
@@ -312,7 +348,7 @@ export class PatchesREST implements PatchesConnection {
     return staticHeaders;
   }
 
-  private async _fetch(path: string, init?: { method?: string; body?: any }): Promise<any> {
+  private async _fetch<T = any>(path: string, init?: { method?: string; body?: any }): Promise<T> {
     const headers = await this._getHeaders();
     const method = init?.method ?? 'GET';
     const hasBody = init?.body !== undefined;
@@ -343,10 +379,10 @@ export class PatchesREST implements PatchesConnection {
 
     // 204 No Content — nothing to parse
     if (response.status === 204) {
-      return undefined;
+      return undefined as T;
     }
 
-    return response.json();
+    return response.json() as Promise<T>;
   }
 
   private _ensureOnlineOfflineListeners(): void {

@@ -16,6 +16,15 @@ export const ErrorCodes = {
   DOC_DELETED: 410,
   /** Document not found (never existed). */
   DOC_NOT_FOUND: 404,
+  /**
+   * Caller is no longer authorized to read/write the document.
+   * Distinct from DOC_DELETED — the doc still exists, the caller just lost
+   * membership (revoked, or removed from a shared collection). The sync
+   * loop treats it like a soft delete: untrack, drop local cache, emit
+   * `onRemoteDocAccessRevoked` so the application can remove the doc from
+   * its own workspace state.
+   */
+  ACCESS_REVOKED: 403,
 } as const;
 
 /**

@@ -342,7 +342,7 @@ export class PatchesREST implements PatchesConnection {
       {
         method: 'POST',
         body: {},
-      },
+      }
     );
     return Boolean(result?.ok);
   }

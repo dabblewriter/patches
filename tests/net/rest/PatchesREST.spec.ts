@@ -578,5 +578,15 @@ describe('PatchesREST', () => {
       expect(init?.method).toBe('POST');
       expect(JSON.parse(init?.body as string)).toEqual({});
     });
+
+    it('should POST revokeMember', async () => {
+      globalThis.fetch = mockFetchResponse({ ok: true });
+      const applied = await rest.revokeMember('projects/p1', 'uid-target');
+      expect(applied).toBe(true);
+      const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/docs/projects/p1/_members/uid-target/revoke');
+      expect(init?.method).toBe('POST');
+      expect(JSON.parse(init?.body as string)).toEqual({});
+    });
   });
 });

@@ -331,6 +331,22 @@ export class PatchesREST implements PatchesConnection {
     return Boolean(result?.ok);
   }
 
+  /**
+   * Owner/co-author revokes another member. `targetUid` is removed from
+   * `roles.users` and tombstoned under `roles.formerUsers.revokedAt`.
+   * `POST /docs/:docId/_members/:uid/revoke`
+   */
+  async revokeMember(docId: string, targetUid: string): Promise<boolean> {
+    const result = await this._fetch<{ ok: boolean }>(
+      `/docs/${docId}/_members/${encodeURIComponent(targetUid)}/revoke`,
+      {
+        method: 'POST',
+        body: {},
+      },
+    );
+    return Boolean(result?.ok);
+  }
+
   // --- Private Helpers ---
 
   private _setState(state: ConnectionState) {

@@ -520,4 +520,73 @@ describe('PatchesREST', () => {
       expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch%2Fwith%2Fslashes');
     });
   });
+
+  describe('invites and leave', () => {
+    it('should GET invite', async () => {
+      const invite = {
+        from: 'owner-uid',
+        to: { role: 'write', email: 'x@y.com', name: 'X' },
+        createdAt: 1,
+        expiresAt: 2,
+      };
+      globalThis.fetch = mockFetchResponse(invite);
+      const out = await rest.getInvite('projects/p1', 'inv-1');
+      expect(out).toEqual(invite);
+      const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/docs/projects/p1/_invites/inv-1');
+      expect(init?.method).toBe('GET');
+    });
+
+    it('should encode inviteId in URL', async () => {
+      globalThis.fetch = mockFetchResponse({
+        from: 'a',
+        to: { role: 'view', email: 'e@e.com' },
+        createdAt: 1,
+        expiresAt: 2,
+      });
+      await rest.getInvite('projects/p1', 'inv/with/slash');
+      const [url] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/docs/projects/p1/_invites/inv%2Fwith%2Fslash');
+    });
+
+    it('should POST acceptInvite with body', async () => {
+      globalThis.fetch = mockFetchResponse({ ok: true });
+      const applied = await rest.acceptInvite('projects/p1', 'inv-1', true);
+      expect(applied).toBe(true);
+      const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/docs/projects/p1/_invites/inv-1');
+      expect(init?.method).toBe('POST');
+      expect(JSON.parse(init?.body as string)).toEqual({ accept: true });
+    });
+
+    it('should propagate StatusError on invite failure', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        json: () => Promise.resolve({ message: 'gone' }),
+      });
+      await expect(rest.getInvite('projects/p1', 'inv-1')).rejects.toMatchObject({ code: 404 });
+    });
+
+    it('should POST leaveProject', async () => {
+      globalThis.fetch = mockFetchResponse({ ok: true });
+      const applied = await rest.leaveProject('projects/p1');
+      expect(applied).toBe(true);
+      const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/docs/projects/p1/_self/leave');
+      expect(init?.method).toBe('POST');
+      expect(JSON.parse(init?.body as string)).toEqual({});
+    });
+
+    it('should POST revokeMember', async () => {
+      globalThis.fetch = mockFetchResponse({ ok: true });
+      const applied = await rest.revokeMember('projects/p1', 'uid-target');
+      expect(applied).toBe(true);
+      const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/docs/projects/p1/_members/uid-target/revoke');
+      expect(init?.method).toBe('POST');
+      expect(JSON.parse(init?.body as string)).toEqual({});
+    });
+  });
 });

@@ -256,11 +256,14 @@ websocketServer.on('connection', async ws => {
 
 #### SSE+REST flavor
 
-Three hook points in your existing routes — same `clientId` is used for both doc sync and signaling so peer addressing matches:
+Three hook points in your existing routes — same `clientId` is used for both doc sync and signaling so peer addressing matches.
+
+> **Security:** when handling `POST /signal/:clientId`, do **not** trust the URL `clientId` as the sender. Bind it to the authenticated session — otherwise client A can POST to `/signal/B` and impersonate B in the WebRTC mesh. The example below assumes your auth middleware has already mapped the request to its owning `clientId`.
 
 ```typescript
-// GET /events/:clientId — alongside the existing sse.connect(...) call:
-const clientId = req.params.clientId;
+// GET /events/:clientId — alongside the existing sse.connect(...) call.
+// Validate that req.auth.clientId === req.params.clientId before proceeding.
+const clientId = req.auth.clientId;
 const stream = sse.connect(clientId, req.headers['last-event-id']);
 await signaling.onClientConnected(clientId);
 
@@ -269,10 +272,12 @@ req.on('close', async () => {
   await signaling.onClientDisconnected(clientId);
 });
 
-// POST /signal/:clientId — new endpoint accepting raw JSON-RPC strings:
+// POST /signal/:clientId — raw JSON-RPC body. The `fromId` MUST come from auth,
+// never from the URL, or A can spoof B's signaling frames.
 app.post('/signal/:clientId', async (req, res) => {
+  const fromId = req.auth.clientId; // <-- authenticated, not URL-derived
   const body = await readBody(req); // raw string, do not parse twice
-  await signaling.handleClientMessage(req.params.clientId, body);
+  await signaling.handleClientMessage(fromId, body);
   res.status(204).end();
 });
 ```

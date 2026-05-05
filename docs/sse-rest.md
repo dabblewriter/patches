@@ -22,7 +22,8 @@ Use WebSocket when:
 
 - You need the lowest possible latency (single persistent connection for both directions)
 - Your infrastructure handles WebSockets well
-- You want WebRTC awareness/presence (which requires WebSocket for signaling)
+
+WebRTC awareness/presence works on either transport: signaling can multiplex over the existing SSE stream via `PatchesRESTSignalingTransport` (see [awareness.md](awareness.md)).
 
 ## Client Setup
 
@@ -104,11 +105,12 @@ All document operations use standard HTTP methods. Document IDs can contain slas
 
 ### SSE & Subscriptions
 
-| Method | Path                       | Description                               |
-| ------ | -------------------------- | ----------------------------------------- |
-| GET    | `/events/:clientId`        | Open SSE stream                           |
-| POST   | `/subscriptions/:clientId` | Subscribe to docs `{ docIds: [...] }`     |
-| DELETE | `/subscriptions/:clientId` | Unsubscribe from docs `{ docIds: [...] }` |
+| Method | Path                       | Description                                                                   |
+| ------ | -------------------------- | ----------------------------------------------------------------------------- |
+| GET    | `/events/:clientId`        | Open SSE stream                                                               |
+| POST   | `/subscriptions/:clientId` | Subscribe to docs `{ docIds: [...] }`                                         |
+| DELETE | `/subscriptions/:clientId` | Unsubscribe from docs `{ docIds: [...] }`                                     |
+| POST   | `/signal/:clientId`        | WebRTC signaling frame (raw JSON-RPC body). See [awareness.md](awareness.md). |
 
 ### Documents
 

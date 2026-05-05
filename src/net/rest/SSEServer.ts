@@ -271,6 +271,34 @@ export class SSEServer {
   }
 
   /**
+   * Send an event directly to a single connected client, bypassing subscription
+   * routing. Used for client-targeted traffic like WebRTC signaling.
+   *
+   * Unlike {@link notify}, this does NOT buffer through expiry: if the client
+   * is currently disconnected, the call returns false and the event is dropped.
+   * Stale signaling replayed after a buffer expiry is harmful (peers gone, ICE
+   * candidates moot), so we deliberately do not preserve it.
+   *
+   * @param clientId - Target client.
+   * @param event - SSE event type (e.g. `'signal'`).
+   * @param data - Pre-serialised event payload.
+   * @returns true if the client was connected and the event was written.
+   */
+  sendToClient(clientId: string, event: string, data: string): boolean {
+    const client = this.clients.get(clientId);
+    if (!client || !client.writer) return false;
+
+    this._writeEvent(client, {
+      id: client.nextEventId++,
+      event,
+      data,
+      timestamp: Date.now(),
+    });
+
+    return true;
+  }
+
+  /**
    * List all client IDs subscribed to a document.
    */
   listSubscriptions(docId: string): string[] {

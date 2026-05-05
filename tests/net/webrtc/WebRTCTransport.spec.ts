@@ -94,6 +94,26 @@ describe('WebRTCTransport', () => {
     it('should delegate state change signal from underlying transport', () => {
       expect(transport.onStateChange).toBe(mockWebSocketTransport.onStateChange);
     });
+
+    it('should accept any SignalingTransport (e.g. non-WebSocket REST adapter)', () => {
+      // Simulate a non-WebSocket transport (the REST signaling adapter shape).
+      // The transport-typed parameter is structural, so no WebSocket-specific
+      // fields are required.
+      const restLikeTransport = {
+        connect: vi.fn().mockResolvedValue(undefined),
+        send: vi.fn(),
+        onMessage: vi.fn(),
+        onStateChange: vi.fn(),
+        state: 'disconnected',
+      };
+
+      const t = new WebRTCTransport(restLikeTransport as any);
+
+      expect(t).toBeInstanceOf(WebRTCTransport);
+      // JSONRPCClient was constructed with the REST-like transport, not a WebSocket.
+      expect(JSONRPCClient).toHaveBeenCalledWith(restLikeTransport);
+      expect(t.onStateChange).toBe(restLikeTransport.onStateChange);
+    });
   });
 
   describe('id property', () => {

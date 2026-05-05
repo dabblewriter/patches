@@ -60,6 +60,11 @@ export class PatchesREST implements PatchesConnection {
   readonly onStateChange = signal<(state: ConnectionState) => void>();
   readonly onChangesCommitted = signal<(docId: string, changes: Change[], options?: CommitChangesOptions) => void>();
   readonly onDocDeleted = signal<(docId: string) => void>();
+  /**
+   * Emits raw JSON-RPC strings received over the multiplexed `signal` SSE channel.
+   * Used by `PatchesRESTSignalingTransport` to drive `WebRTCTransport`'s signaling.
+   */
+  readonly onSignal = signal<(raw: string) => void>();
 
   private _url: string;
   private _state: ConnectionState = 'disconnected';
@@ -90,6 +95,13 @@ export class PatchesREST implements PatchesConnection {
 
   set url(url: string) {
     this._url = url.replace(/\/$/, '');
+  }
+
+  // --- Connection State ---
+
+  /** Current connection state of the underlying SSE stream. */
+  get state(): ConnectionState {
+    return this._state;
   }
 
   // --- Connection Lifecycle ---
@@ -169,6 +181,10 @@ export class PatchesREST implements PatchesConnection {
         } catch {
           // Malformed event, ignore
         }
+      });
+
+      es.addEventListener('signal', (e: MessageEvent) => {
+        this.onSignal.emit(e.data);
       });
 
       es.addEventListener('resync', () => {
@@ -345,6 +361,33 @@ export class PatchesREST implements PatchesConnection {
       }
     );
     return Boolean(result?.ok);
+  }
+
+  // --- WebRTC Signaling ---
+
+  /**
+   * POSTs a raw JSON-RPC string to `/signal/:clientId`. Used as the upstream
+   * half of the multiplexed signaling channel: receive happens via the `signal`
+   * SSE event (see {@link onSignal}).
+   *
+   * The body is sent verbatim — callers pass an already-stringified JSON-RPC
+   * message. The endpoint forwards it to {@link SignalingService.handleClientMessage}.
+   */
+  async sendSignal(raw: string): Promise<void> {
+    const headers = await this._getHeaders();
+    const response = await globalThis.fetch(`${this._url}/signal/${this.clientId}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...headers,
+      },
+      body: raw,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      throw new StatusError(response.status, response.statusText);
+    }
   }
 
   // --- Private Helpers ---

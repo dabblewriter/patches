@@ -1,9 +1,8 @@
 import Peer from 'simple-peer';
 import { signal, type Unsubscriber } from 'easy-signal';
 import { JSONRPCClient } from '../../net/protocol/JSONRPCClient.js';
-import type { ClientTransport } from '../protocol/types.js';
+import type { ClientTransport, SignalingTransport } from '../protocol/types.js';
 import { rpcError } from '../protocol/utils.js';
-import type { WebSocketTransport } from '../websocket/WebSocketTransport.js';
 
 /**
  * Represents information about a connected WebRTC peer.
@@ -19,8 +18,10 @@ interface PeerInfo {
 
 /**
  * WebRTC-based transport implementation that enables direct peer-to-peer communication.
- * Uses a WebSocket transport as a signaling channel to establish WebRTC connections.
- * Once connections are established, data flows directly between peers without going through a server.
+ * Uses a {@link SignalingTransport} (e.g. `WebSocketTransport`,
+ * `PatchesRESTSignalingTransport`) as a signaling channel to establish WebRTC
+ * connections. Once connections are established, data flows directly between peers
+ * without going through a server.
  */
 export class WebRTCTransport implements ClientTransport {
   private rpc: JSONRPCClient;
@@ -48,7 +49,7 @@ export class WebRTCTransport implements ClientTransport {
 
   /**
    * Signal that emits when the underlying signaling transport's state changes.
-   * This is delegated directly from the WebSocketTransport.
+   * This is delegated directly from the signaling transport.
    */
   public get onStateChange() {
     return this.transport.onStateChange;
@@ -56,9 +57,10 @@ export class WebRTCTransport implements ClientTransport {
 
   /**
    * Creates a new WebRTC transport instance.
-   * @param transport - The WebSocket transport to use for signaling
+   * @param transport - A signaling-capable transport (e.g. `WebSocketTransport`
+   *   or `PatchesRESTSignalingTransport`) used to relay WebRTC handshake messages.
    */
-  constructor(private transport: WebSocketTransport) {
+  constructor(private transport: SignalingTransport) {
     this.rpc = new JSONRPCClient(transport);
 
     this.subscriptions = [

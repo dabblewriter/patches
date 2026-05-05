@@ -277,6 +277,54 @@ describe('PatchesREST', () => {
 
       expect(states).toEqual(['disconnected', 'connected']);
     });
+
+    it('should emit onSignal with raw payload from signal SSE event', async () => {
+      const p = rest.connect();
+      const es = MockEventSource.latest;
+      es.simulateOpen();
+      await p;
+
+      const received: string[] = [];
+      rest.onSignal(raw => received.push(raw));
+
+      const payload = '{"jsonrpc":"2.0","method":"peer-welcome","params":{"id":"abc","peers":[]}}';
+      es.simulateEvent('signal', payload);
+
+      expect(received).toEqual([payload]);
+    });
+  });
+
+  describe('sendSignal', () => {
+    beforeEach(async () => {
+      const p = rest.connect();
+      MockEventSource.latest.simulateOpen();
+      await p;
+    });
+
+    it('should POST raw body to /signal/:clientId', async () => {
+      globalThis.fetch = mockFetchResponse(undefined, 204);
+
+      const raw = '{"jsonrpc":"2.0","method":"peer-signal","params":{"to":"peer-1","data":{}}}';
+      await rest.sendSignal(raw);
+
+      const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/signal/test-client-123');
+      expect(init?.method).toBe('POST');
+      // Body is sent verbatim — not re-stringified.
+      expect(init?.body).toBe(raw);
+      expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/json');
+    });
+
+    it('should throw StatusError on non-OK response', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: () => Promise.resolve({}),
+      });
+
+      await expect(rest.sendSignal('{}')).rejects.toThrow();
+    });
   });
 
   describe('API methods', () => {

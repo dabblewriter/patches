@@ -254,7 +254,7 @@ When to use which? WebSocket for document sync. WebRTC for presence/cursors to r
 
 ### Awareness (Presence & Cursors)
 
-Show who's online, where their cursor is, what they're selecting. Works over both WebSocket and WebRTC.
+Show who's online, where their cursor is, what they're selecting. `WebRTCAwareness` carries presence over peer-to-peer WebRTC connections, with the signaling handshake multiplexed over whatever sync channel you already have open — `WebSocketTransport` or `PatchesREST` (SSE+REST). No second connection, same `clientId`.
 
 See [Awareness documentation](./docs/awareness.md) for implementation details.
 

@@ -18,15 +18,15 @@ import type { SSEServer } from './SSEServer.js';
  * const signaling = new SSESignalingService(sse);
  *
  * // GET /events/:clientId — after creating the SSE stream:
- * const clientId = c.get('auth').clientId; // authenticated, not URL-derived
+ * const clientId = req.auth.clientId; // authenticated, not URL-derived
  * await signaling.onClientConnected(clientId);
  *
  * // POST /signal/:clientId
- * app.post('/signal/:clientId', async (c) => {
- *   const fromId = c.get('auth').clientId; // authenticated, not URL-derived
- *   const body = await c.req.text();
- *   const handled = await signaling.handleClientMessage(fromId, body);
- *   return c.json({ ok: handled });
+ * app.post('/signal/:clientId', async (req, res) => {
+ *   if (req.auth.clientId !== req.params.clientId) return res.status(403).end();
+ *   const body = await readBody(req);
+ *   await signaling.handleClientMessage(req.auth.clientId, body);
+ *   res.status(204).end();
  * });
  *
  * // On SSE stream close:
@@ -36,6 +36,22 @@ import type { SSEServer } from './SSEServer.js';
 export class SSESignalingService extends SignalingService {
   constructor(private sse: SSEServer) {
     super();
+  }
+
+  /**
+   * Derived from the live SSE connection set rather than tracked separately,
+   * so peer-routing decisions can't drift from actual writer liveness. If a
+   * client's SSE stream silently dies, `getConnectionIds()` excludes it
+   * immediately and `handleClientMessage` will respond with "Target not
+   * connected" instead of relaying into the void.
+   */
+  override async getClients(): Promise<Set<string>> {
+    return new Set(this.sse.getConnectionIds());
+  }
+
+  /** No-op: the SSEServer's connection set is the source of truth. */
+  override async setClients(_clients: Set<string>): Promise<void> {
+    // intentional no-op — see getClients()
   }
 
   send(id: string, message: JsonRpcMessage): void {

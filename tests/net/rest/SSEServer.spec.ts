@@ -273,22 +273,20 @@ describe('SSEServer', () => {
       // Signal arrives while disconnected — drop it.
       server.sendToClient('client1', 'signal', 'late');
 
-      // Reconnect with lastEventId 0 — buffer is empty so nothing to replay.
+      // Reconnect with lastEventId 0 — if the dropped signal had been buffered,
+      // it would replay here as the next chunk after the retry: line.
       const stream = server.connect('client1', '0');
       const reader = stream.getReader();
-      const decoder = new TextDecoder();
-      // Skip the initial retry: message
-      await reader.read();
-      // Read with a microtask boundary — there should be no further events.
-      const racer = new Promise<{ done: boolean; value?: Uint8Array }>(resolve => {
+      await reader.read(); // skip retry: 5000\n\n
+
+      // No data should be queued on the stream. A pending read against an
+      // empty stream should lose the race against an immediate microtask.
+      const racer = new Promise<{ done: true }>(resolve => {
         Promise.resolve().then(() => resolve({ done: true }));
       });
       const result = await Promise.race([reader.read(), racer]);
       reader.releaseLock();
-      if (!result.done && result.value) {
-        const chunk = decoder.decode(result.value);
-        expect(chunk).not.toContain('event: signal');
-      }
+      expect(result.done).toBe(true);
     });
   });
 

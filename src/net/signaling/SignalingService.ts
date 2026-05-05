@@ -49,11 +49,11 @@ export abstract class SignalingService {
       method: 'peer-welcome',
       params: {
         id,
-        peers: Array.from(this.clients).filter(pid => pid !== id),
+        peers: Array.from(clients).filter(pid => pid !== id),
       },
     };
 
-    this.send(id, welcome);
+    await this.send(id, welcome);
     return id;
   }
 

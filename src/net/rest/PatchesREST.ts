@@ -372,8 +372,16 @@ export class PatchesREST implements PatchesConnection {
    *
    * The body is sent verbatim — callers pass an already-stringified JSON-RPC
    * message. The endpoint forwards it to {@link SignalingService.handleClientMessage}.
+   *
+   * Silently no-ops when the SSE stream is not connected. Signaling is
+   * inherently best-effort and the server has no live `signal` channel back
+   * to this client until the stream is up, so a frame sent before connect
+   * resolves can't be relayed anyway. Throwing here would surface as an
+   * unhandled rejection through `JSONRPCClient.call`, which doesn't await
+   * `transport.send`.
    */
   async sendSignal(raw: string): Promise<void> {
+    if (this._state !== 'connected') return;
     const headers = await this._getHeaders();
     const response = await globalThis.fetch(`${this._url}/signal/${this.clientId}`, {
       method: 'POST',

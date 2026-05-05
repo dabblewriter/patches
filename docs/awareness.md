@@ -258,26 +258,27 @@ websocketServer.on('connection', async ws => {
 
 Three hook points in your existing routes — same `clientId` is used for both doc sync and signaling so peer addressing matches.
 
-> **Security:** when handling `POST /signal/:clientId`, do **not** trust the URL `clientId` as the sender. Bind it to the authenticated session — otherwise client A can POST to `/signal/B` and impersonate B in the WebRTC mesh. The example below assumes your auth middleware has already mapped the request to its owning `clientId`.
+> **Security requirement, not optional:** never trust the URL `:clientId` as the sender. Reject any request whose authenticated identity doesn't match the URL parameter, otherwise client A can POST to `/signal/B` and forge `peer-signal` traffic on B's behalf — including spoofing `from: B` to a third party, redirecting WebRTC handshakes, and leaking IP/relay metadata via coerced TURN paths.
 
 ```typescript
 // GET /events/:clientId — alongside the existing sse.connect(...) call.
-// Validate that req.auth.clientId === req.params.clientId before proceeding.
-const clientId = req.auth.clientId;
-const stream = sse.connect(clientId, req.headers['last-event-id']);
-await signaling.onClientConnected(clientId);
-
-req.on('close', async () => {
-  sse.disconnect(clientId);
-  await signaling.onClientDisconnected(clientId);
+app.get('/events/:clientId', (req, res) => {
+  if (req.auth.clientId !== req.params.clientId) return res.status(403).end();
+  const clientId = req.auth.clientId;
+  const stream = sse.connect(clientId, req.headers['last-event-id']);
+  // ...pipe stream to response, then on close:
+  req.on('close', async () => {
+    sse.disconnect(clientId);
+    await signaling.onClientDisconnected(clientId);
+  });
+  signaling.onClientConnected(clientId);
 });
 
-// POST /signal/:clientId — raw JSON-RPC body. The `fromId` MUST come from auth,
-// never from the URL, or A can spoof B's signaling frames.
+// POST /signal/:clientId — raw JSON-RPC body. fromId comes from auth, never URL.
 app.post('/signal/:clientId', async (req, res) => {
-  const fromId = req.auth.clientId; // <-- authenticated, not URL-derived
+  if (req.auth.clientId !== req.params.clientId) return res.status(403).end();
   const body = await readBody(req); // raw string, do not parse twice
-  await signaling.handleClientMessage(fromId, body);
+  await signaling.handleClientMessage(req.auth.clientId, body);
   res.status(204).end();
 });
 ```

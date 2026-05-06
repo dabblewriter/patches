@@ -26,17 +26,38 @@ Your awareness state can be any JSON object. User photos, cursor colors, emoji s
 
 ### Setup
 
+`WebRTCTransport` needs a signaling channel. It does not know or care which one — anything that implements `SignalingTransport` (send, onMessage, connect, state, onStateChange) works. Two options ship in the box.
+
+#### Option A: ride on a WebSocket connection
+
+Use this if your app already opens a WebSocket via `PatchesWebSocket`.
+
 ```typescript
+import { WebSocketTransport } from '@dabble/patches/net';
 import { WebRTCTransport, WebRTCAwareness } from '@dabble/patches/webrtc';
 
-// Create your transport (requires a signaling server URL)
-const transport = new WebRTCTransport(signalingServerUrl);
-
-// Create awareness instance
+const ws = new WebSocketTransport(`wss://your.server/ws?token=${token}`);
+const transport = new WebRTCTransport(ws);
 const awareness = new WebRTCAwareness(transport);
 
-// Connect to start syncing
 await awareness.connect();
+```
+
+#### Option B: ride on the SSE+REST connection
+
+Use this if your app uses `PatchesREST`. Signaling multiplexes over the existing SSE stream — no second `EventSource`, no second auth token, same `clientId` for doc sync and signaling.
+
+```typescript
+import { PatchesREST, PatchesRESTSignalingTransport } from '@dabble/patches/net';
+import { WebRTCTransport, WebRTCAwareness } from '@dabble/patches/webrtc';
+
+const patches = new PatchesREST('https://your.server/api');
+const signaling = new PatchesRESTSignalingTransport(patches);
+const transport = new WebRTCTransport(signaling);
+const awareness = new WebRTCAwareness(transport);
+
+await patches.connect(); // opens the shared SSE stream
+await awareness.connect(); // no-op for the transport, wires up WebRTC
 ```
 
 ### Setting Your Local State
@@ -173,7 +194,9 @@ Once peers establish direct connections, the server is out of the picture for aw
 
 ### Implementing SignalingService
 
-Extend the class and implement `send()`:
+Extend the class and implement `send()`. Pick whichever wire you already have open.
+
+#### Over a WebSocket
 
 ```typescript
 import { SignalingService, type JsonRpcMessage } from '@dabble/patches/net';
@@ -199,7 +222,20 @@ class WebSocketSignalingService extends SignalingService {
 }
 ```
 
+#### Over an SSE+REST connection (`SSESignalingService`)
+
+`SSESignalingService` is the ready-made implementation that ships with Patches. It rides on the same `SSEServer` you use for document sync, so signaling traffic is multiplexed over the existing `EventSource`.
+
+```typescript
+import { SSEServer, SSESignalingService } from '@dabble/patches/net';
+
+const sse = new SSEServer();
+const signaling = new SSESignalingService(sse);
+```
+
 ### Wiring It Up
+
+#### WebSocket flavor
 
 ```typescript
 const signaling = new WebSocketSignalingService();
@@ -218,7 +254,36 @@ websocketServer.on('connection', async ws => {
 });
 ```
 
-The three key methods:
+#### SSE+REST flavor
+
+Three hook points in your existing routes — same `clientId` is used for both doc sync and signaling so peer addressing matches.
+
+> **Security requirement, not optional:** never trust the URL `:clientId` as the sender. Reject any request whose authenticated identity doesn't match the URL parameter, otherwise client A can POST to `/signal/B` and forge `peer-signal` traffic on B's behalf — including spoofing `from: B` to a third party, redirecting WebRTC handshakes, and leaking IP/relay metadata via coerced TURN paths.
+
+```typescript
+// GET /events/:clientId — alongside the existing sse.connect(...) call.
+app.get('/events/:clientId', (req, res) => {
+  if (req.auth.clientId !== req.params.clientId) return res.status(403).end();
+  const clientId = req.auth.clientId;
+  const stream = sse.connect(clientId, req.headers['last-event-id']);
+  // ...pipe stream to response, then on close:
+  req.on('close', async () => {
+    sse.disconnect(clientId);
+    await signaling.onClientDisconnected(clientId);
+  });
+  signaling.onClientConnected(clientId);
+});
+
+// POST /signal/:clientId — raw JSON-RPC body. fromId comes from auth, never URL.
+app.post('/signal/:clientId', async (req, res) => {
+  if (req.auth.clientId !== req.params.clientId) return res.status(403).end();
+  const body = await readBody(req); // raw string, do not parse twice
+  await signaling.handleClientMessage(req.auth.clientId, body);
+  res.status(204).end();
+});
+```
+
+The three key methods (same shape for both flavors):
 
 - `onClientConnected()` - Registers a client, returns their ID, sends them a welcome with peer list
 - `handleClientMessage()` - Routes signaling messages between peers, returns `true` if it was a signaling message

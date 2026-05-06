@@ -12,6 +12,6 @@ export * from './protocol/utils.js';
 export * from './websocket/AuthorizationProvider.js';
 export * from './websocket/onlineState.js';
 export * from './websocket/PatchesWebSocket.js';
-export * from './websocket/SignalingService.js';
+export * from './signaling/SignalingService.js';
 export * from './websocket/WebSocketServer.js';
 export * from './websocket/WebSocketTransport.js';

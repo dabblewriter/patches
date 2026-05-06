@@ -1,4 +1,4 @@
-import type { Unsubscriber } from 'easy-signal';
+import type { Signal, Unsubscriber } from 'easy-signal';
 import type {
   Branch,
   Change,
@@ -44,6 +44,21 @@ export interface ClientTransport {
    * caller can remove the handler if it no longer cares about incoming data.
    */
   onMessage(cb: (raw: string) => void): Unsubscriber;
+}
+
+/**
+ * Lifecycle-aware transport that {@link WebRTCTransport} can ride on top of as a
+ * signaling channel. Anything implementing {@link ClientTransport} plus a
+ * `connect()` / `state` / `onStateChange` triplet qualifies — including
+ * `WebSocketTransport` and `PatchesRESTSignalingTransport`.
+ */
+export interface SignalingTransport extends ClientTransport {
+  /** Open the underlying channel. May be a no-op if the channel is already open. */
+  connect(): Promise<void> | void;
+  /** Current connection state. */
+  readonly state: ConnectionState;
+  /** Emits whenever {@link state} changes. */
+  readonly onStateChange: Signal<(state: ConnectionState) => void>;
 }
 
 /**

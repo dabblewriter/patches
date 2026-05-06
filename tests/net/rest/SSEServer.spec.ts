@@ -229,6 +229,67 @@ describe('SSEServer', () => {
     });
   });
 
+  describe('sendToClient', () => {
+    it('should write a client-targeted event without subscription routing', async () => {
+      const stream = server.connect('client1');
+
+      const ok = server.sendToClient('client1', 'signal', '{"jsonrpc":"2.0","method":"peer-welcome"}');
+
+      expect(ok).toBe(true);
+      const chunks = await readStream(stream, 1);
+      expect(chunks[0]).toContain('event: signal');
+      expect(chunks[0]).toContain('"method":"peer-welcome"');
+    });
+
+    it('should not require the client to be subscribed to anything', async () => {
+      const stream = server.connect('client1');
+
+      const ok = server.sendToClient('client1', 'signal', 'payload');
+
+      expect(ok).toBe(true);
+      const chunks = await readStream(stream, 1);
+      expect(chunks[0]).toContain('event: signal');
+    });
+
+    it('should return false and drop event when client is not connected', () => {
+      // Connect, then disconnect — buffered for doc events but not signals.
+      server.connect('client1');
+      server.disconnect('client1');
+
+      const ok = server.sendToClient('client1', 'signal', 'payload');
+
+      expect(ok).toBe(false);
+    });
+
+    it('should return false for unknown clients', () => {
+      const ok = server.sendToClient('ghost', 'signal', 'payload');
+      expect(ok).toBe(false);
+    });
+
+    it('should not be replayed on reconnect (signaling events are not buffered)', async () => {
+      server.connect('client1');
+      server.disconnect('client1');
+
+      // Signal arrives while disconnected — drop it.
+      server.sendToClient('client1', 'signal', 'late');
+
+      // Reconnect with lastEventId 0 — if the dropped signal had been buffered,
+      // it would replay here as the next chunk after the retry: line.
+      const stream = server.connect('client1', '0');
+      const reader = stream.getReader();
+      await reader.read(); // skip retry: 5000\n\n
+
+      // No data should be queued on the stream. A pending read against an
+      // empty stream should lose the race against an immediate microtask.
+      const racer = new Promise<{ done: true }>(resolve => {
+        Promise.resolve().then(() => resolve({ done: true }));
+      });
+      const result = await Promise.race([reader.read(), racer]);
+      reader.releaseLock();
+      expect(result.done).toBe(true);
+    });
+  });
+
   describe('event IDs', () => {
     it('should assign monotonically increasing IDs per client', async () => {
       const stream = server.connect('client1');

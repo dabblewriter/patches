@@ -95,11 +95,11 @@ export abstract class SignalingService {
       return false;
     }
 
-    if (parsed.jsonrpc !== '2.0' || parsed.method !== 'peer-signal' || !parsed.params?.to) return false;
+    if (parsed.jsonrpc !== '2.0' || parsed.method !== 'peer-signal' || !Array.isArray(parsed.params)) return false;
 
-    const { params, id } = parsed;
-
-    const { to, data } = params as { to: string; data: any };
+    const { id } = parsed;
+    const [to, data] = parsed.params as [string, any];
+    if (typeof to !== 'string' || !to) return false;
 
     const clients = await this.getClients();
     if (!clients.has(to)) {

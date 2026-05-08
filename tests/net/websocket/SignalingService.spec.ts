@@ -1,6 +1,25 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { JsonRpcRequest } from '../../../src/net';
+import { signal } from 'easy-signal';
+import { beforeEach, describe, expect, it } from 'vitest';
+import type { ClientTransport, JsonRpcRequest } from '../../../src/net';
+import { JSONRPCClient } from '../../../src/net/protocol/JSONRPCClient';
 import { SignalingService, type JsonRpcMessage } from '../../../src/net/websocket/SignalingService';
+
+/**
+ * Minimal in-memory ClientTransport so we can drive a real JSONRPCClient
+ * and capture the exact wire bytes it produces. This is the only way to
+ * guarantee tests fail if the client's params shape drifts away from the
+ * shape the server parses.
+ */
+function createMemoryClient(): { rpc: JSONRPCClient; sent: string[] } {
+  const sent: string[] = [];
+  const transport: ClientTransport = {
+    send(raw: string) {
+      sent.push(raw);
+    },
+    onMessage: signal(),
+  };
+  return { rpc: new JSONRPCClient(transport), sent };
+}
 
 /**
  * Concrete implementation of SignalingService for testing.
@@ -161,18 +180,15 @@ describe('SignalingService', () => {
       service.clearMessages();
     });
 
-    it('should handle valid peer-signal messages', async () => {
-      const signalMessage: JsonRpcRequest = {
-        jsonrpc: '2.0',
-        method: 'peer-signal',
-        id: 1,
-        params: {
-          to: client2Id,
-          data: { type: 'offer', sdp: 'test-sdp' },
-        },
-      };
+    it('should handle peer-signal messages produced by a real JSONRPCClient', async () => {
+      // Drive handleClientMessage with the actual wire format the WebRTCTransport
+      // produces (positional params via rpc.notify). If the client's wire shape
+      // drifts from what the server parses, this test fails.
+      const { rpc, sent } = createMemoryClient();
+      rpc.notify('peer-signal', client2Id, { type: 'offer', sdp: 'test-sdp' });
+      expect(sent).toHaveLength(1);
 
-      const result = await service.handleClientMessage(client1Id, signalMessage);
+      const result = await service.handleClientMessage(client1Id, sent[0]);
 
       expect(result).toBe(true);
       expect(service.getMessages(client2Id)).toContainEqual({
@@ -190,10 +206,7 @@ describe('SignalingService', () => {
         jsonrpc: '2.0',
         method: 'peer-signal',
         id: 123,
-        params: {
-          to: client2Id,
-          data: { type: 'answer' },
-        },
+        params: [client2Id, { type: 'answer' }],
       };
 
       await service.handleClientMessage(client1Id, signalMessage);
@@ -209,10 +222,7 @@ describe('SignalingService', () => {
       const signalMessage: JsonRpcRequest = {
         jsonrpc: '2.0',
         method: 'peer-signal',
-        params: {
-          to: client2Id,
-          data: { type: 'answer' },
-        },
+        params: [client2Id, { type: 'answer' }],
       };
 
       await service.handleClientMessage(client1Id, signalMessage);
@@ -227,10 +237,7 @@ describe('SignalingService', () => {
         jsonrpc: '2.0',
         method: 'peer-signal',
         id: 1,
-        params: {
-          to: client2Id,
-          data: { type: 'offer' },
-        },
+        params: [client2Id, { type: 'offer' }],
       });
 
       const result = await service.handleClientMessage(client1Id, signalMessage);
@@ -265,8 +272,8 @@ describe('SignalingService', () => {
       const malformedMessage = {
         jsonrpc: '2.0',
         method: 'peer-signal',
-        // Missing 'to' parameter
-        params: { data: {} },
+        // Missing target peer id (first positional arg)
+        params: [],
       };
 
       const result = await service.handleClientMessage(client1Id, malformedMessage as JsonRpcRequest);
@@ -274,15 +281,29 @@ describe('SignalingService', () => {
       expect(result).toBe(false);
     });
 
+    it('should reject named-object params (legacy/wrong wire shape)', async () => {
+      // The previous implementation read parsed.params.to directly. This test
+      // pins the chosen wire shape — positional only — so a named-params client
+      // cannot silently pass the guard.
+      const namedParamsMessage = {
+        jsonrpc: '2.0',
+        method: 'peer-signal',
+        id: 1,
+        params: { to: client2Id, data: { type: 'offer' } },
+      };
+
+      const result = await service.handleClientMessage(client1Id, namedParamsMessage as JsonRpcRequest);
+
+      expect(result).toBe(false);
+      expect(service.getMessages(client2Id)).toHaveLength(0);
+    });
+
     it('should handle signaling to non-existent target', async () => {
       const signalMessage: JsonRpcRequest = {
         jsonrpc: '2.0',
         method: 'peer-signal',
         id: 1,
-        params: {
-          to: 'non-existent-client',
-          data: { type: 'offer' },
-        },
+        params: ['non-existent-client', { type: 'offer' }],
       };
 
       const result = await service.handleClientMessage(client1Id, signalMessage);
@@ -300,10 +321,7 @@ describe('SignalingService', () => {
         jsonrpc: '2.0',
         method: 'peer-signal',
         // No id - this is a notification
-        params: {
-          to: 'non-existent-client',
-          data: { type: 'offer' },
-        },
+        params: ['non-existent-client', { type: 'offer' }],
       };
 
       const result = await service.handleClientMessage(client1Id, signalNotification);
@@ -316,7 +334,7 @@ describe('SignalingService', () => {
       const wrongVersionMessage = {
         jsonrpc: '1.0', // Wrong version
         method: 'peer-signal',
-        params: { to: client2Id, data: {} },
+        params: [client2Id, {}],
       };
 
       const result = await service.handleClientMessage(client1Id, wrongVersionMessage as JsonRpcRequest);
@@ -327,7 +345,7 @@ describe('SignalingService', () => {
     it('should handle missing method', async () => {
       const noMethodMessage = {
         jsonrpc: '2.0',
-        params: { to: client2Id, data: {} },
+        params: [client2Id, {}],
       };
 
       const result = await service.handleClientMessage(client1Id, noMethodMessage as JsonRpcRequest);
@@ -381,10 +399,7 @@ describe('SignalingService', () => {
       const signalMessage: JsonRpcRequest = {
         jsonrpc: '2.0',
         method: 'peer-signal',
-        params: {
-          to: client2Id,
-          data: null,
-        },
+        params: [client2Id, null],
       };
 
       const result = await service.handleClientMessage(client1Id, signalMessage);
@@ -425,21 +440,21 @@ describe('SignalingService', () => {
         jsonrpc: '2.0',
         method: 'peer-signal',
         id: 1,
-        params: { to: client2Id, data: { from: '1to2' } },
+        params: [client2Id, { from: '1to2' }],
       };
 
       const signal2to3: JsonRpcRequest = {
         jsonrpc: '2.0',
         method: 'peer-signal',
         id: 2,
-        params: { to: client3Id, data: { from: '2to3' } },
+        params: [client3Id, { from: '2to3' }],
       };
 
       const signal3to1: JsonRpcRequest = {
         jsonrpc: '2.0',
         method: 'peer-signal',
         id: 3,
-        params: { to: client1Id, data: { from: '3to1' } },
+        params: [client1Id, { from: '3to1' }],
       };
 
       // Process signals "simultaneously"

@@ -16,6 +16,26 @@ doc.change(state => (state.title = 'New Title'));
 
 Changes apply immediately for snappy UIs, then sync to the server in the background. Offline? No problem. Changes queue up and sync when you're back online.
 
+## Scope: what Patches is and is not
+
+Patches is a **generic primitives library**. It provides the building blocks (OT, LWW, sync transport, doc-store interfaces) for realtime systems. Compose it into your own backend and frontend.
+
+Patches knows about:
+
+- JSON documents, JSON Patch operations, and snapshots
+- Operational Transformation and Last-Write-Wins conflict resolution
+- A transport surface (WebSocket, SSE+REST, WebRTC) that moves changes between clients and a server
+- HTTP status codes propagated as `StatusError` (401, 403, 404, 410) — so consuming apps can branch on the response
+
+Patches does **not** know about:
+
+- Users, roles, invites, memberships, or any access-control model
+- Apps, projects, books, documents-as-products, or any app-specific terminology
+- Email sending, name/email lookups, or any identity service
+- UX policy for what to do when access is lost (consuming apps decide whether a 403 means "show a banner", "kick out of the doc", or anything else)
+
+If a feature feels like it belongs in Patches but mentions an app concept (e.g. "an invite for a project"), it doesn't belong here — it belongs one level up, in the app's own client SDK or in the consuming app itself. The Patches surface should stay generic enough to back any realtime system.
+
 ## Two Sync Strategies
 
 Patches gives you two conflict resolution approaches. Pick the right tool for the job.

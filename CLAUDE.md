@@ -16,6 +16,26 @@ Patches is a TypeScript library for real-time collaborative apps. It implements 
 - **OT (Operational Transformation)**: centralized server, conflict rebasing, for collaborative editing
 - **LWW (Last-Write-Wins)**: timestamp-based resolution, for settings and preferences
 
+## Scope boundary
+
+Patches is a **generic primitives library**. It is composed into other systems (Pup, app-specific clients) — it is not itself an application.
+
+In scope:
+
+- JSON documents, JSON Patch ops, snapshots
+- OT and LWW algorithms
+- Transport surface (WebSocket, SSE+REST, WebRTC)
+- `StatusError` codes (401, 402, 403, 404, 410) propagated verbatim from the underlying transport
+
+Out of scope — do **not** add these to Patches:
+
+- Users, roles, invites, memberships, access-control models. Permission *enforcement* lives in the `AuthorizationProvider` interface (which the consuming server implements); Patches itself never decides what a user can do.
+- App-specific vocabulary: projects, books, cover art, titles, libraries, anything that names a domain concept.
+- Email sending, identity lookups (uid → name / email), notification fan-out — these are app-shaped concerns that belong in the consuming app's backend or in services like dabble-rest.
+- UX policy for permission errors. Patches surfaces a `StatusError` with the HTTP code; the consuming app decides whether to close the doc, show a toast, redirect, or ignore. Do not embed automatic cleanup signals (`onRemoteDocAccessRevoked` etc.) — `docStates` already exposes the error and consumers can react.
+
+If a contribution adds something that "really only makes sense for Dabble" (or for any specific app), it does not belong here. Land it in the app or in Pup's app-aware client SDK instead.
+
 ## Import Paths
 
 ```

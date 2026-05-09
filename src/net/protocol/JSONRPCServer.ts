@@ -240,7 +240,7 @@ export class JSONRPCServer {
     }
     const ok = await this.auth.canAccess(ctx, docId, access, method);
     if (!ok) {
-      throw new StatusError(401, `${access.toUpperCase()}_FORBIDDEN:${docId}`);
+      throw new StatusError(403, `${access.toUpperCase()}_FORBIDDEN:${docId}`);
     }
   }
 

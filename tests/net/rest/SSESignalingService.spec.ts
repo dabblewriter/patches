@@ -54,7 +54,7 @@ describe('SSESignalingService', () => {
       JSON.stringify({
         jsonrpc: '2.0',
         method: 'peer-signal',
-        params: { to: 'client-B', data: { sdp: 'fake-offer' } },
+        params: ['client-B', { sdp: 'fake-offer' }],
       })
     );
 

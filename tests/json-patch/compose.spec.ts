@@ -26,15 +26,24 @@ describe('composePatch', () => {
   it('text compose', () => {
     expect(
       composePatch([
-        { op: '@txt', path: '/x', value: { ops: [{ insert: 'How about th' }] } },
-        { op: '@txt', path: '/x', value: { ops: [{ retain: 12 }, { insert: 'at!' }] } },
+        { op: '@txt', path: '/x', value: [{ insert: 'How about th' }] },
+        { op: '@txt', path: '/x', value: [{ retain: 12 }, { insert: 'at!' }] },
         {
           op: '@txt',
           path: '/x',
-          value: { ops: [{ delete: 3 }, { insert: 'Who' }, { retain: 1 }, { delete: 5 }, { insert: 'is' }] },
+          value: [{ delete: 3 }, { insert: 'Who' }, { retain: 1 }, { delete: 5 }, { insert: 'is' }],
         },
       ])
-    ).toEqual([{ op: '@txt', path: '/x', value: { ops: [{ insert: 'Who is that!' }] } }]);
+    ).toEqual([{ op: '@txt', path: '/x', value: [{ insert: 'Who is that!' }] }]);
+  });
+
+  it('text compose accepts legacy { ops } shape on input but outputs an array', () => {
+    expect(
+      composePatch([
+        { op: '@txt', path: '/x', value: { ops: [{ insert: 'How about th' }] } as any },
+        { op: '@txt', path: '/x', value: { ops: [{ retain: 12 }, { insert: 'at!' }] } as any },
+      ])
+    ).toEqual([{ op: '@txt', path: '/x', value: [{ insert: 'How about that!' }] }]);
   });
 
   it('max compose', () => {

@@ -22,6 +22,7 @@ import { applyPatch } from './applyPatch.js';
 import { composePatch } from './composePatch.js';
 import { invertPatch } from './invertPatch.js';
 import { bitmask } from './ops/bitmask.js';
+import { toOps } from './ops/text.js';
 import { transformPatch } from './transformPatch.js';
 import type { ApplyJSONPatchOptions, JSONPatchOp, JSONPatchOpHandlerMap } from './types.js';
 
@@ -145,16 +146,14 @@ export class JSONPatch {
 
   /**
    * Applies a delta to a text document.
+   *
+   * `value` is stored as a bare `Op[]` array (the canonical `@txt` shape).
+   * Accepts a `Delta` instance, a serialized `{ ops }` form, or the array directly.
    */
   text(path: PathLike, value: Delta | Delta['ops']) {
-    if (Array.isArray(value)) {
-      value = new Delta(value);
-    } else if (!(value instanceof Delta) && Array.isArray((value as any)?.ops)) {
-      value = new Delta((value as any).ops);
-    } else if (!(value instanceof Delta)) {
-      throw new Error('Invalid Delta');
-    }
-    return this.op('@txt', path, value);
+    const ops = toOps(value);
+    if (!ops) throw new Error('Invalid Delta');
+    return this.op('@txt', path, ops);
   }
 
   /**

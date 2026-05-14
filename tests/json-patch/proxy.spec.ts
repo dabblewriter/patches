@@ -102,12 +102,11 @@ describe('Path Proxy Utilities', () => {
 
     it('should work with text operations using Delta', () => {
       patch.text(path.foo, new Delta().retain(5).insert(' beautiful'));
-      expect(patch.ops[0]).toMatchObject({
+      expect(patch.ops[0]).toEqual({
         op: '@txt',
         path: '/foo',
+        value: [{ retain: 5 }, { insert: ' beautiful' }],
       });
-      // Verify the Delta was stored
-      expect(patch.ops[0].value).toBeInstanceOf(Delta);
     });
 
     it('should work with increment operations', () => {
@@ -135,8 +134,11 @@ describe('Path Proxy Utilities', () => {
 
       expect(patch.ops[0]).toEqual({ op: 'replace', path: '/foo', value: 'Hello' });
       expect(patch.ops[1]).toEqual({ op: '@inc', path: '/bar', value: 5 });
-      expect(patch.ops[2]).toMatchObject({ op: '@txt', path: '/nested/a' });
-      expect(patch.ops[2].value).toBeInstanceOf(Delta);
+      expect(patch.ops[2]).toEqual({
+        op: '@txt',
+        path: '/nested/a',
+        value: [{ retain: 5 }, { insert: ' beautiful' }],
+      });
       expect(patch.ops[3]).toEqual({ op: '@inc', path: '/bar', value: -2 });
     });
   });

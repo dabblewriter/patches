@@ -92,19 +92,6 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   readonly onRemoteDocDeleted = signal<(docId: string, pendingChanges: Change[]) => void>();
   /**
-   * Signal emitted when the server reports the caller is no longer authorised
-   * to read/write a tracked document (e.g. a co-author was revoked, removed
-   * from a shared collection, or never had access in the first place).
-   *
-   * Local cleanup mirrors `onRemoteDocDeleted` — untrack, drop the local
-   * cache, return any pending changes that were lost — but the doc itself
-   * still exists server-side. Consumers that maintain a workspace listing
-   * (e.g. a "Shared with Me" dashboard) should remove the doc from their
-   * own state when this fires; otherwise it would resurface on next start
-   * and immediately re-fail with the same 403.
-   */
-  readonly onRemoteDocAccessRevoked = signal<(docId: string, pendingChanges: Change[]) => void>();
-  /**
    * Signal emitted after pending branch metas have been synced to the server.
    * Consumers should use this to refresh in-memory branch state (e.g. call `loadCached()`
    * on their PatchesBranchClient instances).
@@ -513,14 +500,6 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         await this._handleRemoteDocDeleted(docId);
         return;
       }
-      // Handle ACCESS_REVOKED — caller lost membership while syncing or
-      // while offline. Treat as a soft local delete so the doc stops
-      // re-failing every reconcile loop. The doc is preserved server-side
-      // for any other authorised member.
-      if (this._isAccessRevokedError(err)) {
-        await this._handleRemoteDocAccessRevoked(docId);
-        return;
-      }
       const syncError = err instanceof Error ? err : new Error(String(err));
       this._updateDocSyncState(docId, { syncStatus: 'error', syncError });
       console.error(`Error syncing doc ${docId}:`, err);
@@ -596,10 +575,6 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     } catch (err) {
       if (this._isDocDeletedError(err)) {
         await this._handleRemoteDocDeleted(docId);
-        return;
-      }
-      if (this._isAccessRevokedError(err)) {
-        await this._handleRemoteDocAccessRevoked(docId);
         return;
       }
       const flushError = err instanceof Error ? err : new Error(String(err));
@@ -794,42 +769,24 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * Cleans up local state and notifies the application with any pending changes that were lost.
    */
   protected async _handleRemoteDocDeleted(docId: string): Promise<void> {
-    const pendingChanges = await this._cleanupAfterAccessLoss(docId);
-    await this.onRemoteDocDeleted.emit(docId, pendingChanges);
-  }
-
-  /**
-   * Sibling of `_handleRemoteDocDeleted` for the access-revoked path.
-   * Same local cleanup (close, untrack, drop cache, clear sync state) but
-   * the doc is not tombstoned server-side — it just isn't ours anymore.
-   * Emitted as a distinct signal so consumers can show different UX
-   * ("Your access was revoked" vs. "Project was deleted") without having
-   * to inspect error codes themselves.
-   */
-  protected async _handleRemoteDocAccessRevoked(docId: string): Promise<void> {
-    const pendingChanges = await this._cleanupAfterAccessLoss(docId);
-    await this.onRemoteDocAccessRevoked.emit(docId, pendingChanges);
-  }
-
-  /**
-   * Local cleanup shared by `_handleRemoteDocDeleted` and
-   * `_handleRemoteDocAccessRevoked`. Returns pending changes that were
-   * lost so the caller can include them in the application-facing signal.
-   */
-  protected async _cleanupAfterAccessLoss(docId: string): Promise<Change[]> {
     const algorithm = this._getAlgorithm(docId);
+
+    // Get pending changes before cleanup so app can handle them
     const pendingChanges = (await algorithm.getPendingToSend(docId)) ?? [];
 
+    // Close doc if open
     const doc = this.patches.getOpenDoc(docId);
     if (doc) {
       await this.patches.closeDoc(docId);
     }
 
+    // Clean up tracking and local storage
     this.trackedDocs.delete(docId);
     this._updateDocSyncState(docId, undefined);
     await algorithm.confirmDeleteDoc(docId);
 
-    return pendingChanges;
+    // Notify application (with any pending changes that were lost)
+    await this.onRemoteDocDeleted.emit(docId, pendingChanges);
   }
 
   /**
@@ -900,16 +857,5 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   protected _isDocDeletedError(err: unknown): boolean {
     return err instanceof StatusError && err.code === ErrorCodes.DOC_DELETED;
-  }
-
-  /**
-   * Helper to detect ACCESS_REVOKED (403) errors from the server. Used by
-   * the sync/flush catch blocks to short-circuit straight into the
-   * `_handleRemoteDocAccessRevoked` cleanup path rather than latching the
-   * error onto `docStates[docId].syncError` (which would surface as a
-   * permanent "Unable to Sync" pill in the UI).
-   */
-  protected _isAccessRevokedError(err: unknown): boolean {
-    return err instanceof StatusError && err.code === ErrorCodes.ACCESS_REVOKED;
   }
 }

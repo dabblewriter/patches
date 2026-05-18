@@ -10,21 +10,21 @@ export class StatusError extends Error {
 
 /**
  * Standard error codes for Patches operations.
+ *
+ * Patches is permission-agnostic; these codes are surfaced verbatim from
+ * `StatusError.code` so consuming apps can branch on the HTTP status without
+ * reaching for string matching. Permission *policy* (what to do with a 403)
+ * lives in the consuming app.
  */
 export const ErrorCodes = {
   /** Document was deleted (tombstone exists). */
   DOC_DELETED: 410,
   /** Document not found (never existed). */
   DOC_NOT_FOUND: 404,
-  /**
-   * Caller is no longer authorized to read/write the document.
-   * Distinct from DOC_DELETED — the doc still exists, the caller just lost
-   * membership (revoked, or removed from a shared collection). The sync
-   * loop treats it like a soft delete: untrack, drop local cache, emit
-   * `onRemoteDocAccessRevoked` so the application can remove the doc from
-   * its own workspace state.
-   */
-  ACCESS_REVOKED: 403,
+  /** Caller is not authenticated (no/invalid credentials). */
+  DOC_UNAUTHORIZED: 401,
+  /** Caller is authenticated but not authorized for this doc. */
+  DOC_FORBIDDEN: 403,
 } as const;
 
 /**

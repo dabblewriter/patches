@@ -321,18 +321,12 @@ describe('applyPatch', () => {
   describe('@txt value shapes', () => {
     // The canonical value shape is `Op[]`, but `text.apply` defensively accepts
     // the other historical shapes so rehydrated/legacy data still applies cleanly.
-    it('applies a @txt op with Op[] value', () => {
-      const result = applyPatch({}, [{ op: '@txt', path: '/text', value: [{ insert: 'hi' }] }]);
-      expect(result).toEqual({ text: { ops: [{ insert: 'hi\n' }] } });
-    });
-
-    it('applies a @txt op with a raw Delta instance as value', () => {
-      const result = applyPatch({}, [{ op: '@txt', path: '/text', value: new Delta().insert('hi') as any }]);
-      expect(result).toEqual({ text: { ops: [{ insert: 'hi\n' }] } });
-    });
-
-    it('applies a @txt op with legacy { ops } value', () => {
-      const result = applyPatch({}, [{ op: '@txt', path: '/text', value: { ops: [{ insert: 'hi' }] } as any }]);
+    it.each([
+      ['Op[]', [{ insert: 'hi' }]],
+      ['raw Delta instance', new Delta().insert('hi')],
+      ['legacy { ops }', { ops: [{ insert: 'hi' }] }],
+    ])('applies a @txt op with %s value', (_, value) => {
+      const result = applyPatch({}, [{ op: '@txt', path: '/text', value: value as any }]);
       expect(result).toEqual({ text: { ops: [{ insert: 'hi\n' }] } });
     });
   });

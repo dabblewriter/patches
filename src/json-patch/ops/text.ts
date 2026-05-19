@@ -78,8 +78,9 @@ export const text: JSONPatchOpHandler = {
 
   compose(state, delta1, delta2) {
     const ops1 = toOps(delta1);
+    if (!ops1) throw new Error('Cannot compose @txt ops: first value is not a Delta ops array');
     const ops2 = toOps(delta2);
-    if (!ops1 || !ops2) throw new Error('Cannot compose @txt ops: value is not a Delta ops array');
+    if (!ops2) throw new Error('Cannot compose @txt ops: second value is not a Delta ops array');
     return new Delta(ops1).compose(new Delta(ops2)).ops;
   },
 };

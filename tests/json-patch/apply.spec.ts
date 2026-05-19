@@ -1,3 +1,4 @@
+import { Delta } from '@dabble/delta';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { applyPatch } from '../../src/json-patch/applyPatch.js';
 import { bitmask, combineBitmasks } from '../../src/json-patch/ops/bitmask.js';
@@ -314,6 +315,25 @@ describe('applyPatch', () => {
         { op: 'add', path: '/a/extra', value: 1 },
       ]);
       expect(result).toEqual({ a: { initial: true, extra: 1 } });
+    });
+  });
+
+  describe('@txt value shapes', () => {
+    // The canonical value shape is `Op[]`, but `text.apply` defensively accepts
+    // the other historical shapes so rehydrated/legacy data still applies cleanly.
+    it('applies a @txt op with Op[] value', () => {
+      const result = applyPatch({}, [{ op: '@txt', path: '/text', value: [{ insert: 'hi' }] }]);
+      expect(result).toEqual({ text: { ops: [{ insert: 'hi\n' }] } });
+    });
+
+    it('applies a @txt op with a raw Delta instance as value', () => {
+      const result = applyPatch({}, [{ op: '@txt', path: '/text', value: new Delta().insert('hi') as any }]);
+      expect(result).toEqual({ text: { ops: [{ insert: 'hi\n' }] } });
+    });
+
+    it('applies a @txt op with legacy { ops } value', () => {
+      const result = applyPatch({}, [{ op: '@txt', path: '/text', value: { ops: [{ insert: 'hi' }] } as any }]);
+      expect(result).toEqual({ text: { ops: [{ insert: 'hi\n' }] } });
     });
   });
 });

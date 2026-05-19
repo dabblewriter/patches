@@ -1410,6 +1410,26 @@ describe('transformPatch', () => {
       ).toEqual([{ op: 'replace', path: '/text', value: true }]);
     });
 
+    it('accepts legacy { ops } value shape on either side without dropping ops', () => {
+      // Regression for DAB-491: `text.transform` previously required `op.value` to be an
+      // array, so a `{ ops: [...] }`-shaped value (the JSON.stringify form of a Delta)
+      // was silently dropped — the symptom that crashed the 3→2 migration sync.
+      expect(
+        transformPatch(
+          obj,
+          [{ op: '@txt', path: '/text', value: { ops: [{ insert: 'test' }] } as any }],
+          [{ op: '@txt', path: '/text', value: [{ insert: 'testing' }] }]
+        )
+      ).toEqual([{ op: '@txt', path: '/text', value: [{ retain: 4 }, { insert: 'testing' }] }]);
+      expect(
+        transformPatch(
+          obj,
+          [{ op: '@txt', path: '/text', value: [{ insert: 'test' }] }],
+          [{ op: '@txt', path: '/text', value: { ops: [{ insert: 'testing' }] } as any }]
+        )
+      ).toEqual([{ op: '@txt', path: '/text', value: [{ retain: 4 }, { insert: 'testing' }] }]);
+    });
+
     it('deletes values it overwrites', () => {
       expect(
         transformPatch(

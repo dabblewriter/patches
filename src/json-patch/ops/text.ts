@@ -70,12 +70,17 @@ export const text: JSONPatchOpHandler = {
 
   invert(state, { path, value }, oldValue: Delta, changedObj) {
     if (path.endsWith('/-')) path = path.replace('-', changedObj.length);
-    const delta = new Delta(toOps(value) ?? []);
-    return oldValue === undefined ? { op: 'remove', path } : { op: '@txt', path, value: delta.invert(oldValue).ops };
+    if (oldValue === undefined) return { op: 'remove', path };
+    const ops = toOps(value);
+    if (!ops) throw new Error(`Cannot invert @txt op at ${path}: value is not a Delta ops array`);
+    return { op: '@txt', path, value: new Delta(ops).invert(oldValue).ops };
   },
 
   compose(state, delta1, delta2) {
-    return new Delta(toOps(delta1) ?? []).compose(new Delta(toOps(delta2) ?? [])).ops;
+    const ops1 = toOps(delta1);
+    const ops2 = toOps(delta2);
+    if (!ops1 || !ops2) throw new Error('Cannot compose @txt ops: value is not a Delta ops array');
+    return new Delta(ops1).compose(new Delta(ops2)).ops;
   },
 };
 

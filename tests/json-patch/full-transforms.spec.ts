@@ -5,7 +5,7 @@ import { JSONPatch } from '../../src/json-patch/JSONPatch.js';
 describe('JSONPatch.transform', () => {
   // verbose(true)
 
-  const delta = new Delta();
+  const delta = new Delta().ops;
   const arr = [{ zero: 0 }, { one: 1 }, { two: 2 }, { three: 3 }, { four: 4 }, { five: 5 }, { six: 6 }, { seven: 7 }];
   const obj = { x: [1, 2, 3, {}, 5, 6, 7, 8], y: 'foo' };
   let server: any;

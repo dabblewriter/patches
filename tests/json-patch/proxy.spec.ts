@@ -100,8 +100,8 @@ describe('Path Proxy Utilities', () => {
       expect(patch.ops).toEqual([{ op: 'replace', path: '/nested/a', value: 'universe' }]);
     });
 
-    it('should work with text operations using Delta', () => {
-      patch.text(path.foo, new Delta().retain(5).insert(' beautiful'));
+    it('should work with text operations using Delta ops', () => {
+      patch.text(path.foo, new Delta().retain(5).insert(' beautiful').ops);
       expect(patch.ops[0]).toEqual({
         op: '@txt',
         path: '/foo',
@@ -129,7 +129,7 @@ describe('Path Proxy Utilities', () => {
     it('should work with multiple operations', () => {
       patch.replace(path.foo, 'Hello');
       patch.increment(path.bar!, 5);
-      patch.text(path.nested.a, new Delta().retain(5).insert(' beautiful'));
+      patch.text(path.nested.a, new Delta().retain(5).insert(' beautiful').ops);
       patch.decrement(path.bar!, 2);
 
       expect(patch.ops[0]).toEqual({ op: 'replace', path: '/foo', value: 'Hello' });

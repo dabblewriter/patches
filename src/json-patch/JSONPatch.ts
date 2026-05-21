@@ -17,12 +17,11 @@
  * target different items after concurrent changes. See docs/json-patch.md for details.
  */
 
-import { Delta } from '@dabble/delta';
+import type { Op } from '@dabble/delta';
 import { applyPatch } from './applyPatch.js';
 import { composePatch } from './composePatch.js';
 import { invertPatch } from './invertPatch.js';
 import { bitmask } from './ops/bitmask.js';
-import { toOps } from './ops/text.js';
 import { transformPatch } from './transformPatch.js';
 import type { ApplyJSONPatchOptions, JSONPatchOp, JSONPatchOpHandlerMap } from './types.js';
 
@@ -145,15 +144,11 @@ export class JSONPatch {
   }
 
   /**
-   * Applies a delta to a text document.
-   *
-   * `value` is stored as a bare `Op[]` array (the canonical `@txt` shape).
-   * Accepts a `Delta` instance, a serialized `{ ops }` form, or the array directly.
+   * Applies a delta to a text document. Pass a Delta's `ops` array (e.g. `new Delta().insert('x').ops`).
    */
-  text(path: PathLike, value: Delta | Delta['ops']) {
-    const ops = toOps(value);
-    if (!ops) throw new Error('Invalid Delta');
-    return this.op('@txt', path, ops);
+  text(path: PathLike, value: Op[]) {
+    if (!Array.isArray(value)) throw new Error(`@txt value must be an Op[] (Delta.ops); got ${typeof value}`);
+    return this.op('@txt', path, value);
   }
 
   /**

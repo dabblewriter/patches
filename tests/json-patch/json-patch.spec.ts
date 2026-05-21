@@ -157,12 +157,6 @@ describe('JSONPatch', () => {
   });
 
   it('can add a delta text value', () => {
-    patch.text('/text', new Delta().insert('This is my text.'));
-    obj = patch.apply(obj);
-    expect(obj.text).toEqual({ ops: [{ insert: 'This is my text.\n' }] });
-  });
-
-  it('can add a delta text value from ops', () => {
     patch.text('/text', new Delta().insert('This is my text.').ops);
     obj = patch.apply(obj);
     expect(obj.text).toEqual({ ops: [{ insert: 'This is my text.\n' }] });
@@ -170,28 +164,28 @@ describe('JSONPatch', () => {
 
   it('can update a delta text value', () => {
     obj.text = new Delta().insert('This is my text.\n');
-    patch.text('/text', new Delta().retain(11).insert('amazing '));
+    patch.text('/text', new Delta().retain(11).insert('amazing ').ops);
     obj = patch.apply(obj);
     expect(obj.text).toEqual({ ops: [{ insert: 'This is my amazing text.\n' }] });
   });
 
   it('can overwrite a value with a delta text value', () => {
     obj.text = new Date();
-    patch.text('/text', new Delta().insert('This is my text.'));
+    patch.text('/text', new Delta().insert('This is my text.').ops);
     obj = patch.apply(obj);
     expect(obj.text).toEqual({ ops: [{ insert: 'This is my text.\n' }] });
   });
 
   it('can update an ops value with a delta text value', () => {
     obj.text = new Delta().insert('This is my text.\n').ops;
-    patch.text('/text', new Delta().retain(11).insert('amazing '));
+    patch.text('/text', new Delta().retain(11).insert('amazing ').ops);
     obj = patch.apply(obj);
     expect(obj.text).toEqual({ ops: [{ insert: 'This is my amazing text.\n' }] });
   });
 
   it('will overwrite an array value that does not look like delta ops', () => {
     obj.text = [{ test: true }];
-    patch.text('/text', new Delta().insert('This is my text.'));
+    patch.text('/text', new Delta().insert('This is my text.').ops);
     obj = patch.apply(obj);
     expect(obj.text).toEqual({ ops: [{ insert: 'This is my text.\n' }] });
   });
@@ -205,7 +199,7 @@ describe('JSONPatch', () => {
 
   it('handles text delta that overruns document by converting retain to spaces', () => {
     obj.text = new Delta().insert('Short\n');
-    patch.text('/text', new Delta().retain(21).insert('Long'));
+    patch.text('/text', new Delta().retain(21).insert('Long').ops);
     obj = patch.apply(obj, { strict: true });
     // The retain(21) overruns the 6-char document, creating a retain(15) op after compose.
     // The lenient behavior converts the retain to spaces to preserve cursor positions.
@@ -215,7 +209,7 @@ describe('JSONPatch', () => {
 
   it('handles text delta with trailing retain/delete overrun by dropping them', () => {
     obj.text = new Delta().insert('Short\n');
-    patch.text('/text', new Delta().retain(21).delete(5));
+    patch.text('/text', new Delta().retain(21).delete(5).ops);
     obj = patch.apply(obj, { strict: true });
     // The retain(21) overruns the 6-char document, creating trailing retain/delete ops.
     // Trailing non-insert ops are dropped since there's no subsequent content to preserve.
@@ -368,6 +362,26 @@ describe('JSONPatch', () => {
       expect(invert).toThrow(
         'Patch mismatch. This patch was not applied to the provided object and cannot be inverted.'
       );
+    });
+
+    it('inverts @txt and emits canonical Op[] value', () => {
+      const original = { text: new Delta().insert('Hello\n').ops };
+      patch.text('/text', new Delta().retain(5).insert(' world').ops);
+      const inverted = patch.invert(original);
+      expect(inverted.ops).toEqual([{ op: '@txt', path: '/text', value: [{ retain: 5 }, { delete: 6 }] }]);
+      // Round-trip: applying then inverting should yield the original.
+      const applied = patch.apply(original);
+      const reverted = inverted.apply(applied);
+      expect(reverted).toEqual({ text: { ops: [{ insert: 'Hello\n' }] } });
+    });
+
+    it('inverts @txt with legacy { ops } value shape', () => {
+      const original = { text: new Delta().insert('Hello\n').ops };
+      const legacyPatch = new JSONPatch([
+        { op: '@txt', path: '/text', value: { ops: [{ retain: 5 }, { insert: ' world' }] } as any },
+      ]);
+      const inverted = legacyPatch.invert(original);
+      expect(inverted.ops).toEqual([{ op: '@txt', path: '/text', value: [{ retain: 5 }, { delete: 6 }] }]);
     });
   });
 });

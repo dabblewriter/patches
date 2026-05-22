@@ -134,6 +134,27 @@ describe('SSEServer', () => {
       authServer.destroy();
     });
 
+    it('should exclude docs where canAccess throws and not propagate the error', async () => {
+      const authServer = new SSEServer({
+        auth: {
+          canAccess: vi
+            .fn()
+            .mockResolvedValueOnce(true) // doc1 allowed
+            .mockRejectedValueOnce(new Error('auth service error')) // doc2 throws
+            .mockResolvedValueOnce(true), // doc3 allowed
+        },
+      });
+      authServer.connect('client1');
+
+      const result = await authServer.subscribe('client1', ['doc1', 'doc2', 'doc3'], { clientId: 'client1' });
+      expect(result).toEqual(['doc1', 'doc3']);
+      expect(authServer.listSubscriptions('doc1')).toContain('client1');
+      expect(authServer.listSubscriptions('doc2')).not.toContain('client1');
+      expect(authServer.listSubscriptions('doc3')).toContain('client1');
+
+      authServer.destroy();
+    });
+
     it('should return empty array for unknown client', async () => {
       const result = await server.subscribe('unknown', ['doc1']);
       expect(result).toEqual([]);

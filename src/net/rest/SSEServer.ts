@@ -203,18 +203,27 @@ export class SSEServer {
     const client = this.clients.get(clientId);
     if (!client) return [];
 
-    const allowed: string[] = [];
-    for (const docId of docIds) {
-      if (this.auth) {
-        try {
-          const ok = await this.auth.canAccess(ctx, docId, 'read', 'subscribe');
-          if (!ok) continue;
-        } catch {
-          continue;
-        }
+    if (!this.auth) {
+      for (const docId of docIds) {
+        client.subscriptions.add(docId);
       }
-      allowed.push(docId);
-      client.subscriptions.add(docId);
+      return [...docIds];
+    }
+
+    const checks = await Promise.allSettled(
+      docIds.map(async docId => {
+        const ok = await this.auth!.canAccess(ctx, docId, 'read', 'subscribe');
+        if (!ok) throw new Error('access denied');
+        return docId;
+      })
+    );
+
+    const allowed: string[] = [];
+    for (const result of checks) {
+      if (result.status === 'fulfilled') {
+        allowed.push(result.value);
+        client.subscriptions.add(result.value);
+      }
     }
     return allowed;
   }

@@ -67,6 +67,24 @@ export interface PatchesDoc<T extends object = object> extends ReadonlyStore<T> 
    * @param mutator Function that uses JSONPatch methods with type-safe paths.
    */
   change(mutator: ChangeMutator<T>): void;
+
+  /**
+   * Resolves when the local change pipeline is quiet for this doc: every `change()`
+   * call has been processed by the algorithm (persisted to its store) and either
+   * confirmed or rolled back.
+   *
+   * **Local only.** This does NOT wait for changes to reach the server — sync to the
+   * server is PatchesSync's job and runs independently. Use this before operations
+   * that reset in-memory state (`import` after a branch merge, version creation, hard
+   * resync) — those would otherwise wipe outstanding optimistic ops the user is still
+   * filling.
+   *
+   * Idempotent. No built-in timeout — wrap with `Promise.race` if you need one. If
+   * called on a doc whose Patches has since been closed or that has been reopened
+   * under the same docId, the wait may resolve sooner or later than the original
+   * pending work; don't hold a closed-doc reference across a reopen.
+   */
+  flush(): Promise<void>;
 }
 
 export { OTDoc } from './OTDoc.js';

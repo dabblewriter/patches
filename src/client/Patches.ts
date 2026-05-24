@@ -1,6 +1,6 @@
 import { type Unsubscriber, signal } from 'easy-signal';
 import type { JSONPatchOp } from '../json-patch/types.js';
-import type { Change } from '../types.js';
+import type { Change, PatchesSnapshot } from '../types.js';
 import { singleInvocation } from '../utils/concurrency.js';
 import type { BaseDoc } from './BaseDoc.js';
 import type { ClientAlgorithm } from './ClientAlgorithm.js';
@@ -50,6 +50,10 @@ export class Patches {
   protected options: PatchesOptions;
   protected docs: Map<string, ManagedDoc<any>> = new Map();
   private _changeQueues: Map<string, Promise<void>> = new Map();
+  /** Doc IDs whose openDoc() body is currently in flight (between createDoc and this.docs.set). */
+  private _openingDocs: Set<string> = new Set();
+  /** Single-slot, latest-wins snapshot stash for docs in `_openingDocs`. Drained on open completion. */
+  private _openingSnapshots: Map<string, PatchesSnapshot> = new Map();
 
   readonly docOptions: PatchesDocOptions;
   readonly algorithms: Partial<Record<AlgorithmName, ClientAlgorithm>>;
@@ -183,42 +187,105 @@ export class Patches {
     const existing = this.docs.get(docId);
     if (existing) return existing.doc as PatchesDoc<T>;
 
-    // Determine the algorithm for this doc:
-    // 1. Use opts.algorithm if explicitly provided
-    // 2. Otherwise, check if already tracked and read persisted algorithm
-    // 3. Fall back to defaultAlgorithm
-    let algorithmName = opts.algorithm;
+    // Mark this doc as "opening" so any concurrent applySnapshot() call stashes its
+    // snapshot in `_openingSnapshots` instead of dropping it on the floor. Both the
+    // opening flag and the stash are cleared in the finally block on every exit —
+    // a failed open intentionally drops the stash so a) it can't be drained against
+    // a doc that never opened, b) `applySnapshot` doesn't have to handle a stash-but-
+    // not-opening state, and c) the broadcaster's next emission will repopulate it.
+    this._openingDocs.add(docId);
+    try {
+      // Determine the algorithm for this doc:
+      // 1. Use opts.algorithm if explicitly provided
+      // 2. Otherwise, check if already tracked and read persisted algorithm
+      // 3. Fall back to defaultAlgorithm
+      let algorithmName = opts.algorithm;
 
-    if (!algorithmName) {
-      // Check all algorithm stores to see if this doc is already tracked
-      for (const algo of Object.values(this.algorithms) as ClientAlgorithm[]) {
-        const docs = await algo.listDocs(false);
-        const tracked = docs.find(d => d.docId === docId);
-        if (tracked?.algorithm) {
-          algorithmName = tracked.algorithm;
-          break;
+      if (!algorithmName) {
+        // Check all algorithm stores to see if this doc is already tracked
+        for (const algo of Object.values(this.algorithms) as ClientAlgorithm[]) {
+          const docs = await algo.listDocs(false);
+          const tracked = docs.find(d => d.docId === docId);
+          if (tracked?.algorithm) {
+            algorithmName = tracked.algorithm;
+            break;
+          }
         }
+        algorithmName = algorithmName ?? this.defaultAlgorithm;
       }
-      algorithmName = algorithmName ?? this.defaultAlgorithm;
+
+      const algorithm = this._getAlgorithm(algorithmName);
+
+      // Ensure the doc is tracked before proceeding
+      await this.trackDocs([docId], algorithmName);
+
+      // Load initial state from store via algorithm
+      const snapshot = await algorithm.loadDoc(docId);
+      const mergedMetadata = { ...this.options.metadata, ...opts.metadata };
+
+      // Create the appropriate doc type via algorithm (now takes docId and snapshot)
+      const doc = algorithm.createDoc<T>(docId, snapshot);
+
+      // Wire up flush() so it can await the in-flight change queue for this doc.
+      const baseDoc = doc as unknown as BaseDoc<T>;
+      baseDoc._setFlushAwaiter(() => this._changeQueues.get(docId));
+
+      // Set up local listener -> algorithm handles packaging ops
+      const unsubscribe = doc.onChange(ops => this._handleDocChange(docId, ops, doc, algorithm, mergedMetadata));
+      this.docs.set(docId, { doc: doc as PatchesDoc<any>, algorithm, unsubscribe });
+
+      // Drain any snapshot that arrived during the open. Done synchronously after
+      // `this.docs.set` so no further applySnapshot calls can stash to the slot.
+      // Strict `>` guard: doc.import() unconditionally replaces internal pending-state
+      // (OTDoc._pendingChanges, LWWDoc._inFlightOpKeys) from snapshot.changes — calling
+      // it at equal rev with the stripped `changes: []` we receive over PatchesSync
+      // would wipe legitimate in-flight ops mid-typing. Only fresher snapshots warrant
+      // the reset.
+      const pending = this._openingSnapshots.get(docId);
+      if (pending && pending.rev > baseDoc.committedRev) {
+        baseDoc.import(pending as PatchesSnapshot<T>);
+      }
+
+      return doc;
+    } finally {
+      this._openingDocs.delete(docId);
+      this._openingSnapshots.delete(docId);
     }
+  }
 
-    const algorithm = this._getAlgorithm(algorithmName);
-
-    // Ensure the doc is tracked before proceeding
-    await this.trackDocs([docId], algorithmName);
-
-    // Load initial state from store via algorithm
-    const snapshot = await algorithm.loadDoc(docId);
-    const mergedMetadata = { ...this.options.metadata, ...opts.metadata };
-
-    // Create the appropriate doc type via algorithm (now takes docId and snapshot)
-    const doc = algorithm.createDoc<T>(docId, snapshot);
-
-    // Set up local listener -> algorithm handles packaging ops
-    const unsubscribe = doc.onChange(ops => this._handleDocChange(docId, ops, doc, algorithm, mergedMetadata));
-    this.docs.set(docId, { doc: doc as PatchesDoc<any>, algorithm, unsubscribe });
-
-    return doc;
+  /**
+   * Applies a snapshot received out-of-band (multi-tab broadcast, WebRTC peer gossip,
+   * any server-push pattern that isn't sequenced through openDoc). Handles the open /
+   * opening / closed cases consistently so transports don't have to.
+   *
+   * - **Open** (already in `docs`): imports if `snapshot.rev > doc.committedRev`. Strict
+   *   `>` (not `>=`) because doc.import() resets internal pending-state from
+   *   snapshot.changes; firing it on every equal-rev duplicate broadcast would wipe
+   *   in-flight ops mid-typing.
+   * - **Opening** (openDoc in flight): stashes in a single-slot map, keeping the
+   *   highest-rev snapshot seen. openDoc drains the slot before resolving so the returned
+   *   doc reflects the snapshot.
+   * - **Neither**: dropped. Patches doesn't track snapshots for docs it isn't managing.
+   *
+   * Idempotent. No-op on stale or unknown docs. Never throws.
+   */
+  applySnapshot<T extends object>(docId: string, snapshot: PatchesSnapshot<T>): void {
+    const managed = this.docs.get(docId);
+    if (managed) {
+      const baseDoc = managed.doc as unknown as BaseDoc<T>;
+      if (snapshot.rev > baseDoc.committedRev) {
+        baseDoc.import(snapshot);
+      }
+      return;
+    }
+    if (this._openingDocs.has(docId)) {
+      // Highest-rev wins, not last-write-wins: out-of-order delivery from mesh/peer
+      // transports mustn't clobber a higher-rev snapshot with a lower one.
+      const existing = this._openingSnapshots.get(docId);
+      if (!existing || snapshot.rev > existing.rev) {
+        this._openingSnapshots.set(docId, snapshot);
+      }
+    }
   }
 
   /**
@@ -280,6 +347,8 @@ export class Patches {
     this.docs.forEach(managed => managed.unsubscribe());
     this.docs.clear();
     this._changeQueues.clear();
+    this._openingDocs.clear();
+    this._openingSnapshots.clear();
 
     // Close all algorithms (each closes its store)
     await Promise.all(Object.values(this.algorithms).map(s => s?.close()));

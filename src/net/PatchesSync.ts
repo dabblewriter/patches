@@ -457,7 +457,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     const doc = this.patches.getOpenDoc(docId);
     const algorithm = this._getAlgorithm(docId);
 
-    // Cast to BaseDoc for internal methods (updateSyncStatus, import)
+    // Cast to BaseDoc for internal updateSyncStatus method (not on the PatchesDoc interface)
     const baseDoc = doc as BaseDoc | undefined;
 
     if (baseDoc) {
@@ -484,10 +484,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // Read back the actual committed rev (store may compute from changes)
           const savedRev = await algorithm.getCommittedRev(docId);
           this._updateDocSyncState(docId, { committedRev: savedRev });
-          // Import into doc if open (use BaseDoc.import)
-          if (baseDoc) {
-            baseDoc.import({ ...snapshot, changes: [] });
-          }
+          // Route through applySnapshot so open/opening/closed states are handled consistently
+          this.patches.applySnapshot(docId, { ...snapshot, changes: [] });
         }
       }
       this._updateDocSyncState(docId, { syncStatus: 'synced' });
@@ -553,10 +551,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           const snapshot = await this.connection.getDoc(docId);
           await algorithm.store.saveDoc(docId, snapshot);
           this._updateDocSyncState(docId, { committedRev: snapshot.rev });
-          const openDoc = this.patches.getOpenDoc(docId) as BaseDoc | undefined;
-          if (openDoc) {
-            openDoc.import({ ...snapshot, changes: [] });
-          }
+          // Route through applySnapshot so open/opening/closed states are handled consistently
+          this.patches.applySnapshot(docId, { ...snapshot, changes: [] });
         } else {
           // Confirm sent first so server corrections (applied next) overwrite
           // any stale ops for fields the server won via LWW timestamp resolution.

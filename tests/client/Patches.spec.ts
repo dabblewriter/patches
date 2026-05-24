@@ -101,6 +101,7 @@ describe('Patches', () => {
       import: vi.fn(),
       applyChanges: vi.fn(),
       updateSyncStatus: vi.fn(),
+      _setFlushAwaiter: vi.fn(),
       onChange: vi.fn().mockReturnValue(vi.fn()),
       close: vi.fn(),
       state: {},
@@ -473,6 +474,113 @@ describe('Patches', () => {
       await capturedChangeHandler(ops);
 
       expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {});
+    });
+  });
+
+  describe('applySnapshot', () => {
+    const newer = (rev: number): PatchesSnapshot => ({ state: { text: `r${rev}` }, rev, changes: [] });
+
+    it('imports immediately when doc is open and snapshot rev is newer', async () => {
+      mockDoc.committedRev = 3;
+      await patches.openDoc('doc1');
+      const snapshot = newer(7);
+
+      patches.applySnapshot('doc1', snapshot);
+
+      expect(mockDoc.import).toHaveBeenCalledWith(snapshot);
+    });
+
+    it('drops snapshot when rev is not strictly newer than committedRev', async () => {
+      // Strict `>` (not `>=`): doc.import resets internal pending-state from
+      // snapshot.changes, so firing on equal-rev duplicate broadcasts would wipe
+      // legitimate in-flight ops mid-typing.
+      mockDoc.committedRev = 10;
+      await patches.openDoc('doc1');
+
+      patches.applySnapshot('doc1', newer(10));
+      patches.applySnapshot('doc1', newer(5));
+
+      expect(mockDoc.import).not.toHaveBeenCalled();
+    });
+
+    it('drops snapshot when doc is neither open nor opening', () => {
+      expect(() => patches.applySnapshot('doc1', newer(5))).not.toThrow();
+      expect(mockDoc.import).not.toHaveBeenCalled();
+    });
+
+    it('stashes snapshot during in-flight openDoc and drains after open resolves', async () => {
+      let resolveLoad!: (s: PatchesSnapshot | undefined) => void;
+      vi.mocked(mockAlgorithm.loadDoc).mockReturnValue(
+        new Promise(r => {
+          resolveLoad = r;
+        })
+      );
+
+      const openPromise = patches.openDoc('doc1');
+      // Yield so openDoc reaches the awaited loadDoc
+      await new Promise(r => setTimeout(r, 0));
+
+      const stash = newer(5);
+      patches.applySnapshot('doc1', stash);
+      // mockDoc isn't returned by createDoc until loadDoc resolves, so import not yet called
+      expect(mockDoc.import).not.toHaveBeenCalled();
+
+      // loadDoc resolves with an older snapshot — stashed one should win
+      mockDoc.committedRev = 0;
+      resolveLoad({ state: {}, rev: 0, changes: [] });
+      await openPromise;
+
+      expect(mockDoc.import).toHaveBeenCalledWith(stash);
+    });
+
+    it('highest-rev snapshot wins regardless of arrival order', async () => {
+      let resolveLoad!: (s: PatchesSnapshot | undefined) => void;
+      vi.mocked(mockAlgorithm.loadDoc).mockReturnValue(
+        new Promise(r => {
+          resolveLoad = r;
+        })
+      );
+
+      const openPromise = patches.openDoc('doc1');
+      await new Promise(r => setTimeout(r, 0));
+
+      // Out-of-order: higher rev arrives FIRST, lower rev arrives second.
+      // The lower one must NOT overwrite the higher in the stash.
+      patches.applySnapshot('doc1', newer(7));
+      patches.applySnapshot('doc1', newer(5));
+
+      mockDoc.committedRev = 0;
+      resolveLoad(undefined);
+      await openPromise;
+
+      expect(mockDoc.import).toHaveBeenCalledTimes(1);
+      expect(mockDoc.import).toHaveBeenCalledWith(newer(7));
+    });
+
+    it('clears stash on open failure (no leak, no stale-drain on retry)', async () => {
+      let rejectLoad!: (err: Error) => void;
+      vi.mocked(mockAlgorithm.loadDoc).mockReturnValueOnce(
+        new Promise((_, r) => {
+          rejectLoad = r;
+        })
+      );
+
+      const openPromise = patches.openDoc('doc1');
+      await new Promise(r => setTimeout(r, 0));
+
+      patches.applySnapshot('doc1', newer(5));
+
+      rejectLoad(new Error('boom'));
+      await expect(openPromise).rejects.toThrow('boom');
+
+      // After failure, the doc isn't tracked anywhere — stash is gone.
+      // A subsequent retry starts fresh; the broadcaster's next emission repopulates it.
+      vi.mocked(mockAlgorithm.loadDoc).mockResolvedValue({ state: {}, rev: 0, changes: [] });
+      mockDoc.committedRev = 0;
+
+      await patches.openDoc('doc1');
+
+      expect(mockDoc.import).not.toHaveBeenCalled();
     });
   });
 });

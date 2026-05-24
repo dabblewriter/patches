@@ -129,6 +129,33 @@ This design means:
 
 The sync layer ([`PatchesSync`](PatchesSync.md)) handles getting changes to the server and dealing with conflicts.
 
+### Waiting for the Doc to Drain — `flush()`
+
+After certain coarse operations (branch merge, version creation, a hard resync over a non-PatchesSync transport) you need to know every pending op for a doc has been confirmed or rolled back before you reset its state with `import()`. Skip that step and you wipe a user's in-flight typing — the optimistic ops they just made vanish along with the import.
+
+`flush()` returns a Promise that resolves when the doc is quiet:
+
+```typescript
+// Before importing a fresh snapshot after a branch merge
+await doc.flush();
+applyFreshSnapshotSomehow(doc);
+```
+
+It waits for two things:
+
+1. Any in-flight change-processing for this doc (the per-doc serialized queue inside `Patches`) has settled.
+2. `_optimisticOps` is empty — every `change()` call has either been confirmed by the algorithm or rolled back on error.
+
+Idempotent: calling it on a quiet doc resolves immediately. No built-in timeout — wrap with `Promise.race` if you want one:
+
+```typescript
+const TIMEOUT = 30_000;
+await Promise.race([
+  doc.flush(),
+  new Promise((_, reject) => setTimeout(() => reject(new Error('flush timeout')), TIMEOUT)),
+]);
+```
+
 ## Reading State and Status
 
 ### `id`

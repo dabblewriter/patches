@@ -187,3 +187,92 @@ describe('OTDoc — import preserves optimistic ops', () => {
     expect(doc.state).toEqual({ title: 'hello', count: 0 });
   });
 });
+
+describe('BaseDoc — flush()', () => {
+  let doc: InstanceType<typeof OTDoc<TestDoc>>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    doc = new OTDoc<TestDoc>('doc-1', makeSnapshot({ title: 'hello', count: 0 }, 5));
+  });
+
+  it('resolves immediately when standalone (no awaiter wired, no optimistic ops)', async () => {
+    await expect(doc.flush()).resolves.toBeUndefined();
+  });
+
+  it('awaits the wired tail promise before resolving', async () => {
+    let resolveTail!: () => void;
+    const tail = new Promise<void>(r => {
+      resolveTail = r;
+    });
+    doc._setFlushAwaiter(() => tail);
+
+    let flushed = false;
+    const flushPromise = doc.flush().then(() => {
+      flushed = true;
+    });
+    await Promise.resolve();
+    expect(flushed).toBe(false);
+
+    resolveTail();
+    await flushPromise;
+    expect(flushed).toBe(true);
+  });
+
+  it('drains a fresh tail that appears during the await', async () => {
+    let resolveFirst!: () => void;
+    let resolveSecond!: () => void;
+    const firstTail = new Promise<void>(r => {
+      resolveFirst = r;
+    });
+    const secondTail = new Promise<void>(r => {
+      resolveSecond = r;
+    });
+
+    let current = firstTail;
+    doc._setFlushAwaiter(() => current);
+
+    let flushed = false;
+    const flushPromise = doc.flush().then(() => {
+      flushed = true;
+    });
+
+    // Swap in a new tail (simulating a new change() being queued mid-flush)
+    current = secondTail;
+    resolveFirst();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(flushed).toBe(false);
+
+    resolveSecond();
+    await flushPromise;
+    expect(flushed).toBe(true);
+  });
+
+  it('resolves once optimistic ops drain via applyChanges (local-confirm path)', async () => {
+    doc._setFlushAwaiter(() => undefined);
+
+    // Push an optimistic op without going through the queue
+    doc.change((patch, path) => patch.replace(path.title, 'world'));
+    const localOps = (doc.onChange.emit as any).mock.calls[0][0];
+    expect((doc as any)._optimisticOps.length).toBe(1);
+
+    // Without confirmation flush would spin; confirm the change, draining the op.
+    doc.applyChanges([makeChange('c1', 5, 6, localOps, false)]);
+    expect((doc as any)._optimisticOps.length).toBe(0);
+
+    await expect(doc.flush()).resolves.toBeUndefined();
+  });
+
+  it('resolves after rollbackOptimistic clears outstanding ops', async () => {
+    doc._setFlushAwaiter(() => undefined);
+
+    doc.change((patch, path) => patch.replace(path.title, 'world'));
+    expect((doc as any)._optimisticOps.length).toBe(1);
+
+    doc.rollbackOptimistic();
+    expect((doc as any)._optimisticOps.length).toBe(0);
+
+    await expect(doc.flush()).resolves.toBeUndefined();
+  });
+});

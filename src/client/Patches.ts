@@ -32,11 +32,15 @@ export interface PatchesOptions {
   docOptions?: PatchesDocOptions;
 }
 
-// Internal doc management structure
+// Internal doc management structure. `refCount` tracks how many callers
+// currently hold the doc open via `openDoc`; `closeDoc` only tears the doc
+// down when the count hits zero, so independent consumers can each manage
+// their own open/close lifecycle without stomping on one another.
 interface ManagedDoc<T extends object> {
   doc: PatchesDoc<T>;
   algorithm: ClientAlgorithm;
   unsubscribe: Unsubscriber;
+  refCount: number;
 }
 
 /**
@@ -214,16 +218,36 @@ export class Patches {
   }
 
   /**
-   * Opens a document by ID, loading its state from the store and setting up change listeners.
-   * If the doc is already open, returns the existing instance.
+   * Opens a document by ID, loading its state from the store and setting up
+   * change listeners.
+   *
+   * Refcounted: each call to `openDoc` increments a per-doc reference count,
+   * and `closeDoc` decrements it. The doc is only torn down (listener removed,
+   * cache entry deleted) when the count drops to zero. This means independent
+   * callers can each manage their own open/close lifecycle for the same doc
+   * without one's `closeDoc` ripping the doc out from under another. Callers
+   * MUST pair `openDoc` and `closeDoc` symmetrically — if you stop using a
+   * doc, close it once, exactly once.
+   *
    * @param docId - The document ID to open.
    * @param opts - Optional metadata and algorithm override.
    * @returns The opened PatchesDoc instance.
    */
-  @singleInvocation(true) // ensure a second call to openDoc with the same docId returns the same promise while opening
   async openDoc<T extends object>(docId: string, opts: OpenDocOptions = {}): Promise<PatchesDoc<T>> {
-    const existing = this.docs.get(docId);
-    if (existing) return existing.doc as PatchesDoc<T>;
+    // The actual open (load snapshot, create doc, register listener) is
+    // deduped per docId via `_openDocOnce` — concurrent first-time opens for
+    // the same doc share one in-flight promise so we don't double-create.
+    // Refcount increments here, AFTER the open settles, so every caller of
+    // `openDoc` contributes one ref regardless of cache hit/miss.
+    await this._openDocOnce(docId, opts);
+    const managed = this.docs.get(docId)!;
+    managed.refCount += 1;
+    return managed.doc as PatchesDoc<T>;
+  }
+
+  @singleInvocation(true)
+  private async _openDocOnce(docId: string, opts: OpenDocOptions = {}): Promise<void> {
+    if (this.docs.has(docId)) return;
 
     // Mark this doc as "opening" so any concurrent applySnapshot() call stashes its
     // snapshot in `_openingSnapshots` instead of dropping it on the floor. Both the
@@ -278,15 +302,17 @@ export class Patches {
       const mergedMetadata = { ...this.options.metadata, ...opts.metadata };
 
       // Create the appropriate doc type via algorithm (now takes docId and snapshot)
-      const doc = algorithm.createDoc<T>(docId, snapshot);
+      const doc = algorithm.createDoc<any>(docId, snapshot);
 
       // Wire up flush() so it can await the in-flight change queue for this doc.
-      const baseDoc = doc as unknown as BaseDoc<T>;
+      const baseDoc = doc as unknown as BaseDoc<any>;
       baseDoc._setFlushAwaiter(() => this._changeQueues.get(docId));
 
       // Set up local listener -> algorithm handles packaging ops
       const unsubscribe = doc.onChange(ops => this._handleDocChange(docId, ops, doc, algorithm, mergedMetadata));
-      this.docs.set(docId, { doc: doc as PatchesDoc<any>, algorithm, unsubscribe });
+      // refCount starts at 0; the outer `openDoc` increments it for the caller
+      // (and any concurrent callers awaiting the shared `_openDocOnce` promise).
+      this.docs.set(docId, { doc: doc as PatchesDoc<any>, algorithm, unsubscribe, refCount: 0 });
 
       // Drain any snapshot that arrived during the open. Done synchronously after
       // `this.docs.set` so no further applySnapshot calls can stash to the slot.
@@ -297,10 +323,8 @@ export class Patches {
       // the reset.
       const pending = this._openingSnapshots.get(docId);
       if (pending && pending.rev > baseDoc.committedRev) {
-        baseDoc.import(pending as PatchesSnapshot<T>);
+        baseDoc.import(pending as PatchesSnapshot<any>);
       }
-
-      return doc;
     } catch (err) {
       // If we added this doc to the tracked set during this open, unwind the
       // trackDocs side-effects (in-memory set, algorithm.store, onTrackDocs subscribers)
@@ -360,19 +384,29 @@ export class Patches {
   }
 
   /**
-   * Closes an open document by ID, removing listeners and optionally untracking it.
+   * Releases one reference to an open document. The doc is fully closed
+   * (listener removed, cache entry evicted, change queue cleared) only when
+   * the last outstanding `openDoc` is matched by its `closeDoc`. Calling
+   * `closeDoc` on a doc that isn't open is a no-op.
    * @param docId - The document ID to close.
-   * @param options - Optional: set untrack to true to also untrack the doc.
+   * @param options - Optional: set untrack to true to also untrack the doc
+   *   on the final close.
    */
-  async closeDoc(docId: string, { untrack = false }: { untrack?: boolean } = {}): Promise<void> {
+  async closeDoc(
+    docId: string,
+    { untrack = false, force = false }: { untrack?: boolean; force?: boolean } = {}
+  ): Promise<void> {
     const managed = this.docs.get(docId);
-    if (managed) {
-      managed.unsubscribe();
-      this.docs.delete(docId);
-      this._changeQueues.delete(docId);
-      if (untrack) {
-        await this.untrackDocs([docId]);
-      }
+    if (!managed) return;
+    if (!force) {
+      if (managed.refCount > 0) managed.refCount -= 1;
+      if (managed.refCount > 0) return;
+    }
+    managed.unsubscribe();
+    this.docs.delete(docId);
+    this._changeQueues.delete(docId);
+    if (untrack) {
+      await this.untrackDocs([docId]);
     }
   }
 
@@ -389,9 +423,10 @@ export class Patches {
     // a doc that's open right now still wins via `managed.algorithm`.
     const algorithm = await this._resolveAlgorithmForDoc(docId);
 
-    // Close if open locally
+    // Close if open locally. `force` so we evict regardless of outstanding
+    // refs — the doc is being deleted, every consumer needs to release it.
     if (this.docs.has(docId)) {
-      await this.closeDoc(docId);
+      await this.closeDoc(docId, { force: true });
     }
     // Unsubscribe from server if tracked (deletes the doc from the store before the next step adds a tombstone)
     if (this.trackedDocs.has(docId)) {

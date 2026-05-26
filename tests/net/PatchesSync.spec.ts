@@ -73,6 +73,7 @@ describe('PatchesSync', () => {
       trackedDocs: ['doc1', 'doc2'],
       docOptions: { maxPayloadBytes: 1000 },
       getOpenDoc: vi.fn().mockReturnValue(null),
+      applySnapshot: vi.fn(),
       getDocAlgorithm: vi.fn().mockReturnValue(mockAlgorithm),
       onTrackDocs: vi.fn(),
       onUntrackDocs: vi.fn(),
@@ -392,7 +393,7 @@ describe('PatchesSync', () => {
       expect(mockDoc.updateSyncStatus).toHaveBeenCalledWith('synced');
     });
 
-    it('should import snapshot into open doc when no committed rev', async () => {
+    it('should route fresh-doc snapshot through patches.applySnapshot and reach the doc', async () => {
       const mockDoc = {
         updateSyncStatus: vi.fn(),
         import: vi.fn(),
@@ -402,13 +403,15 @@ describe('PatchesSync', () => {
       mockWebSocket.getDoc.mockResolvedValue(snapshot);
 
       mockPatches.getOpenDoc.mockReturnValue(mockDoc);
-      // Sync now calls algorithm methods
+      // Wire applySnapshot to forward to the open doc, so the test verifies the full
+      // delivery route (DAB-503), not just that PatchesSync called the right method.
+      mockPatches.applySnapshot.mockImplementation((_docId: string, s: any) => mockDoc.import(s));
       mockAlgorithm.getPendingToSend.mockResolvedValue(null);
       mockAlgorithm.getCommittedRev.mockResolvedValue(0);
 
       await sync['syncDoc']('doc1');
 
-      // Sync now calls doc.import directly (via BaseDoc cast)
+      expect(mockPatches.applySnapshot).toHaveBeenCalledWith('doc1', { ...snapshot, changes: [] });
       expect(mockDoc.import).toHaveBeenCalledWith({ ...snapshot, changes: [] });
     });
 

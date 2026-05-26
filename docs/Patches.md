@@ -164,6 +164,27 @@ await patches.deleteDoc('old-shopping-list');
 
 Closing docs frees memory and ensures pending changes are persisted.
 
+### Applying External Snapshots
+
+`PatchesSync` handles snapshots that flow over its own connection. Any other transport that delivers snapshots out-of-band (multi-tab broadcast hubs, WebRTC peer mesh, custom server-push channels) has a race: a snapshot can land mid-`openDoc`, before the doc is in `getOpenDoc()`. Looking the doc up and calling `doc.import()` silently drops the snapshot in that window.
+
+`applySnapshot` makes the window disappear:
+
+```typescript
+// Hub tab broadcasts a fresh snapshot; spoke tab applies it.
+hub.onSnapshot((docId, snapshot) => {
+  patches.applySnapshot(docId, snapshot);
+});
+```
+
+What it does, based on the doc's state:
+
+- **Already open** — imports immediately if `snapshot.rev > doc.committedRev`. Equal-rev and older snapshots are dropped (a `doc.import` at equal rev would reset internal pending-state that the user may still be filling).
+- **`openDoc` in flight** — stashes in a single slot, keeping the highest-rev snapshot seen so out-of-order delivery doesn't lose newer state. `openDoc` drains the slot before resolving.
+- **Neither open nor opening** — dropped. Patches doesn't hold onto snapshots for docs it isn't managing.
+
+Idempotent, no-throw, and safe to call from any transport callback. Use it instead of the `getOpenDoc(id)?.import(snapshot)` pattern.
+
 ## Real-Time Sync
 
 `Patches` works with [`PatchesSync`](PatchesSync.md) for real-time collaboration:

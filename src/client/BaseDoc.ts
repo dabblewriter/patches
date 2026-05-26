@@ -105,6 +105,57 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
   }
 
   /**
+   * Returns the tail of Patches' in-flight change queue for this doc, or undefined
+   * if there is no work pending. Wired by Patches.openDoc(); standalone docs (no
+   * Patches) have no queue, so flush() short-circuits.
+   */
+  private _flushAwaiter?: () => Promise<void> | undefined;
+  /** Latches true the first time _setFlushAwaiter is called. Standalone docs stay false. */
+  private _flushAwaiterWired = false;
+
+  /** Internal: called by Patches.openDoc to wire up flush()'s queue accessor. */
+  _setFlushAwaiter(getter: () => Promise<void> | undefined): void {
+    this._flushAwaiter = getter;
+    this._flushAwaiterWired = true;
+  }
+
+  /**
+   * Resolves when the in-flight change queue for this doc has settled and
+   * `_optimisticOps` is empty. Loops so that change() calls made during the
+   * await are also drained.
+   *
+   * Standalone docs (never wired to a Patches queue) resolve immediately — they have
+   * no consumer to drain optimistic ops, so awaiting would hang forever. For a doc
+   * that WAS wired but whose queue entry has been cleared (post-closeDoc with an
+   * in-flight chain), we yield to the macrotask queue until the captured chain
+   * shifts the ops.
+   *
+   * **setTimeout(0) yield**: per the HTML spec, nested setTimeout(0) is clamped to
+   * 4ms after the 5th level — so a flush spinning over many in-flight ops post-close
+   * adds ~4ms per remaining iteration. The clamp is the cost of letting IndexedDB
+   * macrotasks run; `Promise.resolve()` would starve them.
+   */
+  async flush(): Promise<void> {
+    if (!this._flushAwaiterWired) return;
+    while (true) {
+      const tail = this._flushAwaiter?.();
+      if (!tail) {
+        if (this._optimisticOps.length === 0) return;
+        // The queue map entry was cleared (e.g., closeDoc) but a captured handler chain
+        // may still be draining ops. Yield to the macrotask queue — `Promise.resolve()`
+        // only drains microtasks, which would starve the IndexedDB callbacks the chain
+        // depends on.
+        await new Promise<void>(r => setTimeout(r, 0));
+        continue;
+      }
+      await tail;
+      // After awaiting, check whether a new change() appended a fresh queue tail.
+      // If the tail object is the same and optimistic ops are drained, we're done.
+      if (this._flushAwaiter?.() === tail && this._optimisticOps.length === 0) return;
+    }
+  }
+
+  /**
    * Recomputes state from confirmed state (committed + pending) plus any
    * remaining optimistic ops. Subclass-specific because each algorithm
    * tracks committed/pending state differently.

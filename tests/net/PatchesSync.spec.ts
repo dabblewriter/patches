@@ -408,11 +408,17 @@ describe('PatchesSync', () => {
       mockPatches.applySnapshot.mockImplementation((_docId: string, s: any) => mockDoc.import(s));
       mockAlgorithm.getPendingToSend.mockResolvedValue(null);
       mockAlgorithm.getCommittedRev.mockResolvedValue(0);
+      // After saveDoc, sync re-reads via loadDoc so import() sees any pending the store
+      // preserved across saveDoc (DAB-507 fix). Mock loadDoc to return the snapshot with
+      // a representative pending change to assert that path through.
+      const storeSnapshot = { ...snapshot, changes: [{ id: 'p1', rev: 2, baseRev: 1, ops: [], created: 0 } as any] };
+      mockAlgorithm.loadDoc.mockResolvedValue(storeSnapshot);
 
       await sync['syncDoc']('doc1');
 
-      expect(mockPatches.applySnapshot).toHaveBeenCalledWith('doc1', { ...snapshot, changes: [] });
-      expect(mockDoc.import).toHaveBeenCalledWith({ ...snapshot, changes: [] });
+      expect(mockAlgorithm.loadDoc).toHaveBeenCalledWith('doc1');
+      expect(mockPatches.applySnapshot).toHaveBeenCalledWith('doc1', storeSnapshot);
+      expect(mockDoc.import).toHaveBeenCalledWith(storeSnapshot);
     });
 
     it('should not sync if not connected', async () => {

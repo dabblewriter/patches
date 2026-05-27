@@ -92,14 +92,18 @@ export class LWWInMemoryStore implements LWWClientStore {
 
   /**
    * Saves the current document state to storage.
-   * Clears committed fields (subsumed by the snapshot) but preserves pending ops.
+   * Clears committed fields (subsumed by the snapshot) but preserves pending ops
+   * and the in-flight sending change — those represent local edits not yet
+   * accepted by the server and would otherwise be silently dropped when
+   * PatchesSync re-saves a freshly-fetched snapshot.
    */
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
+    const existing = this.docs.get(docId);
     this.docs.set(docId, {
       snapshot: { state: docState.state, rev: docState.rev },
       committedFields: new Map(),
-      pendingOps: new Map(),
-      sendingChange: null,
+      pendingOps: existing?.pendingOps ?? new Map(),
+      sendingChange: existing?.sendingChange ?? null,
       committedRev: docState.rev,
     });
   }

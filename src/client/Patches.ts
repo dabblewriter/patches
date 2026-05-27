@@ -54,6 +54,13 @@ export class Patches {
   private _openingDocs: Set<string> = new Set();
   /** Single-slot, latest-wins snapshot stash for docs in `_openingDocs`. Drained on open completion. */
   private _openingSnapshots: Map<string, PatchesSnapshot> = new Map();
+  /**
+   * Promises for in-flight openDoc() calls, awaited by close() so it can't tear down
+   * algorithm/store state while an open is still resolving — which would otherwise let
+   * the resolving open call this.docs.set against an already-cleared map with a doc
+   * bound to closed algorithm internals.
+   */
+  private _openingPromises: Map<string, Promise<unknown>> = new Map();
 
   readonly docOptions: PatchesDocOptions;
   readonly algorithms: Partial<Record<AlgorithmName, ClientAlgorithm>>;
@@ -127,6 +134,35 @@ export class Patches {
     return this.docs.get(docId)?.algorithm;
   }
 
+  /**
+   * Resolves the algorithm that owns a doc's data, including for closed docs.
+   *
+   * For open docs the answer is `managed.algorithm`. For closed docs we have to scan
+   * each algorithm's `listDocs(true)` (mirroring openDoc's algorithm-detection loop)
+   * — otherwise `deleteDoc('x')` for a closed doc that was opened with a non-default
+   * algorithm would tombstone the wrong store (dropping the actual data on the floor
+   * and writing a stranded tombstone in the default algorithm's store).
+   * `includeDeleted=true` so we still find the right algorithm when the lookup is for
+   * a doc mid-deletion.
+   *
+   * Precedence on ambiguity: returns the first algorithm whose store claims the docId,
+   * iterated in `Object.values(this.algorithms)` insertion order. A docId should live
+   * in exactly one algorithm; if multiple stores claim the same id (e.g. partial
+   * migration), the algorithm passed first to the Patches constructor wins.
+   *
+   * Falls back to defaultAlgorithm only when no algorithm claims the docId — used by
+   * deleteDoc on truly-new IDs (rare) so we still tombstone somewhere consistent.
+   */
+  protected async _resolveAlgorithmForDoc(docId: string): Promise<ClientAlgorithm> {
+    const managed = this.docs.get(docId);
+    if (managed) return managed.algorithm;
+    for (const algo of Object.values(this.algorithms) as ClientAlgorithm[]) {
+      const docs = await algo.listDocs(true);
+      if (docs.some(d => d.docId === docId)) return algo;
+    }
+    return this._getAlgorithm(this.defaultAlgorithm);
+  }
+
   // --- Public API Methods ---
 
   /**
@@ -157,11 +193,13 @@ export class Patches {
     docIds.forEach(this.trackedDocs.delete, this.trackedDocs);
     this.onUntrackDocs.emit(docIds);
 
-    // Capture algorithm mapping BEFORE closing docs (closeDoc removes from this.docs)
+    // Capture algorithm mapping BEFORE closing docs (closeDoc removes from this.docs).
+    // For closed docs, `_resolveAlgorithmForDoc` scans each algorithm's store rather than
+    // defaulting — a closed doc opened on a non-default algorithm must be untracked from
+    // the algorithm that actually has its data.
     const byAlgorithm = new Map<ClientAlgorithm, string[]>();
     for (const docId of docIds) {
-      const managed = this.docs.get(docId);
-      const algorithm = managed?.algorithm ?? this._getAlgorithm(this.defaultAlgorithm);
+      const algorithm = await this._resolveAlgorithmForDoc(docId);
       const list = byAlgorithm.get(algorithm) ?? [];
       list.push(docId);
       byAlgorithm.set(algorithm, list);
@@ -194,6 +232,22 @@ export class Patches {
     // a doc that never opened, b) `applySnapshot` doesn't have to handle a stash-but-
     // not-opening state, and c) the broadcaster's next emission will repopulate it.
     this._openingDocs.add(docId);
+    // Register a deferred so close() can await the body without us having to pass the
+    // openDoc promise to itself. Safe under @singleInvocation(true) — only one body
+    // per docId can be in flight, so the map entry is single-writer per key. The
+    // resolve fires unconditionally from the finally below.
+    let resolveOpening!: () => void;
+    this._openingPromises.set(
+      docId,
+      new Promise<void>(resolve => {
+        resolveOpening = resolve;
+      })
+    );
+    // Snapshot whether the doc was already tracked before this open. If openDoc fails
+    // after we called trackDocs, we unwind via untrackDocs so the doc isn't left in a
+    // "tracked but never opened" zombie state. Skipped when the doc was pre-tracked —
+    // we don't want to untrack a subscription that existed before this call.
+    const wasTracked = this.trackedDocs.has(docId);
     try {
       // Determine the algorithm for this doc:
       // 1. Use opts.algorithm if explicitly provided
@@ -247,9 +301,26 @@ export class Patches {
       }
 
       return doc;
+    } catch (err) {
+      // If we added this doc to the tracked set during this open, unwind the
+      // trackDocs side-effects (in-memory set, algorithm.store, onTrackDocs subscribers)
+      // so a failed open doesn't leave a tracked-but-unopened doc behind. If untrack
+      // itself fails we still rethrow the original openDoc error (it's the actionable
+      // one for the caller), but emit the untrack failure via onError so observers can
+      // see the zombie state — otherwise the very bug this fix targets recurs silently.
+      if (!wasTracked && this.trackedDocs.has(docId)) {
+        try {
+          await this.untrackDocs([docId]);
+        } catch (untrackErr) {
+          this.onError.emit(untrackErr as Error, { docId });
+        }
+      }
+      throw err;
     } finally {
       this._openingDocs.delete(docId);
       this._openingSnapshots.delete(docId);
+      this._openingPromises.delete(docId);
+      resolveOpening();
     }
   }
 
@@ -311,9 +382,12 @@ export class Patches {
    * @param docId - The document ID to delete.
    */
   async deleteDoc(docId: string): Promise<void> {
-    // Get the algorithm for this doc (or default)
-    const managed = this.docs.get(docId);
-    const algorithm = managed?.algorithm ?? this._getAlgorithm(this.defaultAlgorithm);
+    // Resolve algorithm by store membership rather than defaulting. For a closed doc
+    // opened on a non-default algorithm, defaulting would tombstone the wrong store
+    // (writing a stranded tombstone in the default algorithm while leaving the real
+    // data untouched in the other algorithm). Resolved before closeDoc/untrackDocs so
+    // a doc that's open right now still wins via `managed.algorithm`.
+    const algorithm = await this._resolveAlgorithmForDoc(docId);
 
     // Close if open locally
     if (this.docs.has(docId)) {
@@ -343,6 +417,14 @@ export class Patches {
    * Should be called when shutting down the client.
    */
   async close(): Promise<void> {
+    // Drain in-flight openDoc() bodies first. Without this, an open resolving after
+    // close() cleared the maps would call this.docs.set against an emptied map with
+    // a doc bound to closed algorithm internals. allSettled so a failed open during
+    // shutdown still lets close() complete cleanly.
+    if (this._openingPromises.size > 0) {
+      await Promise.allSettled([...this._openingPromises.values()]);
+    }
+
     // Clean up local PatchesDoc listeners
     this.docs.forEach(managed => managed.unsubscribe());
     this.docs.clear();

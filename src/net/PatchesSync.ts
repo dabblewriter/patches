@@ -484,8 +484,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // Read back the actual committed rev (store may compute from changes)
           const savedRev = await algorithm.getCommittedRev(docId);
           this._updateDocSyncState(docId, { committedRev: savedRev });
-          // Route through applySnapshot so open/opening/closed states are handled consistently
-          this.patches.applySnapshot(docId, { ...snapshot, changes: [] });
+          // Re-read the snapshot from the algorithm's store so it includes any pending
+          // changes the store kept across saveDoc. Passing `changes: []` here would let
+          // doc.import() wipe in-memory pending state (OTDoc._pendingChanges) and LWW
+          // echo tracking (_inFlightOpKeys), diverging the doc from its store.
+          const fullSnapshot = await algorithm.loadDoc(docId);
+          if (fullSnapshot) {
+            this.patches.applySnapshot(docId, fullSnapshot);
+          }
         }
       }
       this._updateDocSyncState(docId, { syncStatus: 'synced' });
@@ -551,8 +557,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           const snapshot = await this.connection.getDoc(docId);
           await algorithm.store.saveDoc(docId, snapshot);
           this._updateDocSyncState(docId, { committedRev: snapshot.rev });
-          // Route through applySnapshot so open/opening/closed states are handled consistently
-          this.patches.applySnapshot(docId, { ...snapshot, changes: [] });
+          // Re-read from the algorithm's store so applySnapshot sees any pending the
+          // store kept (e.g., user kept typing during the commit roundtrip). Without
+          // this, doc.import() with `changes: []` wipes _pendingChanges / _inFlightOpKeys.
+          const fullSnapshot = await algorithm.loadDoc(docId);
+          if (fullSnapshot) {
+            this.patches.applySnapshot(docId, fullSnapshot);
+          }
         } else {
           // Confirm sent first so server corrections (applied next) overwrite
           // any stale ops for fields the server won via LWW timestamp resolution.

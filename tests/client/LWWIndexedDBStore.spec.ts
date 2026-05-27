@@ -279,7 +279,7 @@ describe('LWWIndexedDBStore', () => {
   });
 
   describe('saveDoc', () => {
-    it('should save document snapshot and clear fields', async () => {
+    it('should save document snapshot', async () => {
       const snapshot = createState({ title: 'Hello' }, 5);
       await store.saveDoc('doc1', snapshot);
 
@@ -296,6 +296,21 @@ describe('LWWIndexedDBStore', () => {
         committedRev: 5,
         algorithm: 'lww',
       });
+    });
+
+    it('should not delete pendingOps or sendingChanges (DAB-507 Bug 1)', async () => {
+      // saveDoc updates the committed snapshot only — local edits not yet sent
+      // (pendingOps) and the in-flight change (sendingChange) must survive, or
+      // PatchesSync's fresh-fetch / docReloadRequired paths silently drop them.
+      const pendingStore = createMockIDBStore();
+      const sendingStore = createMockIDBStore();
+      mockStores.set('pendingOps', pendingStore);
+      mockStores.set('sendingChanges', sendingStore);
+
+      await store.saveDoc('doc1', createState({ title: 'Hello' }, 5));
+
+      expect(pendingStore.delete).not.toHaveBeenCalled();
+      expect(sendingStore.delete).not.toHaveBeenCalled();
     });
   });
 

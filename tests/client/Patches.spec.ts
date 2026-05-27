@@ -283,6 +283,30 @@ describe('Patches', () => {
       expect(mockAlgorithm.createDoc).toHaveBeenCalledWith('doc1', undefined);
       expect(doc).toBe(mockDoc);
     });
+
+    it('should unwind trackDocs if loadDoc throws (DAB-507 Bug 2)', async () => {
+      // openDoc tracks the doc before calling loadDoc. If loadDoc throws, the doc must
+      // not be left in `trackedDocs` (a tracked-but-unopened zombie).
+      vi.mocked(mockAlgorithm.loadDoc).mockRejectedValue(new Error('transient load failure'));
+
+      await expect(patches.openDoc('doc1')).rejects.toThrow('transient load failure');
+
+      expect(patches.trackedDocs.has('doc1')).toBe(false);
+      expect(mockAlgorithm.untrackDocs).toHaveBeenCalledWith(['doc1']);
+    });
+
+    it('should not untrack a pre-tracked doc when openDoc fails (DAB-507 Bug 2)', async () => {
+      // Doc was tracked before openDoc was called (e.g., from a prior session). A failed
+      // open must not nuke the existing subscription.
+      await patches.trackDocs(['doc1']);
+      vi.mocked(mockAlgorithm.untrackDocs).mockClear();
+      vi.mocked(mockAlgorithm.loadDoc).mockRejectedValue(new Error('transient load failure'));
+
+      await expect(patches.openDoc('doc1')).rejects.toThrow('transient load failure');
+
+      expect(patches.trackedDocs.has('doc1')).toBe(true);
+      expect(mockAlgorithm.untrackDocs).not.toHaveBeenCalled();
+    });
   });
 
   describe('closeDoc', () => {
@@ -386,6 +410,44 @@ describe('Patches', () => {
       expect(mockAlgorithm.close).toHaveBeenCalled();
       expect(patches.getOpenDoc('doc1')).toBeUndefined();
       expect(patches.getOpenDoc('doc2')).toBeUndefined();
+    });
+
+    it('should await in-flight openDoc before closing algorithms (DAB-507 Bug 3)', async () => {
+      // Without the fix, close() clears `docs`/algorithms while an open is between its
+      // last `await` and `this.docs.set`. The open then registers a doc against a
+      // half-closed instance. With the fix, close() awaits the in-flight body first.
+      let resolveLoadDoc!: (snap: PatchesSnapshot | undefined) => void;
+      vi.mocked(mockAlgorithm.loadDoc).mockImplementation(
+        () =>
+          new Promise(resolve => {
+            resolveLoadDoc = resolve;
+          })
+      );
+
+      const openPromise = patches.openDoc('doc1');
+      // Yield once so openDoc reaches the loadDoc await before we call close().
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const closePromise = patches.close();
+      // close() must not resolve yet — openDoc is still pending on loadDoc.
+      let closeResolved = false;
+      closePromise.then(() => {
+        closeResolved = true;
+      });
+      await Promise.resolve();
+      expect(closeResolved).toBe(false);
+      // mockAlgorithm.close must not have been called yet.
+      expect(mockAlgorithm.close).not.toHaveBeenCalled();
+
+      // Release loadDoc; openDoc completes; close() proceeds.
+      resolveLoadDoc({ state: {}, rev: 1, changes: [] });
+      await openPromise;
+      await closePromise;
+
+      expect(mockAlgorithm.close).toHaveBeenCalled();
+      // openDoc's doc is gone from the map after close() cleared it.
+      expect(patches.getOpenDoc('doc1')).toBeUndefined();
     });
   });
 
@@ -581,6 +643,73 @@ describe('Patches', () => {
       await patches.openDoc('doc1');
 
       expect(mockDoc.import).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('multi-algorithm: closed-doc resolution (DAB-507 Bug 4)', () => {
+    // For a closed doc opened on a non-default algorithm, deleteDoc / untrackDocs
+    // must resolve the algorithm by scanning each store rather than defaulting —
+    // otherwise the tombstone or untrack lands in the wrong store.
+
+    let multiPatches: InstanceType<typeof Patches>;
+    let otAlgorithm: ClientAlgorithm;
+    let lwwAlgorithm: ClientAlgorithm;
+
+    beforeEach(async () => {
+      const makeAlgorithm = (name: string): ClientAlgorithm =>
+        ({
+          name,
+          store: {} as PatchesStore,
+          createDoc: vi.fn().mockReturnValue(mockDoc),
+          loadDoc: vi.fn().mockResolvedValue(undefined),
+          handleDocChange: vi.fn().mockResolvedValue([]),
+          getPendingToSend: vi.fn().mockResolvedValue(null),
+          applyServerChanges: vi.fn().mockResolvedValue([]),
+          confirmSent: vi.fn().mockResolvedValue(undefined),
+          trackDocs: vi.fn().mockResolvedValue(undefined),
+          untrackDocs: vi.fn().mockResolvedValue(undefined),
+          listDocs: vi.fn().mockResolvedValue([]),
+          getCommittedRev: vi.fn().mockResolvedValue(0),
+          deleteDoc: vi.fn().mockResolvedValue(undefined),
+          confirmDeleteDoc: vi.fn().mockResolvedValue(undefined),
+          hasPending: vi.fn().mockResolvedValue(false),
+          close: vi.fn().mockResolvedValue(undefined),
+        }) as ClientAlgorithm;
+
+      otAlgorithm = makeAlgorithm('ot');
+      lwwAlgorithm = makeAlgorithm('lww');
+
+      multiPatches = new Patches({
+        algorithms: { ot: otAlgorithm, lww: lwwAlgorithm },
+        defaultAlgorithm: 'ot',
+      });
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+
+    afterEach(async () => {
+      await multiPatches.close();
+    });
+
+    it('deleteDoc routes to the algorithm whose store claims the closed doc', async () => {
+      // Doc lives in LWW store (e.g., opened with `algorithm: 'lww'` then closed).
+      // Defaulting to 'ot' would tombstone the wrong store.
+      vi.mocked(lwwAlgorithm.listDocs).mockResolvedValue([{ docId: 'settings', committedRev: 1, algorithm: 'lww' }]);
+      multiPatches.trackedDocs.add('settings');
+
+      await multiPatches.deleteDoc('settings');
+
+      expect(lwwAlgorithm.deleteDoc).toHaveBeenCalledWith('settings');
+      expect(otAlgorithm.deleteDoc).not.toHaveBeenCalled();
+    });
+
+    it('untrackDocs routes to the algorithm whose store claims the closed doc', async () => {
+      vi.mocked(lwwAlgorithm.listDocs).mockResolvedValue([{ docId: 'settings', committedRev: 1, algorithm: 'lww' }]);
+      multiPatches.trackedDocs.add('settings');
+
+      await multiPatches.untrackDocs(['settings']);
+
+      expect(lwwAlgorithm.untrackDocs).toHaveBeenCalledWith(['settings']);
+      expect(otAlgorithm.untrackDocs).not.toHaveBeenCalled();
     });
   });
 });

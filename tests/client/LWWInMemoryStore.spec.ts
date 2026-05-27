@@ -155,16 +155,36 @@ describe('LWWInMemoryStore', () => {
       expect(result?.rev).toBe(5);
     });
 
-    it('should clear all fields', async () => {
+    it('should preserve pending ops across saveDoc (DAB-507 Bug 1)', async () => {
+      // saveDoc updates the committed snapshot but must keep local edits the user
+      // hasn't sent yet — otherwise PatchesSync's fresh-fetch / docReloadRequired
+      // paths silently drop concurrent local writes.
       await store.saveDoc('doc1', createState({ count: 10 }, 5));
-      await store.savePendingOps('doc1', [{ op: '@inc', path: '/count', value: 5, ts: Date.now() }]);
+      const op: JSONPatchOp = { op: '@inc', path: '/count', value: 5, ts: Date.now() };
+      await store.savePendingOps('doc1', [op]);
 
-      // Save new doc state (should clear pending)
+      // Server delivers a fresher snapshot; PatchesSync re-saves it via saveDoc.
       await store.saveDoc('doc1', createState({ count: 20 }, 6));
 
       const result = await store.getDoc('doc1');
-      expect(result?.state.count).toBe(20);
-      expect(result?.changes).toEqual([]);
+      // Snapshot bumped, pending op preserved and re-applied on top.
+      expect(result?.rev).toBe(6);
+      expect(result?.changes).toHaveLength(1);
+      const pending = await store.getPendingOps('doc1');
+      expect(pending).toHaveLength(1);
+      expect(pending[0].path).toBe('/count');
+    });
+
+    it('should preserve sending change across saveDoc (DAB-507 Bug 1)', async () => {
+      await store.saveDoc('doc1', createState({ count: 10 }, 5));
+      const change = createChange('send1', 6, 5, [{ op: 'replace', path: '/count', value: 15, ts: Date.now() }]);
+      await store.saveSendingChange('doc1', change);
+
+      await store.saveDoc('doc1', createState({ count: 20 }, 6));
+
+      const sending = await store.getSendingChange('doc1');
+      expect(sending).not.toBeNull();
+      expect(sending?.id).toBe('send1');
     });
   });
 

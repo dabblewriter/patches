@@ -138,11 +138,17 @@ export class Patches {
    * Resolves the algorithm that owns a doc's data, including for closed docs.
    *
    * For open docs the answer is `managed.algorithm`. For closed docs we have to scan
-   * each algorithm's `listDocs(true)` (mirroring openDoc at lines 206-213) — otherwise
-   * `deleteDoc('x')` for a closed doc that was opened with a non-default algorithm
-   * would tombstone the wrong store (dropping the actual data on the floor and writing
-   * a stranded tombstone in the default algorithm's store). `includeDeleted=true` so
-   * we still find the right algorithm when the lookup is for a doc mid-deletion.
+   * each algorithm's `listDocs(true)` (mirroring openDoc's algorithm-detection loop)
+   * — otherwise `deleteDoc('x')` for a closed doc that was opened with a non-default
+   * algorithm would tombstone the wrong store (dropping the actual data on the floor
+   * and writing a stranded tombstone in the default algorithm's store).
+   * `includeDeleted=true` so we still find the right algorithm when the lookup is for
+   * a doc mid-deletion.
+   *
+   * Precedence on ambiguity: returns the first algorithm whose store claims the docId,
+   * iterated in `Object.values(this.algorithms)` insertion order. A docId should live
+   * in exactly one algorithm; if multiple stores claim the same id (e.g. partial
+   * migration), the algorithm passed first to the Patches constructor wins.
    *
    * Falls back to defaultAlgorithm only when no algorithm claims the docId — used by
    * deleteDoc on truly-new IDs (rare) so we still tombstone somewhere consistent.
@@ -227,9 +233,10 @@ export class Patches {
     // not-opening state, and c) the broadcaster's next emission will repopulate it.
     this._openingDocs.add(docId);
     // Register a deferred so close() can await the body without us having to pass the
-    // openDoc promise to itself. The resolve fires unconditionally from the finally below.
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    let resolveOpening: () => void = () => {};
+    // openDoc promise to itself. Safe under @singleInvocation(true) — only one body
+    // per docId can be in flight, so the map entry is single-writer per key. The
+    // resolve fires unconditionally from the finally below.
+    let resolveOpening!: () => void;
     this._openingPromises.set(
       docId,
       new Promise<void>(resolve => {
@@ -297,13 +304,15 @@ export class Patches {
     } catch (err) {
       // If we added this doc to the tracked set during this open, unwind the
       // trackDocs side-effects (in-memory set, algorithm.store, onTrackDocs subscribers)
-      // so a failed open doesn't leave a tracked-but-unopened doc behind. Best-effort:
-      // if untrackDocs itself fails, we still rethrow the original openDoc error.
+      // so a failed open doesn't leave a tracked-but-unopened doc behind. If untrack
+      // itself fails we still rethrow the original openDoc error (it's the actionable
+      // one for the caller), but emit the untrack failure via onError so observers can
+      // see the zombie state — otherwise the very bug this fix targets recurs silently.
       if (!wasTracked && this.trackedDocs.has(docId)) {
         try {
           await this.untrackDocs([docId]);
-        } catch {
-          // Swallow: the openDoc failure is the actionable error for the caller.
+        } catch (untrackErr) {
+          this.onError.emit(untrackErr as Error, { docId });
         }
       }
       throw err;

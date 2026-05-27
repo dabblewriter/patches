@@ -204,12 +204,15 @@ export class LWWIndexedDBStore implements LWWClientStore {
 
   /**
    * Saves the current document state to storage.
-   * Clears committed fields (subsumed by the snapshot) but preserves pending ops.
+   * Clears committed fields (subsumed by the snapshot) but preserves pending ops
+   * and the in-flight sending change — those represent local edits not yet
+   * accepted by the server and would otherwise be silently dropped when
+   * PatchesSync re-saves a freshly-fetched snapshot.
    */
   @blockable
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
-    const [tx, snapshots, committedOps, pendingOps, sendingChanges, docsStore] = await this.db.transaction(
-      ['snapshots', 'committedOps', 'pendingOps', 'sendingChanges', 'docs'],
+    const [tx, snapshots, committedOps, docsStore] = await this.db.transaction(
+      ['snapshots', 'committedOps', 'docs'],
       'readwrite'
     );
 
@@ -219,8 +222,6 @@ export class LWWIndexedDBStore implements LWWClientStore {
       docsStore.put<TrackedDoc>({ docId, committedRev: rev, algorithm: 'lww' }),
       snapshots.put<Snapshot>({ docId, state, rev }),
       this.deleteFieldsForDoc(committedOps, docId),
-      this.deleteFieldsForDoc(pendingOps, docId),
-      sendingChanges.delete(docId),
     ]);
 
     await tx.complete();

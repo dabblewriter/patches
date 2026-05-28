@@ -335,6 +335,58 @@ describe('Patches', () => {
     });
   });
 
+  describe('openDoc/closeDoc refcounting', () => {
+    it('keeps doc open when openDoc count exceeds closeDoc count', async () => {
+      const unsubscribe = vi.fn();
+      mockDoc.onChange.mockReturnValue(unsubscribe);
+
+      await patches.openDoc('doc1');
+      await patches.openDoc('doc1');
+      await patches.closeDoc('doc1');
+
+      expect(unsubscribe).not.toHaveBeenCalled();
+      expect(patches.getOpenDoc('doc1')).toBe(mockDoc);
+    });
+
+    it('tears down once when every openDoc is matched by a closeDoc', async () => {
+      const unsubscribe = vi.fn();
+      mockDoc.onChange.mockReturnValue(unsubscribe);
+
+      await patches.openDoc('doc1');
+      await patches.openDoc('doc1');
+      await patches.closeDoc('doc1');
+      await patches.closeDoc('doc1');
+
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+      expect(patches.getOpenDoc('doc1')).toBeUndefined();
+    });
+
+    it('treats an extra closeDoc past zero as a no-op', async () => {
+      const unsubscribe = vi.fn();
+      mockDoc.onChange.mockReturnValue(unsubscribe);
+
+      await patches.openDoc('doc1');
+      await patches.closeDoc('doc1');
+      await patches.closeDoc('doc1');
+
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+      expect(patches.getOpenDoc('doc1')).toBeUndefined();
+    });
+
+    it('deleteDoc evicts even with outstanding refs', async () => {
+      const unsubscribe = vi.fn();
+      mockDoc.onChange.mockReturnValue(unsubscribe);
+
+      await patches.openDoc('doc1');
+      await patches.openDoc('doc1');
+      await patches.deleteDoc('doc1');
+
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+      expect(patches.getOpenDoc('doc1')).toBeUndefined();
+      expect(mockAlgorithm.deleteDoc).toHaveBeenCalledWith('doc1');
+    });
+  });
+
   describe('deleteDoc', () => {
     it('should delete an open document', async () => {
       const onDeleteSpy = vi.fn();

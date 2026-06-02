@@ -113,6 +113,10 @@ describe('PatchesSync', () => {
       get: vi.fn().mockReturnValue(true),
       configurable: true,
     });
+    Object.defineProperty(vi.mocked(onlineState), 'isOffline', {
+      get: vi.fn().mockReturnValue(false),
+      configurable: true,
+    });
     vi.mocked(onlineState).onOnlineChange = vi.fn() as any;
 
     sync = new PatchesSync(mockPatches, 'ws://localhost:8080');
@@ -121,6 +125,17 @@ describe('PatchesSync', () => {
   afterEach(() => {
     vi.clearAllMocks();
   });
+
+  function setOffline(offline: boolean) {
+    Object.defineProperty(vi.mocked(onlineState), 'isOffline', {
+      get: vi.fn().mockReturnValue(offline),
+      configurable: true,
+    });
+    Object.defineProperty(vi.mocked(onlineState), 'isOnline', {
+      get: vi.fn().mockReturnValue(!offline),
+      configurable: true,
+    });
+  }
 
   describe('constructor', () => {
     it('should initialize with patches and websocket', () => {
@@ -429,6 +444,15 @@ describe('PatchesSync', () => {
       // Sync now calls algorithm methods
       expect(mockAlgorithm.getPendingToSend).not.toHaveBeenCalled();
     });
+
+    it('should not sync if offline even when connection state is stale-connected', async () => {
+      // Worker: state.connected can stay stale-true; onlineState.isOffline gates it.
+      setOffline(true);
+
+      await sync['syncDoc']('doc1');
+
+      expect(mockAlgorithm.getPendingToSend).not.toHaveBeenCalled();
+    });
   });
 
   describe('flushDoc method', () => {
@@ -445,6 +469,13 @@ describe('PatchesSync', () => {
       sync['updateState']({ connected: false });
 
       await expect(sync['flushDoc']('doc1')).rejects.toThrow('Not connected to server');
+    });
+
+    it('should throw if offline even when connection state is stale-connected', async () => {
+      setOffline(true);
+
+      await expect(sync['flushDoc']('doc1')).rejects.toThrow('Not connected to server');
+      expect(mockWebSocket.commitChanges).not.toHaveBeenCalled();
     });
 
     it('should return early if no pending changes', async () => {

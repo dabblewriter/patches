@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { onlineState } from '../../../src/net/websocket/onlineState';
 
 describe('onlineState', () => {
@@ -38,21 +38,49 @@ describe('onlineState', () => {
     });
   });
 
-  describe('state manipulation', () => {
-    it('should allow direct state changes for testing', () => {
-      const originalState = onlineState.isOnline;
+  describe('navigator.onLine integration', () => {
+    let onLineDescriptor: PropertyDescriptor | undefined;
+    let originalCache: boolean;
 
-      // Directly manipulate internal state for testing
-      onlineState['_isOnline'] = true;
+    beforeEach(() => {
+      onLineDescriptor = Object.getOwnPropertyDescriptor(navigator, 'onLine');
+      originalCache = onlineState['_isOnline'];
+    });
+
+    afterEach(() => {
+      if (onLineDescriptor) Object.defineProperty(navigator, 'onLine', onLineDescriptor);
+      onlineState['_isOnline'] = originalCache;
+    });
+
+    function setOnLine(value: boolean | undefined) {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => value });
+    }
+
+    it('reflects a live navigator.onLine reading', () => {
+      setOnLine(true);
       expect(onlineState.isOnline).toBe(true);
       expect(onlineState.isOffline).toBe(false);
 
-      onlineState['_isOnline'] = false;
+      setOnLine(false);
       expect(onlineState.isOnline).toBe(false);
       expect(onlineState.isOffline).toBe(true);
+    });
 
-      // Restore original state
-      onlineState['_isOnline'] = originalState;
+    it('ignores a stale _isOnline cache when navigator.onLine is available (worker scenario)', () => {
+      // Worker: the offline event never fired, so the cache is stale-true; the
+      // live navigator.onLine read must win.
+      setOnLine(false);
+      onlineState['_isOnline'] = true;
+      expect(onlineState.isOnline).toBe(false);
+      expect(onlineState.isOffline).toBe(true);
+    });
+
+    it('falls back to the cached value when navigator.onLine is unavailable', () => {
+      setOnLine(undefined);
+      onlineState['_isOnline'] = true;
+      expect(onlineState.isOnline).toBe(true);
+      onlineState['_isOnline'] = false;
+      expect(onlineState.isOnline).toBe(false);
     });
 
     it('should emit signal when state changes', () => {
@@ -65,6 +93,47 @@ describe('onlineState', () => {
 
       onlineState.onOnlineChange.emit(false);
       expect(spy).toHaveBeenCalledWith(false);
+    });
+  });
+
+  describe('set (forwarded connectivity transitions)', () => {
+    let originalCache: boolean;
+
+    beforeEach(() => {
+      originalCache = onlineState['_isOnline'];
+    });
+
+    afterEach(() => {
+      onlineState['_isOnline'] = originalCache;
+    });
+
+    it('emits onOnlineChange when the value changes', () => {
+      const spy = vi.fn();
+      const unsub = onlineState.onOnlineChange(spy);
+
+      onlineState['_isOnline'] = true;
+      onlineState.set(false);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith(false);
+
+      onlineState.set(true);
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(spy).toHaveBeenLastCalledWith(true);
+
+      unsub();
+    });
+
+    it('dedups repeated values so N tabs forwarding the same transition emit once', () => {
+      const spy = vi.fn();
+      const unsub = onlineState.onOnlineChange(spy);
+
+      onlineState['_isOnline'] = true;
+      onlineState.set(false);
+      onlineState.set(false);
+      onlineState.set(false);
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      unsub();
     });
   });
 
@@ -140,18 +209,7 @@ describe('onlineState', () => {
 
   describe('state consistency', () => {
     it('should maintain isOnline and isOffline as opposites', () => {
-      // Test various state values
-      onlineState['_isOnline'] = true;
-      expect(onlineState.isOnline).toBe(true);
-      expect(onlineState.isOffline).toBe(false);
-
-      onlineState['_isOnline'] = false;
-      expect(onlineState.isOnline).toBe(false);
-      expect(onlineState.isOffline).toBe(true);
-
-      (onlineState as any)['_isOnline'] = undefined;
-      expect(onlineState.isOnline).toBe(undefined);
-      expect(onlineState.isOffline).toBe(true); // !undefined is true
+      expect(onlineState.isOffline).toBe(!onlineState.isOnline);
     });
   });
 });

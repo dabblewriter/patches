@@ -450,7 +450,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   @serialGate
   protected async syncDoc(docId: string): Promise<void> {
-    if (!this.state.connected || !this.trackedDocs.has(docId)) return;
+    if (!this.state.connected || onlineState.isOffline || !this.trackedDocs.has(docId)) return;
 
     this._updateDocSyncState(docId, { syncStatus: 'syncing' });
 
@@ -523,7 +523,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (!this.trackedDocs.has(docId)) {
       throw new Error(`Document ${docId} is not tracked`);
     }
-    if (!this.state.connected) {
+    if (!this.state.connected || onlineState.isOffline) {
       throw new Error('Not connected to server');
     }
 
@@ -544,7 +544,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       });
 
       for (const changeBatch of batches) {
-        if (!this.state.connected) {
+        if (!this.state.connected || onlineState.isOffline) {
           throw new Error('Disconnected during flush');
         }
 
@@ -767,7 +767,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   protected _handleDocChange(docId: string): void {
     if (!this.trackedDocs.has(docId)) return;
     this._updateDocSyncState(docId, { hasPending: true });
-    if (!this.state.connected) return;
+    if (!this.state.connected || onlineState.isOffline) return;
     this.syncDoc(docId);
   }
 

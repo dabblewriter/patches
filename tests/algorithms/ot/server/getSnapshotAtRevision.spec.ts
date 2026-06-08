@@ -375,4 +375,21 @@ describe('getSnapshotStream', () => {
 
     expect(JSON.parse(json)).toEqual({ state: null, rev: 0, changes: [] });
   });
+
+  it('treats rev 0 as a bound (empty pre-history state), not "latest"', async () => {
+    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+
+    const json = await readStream(await getSnapshotStream(mockStore, 'doc1', 0));
+
+    expect(JSON.parse(json)).toEqual({ state: null, rev: 0, changes: [] });
+    expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
+      limit: 1,
+      reverse: true,
+      startAfter: 1,
+      origin: 'main',
+      orderBy: 'endRev',
+    });
+    expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', { startAfter: 0, endBefore: 1 });
+  });
 });

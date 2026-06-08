@@ -43,7 +43,7 @@ export { assertVersionMetadata } from './utils.js';
 
 // Interfaces
 export type { DeleteDocOptions } from '../types.js';
-export type { PatchesServer } from './PatchesServer.js';
+export type { GetDocOptions, PatchesServer } from './PatchesServer.js';
 export type {
   BranchingStoreBackend,
   ListFieldsOptions,

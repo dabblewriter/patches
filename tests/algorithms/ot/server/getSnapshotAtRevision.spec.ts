@@ -1,6 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getSnapshotAtRevision } from '../../../../src/algorithms/ot/server/getSnapshotAtRevision';
+import { getSnapshotAtRevision, getSnapshotStream } from '../../../../src/algorithms/ot/server/getSnapshotAtRevision';
 import type { OTStoreBackend } from '../../../../src/server';
+
+async function readStream(stream: ReadableStream<string>): Promise<string> {
+  const reader = stream.getReader();
+  let out = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out += value;
+  }
+  return out;
+}
 
 describe('getSnapshotAtRevision', () => {
   let mockStore: OTStoreBackend;
@@ -220,39 +231,30 @@ describe('getSnapshotAtRevision', () => {
     });
   });
 
-  it('should work with revision 0', async () => {
-    const mockChanges = [
-      {
-        id: 'c1',
-        rev: 1,
-        baseRev: 0,
-        createdAt: 1100,
-        committedAt: 1100,
-        ops: [{ op: 'add', path: '/text', value: 'hello' }],
-      },
-    ];
-
+  it('should bound to the empty state for revision 0', async () => {
     vi.mocked(mockStore.listVersions).mockResolvedValue([]);
-    vi.mocked(mockStore.listChanges).mockResolvedValue(mockChanges);
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1', 0);
 
+    // rev 0 is a real bound (the pre-history empty state), not "latest":
+    // versions before rev 1 and changes before rev 1 are both excluded.
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
-      startAfter: undefined, // When rev is 0, startAfter should be undefined
+      startAfter: 1,
       origin: 'main',
       orderBy: 'endRev',
     });
     expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', {
       startAfter: 0,
-      endBefore: undefined, // When rev is 0, endBefore becomes undefined
+      endBefore: 1,
     });
 
     expect(result).toEqual({
       state: null,
       rev: 0,
-      changes: mockChanges,
+      changes: [],
     });
   });
 
@@ -318,5 +320,76 @@ describe('getSnapshotAtRevision', () => {
       rev: 15,
       changes: mockChanges,
     });
+  });
+});
+
+describe('getSnapshotStream', () => {
+  let mockStore: OTStoreBackend;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStore = {
+      getCurrentRev: vi.fn().mockResolvedValue(0),
+      listVersions: vi.fn(),
+      loadVersionState: vi.fn(),
+      listChanges: vi.fn(),
+    } as any;
+  });
+
+  it('streams the latest snapshot envelope when no revision specified', async () => {
+    const changes = [{ id: 'c1', rev: 11, baseRev: 10, createdAt: 1, committedAt: 1, ops: [] }];
+    vi.mocked(mockStore.listVersions).mockResolvedValue([{ id: 'v1', endRev: 10 } as any]);
+    vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify({ text: 'hi' }));
+    vi.mocked(mockStore.listChanges).mockResolvedValue(changes);
+
+    const json = await readStream(await getSnapshotStream(mockStore, 'doc1'));
+
+    expect(JSON.parse(json)).toEqual({ state: { text: 'hi' }, rev: 10, changes });
+    expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', { startAfter: 10, endBefore: undefined });
+  });
+
+  it('bounds the snapshot to the requested revision', async () => {
+    const changes = [{ id: 'c6', rev: 6, baseRev: 5, createdAt: 1, committedAt: 1, ops: [] }];
+    vi.mocked(mockStore.listVersions).mockResolvedValue([{ id: 'v1', endRev: 5 } as any]);
+    vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify({ text: 'base' }));
+    vi.mocked(mockStore.listChanges).mockResolvedValue(changes);
+
+    const json = await readStream(await getSnapshotStream(mockStore, 'doc1', 6));
+
+    expect(JSON.parse(json)).toEqual({ state: { text: 'base' }, rev: 5, changes });
+    expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
+      limit: 1,
+      reverse: true,
+      startAfter: 7,
+      origin: 'main',
+      orderBy: 'endRev',
+    });
+    expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', { startAfter: 5, endBefore: 7 });
+  });
+
+  it('streams a null state when no version exists', async () => {
+    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+
+    const json = await readStream(await getSnapshotStream(mockStore, 'doc1'));
+
+    expect(JSON.parse(json)).toEqual({ state: null, rev: 0, changes: [] });
+  });
+
+  it('treats rev 0 as a bound (empty pre-history state), not "latest"', async () => {
+    vi.mocked(mockStore.listVersions).mockResolvedValue([]);
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+
+    const json = await readStream(await getSnapshotStream(mockStore, 'doc1', 0));
+
+    expect(JSON.parse(json)).toEqual({ state: null, rev: 0, changes: [] });
+    expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
+      limit: 1,
+      reverse: true,
+      startAfter: 1,
+      origin: 'main',
+      orderBy: 'endRev',
+    });
+    expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', { startAfter: 0, endBefore: 1 });
   });
 });

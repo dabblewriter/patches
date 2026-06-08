@@ -83,11 +83,25 @@ describe('OTServer', () => {
 
       const stream = await server.getDoc('doc1');
 
-      expect(getSnapshotStream).toHaveBeenCalledWith(mockStore, 'doc1');
+      expect(getSnapshotStream).toHaveBeenCalledWith(mockStore, 'doc1', undefined);
       expect(stream).toBeInstanceOf(ReadableStream);
       const json = await readStreamAsString(stream);
       const result = JSON.parse(json);
       expect(result).toEqual({ state: mockState, rev: 5, changes: [] });
+    });
+
+    it('should forward the rev argument to getSnapshotStream', async () => {
+      const mockStream = new ReadableStream<string>({
+        start(controller) {
+          controller.enqueue('{"state":null,"rev":3,"changes":[]}');
+          controller.close();
+        },
+      });
+      vi.mocked(getSnapshotStream).mockResolvedValue(mockStream);
+
+      await server.getDoc('doc1', { rev: 3 });
+
+      expect(getSnapshotStream).toHaveBeenCalledWith(mockStore, 'doc1', 3);
     });
   });
 

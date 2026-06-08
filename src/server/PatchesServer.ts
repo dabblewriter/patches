@@ -9,6 +9,14 @@ import type {
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 
 /**
+ * Options for reading a document via `getDoc`.
+ */
+export interface GetDocOptions {
+  /** Read the document as of this revision instead of the latest. */
+  rev?: number;
+}
+
+/**
  * Result of committing changes to a document.
  * Used internally by the algorithm layer to provide structured information
  * about what was committed.
@@ -40,10 +48,10 @@ export interface PatchesServer {
    * Get the state of a document as a ReadableStream of JSON.
    * The stream contains the full JSON envelope: `{"state":...,"rev":N,"changes":[...]}`.
    * @param docId - The document ID.
-   * @param rev - Optional revision to read the document as of; omitted reads the latest.
+   * @param options - Optional read options; `rev` reads the document as of a revision.
    * @returns A ReadableStream of JSON string chunks.
    */
-  getDoc(docId: string, rev?: number): Promise<ReadableStream<string>>;
+  getDoc(docId: string, options?: GetDocOptions): Promise<ReadableStream<string>>;
 
   /**
    * Get changes that occurred after a specific revision.

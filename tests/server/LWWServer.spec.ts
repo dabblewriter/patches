@@ -169,7 +169,7 @@ describe('LWWServer', () => {
     });
 
     it('should reject reading at a specific revision', async () => {
-      await expect(server.getDoc('doc1', 5)).rejects.toThrow(/specific revision/);
+      await expect(server.getDoc('doc1', { rev: 5 })).rejects.toThrow(/specific revision/);
     });
 
     it('should return state from snapshot when no fields', async () => {

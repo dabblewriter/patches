@@ -7,7 +7,7 @@ import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import { getClientId } from '../net/serverContext.js';
 import type { Change, ChangeInput, ChangeMutator, DeleteDocOptions, EditableVersionMetadata } from '../types.js';
-import type { PatchesServer } from './PatchesServer.js';
+import type { GetDocOptions, PatchesServer } from './PatchesServer.js';
 import type { OTStoreBackend } from './types.js';
 import { createTombstoneIfSupported, removeTombstoneIfExists } from './tombstone.js';
 import { assertVersionMetadata } from './utils.js';
@@ -71,11 +71,11 @@ export class OTServer implements PatchesServer {
    * Streams `{"state":...,"rev":N,"changes":[...]}` with the version state
    * flowing through without parsing.
    * @param docId - The ID of the document.
-   * @param rev - Optional revision to read the document as of; omitted reads the latest.
+   * @param options - Optional read options; `rev` reads the document as of a revision.
    * @returns A ReadableStream of JSON string chunks.
    */
-  async getDoc(docId: string, rev?: number): Promise<ReadableStream<string>> {
-    return getSnapshotStream(this.store, docId, rev);
+  async getDoc(docId: string, options?: GetDocOptions): Promise<ReadableStream<string>> {
+    return getSnapshotStream(this.store, docId, options?.rev);
   }
 
   /**

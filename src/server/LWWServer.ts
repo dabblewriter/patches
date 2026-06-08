@@ -14,7 +14,7 @@ import type {
   EditableVersionMetadata,
 } from '../types.js';
 import { concatStreams } from './jsonReadable.js';
-import type { PatchesServer } from './PatchesServer.js';
+import type { GetDocOptions, PatchesServer } from './PatchesServer.js';
 import { createTombstoneIfSupported, removeTombstoneIfExists } from './tombstone.js';
 import type { LWWStoreBackend, VersioningStoreBackend } from './types.js';
 import { assertVersionMetadata } from './utils.js';
@@ -84,11 +84,11 @@ export class LWWServer implements PatchesServer {
    * flowing through without parsing.
    *
    * @param docId - The document ID.
-   * @param rev - Unsupported for LWW (no per-revision history); passing it throws.
+   * @param options - `rev` is unsupported for LWW (no per-revision history); passing it throws.
    * @returns A ReadableStream of JSON string chunks.
    */
-  async getDoc(docId: string, atRev?: number): Promise<ReadableStream<string>> {
-    if (atRev != null) throw new Error('LWW documents do not support reading at a specific revision');
+  async getDoc(docId: string, options?: GetDocOptions): Promise<ReadableStream<string>> {
+    if (options?.rev != null) throw new Error('LWW documents do not support reading at a specific revision');
     const snapshot = await this.store.getSnapshot(docId);
     const baseRev = snapshot?.rev ?? 0;
 

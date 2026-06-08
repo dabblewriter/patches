@@ -175,10 +175,10 @@ const stream = await server.getDoc(docId);
 
 Returns a `ReadableStream<string>` that emits the full document envelope without parsing the state blob. The `state` field comes from the latest version snapshot; `changes` contains any changes committed after that snapshot. Reconstruct the current state by applying the changes on top of the state.
 
-Pass a `rev` to read the document as of an earlier revision. The envelope then holds the latest version at or before `rev` plus the changes from there up to `rev` — apply them the same way to get the state as it was at that revision:
+Pass `{ rev }` to read the document as of an earlier revision. The envelope then holds the latest version at or before `rev` plus the changes from there up to `rev` — apply them the same way to get the state as it was at that revision:
 
 ```typescript
-const stream = await server.getDoc(docId, 123);
+const stream = await server.getDoc(docId, { rev: 123 });
 // state as of rev 123: {"state":...,"rev":M,"changes":[...]} where the last change is rev 123
 ```
 

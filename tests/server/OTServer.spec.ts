@@ -99,7 +99,7 @@ describe('OTServer', () => {
       });
       vi.mocked(getSnapshotStream).mockResolvedValue(mockStream);
 
-      await server.getDoc('doc1', 3);
+      await server.getDoc('doc1', { rev: 3 });
 
       expect(getSnapshotStream).toHaveBeenCalledWith(mockStore, 'doc1', 3);
     });

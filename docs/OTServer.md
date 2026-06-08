@@ -166,7 +166,7 @@ This creates a proper change, applies it through the standard OT flow, and trigg
 
 ### `getDoc()`
 
-Get the current state of a document as a streaming JSON envelope:
+Get the state of a document as a streaming JSON envelope:
 
 ```typescript
 const stream = await server.getDoc(docId);
@@ -174,6 +174,13 @@ const stream = await server.getDoc(docId);
 ```
 
 Returns a `ReadableStream<string>` that emits the full document envelope without parsing the state blob. The `state` field comes from the latest version snapshot; `changes` contains any changes committed after that snapshot. Reconstruct the current state by applying the changes on top of the state.
+
+Pass a `rev` to read the document as of an earlier revision. The envelope then holds the latest version at or before `rev` plus the changes from there up to `rev` — apply them the same way to get the state as it was at that revision:
+
+```typescript
+const stream = await server.getDoc(docId, 123);
+// state as of rev 123: {"state":...,"rev":M,"changes":[...]} where the last change is rev 123
+```
 
 ### `getChangesSince()`
 

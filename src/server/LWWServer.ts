@@ -84,9 +84,11 @@ export class LWWServer implements PatchesServer {
    * flowing through without parsing.
    *
    * @param docId - The document ID.
+   * @param rev - Unsupported for LWW (no per-revision history); passing it throws.
    * @returns A ReadableStream of JSON string chunks.
    */
-  async getDoc(docId: string): Promise<ReadableStream<string>> {
+  async getDoc(docId: string, atRev?: number): Promise<ReadableStream<string>> {
+    if (atRev != null) throw new Error('LWW documents do not support reading at a specific revision');
     const snapshot = await this.store.getSnapshot(docId);
     const baseRev = snapshot?.rev ?? 0;
 

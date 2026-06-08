@@ -168,6 +168,10 @@ describe('LWWServer', () => {
       expect(result.rev).toBe(0);
     });
 
+    it('should reject reading at a specific revision', async () => {
+      await expect(server.getDoc('doc1', 5)).rejects.toThrow(/specific revision/);
+    });
+
     it('should return state from snapshot when no fields', async () => {
       mockStore.snapshots.set('doc1', { state: { name: 'Alice' }, rev: 5 });
 

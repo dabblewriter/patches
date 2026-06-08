@@ -58,11 +58,19 @@ export async function getSnapshotAtRevision(
  *
  * The version state (typically the largest payload) flows through as a raw
  * string from the store without parsing. Changes are stringified from the array.
+ *
+ * When `rev` is given, the snapshot reflects the document as of that revision:
+ * the latest version at or before `rev`, plus the changes from there up to `rev`.
+ * Omitted, it streams the current state with all changes since the latest version.
  */
-export async function getSnapshotStream(store: OTStoreBackend, docId: string): Promise<ReadableStream<string>> {
-  const { rawState, versionRev } = await getLatestMainVersion(store, docId);
+export async function getSnapshotStream(
+  store: OTStoreBackend,
+  docId: string,
+  rev?: number
+): Promise<ReadableStream<string>> {
+  const { rawState, versionRev } = await getLatestMainVersion(store, docId, rev);
   const statePayload: string | ReadableStream<string> = rawState ?? 'null';
-  const changes = await store.listChanges(docId, { startAfter: versionRev });
+  const changes = await store.listChanges(docId, { startAfter: versionRev, endBefore: rev ? rev + 1 : undefined });
 
   return concatStreams(`{"state":`, statePayload, `,"rev":${versionRev},"changes":`, JSON.stringify(changes), '}');
 }

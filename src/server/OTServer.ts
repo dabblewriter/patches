@@ -67,14 +67,15 @@ export class OTServer implements PatchesServer {
   }
 
   /**
-   * Get the current state of a document as a ReadableStream of JSON.
+   * Get the state of a document as a ReadableStream of JSON.
    * Streams `{"state":...,"rev":N,"changes":[...]}` with the version state
    * flowing through without parsing.
    * @param docId - The ID of the document.
+   * @param rev - Optional revision to read the document as of; omitted reads the latest.
    * @returns A ReadableStream of JSON string chunks.
    */
-  async getDoc(docId: string): Promise<ReadableStream<string>> {
-    return getSnapshotStream(this.store, docId);
+  async getDoc(docId: string, rev?: number): Promise<ReadableStream<string>> {
+    return getSnapshotStream(this.store, docId, rev);
   }
 
   /**

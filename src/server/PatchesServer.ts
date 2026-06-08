@@ -37,12 +37,13 @@ export interface CommitResult {
  */
 export interface PatchesServer {
   /**
-   * Get the current state of a document as a ReadableStream of JSON.
+   * Get the state of a document as a ReadableStream of JSON.
    * The stream contains the full JSON envelope: `{"state":...,"rev":N,"changes":[...]}`.
    * @param docId - The document ID.
+   * @param rev - Optional revision to read the document as of; omitted reads the latest.
    * @returns A ReadableStream of JSON string chunks.
    */
-  getDoc(docId: string): Promise<ReadableStream<string>>;
+  getDoc(docId: string, rev?: number): Promise<ReadableStream<string>>;
 
   /**
    * Get changes that occurred after a specific revision.

@@ -231,39 +231,30 @@ describe('getSnapshotAtRevision', () => {
     });
   });
 
-  it('should work with revision 0', async () => {
-    const mockChanges = [
-      {
-        id: 'c1',
-        rev: 1,
-        baseRev: 0,
-        createdAt: 1100,
-        committedAt: 1100,
-        ops: [{ op: 'add', path: '/text', value: 'hello' }],
-      },
-    ];
-
+  it('should bound to the empty state for revision 0', async () => {
     vi.mocked(mockStore.listVersions).mockResolvedValue([]);
-    vi.mocked(mockStore.listChanges).mockResolvedValue(mockChanges);
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1', 0);
 
+    // rev 0 is a real bound (the pre-history empty state), not "latest":
+    // versions before rev 1 and changes before rev 1 are both excluded.
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
-      startAfter: undefined, // When rev is 0, startAfter should be undefined
+      startAfter: 1,
       origin: 'main',
       orderBy: 'endRev',
     });
     expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', {
       startAfter: 0,
-      endBefore: undefined, // When rev is 0, endBefore becomes undefined
+      endBefore: 1,
     });
 
     expect(result).toEqual({
       state: null,
       rev: 0,
-      changes: mockChanges,
+      changes: [],
     });
   });
 

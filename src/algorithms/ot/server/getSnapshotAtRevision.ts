@@ -9,7 +9,7 @@ async function getLatestMainVersion(store: OTStoreBackend, docId: string, before
   const versions = await store.listVersions(docId, {
     limit: 1,
     reverse: true,
-    startAfter: beforeRev ? beforeRev + 1 : undefined,
+    startAfter: beforeRev != null ? beforeRev + 1 : undefined,
     origin: 'main',
     orderBy: 'endRev',
   });
@@ -42,7 +42,7 @@ export async function getSnapshotAtRevision(
   // Get *all* changes since that version up to the target revision (if specified)
   const changesSinceVersion = await store.listChanges(docId, {
     startAfter: versionRev,
-    endBefore: rev ? rev + 1 : undefined,
+    endBefore: rev != null ? rev + 1 : undefined,
   });
 
   return {
@@ -70,7 +70,10 @@ export async function getSnapshotStream(
 ): Promise<ReadableStream<string>> {
   const { rawState, versionRev } = await getLatestMainVersion(store, docId, rev);
   const statePayload: string | ReadableStream<string> = rawState ?? 'null';
-  const changes = await store.listChanges(docId, { startAfter: versionRev, endBefore: rev ? rev + 1 : undefined });
+  const changes = await store.listChanges(docId, {
+    startAfter: versionRev,
+    endBefore: rev != null ? rev + 1 : undefined,
+  });
 
   return concatStreams(`{"state":`, statePayload, `,"rev":${versionRev},"changes":`, JSON.stringify(changes), '}');
 }

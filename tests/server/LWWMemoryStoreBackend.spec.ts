@@ -446,6 +446,58 @@ describe('LWWMemoryStoreBackend', () => {
         expect(versions).toHaveLength(1);
         expect(versions[0].endRev).toBe(10);
       });
+
+      // Conformance: `startAfter`/`endBefore` are cursors relative to the sort
+      // order, so reversing flips which side of each bound they select. These
+      // cases mirror pup's FirestoreOTStore tests so the two backends agree —
+      // the production store is the real one the snapshot query runs against.
+      describe('reverse-cursor semantics (FirestoreOTStore conformance)', () => {
+        it('treats startAfter as an upper bound when reversed', async () => {
+          // pup: { startAfter: 11, reverse: true } → where('endRev', '<', 11)
+          const versions = await store.listVersions('doc1', { startAfter: 11, reverse: true });
+          expect(versions.map(v => v.endRev)).toEqual([10, 5]);
+        });
+
+        it('flips endBefore to a lower bound when reversed', async () => {
+          // pup: { endBefore: 5, reverse: true } → where('endRev', '>', 5)
+          const versions = await store.listVersions('doc1', { endBefore: 5, reverse: true });
+          expect(versions.map(v => v.endRev)).toEqual([15, 10]);
+        });
+
+        it('selects the latest version at or below the cap (the getSnapshot query shape)', async () => {
+          // This is exactly how getLatestMainVersion queries: reverse + limit 1 +
+          // startAfter = cap + 1 yields the highest endRev <= cap.
+          const atOrBelow15 = await store.listVersions('doc1', {
+            reverse: true,
+            limit: 1,
+            startAfter: 16,
+            orderBy: 'endRev',
+          });
+          expect(atOrBelow15[0].endRev).toBe(15);
+
+          const atOrBelow12 = await store.listVersions('doc1', {
+            reverse: true,
+            limit: 1,
+            startAfter: 13,
+            orderBy: 'endRev',
+          });
+          expect(atOrBelow12[0].endRev).toBe(10);
+        });
+
+        it('excludes an orphan version stamped beyond the cap', async () => {
+          // Orphan at endRev 20 sits past the committed tip (15). startAfter = 16
+          // (cap+1) must skip it and return the latest legit version (15).
+          await store.createVersion('doc1', versionMetadata('orphan', 20, { name: 'Orphan' }));
+          const latest = await store.listVersions('doc1', {
+            reverse: true,
+            limit: 1,
+            startAfter: 16,
+            orderBy: 'endRev',
+          });
+          expect(latest[0].endRev).toBe(15);
+          expect(latest[0].id).toBe('v3');
+        });
+      });
     });
 
     describe('loadVersionState', () => {

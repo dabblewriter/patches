@@ -151,12 +151,16 @@ export async function commitChanges(
 
       // Fast-forward: nothing committed after baseRev, so the incoming changes save
       // verbatim. Their revs are final, so version them directly (origin 'main').
+      // Save before versioning: if `saveChanges` throws a RevConflictError (a
+      // concurrent commit landed first), nothing was versioned and the retry falls
+      // through to the transform branch cleanly — no version minted from the
+      // pre-transform changes is left stranded ahead of the real log.
       if (isOfflineOrBatch && committedChanges.length === 0) {
+        await store.saveChanges(docId, incomingChanges);
         if (!offlineSessionsHandled) {
           await handleOfflineSessionsAndBatches(store, sessionTimeoutMillis, docId, incomingChanges, 'main');
           offlineSessionsHandled = true;
         }
-        await store.saveChanges(docId, incomingChanges);
         return { catchupChanges: [], newChanges: incomingChanges, docReloadRequired };
       }
 
@@ -169,6 +173,9 @@ export async function commitChanges(
       );
 
       if (transformedChanges.length > 0) {
+        // Save before versioning (same ordering as the fast-forward branch) so a
+        // RevConflictError on save never leaves a version behind to retry against.
+        await store.saveChanges(docId, transformedChanges);
         // Version the offline/batch session from the changes that ACTUALLY persisted
         // (their post-transform revs), never the pre-transform claimed revs. When an
         // offline change rebases to a no-op it isn't saved — versioning the claimed
@@ -179,7 +186,6 @@ export async function commitChanges(
           await handleOfflineSessionsAndBatches(store, sessionTimeoutMillis, docId, transformedChanges, origin);
           offlineSessionsHandled = true;
         }
-        await store.saveChanges(docId, transformedChanges);
       }
 
       // Return catchup changes and newly transformed changes separately

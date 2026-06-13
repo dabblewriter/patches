@@ -162,6 +162,14 @@ export class OTBranchManager implements BranchManager {
     // real tip is correct and a no-op for healthy branches.
     const sourceCurrentRev = await this.store.getCurrentRev(sourceDocId);
     const branchStartRevOnSource = Math.min(branch.branchedAtRev, sourceCurrentRev);
+    if (branch.branchedAtRev > sourceCurrentRev) {
+      // The clamp only fires on a corrupted/renumbered source doc — exactly the
+      // data-integrity case worth surfacing rather than merging silently.
+      console.warn(
+        `[OTBranchManager] branch ${branchId} branchedAtRev (${branch.branchedAtRev}) is ahead of ` +
+          `source ${sourceDocId} currentRev (${sourceCurrentRev}); clamping merge base to ${branchStartRevOnSource}`
+      );
+    }
 
     // Get only unmerged changes: since lastMergedRev (if previously merged) or contentStartRev
     const startAfter = branch.lastMergedRev ?? (branch.contentStartRev ?? 2) - 1;

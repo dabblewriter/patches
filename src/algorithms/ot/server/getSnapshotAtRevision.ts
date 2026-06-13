@@ -16,10 +16,16 @@ import type { PatchesSnapshot } from '../../../types.js';
 async function getLatestMainVersion(store: OTStoreBackend, docId: string, beforeRev?: number) {
   const currentRev = await store.getCurrentRev(docId);
   const upperBound = beforeRev != null ? Math.min(beforeRev, currentRev) : currentRev;
+  // `startAfter`/`endBefore` are cursors relative to the (reversed) sort order, not
+  // absolute filters. Under `reverse: true` on `endRev`, the head of the list is the
+  // highest rev and "after" the cursor means below it, so `startAfter: upperBound + 1`
+  // selects `endRev <= upperBound` — the latest legit version at or before our bound,
+  // excluding any orphan stamped beyond the change log. (`endBefore` here would flip to
+  // a *lower* bound and select versions above the cap — see ListVersionsOptions.)
   const versions = await store.listVersions(docId, {
     limit: 1,
     reverse: true,
-    endBefore: upperBound + 1,
+    startAfter: upperBound + 1,
     origin: 'main',
     orderBy: 'endRev',
   });

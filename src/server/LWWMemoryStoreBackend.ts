@@ -189,14 +189,23 @@ export class LWWMemoryStoreBackend
       result.reverse();
     }
 
-    // Handle startAfter/endBefore
+    // Handle startAfter/endBefore. These are cursors relative to the sort order,
+    // not absolute filters: `startAfter` keeps entries that come *after* the cursor
+    // in the (possibly reversed) ordering, `endBefore` keeps entries *before* it.
+    // Ascending: startAfter → field > value, endBefore → field < value.
+    // Reversed:  startAfter → field < value, endBefore → field > value.
+    // This mirrors the production FirestoreOTStore so the two backends agree.
     if (options.startAfter !== undefined) {
       const startVal = options.startAfter as number;
-      result = result.filter(v => (v[orderBy] as number) > startVal);
+      result = result.filter(v =>
+        options.reverse ? (v[orderBy] as number) < startVal : (v[orderBy] as number) > startVal
+      );
     }
     if (options.endBefore !== undefined) {
       const endVal = options.endBefore as number;
-      result = result.filter(v => (v[orderBy] as number) < endVal);
+      result = result.filter(v =>
+        options.reverse ? (v[orderBy] as number) > endVal : (v[orderBy] as number) < endVal
+      );
     }
 
     // Handle limit

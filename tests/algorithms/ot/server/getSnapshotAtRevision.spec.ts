@@ -65,11 +65,12 @@ describe('getSnapshotAtRevision', () => {
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1');
 
-    // No target rev → bounded by currentRev (12), so endBefore = 13.
+    // No target rev → bounded by currentRev (12). Reversed, `startAfter: 13` is an
+    // upper bound (endRev <= 12).
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
-      endBefore: 13,
+      startAfter: 13,
       origin: 'main',
       orderBy: 'endRev',
     });
@@ -124,11 +125,11 @@ describe('getSnapshotAtRevision', () => {
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1', 7);
 
-    // Target rev 7, currentRev 7 → bound = min(7, 7) = 7, so endBefore = 8.
+    // Target rev 7, currentRev 7 → bound = min(7, 7) = 7, so startAfter = 8 (endRev <= 7).
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
-      endBefore: 8,
+      startAfter: 8,
       origin: 'main',
       orderBy: 'endRev',
     });
@@ -242,12 +243,12 @@ describe('getSnapshotAtRevision', () => {
     const result = await getSnapshotAtRevision(mockStore, 'doc1', 0);
 
     // rev 0 is a real bound (the pre-history empty state), not "latest":
-    // with currentRev defaulting to 0, bound = min(0, 0) = 0 → endBefore = 1,
-    // so versions and changes before rev 1 are both excluded.
+    // with currentRev defaulting to 0, bound = min(0, 0) = 0 → startAfter = 1
+    // (endRev <= 0), so versions and changes before rev 1 are both excluded.
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
-      endBefore: 1,
+      startAfter: 1,
       origin: 'main',
       orderBy: 'endRev',
     });
@@ -309,11 +310,11 @@ describe('getSnapshotAtRevision', () => {
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1', 18);
 
-    // Target rev 18, currentRev 18 → bound = 18, so endBefore = 19.
+    // Target rev 18, currentRev 18 → bound = 18, so startAfter = 19 (endRev <= 18).
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
-      endBefore: 19,
+      startAfter: 19,
       origin: 'main',
       orderBy: 'endRev',
     });
@@ -338,10 +339,11 @@ describe('getSnapshotAtRevision', () => {
       { id: 'orphan295', endRev: 295, startRev: 295, origin: 'offline-branch' as const, startedAt: 3, endedAt: 4 },
     ];
     vi.mocked(mockStore.getCurrentRev).mockResolvedValue(294);
-    // Emulate a store that honors `endBefore` + `origin` (as Firestore would with the index).
+    // Emulate the production store's reverse-cursor semantics: under `reverse`,
+    // `startAfter` is an upper bound (endRev < startAfter), as FirestoreOTStore does.
     vi.mocked(mockStore.listVersions).mockImplementation(async (_doc, opts: any) => {
       const filtered = allVersions
-        .filter(v => opts.endBefore === undefined || v.endRev < opts.endBefore)
+        .filter(v => opts.startAfter === undefined || v.endRev < opts.startAfter)
         .filter(v => opts.origin === undefined || v.origin === opts.origin)
         .sort((a, b) => b.endRev - a.endRev);
       return opts.limit ? filtered.slice(0, opts.limit) : filtered;
@@ -351,11 +353,12 @@ describe('getSnapshotAtRevision', () => {
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1');
 
-    // endBefore = 295 excludes orphan@295; the latest valid main version is 294.
+    // startAfter = 295 (reversed → endRev <= 294) excludes orphan@295; the latest
+    // valid main version is 294.
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
-      endBefore: 295,
+      startAfter: 295,
       origin: 'main',
       orderBy: 'endRev',
     });
@@ -399,11 +402,11 @@ describe('getSnapshotStream', () => {
     const json = await readStream(await getSnapshotStream(mockStore, 'doc1', 6));
 
     expect(JSON.parse(json)).toEqual({ state: { text: 'base' }, rev: 5, changes });
-    // Requested rev 6, currentRev 10 → bound = min(6, 10) = 6, so endBefore = 7.
+    // Requested rev 6, currentRev 10 → bound = min(6, 10) = 6, so startAfter = 7 (endRev <= 6).
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
-      endBefore: 7,
+      startAfter: 7,
       origin: 'main',
       orderBy: 'endRev',
     });
@@ -426,11 +429,11 @@ describe('getSnapshotStream', () => {
     const json = await readStream(await getSnapshotStream(mockStore, 'doc1', 0));
 
     expect(JSON.parse(json)).toEqual({ state: null, rev: 0, changes: [] });
-    // rev 0 → bound = min(0, 0) = 0, so endBefore = 1 (nothing before rev 1).
+    // rev 0 → bound = min(0, 0) = 0, so startAfter = 1 (endRev <= 0, nothing before rev 1).
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
-      endBefore: 1,
+      startAfter: 1,
       origin: 'main',
       orderBy: 'endRev',
     });

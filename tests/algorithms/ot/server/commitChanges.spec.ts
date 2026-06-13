@@ -475,9 +475,13 @@ describe('commitChanges', () => {
       expect(mockStore.saveChanges).toHaveBeenCalledTimes(1);
     });
 
-    it('should not re-create offline session versions on retry', async () => {
+    it('versions the offline session once, from the persisted post-transform changes, after a FF save conflict', async () => {
+      // Regression for the FF + conflict-retry residual: the fast-forward branch
+      // saves before it versions, so when that save loses a rev conflict NOTHING is
+      // versioned. The retry's transform branch then versions from the changes that
+      // actually persisted — never the stale pre-transform claim from the FF attempt.
       const oldTime = Date.now() - sessionTimeoutMillis - 1000;
-      const changes = [createChange('1', 1, 0, oldTime)];
+      const changes = [createChange('1', 1, 0, oldTime)]; // claims rev 1
 
       // First save fails (fast-forward path), second succeeds (transform path)
       vi.mocked(mockStore.saveChanges).mockRejectedValueOnce(new RevConflictError()).mockResolvedValueOnce(undefined);
@@ -494,8 +498,12 @@ describe('commitChanges', () => {
 
       const { handleOfflineSessionsAndBatches } =
         await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
-      // Should only be called once despite retry
+      // Versioned exactly once, and from the rebased rev (transform mock → currentRev+1 = 2),
+      // not the pre-transform claimed rev 1 that the conflicting FF attempt would have minted.
       expect(handleOfflineSessionsAndBatches).toHaveBeenCalledTimes(1);
+      const versionedChanges = vi.mocked(handleOfflineSessionsAndBatches).mock.calls[0][3];
+      expect(versionedChanges).toHaveLength(1);
+      expect(versionedChanges[0].rev).toBe(2);
     });
   });
 });

@@ -234,6 +234,23 @@ export class OTIndexedDBStore implements OTClientStore {
   }
 
   /**
+   * Remove specific pending changes by change id. Pending changes are keyed by
+   * `[docId, rev]`, so we load the doc's pending, match on `id`, and delete the
+   * matching keys. Used to clear changes the server rebased away to a no-op.
+   */
+  @blockable
+  async dropPendingChanges(docId: string, changeIds: string[]): Promise<void> {
+    if (changeIds.length === 0) return;
+    const ids = new Set(changeIds);
+    const [tx, pendingChanges] = await this.db.transaction(['pendingChanges'], 'readwrite');
+    const pending = await pendingChanges.getAll<StoredChange>([docId, 0], [docId, Infinity]);
+    await Promise.all(
+      pending.filter(change => ids.has(change.id)).map(change => pendingChanges.delete([docId, change.rev]))
+    );
+    await tx.complete();
+  }
+
+  /**
    * Lists all changes (committed + pending) for a document, sorted by rev.
    * @param docId - The document ID.
    * @param options.startAfter - Only return changes with rev > startAfter.

@@ -32,6 +32,20 @@ export interface OTClientStore extends PatchesStore {
   savePendingChanges(docId: string, changes: Change[]): Promise<void>;
 
   /**
+   * Removes specific pending changes by change id.
+   *
+   * Used after a commit when the server rebased some sent changes away to a
+   * no-op: they never come back as committed changes, so the normal
+   * rebase-by-id removal in {@link applyServerChanges} can't clear them, and a
+   * change like a root-level replace never reduces to empty under rebase. Without
+   * this the client resends them forever.
+   *
+   * @param docId Document identifier
+   * @param changeIds Ids of the pending changes to remove (matched on `Change.id`)
+   */
+  dropPendingChanges(docId: string, changeIds: string[]): Promise<void>;
+
+  /**
    * Lists all changes (committed + pending) for a document, sorted by rev.
    * Used by PatchesBranchClient for client-side offline merge to read branch changes.
    *

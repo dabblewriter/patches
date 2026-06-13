@@ -144,6 +144,19 @@ export class OTAlgorithm implements ClientAlgorithm {
     // Pending changes remain until server commits them back.
   }
 
+  async dropResolvedPending(docId: string, sentChanges: Change[], committedChanges: Change[]): Promise<number> {
+    // A sent change the server didn't echo back in its response was rebased away
+    // to a no-op (its content was already committed). It will never return as a
+    // server change, so applyServerChanges' rebase can't clear it — and an op like
+    // a root-level replace never reduces to empty under rebase, so it would be
+    // resent on every flush. Drop those by id.
+    const survived = new Set(committedChanges.map(c => c.id));
+    const droppedIds = sentChanges.filter(c => !survived.has(c.id)).map(c => c.id);
+    if (droppedIds.length === 0) return 0;
+    await this.store.dropPendingChanges(docId, droppedIds);
+    return droppedIds.length;
+  }
+
   // --- Store forwarding methods ---
 
   async trackDocs(docIds: string[]): Promise<void> {

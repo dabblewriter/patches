@@ -184,6 +184,10 @@ describe('PatchesStore interface', () => {
         expect(typeof docId).toBe('string');
         expect(Array.isArray(changes)).toBe(true);
       },
+      dropPendingChanges: async (docId: string, changeIds: string[]) => {
+        expect(typeof docId).toBe('string');
+        expect(Array.isArray(changeIds)).toBe(true);
+      },
       applyServerChanges: async (docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]) => {
         expect(typeof docId).toBe('string');
         expect(Array.isArray(serverChanges)).toBe(true);
@@ -363,6 +367,7 @@ describe('PatchesStore interface', () => {
     close: async () => {},
     getPendingChanges: async () => [],
     savePendingChanges: async () => {},
+    dropPendingChanges: async () => {},
     applyServerChanges: async () => {},
   });
 });

@@ -57,6 +57,7 @@ describe('PatchesSync', () => {
       getPendingToSend: vi.fn().mockResolvedValue(null),
       applyServerChanges: vi.fn().mockResolvedValue([]),
       confirmSent: vi.fn().mockResolvedValue(undefined),
+      dropResolvedPending: vi.fn().mockResolvedValue(0),
       getCommittedRev: vi.fn().mockResolvedValue(0),
       deleteDoc: vi.fn().mockResolvedValue(undefined),
       confirmDeleteDoc: vi.fn().mockResolvedValue(undefined),
@@ -521,6 +522,42 @@ describe('PatchesSync', () => {
 
       expect(mockWebSocket.commitChanges).toHaveBeenCalledWith('doc1', pendingChanges);
       expect(applySpy).toHaveBeenCalledWith('doc1', committed);
+    });
+
+    it('drops sent changes the server rebased away and re-syncs the open doc', async () => {
+      const sent: Change[] = [
+        { id: 'root', rev: 1, baseRev: 0, ops: [{ op: 'replace', path: '', value: {} }], createdAt: 0, committedAt: 0 },
+      ];
+      mockAlgorithm.getPendingToSend.mockResolvedValueOnce(sent).mockResolvedValueOnce(null);
+
+      // Server returned only an unrelated catchup change — `sent` was rebased away (absent).
+      const committed: Change[] = [{ id: 'srv', rev: 11, baseRev: 10, ops: [], createdAt: 0, committedAt: 0 }];
+      mockWebSocket.commitChanges.mockResolvedValue({ changes: committed });
+      vi.spyOn(sync as any, '_applyServerChangesToDoc').mockResolvedValue(undefined);
+
+      // One pending dropped + an open doc → re-import from store to stay consistent.
+      mockAlgorithm.dropResolvedPending.mockResolvedValue(1);
+      mockPatches.getOpenDoc.mockReturnValue({} as any);
+      const reimported = { state: {}, rev: 11, changes: [] };
+      mockAlgorithm.loadDoc.mockResolvedValue(reimported);
+
+      await sync['flushDoc']('doc1');
+
+      expect(mockAlgorithm.dropResolvedPending).toHaveBeenCalledWith('doc1', sent, committed);
+      expect(mockPatches.applySnapshot).toHaveBeenCalledWith('doc1', reimported);
+    });
+
+    it('does not re-sync when nothing was rebased away', async () => {
+      const sent: Change[] = [{ id: 'c1', rev: 1, baseRev: 0, ops: [], createdAt: 0, committedAt: 0 }];
+      mockAlgorithm.getPendingToSend.mockResolvedValueOnce(sent).mockResolvedValueOnce(null);
+      mockWebSocket.commitChanges.mockResolvedValue({ changes: sent.map(c => ({ ...c, rev: c.rev + 10 })) });
+      vi.spyOn(sync as any, '_applyServerChangesToDoc').mockResolvedValue(undefined);
+      mockAlgorithm.dropResolvedPending.mockResolvedValue(0);
+      mockPatches.getOpenDoc.mockReturnValue({} as any);
+
+      await sync['flushDoc']('doc1');
+
+      expect(mockPatches.applySnapshot).not.toHaveBeenCalled();
     });
   });
 

@@ -397,6 +397,9 @@ describe('OTBranchManager', () => {
 
     beforeEach(() => {
       vi.mocked(mockStore.loadBranch).mockResolvedValue(mockBranch);
+      // Healthy branch: the source's current rev is at or beyond branchedAtRev,
+      // so the merge-base clamp is a no-op and baseRev stays at branchedAtRev.
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(5);
       vi.mocked(mockStore.listChanges).mockResolvedValue(mockBranchChanges);
       vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
       vi.mocked(mockStore.loadVersionState).mockResolvedValue(
@@ -434,6 +437,32 @@ describe('OTBranchManager', () => {
         lastMergedRev: 2,
         modifiedAt: expect.any(Number),
       });
+      expect(result).toEqual(committedChanges);
+    });
+
+    it('clamps the merge base when branchedAtRev is ahead of the source tip', async () => {
+      // Migrated/re-synced doc: the branch records branchedAtRev=295 but the
+      // source's change log was renumbered down to a current rev of 294. Without
+      // clamping, committing with baseRev=295 trips commitChanges' "baseRev ahead
+      // of server revision" guard and the merge throws. The base must clamp to
+      // the source tip (294) so the branch's edits rebase onto the real head.
+      vi.mocked(mockStore.loadBranch).mockResolvedValue({ ...mockBranch, branchedAtRev: 295 });
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(294);
+
+      const committedChanges = mockBranchChanges.map((c, i) => ({
+        ...c,
+        baseRev: 294,
+        rev: 295 + i,
+        batchId: 'branch1',
+      }));
+      vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: committedChanges });
+
+      const result = await branchManager.mergeBranch('branch1');
+
+      expect(mockServer.commitChanges).toHaveBeenCalledWith('doc1', [
+        expect.objectContaining({ id: 'change1', baseRev: 294, rev: 295, batchId: 'branch1' }),
+        expect.objectContaining({ id: 'change2', baseRev: 294, rev: 296, batchId: 'branch1' }),
+      ]);
       expect(result).toEqual(committedChanges);
     });
 

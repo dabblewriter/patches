@@ -151,7 +151,17 @@ export class OTBranchManager implements BranchManager {
     assertBranchExists(branch, branchId);
 
     const sourceDocId = branch.docId;
-    const branchStartRevOnSource = branch.branchedAtRev;
+    // Clamp the merge base to the source's actual current revision. A branch
+    // can carry a `branchedAtRev` that is *ahead* of the source's committed tip
+    // — e.g. a migrated/re-synced document whose change log was renumbered down
+    // under a branch record, leaving `branchedAtRev` pointing one (or more) revs
+    // past the last change that exists. Committing the branch's changes with a
+    // `baseRev` greater than the source's current rev trips `commitChanges`'
+    // "baseRev ahead of server revision" guard and the merge throws. Nothing
+    // exists between the source tip and `branchedAtRev`, so rebasing onto the
+    // real tip is correct and a no-op for healthy branches.
+    const sourceCurrentRev = await this.store.getCurrentRev(sourceDocId);
+    const branchStartRevOnSource = Math.min(branch.branchedAtRev, sourceCurrentRev);
 
     // Get only unmerged changes: since lastMergedRev (if previously merged) or contentStartRev
     const startAfter = branch.lastMergedRev ?? (branch.contentStartRev ?? 2) - 1;

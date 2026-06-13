@@ -258,15 +258,27 @@ export interface ListChangesOptions {
  * Options for listing version metadata.
  */
 export interface ListVersionsOptions {
-  /** List versions whose orderBy field is *after* this value. */
+  /**
+   * Cursor: keep versions that come *after* this value in the current sort order.
+   * Ascending (default) this is a lower bound (`orderBy` field > value); under
+   * `reverse` the order flips and it becomes an upper bound (field < value).
+   */
   startAfter?: number | string;
-  /** List versions whose orderBy field is strictly *before* this value. */
+  /**
+   * Cursor: keep versions that come *before* this value in the current sort order.
+   * Ascending (default) this is an upper bound (`orderBy` field < value); under
+   * `reverse` the order flips and it becomes a lower bound (field > value).
+   */
   endBefore?: number | string;
   /** Maximum number of versions to return. */
   limit?: number;
   /** Sort by startedAt, endRev, or startRev. Defaults to 'endRev'. */
   orderBy?: 'startedAt' | 'endRev' | 'startRev';
-  /** Return versions in descending order. Defaults to false (ascending). When reversed, startAfter and endBefore apply to the *reversed* list. */
+  /**
+   * Return versions in descending order. Defaults to false (ascending). Because
+   * `startAfter`/`endBefore` are cursors relative to the sort order, reversing
+   * flips which side of each bound they select — see their notes above.
+   */
   reverse?: boolean;
   /** Filter by the origin type. */
   origin?: 'main' | 'offline-branch' | 'branch';

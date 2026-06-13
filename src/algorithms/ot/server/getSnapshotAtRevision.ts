@@ -4,12 +4,28 @@ import type { PatchesSnapshot } from '../../../types.js';
 
 /**
  * Finds the latest main version at or before the given revision and loads its raw state.
+ *
+ * The search is bounded by `getCurrentRev`: a version can never legitimately sit
+ * ahead of the committed change log. Without this bound an orphan version — e.g.
+ * one left behind by a no-op offline commit, stamped at a rev that never actually
+ * persisted — would be selected as the latest snapshot, making the snapshot report
+ * a phantom rev and drop the real tail of changes (so `getDoc` would lie about the
+ * document's head). When a target `beforeRev` is given we also clamp to it so a
+ * caller asking for a past state never gets a version from beyond that point.
  */
 async function getLatestMainVersion(store: OTStoreBackend, docId: string, beforeRev?: number) {
+  const currentRev = await store.getCurrentRev(docId);
+  const upperBound = beforeRev != null ? Math.min(beforeRev, currentRev) : currentRev;
+  // `startAfter`/`endBefore` are cursors relative to the (reversed) sort order, not
+  // absolute filters. Under `reverse: true` on `endRev`, the head of the list is the
+  // highest rev and "after" the cursor means below it, so `startAfter: upperBound + 1`
+  // selects `endRev <= upperBound` — the latest legit version at or before our bound,
+  // excluding any orphan stamped beyond the change log. (`endBefore` here would flip to
+  // a *lower* bound and select versions above the cap — see ListVersionsOptions.)
   const versions = await store.listVersions(docId, {
     limit: 1,
     reverse: true,
-    startAfter: beforeRev != null ? beforeRev + 1 : undefined,
+    startAfter: upperBound + 1,
     origin: 'main',
     orderBy: 'endRev',
   });

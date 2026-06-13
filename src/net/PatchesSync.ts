@@ -571,6 +571,18 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // is the last writer for corrected fields.
           await algorithm.confirmSent(docId, changeBatch);
           await this._applyServerChangesToDoc(docId, committed);
+
+          // Drop any sent change the server rebased away to a no-op (absent from
+          // `committed`). applyServerChanges only clears pending whose ids the
+          // server echoed back; a dropped change (e.g. a root-replace re-asserting
+          // already-committed state) is never echoed and never rebases to empty, so
+          // without this it is resent on every flush forever. Re-sync the open doc
+          // from the store when we drop so its in-memory pending stays consistent.
+          const dropped = (await algorithm.dropResolvedPending?.(docId, changeBatch, committed)) ?? 0;
+          if (dropped > 0 && this.patches.getOpenDoc(docId)) {
+            const fullSnapshot = await algorithm.loadDoc(docId);
+            if (fullSnapshot) this.patches.applySnapshot(docId, fullSnapshot);
+          }
         }
 
         // Fetch remaining pending for next batch or check completion

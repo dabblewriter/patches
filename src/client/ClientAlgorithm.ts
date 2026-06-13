@@ -114,6 +114,23 @@ export interface ClientAlgorithm {
    */
   confirmSent(docId: string, changes: Change[]): Promise<void>;
 
+  /**
+   * After a commit, drop pending changes that were sent but did not come back as
+   * committed — the server rebased them away to a no-op. The normal rebase clears
+   * a pending change only when its id is echoed in the server changes; a change
+   * the server dropped (e.g. a root-level replace re-asserting already-committed
+   * state) is never echoed and never reduces to empty under rebase, so it would be
+   * resent forever. Returns the number of pending changes dropped.
+   *
+   * Optional — only OT needs it (LWW resolves its single in-flight change directly
+   * in {@link confirmSent}).
+   *
+   * @param docId Document identifier
+   * @param sentChanges The changes just submitted to the server
+   * @param committedChanges The changes the server returned (catchup + accepted)
+   */
+  dropResolvedPending?(docId: string, sentChanges: Change[], committedChanges: Change[]): Promise<number>;
+
   // --- Store forwarding methods ---
 
   /** Registers documents for local tracking with the algorithm for this instance. */

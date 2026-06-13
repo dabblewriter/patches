@@ -58,16 +58,19 @@ describe('getSnapshotAtRevision', () => {
       },
     ];
 
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(12);
     vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
     vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify(mockState));
     vi.mocked(mockStore.listChanges).mockResolvedValue(mockChanges);
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1');
 
+    // No target rev → bounded by currentRev (12). Reversed, `startAfter: 13` is an
+    // upper bound (endRev <= 12).
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
-      startAfter: undefined,
+      startAfter: 13,
       origin: 'main',
       orderBy: 'endRev',
     });
@@ -115,16 +118,18 @@ describe('getSnapshotAtRevision', () => {
       },
     ];
 
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(7);
     vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
     vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify(mockState));
     vi.mocked(mockStore.listChanges).mockResolvedValue(mockChanges);
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1', 7);
 
+    // Target rev 7, currentRev 7 → bound = min(7, 7) = 7, so startAfter = 8 (endRev <= 7).
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
-      startAfter: 8, // rev + 1
+      startAfter: 8,
       origin: 'main',
       orderBy: 'endRev',
     });
@@ -238,7 +243,8 @@ describe('getSnapshotAtRevision', () => {
     const result = await getSnapshotAtRevision(mockStore, 'doc1', 0);
 
     // rev 0 is a real bound (the pre-history empty state), not "latest":
-    // versions before rev 1 and changes before rev 1 are both excluded.
+    // with currentRev defaulting to 0, bound = min(0, 0) = 0 → startAfter = 1
+    // (endRev <= 0), so versions and changes before rev 1 are both excluded.
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
@@ -297,12 +303,14 @@ describe('getSnapshotAtRevision', () => {
       },
     ];
 
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(18);
     vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
     vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify(mockState));
     vi.mocked(mockStore.listChanges).mockResolvedValue(mockChanges);
 
     const result = await getSnapshotAtRevision(mockStore, 'doc1', 18);
 
+    // Target rev 18, currentRev 18 → bound = 18, so startAfter = 19 (endRev <= 18).
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
@@ -320,6 +328,42 @@ describe('getSnapshotAtRevision', () => {
       rev: 15,
       changes: mockChanges,
     });
+  });
+
+  it('never selects a version whose endRev is ahead of the committed tip', async () => {
+    // Regression: an orphan `offline-branch` version sits at endRev 295 (left by a
+    // no-op offline commit) while the real change log tops out at 294. The snapshot
+    // must ignore it — otherwise getDoc reports a phantom rev 295.
+    const allVersions = [
+      { id: 'main294', endRev: 294, startRev: 0, origin: 'main' as const, startedAt: 1, endedAt: 2 },
+      { id: 'orphan295', endRev: 295, startRev: 295, origin: 'offline-branch' as const, startedAt: 3, endedAt: 4 },
+    ];
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(294);
+    // Emulate the production store's reverse-cursor semantics: under `reverse`,
+    // `startAfter` is an upper bound (endRev < startAfter), as FirestoreOTStore does.
+    vi.mocked(mockStore.listVersions).mockImplementation(async (_doc, opts: any) => {
+      const filtered = allVersions
+        .filter(v => opts.startAfter === undefined || v.endRev < opts.startAfter)
+        .filter(v => opts.origin === undefined || v.origin === opts.origin)
+        .sort((a, b) => b.endRev - a.endRev);
+      return opts.limit ? filtered.slice(0, opts.limit) : filtered;
+    });
+    vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify({ ok: true }));
+    vi.mocked(mockStore.listChanges).mockResolvedValue([]);
+
+    const result = await getSnapshotAtRevision(mockStore, 'doc1');
+
+    // startAfter = 295 (reversed → endRev <= 294) excludes orphan@295; the latest
+    // valid main version is 294.
+    expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
+      limit: 1,
+      reverse: true,
+      startAfter: 295,
+      origin: 'main',
+      orderBy: 'endRev',
+    });
+    expect(mockStore.loadVersionState).toHaveBeenCalledWith('doc1', 'main294');
+    expect(result.rev).toBe(294);
   });
 });
 
@@ -350,6 +394,7 @@ describe('getSnapshotStream', () => {
 
   it('bounds the snapshot to the requested revision', async () => {
     const changes = [{ id: 'c6', rev: 6, baseRev: 5, createdAt: 1, committedAt: 1, ops: [] }];
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(10); // doc has changes beyond the requested rev
     vi.mocked(mockStore.listVersions).mockResolvedValue([{ id: 'v1', endRev: 5 } as any]);
     vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify({ text: 'base' }));
     vi.mocked(mockStore.listChanges).mockResolvedValue(changes);
@@ -357,6 +402,7 @@ describe('getSnapshotStream', () => {
     const json = await readStream(await getSnapshotStream(mockStore, 'doc1', 6));
 
     expect(JSON.parse(json)).toEqual({ state: { text: 'base' }, rev: 5, changes });
+    // Requested rev 6, currentRev 10 → bound = min(6, 10) = 6, so startAfter = 7 (endRev <= 6).
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
@@ -383,6 +429,7 @@ describe('getSnapshotStream', () => {
     const json = await readStream(await getSnapshotStream(mockStore, 'doc1', 0));
 
     expect(JSON.parse(json)).toEqual({ state: null, rev: 0, changes: [] });
+    // rev 0 → bound = min(0, 0) = 0, so startAfter = 1 (endRev <= 0, nothing before rev 1).
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,

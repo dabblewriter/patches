@@ -78,6 +78,13 @@ export class OTInMemoryStore implements OTClientStore {
     buf.pending = [...rebasedPendingChanges];
   }
 
+  async dropPendingChanges(docId: string, changeIds: string[]): Promise<void> {
+    const buf = this.docs.get(docId);
+    if (!buf || changeIds.length === 0) return;
+    const ids = new Set(changeIds);
+    buf.pending = buf.pending.filter(change => !ids.has(change.id));
+  }
+
   // ─── Metadata / Tracking ───────────────────────────────────────────
   async trackDocs(docIds: string[], _algorithm?: 'ot' | 'lww'): Promise<void> {
     for (const docId of docIds) {

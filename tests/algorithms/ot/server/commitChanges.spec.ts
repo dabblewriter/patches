@@ -192,6 +192,63 @@ describe('commitChanges', () => {
     expect(mockStore.createVersion).toHaveBeenCalledWith('doc1', expect.any(Object), [lastChange]);
   });
 
+  it('does not version an offline change that rebases to a no-op (no orphan versions)', async () => {
+    // Regression: an offline change whose content is already committed rebases to
+    // nothing. It must not be saved AND must not mint an offline-session version —
+    // otherwise we get an orphan version stamped at a rev that never persisted.
+    const { handleOfflineSessionsAndBatches } =
+      await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
+    const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
+    vi.mocked(transformIncomingChanges).mockReturnValue([]); // rebases away to nothing
+
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(5);
+    const committed = createChange('committed', 5, 4);
+    vi.mocked(mockStore.listChanges)
+      .mockResolvedValueOnce([]) // session check: no last change → no createVersionAtRev
+      .mockResolvedValueOnce([committed]); // committed changes after baseRev → not a fast-forward
+
+    const oldTime = createTimestamp(-sessionTimeoutMillis - 1000); // offline timestamp
+    const offline = createChange('offline', 3, 2, oldTime);
+
+    const result = await commitChanges(mockStore, 'doc1', [offline], sessionTimeoutMillis);
+
+    expect(handleOfflineSessionsAndBatches).not.toHaveBeenCalled();
+    expect(mockStore.saveChanges).not.toHaveBeenCalled();
+    expect(result.newChanges).toEqual([]);
+    expect(result.catchupChanges).toEqual([committed]);
+  });
+
+  it('versions an offline change from its persisted (post-transform) rev, not the claimed rev', async () => {
+    // When an offline change DOES persist, the version must be built from the rebased
+    // change (its real saved rev), never the pre-transform claimed rev.
+    const { handleOfflineSessionsAndBatches } =
+      await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
+    const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
+    const rebased = { ...createChange('offline', 6, 5), rev: 6 }; // rebased onto the real tip
+    vi.mocked(transformIncomingChanges).mockReturnValue([rebased]);
+
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(5);
+    const committed = createChange('committed', 5, 4);
+    vi.mocked(mockStore.listChanges)
+      .mockResolvedValueOnce([]) // session check
+      .mockResolvedValueOnce([committed]); // committed → not fast-forward
+
+    const oldTime = createTimestamp(-sessionTimeoutMillis - 1000);
+    const offline = createChange('offline', 3, 2, oldTime); // claims rev 3
+
+    await commitChanges(mockStore, 'doc1', [offline], sessionTimeoutMillis);
+
+    // Versioned from the rebased change (rev 6), not the claimed rev 3, and only the persisted change is saved.
+    expect(handleOfflineSessionsAndBatches).toHaveBeenCalledWith(
+      mockStore,
+      sessionTimeoutMillis,
+      'doc1',
+      [rebased],
+      'offline-branch'
+    );
+    expect(mockStore.saveChanges).toHaveBeenCalledWith('doc1', [rebased]);
+  });
+
   it('should filter out already committed changes', async () => {
     const existingChange = createChange('existing', 2, 1);
     const newChange = createChange('new', 3, 1);

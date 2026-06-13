@@ -143,27 +143,21 @@ export async function commitChanges(
         return { catchupChanges: committedChanges, newChanges: [], docReloadRequired };
       }
 
-      // 4. Handle offline-session versioning (once — version creation is not idempotent):
+      // 4. Offline-session versioning applies when:
       // - batchId present (multi-batch uploads)
       // - or the first change is older than the session timeout (single-batch offline)
       const isOfflineTimestamp = serverNow - incomingChanges[0].createdAt > sessionTimeoutMillis;
-      if (isOfflineTimestamp || batchId) {
-        const canFastForward = committedChanges.length === 0;
+      const isOfflineOrBatch = isOfflineTimestamp || !!batchId;
 
+      // Fast-forward: nothing committed after baseRev, so the incoming changes save
+      // verbatim. Their revs are final, so version them directly (origin 'main').
+      if (isOfflineOrBatch && committedChanges.length === 0) {
         if (!offlineSessionsHandled) {
-          // In historicalImport mode, always use 'main' origin
-          const origin = options?.historicalImport ? 'main' : canFastForward ? 'main' : 'offline-branch';
-
-          // Create versions for offline sessions (metadata + changes, no state)
-          await handleOfflineSessionsAndBatches(store, sessionTimeoutMillis, docId, incomingChanges, origin);
+          await handleOfflineSessionsAndBatches(store, sessionTimeoutMillis, docId, incomingChanges, 'main');
           offlineSessionsHandled = true;
         }
-
-        // Fast-forward: no transformation needed, save changes directly
-        if (canFastForward) {
-          await store.saveChanges(docId, incomingChanges);
-          return { catchupChanges: [], newChanges: incomingChanges, docReloadRequired };
-        }
+        await store.saveChanges(docId, incomingChanges);
+        return { catchupChanges: [], newChanges: incomingChanges, docReloadRequired };
       }
 
       // 5. Transform the incoming changes against committed changes (stateless — no state loaded)
@@ -175,6 +169,16 @@ export async function commitChanges(
       );
 
       if (transformedChanges.length > 0) {
+        // Version the offline/batch session from the changes that ACTUALLY persisted
+        // (their post-transform revs), never the pre-transform claimed revs. When an
+        // offline change rebases to a no-op it isn't saved — versioning the claimed
+        // rev here would mint an orphan version pointing past the committed log, which
+        // poisons getDoc's reported rev and never gets cleaned up.
+        if (isOfflineOrBatch && !offlineSessionsHandled) {
+          const origin = options?.historicalImport ? 'main' : 'offline-branch';
+          await handleOfflineSessionsAndBatches(store, sessionTimeoutMillis, docId, transformedChanges, origin);
+          offlineSessionsHandled = true;
+        }
         await store.saveChanges(docId, transformedChanges);
       }
 

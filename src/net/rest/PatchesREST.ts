@@ -307,8 +307,17 @@ export class PatchesREST implements PatchesConnection {
     await this._fetch(`/docs/${docId}/_branches/${encodeURIComponent(branchId)}`, { method: 'DELETE' });
   }
 
-  async mergeBranch(docId: string, branchId: string): Promise<void> {
-    await this._fetch(`/docs/${docId}/_branches/${encodeURIComponent(branchId)}/_merge`, { method: 'POST' });
+  /**
+   * Merge a branch into its source document. Returns the server commit change(s)
+   * the merge applied to the source doc (`{ changes }` in the response body), so
+   * callers can fold the merged result into an open doc directly — no follow-up
+   * snapshot fetch needed. Empty for a no-op merge (nothing new to bring across).
+   */
+  async mergeBranch(docId: string, branchId: string): Promise<Change[]> {
+    const result = await this._fetch(`/docs/${docId}/_branches/${encodeURIComponent(branchId)}/_merge`, {
+      method: 'POST',
+    });
+    return (result?.changes as Change[]) ?? [];
   }
 
   // --- WebRTC Signaling ---

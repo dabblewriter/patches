@@ -2,7 +2,7 @@ import { store, type Store } from 'easy-signal';
 import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import type { BranchAPI } from '../net/protocol/types.js';
-import type { Branch, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
+import type { Branch, Change, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
 import type { BranchClientStore } from './BranchClientStore.js';
 import type { Patches } from './Patches.js';
 import type { AlgorithmName } from './PatchesStore.js';
@@ -127,13 +127,17 @@ export class PatchesBranchClient {
    * Throws if the API is a `BranchClientStore` (offline-first mode) because
    * client stores don't maintain full change history needed for correct merging.
    * Offline-first consumers should call the server merge endpoint directly.
+   *
+   * @returns The server commit change(s) the merge applied to the source document
+   *   (empty for a no-op merge). Consumers can fold these into an open doc directly.
    */
-  async mergeBranch(branchId: string): Promise<void> {
+  async mergeBranch(branchId: string): Promise<Change[]> {
     if (this.isOffline) {
       throw new Error(OFFLINE_MERGE_ERROR);
     }
-    await (this.api as BranchAPI).mergeBranch(branchId);
+    const changes = await (this.api as BranchAPI).mergeBranch(branchId);
     await this.listBranches();
+    return changes ?? [];
   }
 
   /** Clear state */

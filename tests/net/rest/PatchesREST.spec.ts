@@ -553,12 +553,19 @@ describe('PatchesREST', () => {
       expect(init?.method).toBe('DELETE');
     });
 
-    it('should POST to merge branch', async () => {
-      globalThis.fetch = mockFetchResponse(undefined, 204);
-      await rest.mergeBranch('doc1', 'branch-abc');
+    it('should POST to merge branch and return the committed changes', async () => {
+      const committed = [{ id: 'c1', rev: 6, baseRev: 5, ops: [], created: 0 }];
+      globalThis.fetch = mockFetchResponse({ changes: committed });
+      const result = await rest.mergeBranch('doc1', 'branch-abc');
       const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
       expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch-abc/_merge');
       expect(init?.method).toBe('POST');
+      expect(result).toEqual(committed);
+    });
+
+    it('should return an empty array for a no-op merge (no changes in the response)', async () => {
+      globalThis.fetch = mockFetchResponse({ changes: [] });
+      expect(await rest.mergeBranch('doc1', 'branch-abc')).toEqual([]);
     });
 
     it('should encode branchId in URL', async () => {

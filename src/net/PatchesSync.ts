@@ -515,6 +515,32 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
+   * Fold a branch merge's committed changes (as returned by the merge RPC) into the
+   * open source doc, so the merged result materializes immediately instead of waiting
+   * for the WebSocket/SSE echo — which isn't guaranteed to reach the initiating client
+   * promptly when the REST commit and the subscription resolve to different backends.
+   * `_applyServerChangesToDoc` rebases pending edits (lossless); a subclass override may
+   * additionally broadcast the applied changes to other tabs.
+   *
+   * Idempotent, deduped by revision: if the echo (or a re-broadcast) already advanced the
+   * doc to/past the merge, this is a no-op. If a concurrent commit opened a gap since our
+   * last sync, fall back to `syncDoc` (pulls the authoritative tail, which includes the
+   * merge). An empty merge is a no-op.
+   */
+  async applyMergeChanges(docId: string, mergeChanges: Change[]): Promise<void> {
+    if (mergeChanges.length === 0) return;
+    const committedRev = await this._getAlgorithm(docId).getCommittedRev(docId);
+    const firstRev = mergeChanges[0].rev;
+    const lastRev = mergeChanges[mergeChanges.length - 1].rev;
+    if (committedRev >= lastRev) return; // already applied (echo / re-broadcast)
+    if (committedRev === firstRev - 1) {
+      await this._applyServerChangesToDoc(docId, mergeChanges);
+    } else {
+      await this.syncDoc(docId); // gap from a concurrent commit → pull the authoritative tail
+    }
+  }
+
+  /**
    * Flushes a document to the server.
    * @param docId The ID of the document to flush.
    * @param pending Optional pending changes to flush, to avoid redundant store fetch.

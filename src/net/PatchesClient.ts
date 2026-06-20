@@ -216,9 +216,11 @@ export class PatchesClient implements PatchesAPI {
   /**
    * Merges a branch on the server.
    * @param branchId - The ID of the branch to merge.
-   * @returns A promise resolving when the merge is confirmed.
+   * @returns The server commit change(s) the merge applied to the source document
+   *   (empty for a no-op merge). Lets callers fold the merged result into an open
+   *   doc directly instead of waiting for the broadcast echo.
    */
-  async mergeBranch(branchId: string): Promise<void> {
+  async mergeBranch(branchId: string): Promise<Change[]> {
     return this.rpc.call('mergeBranch', branchId);
   }
 }

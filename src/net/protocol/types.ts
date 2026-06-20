@@ -191,7 +191,8 @@ export interface BranchAPI {
   createBranch(docId: string, rev: number, metadata?: CreateBranchMetadata): Promise<string>;
   updateBranch(branchId: string, metadata: EditableBranchMetadata): Promise<void>;
   deleteBranch(branchId: string): Promise<void>;
-  mergeBranch(branchId: string): Promise<void>;
+  /** Merge a branch into its source; resolves to the server commit change(s) applied (empty for a no-op merge). */
+  mergeBranch(branchId: string): Promise<Change[]>;
 }
 
 // Also define the expected parameters for notifications the server might send:

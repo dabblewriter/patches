@@ -294,6 +294,23 @@ describe('PatchesBranchClient', () => {
       expect(api.listBranches).toHaveBeenCalled();
     });
 
+    it('should return the committed changes from the API so callers can fold them in', async () => {
+      const committed = [{ id: 'c1', rev: 6, baseRev: 5, ops: [], created: 0 }];
+      api.mergeBranch.mockResolvedValue(committed);
+      api.listBranches.mockResolvedValue([]);
+      const client = new PatchesBranchClient('doc1', api, patches);
+
+      await expect(client.mergeBranch('branch-1')).resolves.toEqual(committed);
+    });
+
+    it('should normalize a void API result to an empty array', async () => {
+      api.mergeBranch.mockResolvedValue(undefined);
+      api.listBranches.mockResolvedValue([]);
+      const client = new PatchesBranchClient('doc1', api, patches);
+
+      await expect(client.mergeBranch('branch-1')).resolves.toEqual([]);
+    });
+
     it('should throw when using offline API', async () => {
       const client = new PatchesBranchClient('doc1', offlineApi, patches);
 

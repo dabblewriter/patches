@@ -456,6 +456,73 @@ describe('PatchesSync', () => {
     });
   });
 
+  describe('applyMergeChanges', () => {
+    const mergeChanges: Change[] = [
+      { id: 'm1', rev: 6, baseRev: 5, ops: [], createdAt: 0, committedAt: 1000 },
+      { id: 'm2', rev: 7, baseRev: 6, ops: [], createdAt: 0, committedAt: 1001 },
+    ];
+
+    it('should be a no-op for an empty merge', async () => {
+      const applySpy = vi.spyOn(sync as any, '_applyServerChangesToDoc').mockResolvedValue(undefined);
+      const syncSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      await sync.applyMergeChanges('doc1', []);
+
+      expect(applySpy).not.toHaveBeenCalled();
+      expect(syncSpy).not.toHaveBeenCalled();
+      expect(mockAlgorithm.getCommittedRev).not.toHaveBeenCalled();
+    });
+
+    it('should be a no-op when the merge is already applied (committedRev >= lastRev)', async () => {
+      mockAlgorithm.getCommittedRev.mockResolvedValue(7);
+      const applySpy = vi.spyOn(sync as any, '_applyServerChangesToDoc').mockResolvedValue(undefined);
+      const syncSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      await sync.applyMergeChanges('doc1', mergeChanges);
+
+      expect(applySpy).not.toHaveBeenCalled();
+      expect(syncSpy).not.toHaveBeenCalled();
+    });
+
+    it('should apply contiguous merge changes (committedRev === firstRev - 1)', async () => {
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      const applySpy = vi.spyOn(sync as any, '_applyServerChangesToDoc').mockResolvedValue(undefined);
+      const syncSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      await sync.applyMergeChanges('doc1', mergeChanges);
+
+      expect(applySpy).toHaveBeenCalledTimes(1);
+      expect(applySpy).toHaveBeenCalledWith('doc1', mergeChanges);
+      expect(syncSpy).not.toHaveBeenCalled();
+    });
+
+    it('should fall back to syncDoc when there is a gap (committedRev < firstRev - 1)', async () => {
+      mockAlgorithm.getCommittedRev.mockResolvedValue(3);
+      const applySpy = vi.spyOn(sync as any, '_applyServerChangesToDoc').mockResolvedValue(undefined);
+      const syncSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      await sync.applyMergeChanges('doc1', mergeChanges);
+
+      expect(syncSpy).toHaveBeenCalledTimes(1);
+      expect(syncSpy).toHaveBeenCalledWith('doc1');
+      expect(applySpy).not.toHaveBeenCalled();
+    });
+
+    it('should fall back to syncDoc on a partial overlap (firstRev <= committedRev < lastRev)', async () => {
+      // committedRev sits inside the merge block (e.g. only the first merge rev landed).
+      // The old subclass impl did nothing here, stranding the doc behind the tail.
+      mockAlgorithm.getCommittedRev.mockResolvedValue(6);
+      const applySpy = vi.spyOn(sync as any, '_applyServerChangesToDoc').mockResolvedValue(undefined);
+      const syncSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      await sync.applyMergeChanges('doc1', mergeChanges);
+
+      expect(syncSpy).toHaveBeenCalledTimes(1);
+      expect(syncSpy).toHaveBeenCalledWith('doc1');
+      expect(applySpy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('flushDoc method', () => {
     beforeEach(() => {
       sync['updateState']({ connected: true });

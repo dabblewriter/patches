@@ -1,4 +1,4 @@
-import { ReadonlyStoreClass, signal, store, type Store } from 'easy-signal';
+import { batch, ReadonlyStoreClass, signal, store, type Store } from 'easy-signal';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
@@ -171,9 +171,13 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
    * @param error Optional error when status is 'error'.
    */
   updateSyncStatus(status: DocSyncStatus, error?: Error): void {
-    this.syncError.state = status === 'error' ? error : undefined;
-    this.syncStatus.state = status;
-    this._checkLoaded();
+    // Batch so isLoaded is latched before subscribers run; otherwise a syncStatus
+    // subscriber sees the new status but stale isLoaded (empty rev-0 docs never "load").
+    batch(() => {
+      this.syncError.state = status === 'error' ? error : undefined;
+      this.syncStatus.state = status;
+      this._checkLoaded();
+    });
   }
 
   /** Latches _isLoaded to true when the doc has data or sync has resolved. */

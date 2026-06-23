@@ -360,6 +360,15 @@ describe('OTDoc', () => {
       expect(doc.isLoaded.state).toBe(true);
     });
 
+    it('should be latched before syncStatus subscribers are notified', () => {
+      let isLoadedWhenNotified: boolean | undefined;
+      doc.syncStatus.subscribe(() => {
+        isLoadedWhenNotified = doc.isLoaded.state;
+      }, false);
+      doc.updateSyncStatus('synced');
+      expect(isLoadedWhenNotified).toBe(true);
+    });
+
     it('should stay true after transitioning back to syncing', () => {
       doc.updateSyncStatus('synced');
       expect(doc.isLoaded.state).toBe(true);

@@ -1,3 +1,4 @@
+import { createId } from 'crypto-id';
 import { signal, type Unsubscriber } from 'easy-signal';
 import type {
   Branch,
@@ -29,7 +30,7 @@ const CONNECT_TIMEOUT_MS = 30_000;
 export interface PatchesRESTOptions {
   /**
    * Explicit client ID. If not provided, restored from sessionStorage (when available)
-   * or generated via crypto.randomUUID(). Persisted to sessionStorage automatically.
+   * or generated via createId(). Persisted to sessionStorage automatically.
    */
   clientId?: string;
 
@@ -78,7 +79,7 @@ export class PatchesREST implements PatchesConnection {
 
     // Resolve clientId: explicit > sessionStorage > random
     const storage = typeof globalThis.sessionStorage !== 'undefined' ? globalThis.sessionStorage : undefined;
-    this.clientId = this.options.clientId ?? storage?.getItem(SESSION_STORAGE_KEY) ?? globalThis.crypto.randomUUID();
+    this.clientId = this.options.clientId ?? storage?.getItem(SESSION_STORAGE_KEY) ?? createId(22);
     try {
       storage?.setItem(SESSION_STORAGE_KEY, this.clientId);
     } catch {

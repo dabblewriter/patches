@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Patches } from '../../src/client/Patches';
 import type { AlgorithmName, TrackedDoc } from '../../src/client/PatchesStore';
 import { PatchesSync } from '../../src/net/PatchesSync';
+import { StatusError } from '../../src/net/error';
 import { PatchesWebSocket } from '../../src/net/websocket/PatchesWebSocket';
 import { onlineState } from '../../src/net/websocket/onlineState';
 import type { Change } from '../../src/types';
@@ -124,6 +125,8 @@ describe('PatchesSync', () => {
   });
 
   afterEach(() => {
+    // Cancel any retry timer a test left scheduled so it can't fire into a later test.
+    (sync as any)?._clearAllSyncRetries?.();
     vi.clearAllMocks();
   });
 
@@ -453,6 +456,143 @@ describe('PatchesSync', () => {
       await sync['syncDoc']('doc1');
 
       expect(mockAlgorithm.getPendingToSend).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('transient sync-error auto-retry', () => {
+    // First backoff is SYNC_RETRY_BASE_MS (1000ms) in PatchesSync.
+    const FIRST_RETRY_MS = 1000;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      sync['updateState']({ connected: true });
+      mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('retries a doc that failed transiently and recovers without a refresh', async () => {
+      mockWebSocket.getChangesSince.mockRejectedValueOnce(new Error('network blip')).mockResolvedValue([]);
+
+      await sync['syncDoc']('doc1');
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(FIRST_RETRY_MS);
+
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledTimes(2);
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+      expect(sync.docStates.state['doc1'].syncError).toBeUndefined();
+    });
+
+    it('does not retry a terminal (403) sync error — it stays latched for the app to handle', async () => {
+      const errors: Error[] = [];
+      sync.onError((err: Error) => {
+        errors.push(err);
+      });
+      mockWebSocket.getChangesSince.mockRejectedValue(new StatusError(403, 'Forbidden'));
+
+      await sync['syncDoc']('doc1');
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledTimes(1);
+      // A definitive error has nothing to recover it, so it surfaces immediately.
+      expect(errors).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledTimes(1);
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+    });
+
+    it('stays quiet on a transient failure while a retry is still pending', async () => {
+      const errors: Error[] = [];
+      sync.onError((err: Error) => {
+        errors.push(err);
+      });
+      mockWebSocket.getChangesSince.mockRejectedValueOnce(new Error('network blip')).mockResolvedValue([]);
+
+      await sync['syncDoc']('doc1');
+      // The doc reflects the error in its own sync state, but we don't surface it via
+      // onError/logs while a retry that's expected to recover it is pending.
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+      expect(errors).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(FIRST_RETRY_MS);
+
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+      expect(errors).toHaveLength(0);
+    });
+
+    it('gives up after the attempt cap and surfaces the error exactly once', async () => {
+      const errors: Error[] = [];
+      sync.onError((err: Error) => {
+        errors.push(err);
+      });
+      mockWebSocket.getChangesSince.mockRejectedValue(new Error('persistent blip'));
+
+      await sync['syncDoc']('doc1');
+      // Drain the full backoff schedule (1 + 2 + 4 + 8 + 16 + 30×5 ≈ 181s).
+      await vi.advanceTimersByTimeAsync(200_000);
+
+      // 1 initial attempt + SYNC_RETRY_MAX_ATTEMPTS (10) retries, then it stops.
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledTimes(11);
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+      // Quiet across every retry; a single emit when we exhaust retries and give up.
+      expect(errors).toHaveLength(1);
+
+      // Nothing left armed — advancing further does nothing.
+      await vi.advanceTimersByTimeAsync(200_000);
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledTimes(11);
+    });
+
+    it('cancels a pending retry when the doc is untracked', async () => {
+      mockWebSocket.getChangesSince.mockRejectedValue(new Error('blip'));
+
+      await sync['syncDoc']('doc1');
+      expect((sync as any)._syncRetryTimers.size).toBe(1);
+
+      await sync['_handleDocsUntracked'](['doc1']);
+      expect((sync as any)._syncRetryTimers.size).toBe(0);
+      expect((sync as any)._syncRetryAttempts.size).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels pending retries on disconnect', async () => {
+      mockWebSocket.getChangesSince.mockRejectedValue(new Error('blip'));
+
+      await sync['syncDoc']('doc1');
+      expect((sync as any)._syncRetryTimers.size).toBe(1);
+
+      sync.disconnect();
+      expect((sync as any)._syncRetryTimers.size).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledTimes(1);
+    });
+
+    it('backs off across repeated failures, then recovers', async () => {
+      mockWebSocket.getChangesSince
+        .mockRejectedValueOnce(new Error('blip 1'))
+        .mockRejectedValueOnce(new Error('blip 2'))
+        .mockResolvedValue([]);
+
+      await sync['syncDoc']('doc1');
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledTimes(1);
+
+      // 1st retry at 1s fails again
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledTimes(2);
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+
+      // 2nd retry waits 2s (backoff) then succeeds
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledTimes(3);
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
     });
   });
 

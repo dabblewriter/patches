@@ -57,6 +57,13 @@ const EMPTY_DOC_STATE: DocSyncState = {
   isLoaded: false,
 };
 
+// Backoff for retrying a doc that failed to sync transiently (see `syncDoc`).
+const SYNC_RETRY_BASE_MS = 1_000;
+const SYNC_RETRY_MAX_MS = 30_000;
+const SYNC_RETRY_MAX_ATTEMPTS = 10;
+// Definitive StatusError codes — don't retry (auth, payment, permission, not-found, gone).
+const TERMINAL_SYNC_CODES = new Set([401, 402, 403, 404, 410]);
+
 /**
  * Handles server connection, document subscriptions, and syncing logic between
  * the Patches instance and the server.
@@ -144,6 +151,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   private _unsubs: Unsubscriber[] = [];
+  /** Pending per-doc retry timers + attempt counts for transient sync failures. */
+  private _syncRetryTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
+  private _syncRetryAttempts = new Map<string, number>();
 
   /**
    * Gets the algorithm for a document. Uses the open doc's algorithm if available,
@@ -229,6 +239,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   disconnect(): void {
     this.connection.disconnect();
     this.updateState({ connected: false, syncStatus: 'unsynced' });
+    this._clearAllSyncRetries();
     this._resetSyncingStatuses();
   }
 
@@ -495,6 +506,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         }
       }
       this._updateDocSyncState(docId, { syncStatus: 'synced' });
+      this._clearSyncRetry(docId);
       if (baseDoc) {
         baseDoc.updateSyncStatus('synced');
       }
@@ -506,10 +518,25 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       }
       const syncError = err instanceof Error ? err : new Error(String(err));
       this._updateDocSyncState(docId, { syncStatus: 'error', syncError });
-      console.error(`Error syncing doc ${docId}:`, err);
-      this.onError.emit(syncError, { docId });
       if (baseDoc) {
         baseDoc.updateSyncStatus('error', syncError);
+      }
+      // Transient failures self-heal via a backed-off retry; definitive ones
+      // (auth/payment/permission/not-found/gone) latch immediately. Surface the error
+      // only when nothing is left to recover it — otherwise a self-healing reconnect blip
+      // would spam onError/logs on every attempt. So we report a definitive failure, or a
+      // transient one we've exhausted retries on while still connected; a failure that
+      // coincides with a disconnect stays quiet, since the reconnect's syncAllKnownDocs
+      // re-syncs everything.
+      const retryable = this._isRetryableSyncError(err);
+      const willRetry = retryable && this._scheduleSyncRetry(docId);
+      if (!willRetry) {
+        this._clearSyncRetry(docId);
+        const recoverableOnReconnect = retryable && !this._isConnectedAndOnline();
+        if (!recoverableOnReconnect) {
+          console.error(`Error syncing doc ${docId}:`, err);
+          this.onError.emit(syncError, { docId });
+        }
       }
     }
   }
@@ -701,6 +728,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // Sync everything on connect/reconnect
       void this.syncAllKnownDocs();
     } else if (!isConnecting) {
+      // Drop pending retries — the next reconnect's syncAllKnownDocs re-syncs everything.
+      this._clearAllSyncRetries();
       // Reset any stale 'syncing' statuses on disconnect/error
       this._resetSyncingStatuses();
     }
@@ -785,6 +814,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     const subscribedBefore = this._getActiveSubscriptions();
 
     existingIds.forEach(id => this.trackedDocs.delete(id));
+    existingIds.forEach(id => this._clearSyncRetry(id));
     batch(() => {
       existingIds.forEach(id => this._updateDocSyncState(id, undefined));
     });
@@ -827,6 +857,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     // Clean up tracking and local storage
     this.trackedDocs.delete(docId);
+    this._clearSyncRetry(docId);
     this._updateDocSyncState(docId, undefined);
     await algorithm.confirmDeleteDoc(docId);
 
@@ -902,5 +933,56 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   protected _isDocDeletedError(err: unknown): boolean {
     return err instanceof StatusError && err.code === ErrorCodes.DOC_DELETED;
+  }
+
+  /** Retryable = any failure except a definitive auth/payment/permission/not-found/gone StatusError. */
+  protected _isRetryableSyncError(err: unknown): boolean {
+    if (err instanceof StatusError) return !TERMINAL_SYNC_CODES.has(err.code);
+    return true;
+  }
+
+  protected _isConnectedAndOnline(): boolean {
+    return this.state.connected && !onlineState.isOffline;
+  }
+
+  /**
+   * Schedule a backed-off re-sync of a doc that failed transiently, while connected.
+   * Returns true if a retry was scheduled, false if it declined — either because we're
+   * disconnected/offline (the reconnect's `syncAllKnownDocs` will recover the doc), or
+   * because the per-doc attempt cap is reached. The cap bounds the retry storm for a doc
+   * that keeps failing on a non-terminal error while the connection stays up; once it's
+   * hit, `syncDoc` surfaces the error and the doc latches until the next external trigger
+   * (a local edit, untrack, or reconnect) re-arms it from a clean slate.
+   */
+  protected _scheduleSyncRetry(docId: string): boolean {
+    if (!this._isConnectedAndOnline()) return false;
+    const attempts = this._syncRetryAttempts.get(docId) ?? 0;
+    if (attempts >= SYNC_RETRY_MAX_ATTEMPTS) return false;
+    const delay = Math.min(SYNC_RETRY_BASE_MS * 2 ** attempts, SYNC_RETRY_MAX_MS);
+    this._syncRetryAttempts.set(docId, attempts + 1);
+    const existing = this._syncRetryTimers.get(docId);
+    if (existing !== undefined) globalThis.clearTimeout(existing);
+    const timer = globalThis.setTimeout(() => {
+      this._syncRetryTimers.delete(docId);
+      if (!this._isConnectedAndOnline() || !this.trackedDocs.has(docId)) return;
+      void this.syncDoc(docId);
+    }, delay);
+    this._syncRetryTimers.set(docId, timer);
+    return true;
+  }
+
+  protected _clearSyncRetry(docId: string): void {
+    const timer = this._syncRetryTimers.get(docId);
+    if (timer !== undefined) {
+      globalThis.clearTimeout(timer);
+      this._syncRetryTimers.delete(docId);
+    }
+    this._syncRetryAttempts.delete(docId);
+  }
+
+  protected _clearAllSyncRetries(): void {
+    for (const timer of this._syncRetryTimers.values()) globalThis.clearTimeout(timer);
+    this._syncRetryTimers.clear();
+    this._syncRetryAttempts.clear();
   }
 }

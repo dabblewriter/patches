@@ -242,13 +242,18 @@ Most real-world disconnects are tier 1. Phone loses signal for three seconds, la
 
 ### Heartbeats
 
-SSE connections can die silently. The server sends a heartbeat comment every 30 seconds:
+SSE connections can die silently. The server sends a heartbeat as a named event every 30 seconds (`heartbeatIntervalMs`):
 
 ```
-: heartbeat
+event: heartbeat
+data:
 ```
 
-SSE comments are invisible to `EventSource` but keep the connection alive through proxies and let the server detect dead connections when the write fails.
+It keeps the connection alive through proxies and lets the server detect dead connections when the write fails. Because it's an observable named event (not a `:` comment, which `EventSource` discards), the client can also see it: `PatchesREST` runs a liveness watchdog that forces a reconnect if no frame — event _or_ heartbeat — arrives within ~75s (`LIVENESS_TIMEOUT_MS`, which must stay >= ~2x `heartbeatIntervalMs`). This catches a half-open stream that stays `connected` without ever firing `onerror`.
+
+> **Deploy ordering:** the heartbeat changed from a `:` comment to a named `event: heartbeat` in 0.12.1. A watchdog client only counts observable frames, so against an older server (<= 0.9.13, comment heartbeat) an idle stream gets zero observable frames and the watchdog tears it down every ~75s. Deploy the named-heartbeat server build before shipping any watchdog client.
+
+On a fatal error or watchdog teardown, `PatchesREST` reconnects itself with exponential backoff (mirroring `WebSocketTransport`); the consumer re-syncs on the next `connected` event.
 
 ## Authentication
 

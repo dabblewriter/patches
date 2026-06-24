@@ -1,5 +1,6 @@
 import { isEqual } from '@dabble/delta';
 import { batch, ReadonlyStoreClass, signal, store, type Store, type Unsubscriber } from 'easy-signal';
+import { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
 import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/ot/shared/changeBatching.js';
 import { BaseDoc } from '../client/BaseDoc.js';
 import type { BranchClientStore } from '../client/BranchClientStore.js';
@@ -669,10 +670,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       await this._applyServerChangesToDoc(docId, serverChanges);
     } catch (err) {
       // A non-contiguous server change (we missed an earlier event — a transient SSE drop the
-      // browser's replay didn't fully cover) throws "Missing changes from the server …". Without
-      // recovery the tail is dropped and `committedRev` freezes silently, so the client stops
-      // converging while believing it is up to date. Pull the authoritative tail via syncDoc
-      // (getChangesSince), mirroring applyMergeChanges' gap fallback. Keep onError for telemetry.
+      // browser's replay didn't fully cover) throws a MissingChangesError. Without recovery the
+      // tail is dropped and `committedRev` freezes silently, so the client stops converging while
+      // believing it is up to date. Pull the authoritative tail via syncDoc (getChangesSince),
+      // mirroring applyMergeChanges' gap fallback. Keep onError for telemetry.
       if (this._isMissingChangesGap(err)) {
         try {
           await this.syncDoc(docId);
@@ -686,9 +687,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     }
   }
 
-  /** True when an error is the "missing changes" revision-gap thrown by applyCommittedChanges. */
+  /** True when an error is the revision-gap thrown by applyCommittedChanges. */
   private _isMissingChangesGap(err: unknown): boolean {
-    return err instanceof Error && err.message.includes('Missing changes from the server');
+    return err instanceof MissingChangesError;
   }
 
   /**

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Patches } from '../../src/client/Patches';
 import type { AlgorithmName, TrackedDoc } from '../../src/client/PatchesStore';
+import { MissingChangesError } from '../../src/algorithms/ot/client/applyCommittedChanges';
 import { PatchesSync } from '../../src/net/PatchesSync';
 import { StatusError } from '../../src/net/error';
 import { PatchesWebSocket } from '../../src/net/websocket/PatchesWebSocket';
@@ -14,13 +15,18 @@ vi.mock('../../src/net/websocket/onlineState');
 vi.mock('@dabble/delta', () => ({
   isEqual: vi.fn((a, b) => JSON.stringify(a) === JSON.stringify(b)),
 }));
-vi.mock('../../src/algorithms/ot/client/applyCommittedChanges', () => ({
-  applyCommittedChanges: vi.fn(() => ({
-    state: { content: 'updated' },
-    rev: 6,
-    changes: [],
-  })),
-}));
+vi.mock('../../src/algorithms/ot/client/applyCommittedChanges', async importActual => {
+  const actual = await importActual<typeof import('../../src/algorithms/ot/client/applyCommittedChanges')>();
+  return {
+    applyCommittedChanges: vi.fn(() => ({
+      state: { content: 'updated' },
+      rev: 6,
+      changes: [],
+    })),
+    // Re-export the real typed error so `instanceof MissingChangesError` resolves in PatchesSync.
+    MissingChangesError: actual.MissingChangesError,
+  };
+});
 vi.mock('../../src/algorithms/ot/shared/changeBatching', () => ({
   breakChangesIntoBatches: vi.fn(changes => [changes]),
 }));
@@ -460,8 +466,8 @@ describe('PatchesSync', () => {
   });
 
   describe('committed-changes gap recovery (SSE-2)', () => {
-    it('falls back to syncDoc when applying a non-contiguous server change throws "Missing changes"', async () => {
-      const gapErr = new Error('Missing changes from the server. Expected rev 6, got 9. Request changes since 5.');
+    it('falls back to syncDoc when applying a non-contiguous server change throws MissingChangesError', async () => {
+      const gapErr = new MissingChangesError(6, 9, 5);
       vi.spyOn(sync as any, '_applyServerChangesToDoc').mockRejectedValue(gapErr);
       const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
       const onError = vi.fn();

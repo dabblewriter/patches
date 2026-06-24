@@ -291,6 +291,74 @@ describe('PatchesREST', () => {
         vi.useRealTimers();
       }
     });
+
+    it('schedules a backoff reconnect after a fatal post-handshake error and rebuilds the stream', async () => {
+      vi.useFakeTimers();
+      try {
+        const p = rest.connect();
+        const es = MockEventSource.latest;
+        es.simulateOpen();
+        await p;
+
+        // Fatal: browser gave up (readyState CLOSED), no native auto-reconnect.
+        es.readyState = MockEventSource.CLOSED;
+        es.simulateError();
+        expect(rest.state).toBe('error');
+        expect(MockEventSource.instances.length).toBe(1);
+
+        // Backoff elapses → the transport rebuilds the stream on its own (no consumer action).
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(MockEventSource.instances.length).toBe(2);
+
+        MockEventSource.latest.simulateOpen();
+        expect(rest.state).toBe('connected');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reconnects after the watchdog tears down a half-open stream', async () => {
+      vi.useFakeTimers();
+      try {
+        const p = rest.connect();
+        MockEventSource.latest.simulateOpen();
+        await p;
+
+        // No frames for the full liveness window → watchdog tears down to 'error'.
+        await vi.advanceTimersByTimeAsync(90_000);
+        expect(rest.state).toBe('error');
+        expect(MockEventSource.instances.length).toBe(1);
+
+        // Backoff elapses → transport rebuilds the stream.
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(MockEventSource.instances.length).toBe(2);
+        MockEventSource.latest.simulateOpen();
+        expect(rest.state).toBe('connected');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not reconnect after disconnect() cancels a pending reconnect', async () => {
+      vi.useFakeTimers();
+      try {
+        const p = rest.connect();
+        const es = MockEventSource.latest;
+        es.simulateOpen();
+        await p;
+
+        es.readyState = MockEventSource.CLOSED;
+        es.simulateError(); // schedules a backoff reconnect
+        expect(rest.state).toBe('error');
+
+        rest.disconnect(); // intent cleared — cancels the pending reconnect
+
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(MockEventSource.instances.length).toBe(1); // never rebuilt
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('SSE notifications', () => {

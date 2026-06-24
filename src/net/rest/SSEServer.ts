@@ -383,6 +383,14 @@ export class SSEServer {
       // Named event (not a `:` comment) so the EventSource client can observe it and
       // distinguish a healthy-but-idle stream from a half-open one. A comment is invisible
       // to EventSource handlers, which left clients unable to detect a silently dead stream.
+      //
+      // WIRE-FORMAT CHANGE — REQUIRES SERVER-FIRST DEPLOY ORDERING. Earlier releases
+      // (<= 0.9.13) emitted `: heartbeat` (an SSE comment) here. A client running the
+      // 75s liveness watchdog in PatchesREST only resets on *observable* frames, so an
+      // idle doc served by an old comment-heartbeat server receives zero observable frames
+      // and the watchdog tears the stream down to `error` (then reconnects) every ~75s.
+      // Deploy this named-heartbeat server build BEFORE shipping any watchdog client
+      // (e.g. bump and deploy pup's @dabble/patches first, then release the app).
       const heartbeat = 'event: heartbeat\ndata: \n\n';
       for (const client of this.clients.values()) {
         if (client.writer) {

@@ -276,3 +276,47 @@ describe('BaseDoc — flush()', () => {
     await expect(doc.flush()).resolves.toBeUndefined();
   });
 });
+
+interface ListDoc {
+  items: string[];
+}
+
+// Regression repro for SNAPIMP-1 (sync data-loss audit, 2026-06-24; live report DABBLE-WRITER-3-42
+// "manuscript changes revert and then duplicate / add other characters").
+//
+// In the DW3 spoke, the `'changes'` listener's rev-mismatch recovery (src/stores/patches.ts) does
+// `recoveringDocs.add(docId)` then `loadDoc(docId).then(doc.import)`, and while that RPC is in
+// flight it DROPS the doc's own local-change broadcasts. The local broadcast is what would normally
+// shift a typed op out of `_optimisticOps` (via applyChanges). Because it is dropped, the op stays
+// in `_optimisticOps`. Meanwhile the hub already persisted that op (savePendingChanges runs BEFORE
+// the broadcast), so `loadDoc` returns it inside `snapshot.changes`. `import()` then applies the op
+// TWICE — once via createStateFromSnapshot (snapshot.changes -> _pendingChanges) and again from the
+// surviving `_optimisticOps` — with no de-dup by change id. The result is duplicated content.
+//
+// An array append is used here because it is non-idempotent and dependency-free; the editor's
+// real `@dabble/delta` `@txt` text ops duplicate identically, and the same path duplicates plot/
+// structure cards (cf. the 34-vs-45 plot-card loss class).
+describe('OTDoc — import() must not double-apply a stranded optimistic op the snapshot already holds (SNAPIMP-1)', () => {
+  it('does not duplicate a typed op that the recovery snapshot already contains as pending', () => {
+    const doc = new OTDoc<ListDoc>('doc-snapimp', { state: { items: ['a'] }, rev: 5, changes: [] });
+
+    // User types: additive op applied optimistically and parked in _optimisticOps. Its echo
+    // broadcast (which would shift it out) is dropped by the recovery guard, so it stays parked.
+    doc.change(patch => patch.add('/items/-', 'b'));
+    expect(doc.state.items).toEqual(['a', 'b']);
+    expect((doc as any)._optimisticOps.length).toBe(1);
+
+    // What loadDoc() returns from the hub mid-recovery: the hub had already persisted the typed op,
+    // so it comes back as a pending change on the same committedRev (committedAt 0 = not yet server-committed).
+    const recoverySnapshot: PatchesSnapshot<ListDoc> = {
+      state: { items: ['a'] },
+      rev: 5,
+      changes: [makeChange('c1', 5, 6, [{ op: 'add', path: '/items/-', value: 'b' }], false)],
+    };
+
+    doc.import(recoverySnapshot);
+
+    // Current (buggy) behaviour produces ['a', 'b', 'b'] — the typed 'b' is duplicated.
+    expect(doc.state.items).toEqual(['a', 'b']);
+  });
+});

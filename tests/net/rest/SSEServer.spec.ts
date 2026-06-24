@@ -418,7 +418,8 @@ describe('SSEServer', () => {
       vi.advanceTimersByTime(10_000);
 
       const chunks = await readStream(stream, 1);
-      expect(chunks[0]).toBe(': heartbeat\n\n');
+      // Observable named event (not a `:` comment) so EventSource clients can detect liveness.
+      expect(chunks[0]).toBe('event: heartbeat\ndata: \n\n');
     });
 
     it('should not send heartbeats to disconnected clients', () => {

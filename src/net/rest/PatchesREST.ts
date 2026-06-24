@@ -22,6 +22,16 @@ import { normalizeIds } from './utils.js';
 const SESSION_STORAGE_KEY = 'patches-clientId';
 const REQUEST_TIMEOUT_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 30_000;
+/**
+ * If no SSE frame (a committed-change/signal/resync event OR the server's periodic
+ * `heartbeat` event) arrives within this window, the watchdog treats the stream as
+ * half-open and forces a reconnect. Must exceed the server heartbeat interval
+ * (default 30s) with margin for jitter/proxies — a half-open EventSource can stay
+ * `connected` forever without ever firing `onerror`, silently freezing the client.
+ */
+const LIVENESS_TIMEOUT_MS = 75_000;
+/** How often the liveness watchdog checks for a stalled stream. */
+const LIVENESS_CHECK_MS = 15_000;
 
 /**
  * Options for creating a PatchesREST instance.
@@ -71,6 +81,10 @@ export class PatchesREST implements PatchesConnection {
   private options: PatchesRESTOptions;
   private shouldBeConnected = false;
   private onlineUnsubscriber: Unsubscriber | null = null;
+  /** Timestamp (ms) of the last SSE frame received (event or heartbeat). 0 until first open. */
+  private _lastEventAt = 0;
+  /** Interval handle for the half-open-stream watchdog; null while not connected. */
+  private livenessTimer: ReturnType<typeof globalThis.setInterval> | null = null;
 
   constructor(url: string, options?: PatchesRESTOptions) {
     this._url = url.replace(/\/$/, ''); // Strip trailing slash
@@ -139,6 +153,8 @@ export class PatchesREST implements PatchesConnection {
       }, CONNECT_TIMEOUT_MS);
 
       es.onopen = () => {
+        this._noteTraffic();
+        this._startLivenessWatchdog();
         this._setState('connected');
         if (!settled) {
           settled = true;
@@ -156,15 +172,26 @@ export class PatchesREST implements PatchesConnection {
           reject(new Error('SSE connection failed'));
           return;
         }
-        // Subsequent errors (after initial connection) — EventSource auto-reconnects
-        if (this._state === 'connected') {
+        // Post-handshake error.
+        if (es.readyState === EventSource.CLOSED) {
+          // Fatal: the browser has given up and will NOT auto-reconnect (e.g. the
+          // auto-reconnect attempt got a non-retryable response). Left untouched the
+          // stream sits dead while `connect()` no-ops on the still-non-null eventSource,
+          // so the client silently stops converging (the "stuck on connecting" hole).
+          // Tear it down and surface 'error' so the supervisor / online-transition path
+          // rebuilds a fresh stream.
+          this._teardownStream();
+          this._setState('error');
+        } else if (this._state === 'connected') {
+          // Transient drop — the browser is auto-reconnecting (readyState CONNECTING).
           this._setState('disconnected');
           this._setState('connecting');
         }
       };
 
-      // Listen for typed server events
+      // Listen for typed server events. Every frame also bumps the liveness clock.
       es.addEventListener('changesCommitted', (e: MessageEvent) => {
+        this._noteTraffic();
         try {
           const { docId, changes, options } = JSON.parse(e.data);
           this.onChangesCommitted.emit(docId, changes, options);
@@ -174,6 +201,7 @@ export class PatchesREST implements PatchesConnection {
       });
 
       es.addEventListener('docDeleted', (e: MessageEvent) => {
+        this._noteTraffic();
         try {
           const { docId } = JSON.parse(e.data);
           this.onDocDeleted.emit(docId);
@@ -183,28 +211,29 @@ export class PatchesREST implements PatchesConnection {
       });
 
       es.addEventListener('signal', (e: MessageEvent) => {
+        this._noteTraffic();
         this.onSignal.emit(e.data);
       });
 
       es.addEventListener('resync', () => {
+        this._noteTraffic();
         if (!this.shouldBeConnected) return;
         // Server's buffer expired — trigger a full re-sync by cycling state.
         // PatchesSync listens to onStateChange and calls syncAllKnownDocs on 'connected'.
         this._setState('disconnected');
         this._setState('connected');
       });
+
+      // Server's periodic keep-alive. Carries no payload — its only job is to prove the
+      // stream is still live so the watchdog doesn't tear down a healthy-but-idle connection.
+      es.addEventListener('heartbeat', () => this._noteTraffic());
     });
   }
 
   disconnect(): void {
     this.shouldBeConnected = false;
     this._removeOnlineOfflineListeners();
-
-    if (this.eventSource) {
-      this.eventSource.close();
-      this.eventSource = null;
-    }
-
+    this._teardownStream();
     this._setState('disconnected');
   }
 
@@ -363,6 +392,45 @@ export class PatchesREST implements PatchesConnection {
     this.onStateChange.emit(state);
   }
 
+  /** Record that an SSE frame (event or heartbeat) just arrived, for the liveness watchdog. */
+  private _noteTraffic(): void {
+    this._lastEventAt = Date.now();
+  }
+
+  /** Close + null the EventSource and stop the liveness watchdog. Idempotent. */
+  private _teardownStream(): void {
+    this._stopLivenessWatchdog();
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+  }
+
+  /**
+   * Watchdog for half-open streams. A TCP connection can silently die without the
+   * browser firing `EventSource.onerror`, leaving `eventSource` non-null and the client
+   * stuck `connected` forever (frozen `committedRev`). If no frame — including the
+   * server's periodic `heartbeat` — has arrived within {@link LIVENESS_TIMEOUT_MS},
+   * force a reconnect: tear the stream down and surface `error`, which drives the
+   * consumer's reconnect path (re-subscribe + `syncAllKnownDocs` catch-up).
+   */
+  private _startLivenessWatchdog(): void {
+    this._stopLivenessWatchdog();
+    this.livenessTimer = globalThis.setInterval(() => {
+      if (!this.shouldBeConnected || onlineState.isOffline || !this.eventSource) return;
+      if (Date.now() - this._lastEventAt <= LIVENESS_TIMEOUT_MS) return;
+      this._teardownStream();
+      this._setState('error');
+    }, LIVENESS_CHECK_MS);
+  }
+
+  private _stopLivenessWatchdog(): void {
+    if (this.livenessTimer !== null) {
+      globalThis.clearInterval(this.livenessTimer);
+      this.livenessTimer = null;
+    }
+  }
+
   private async _getHeaders(): Promise<Record<string, string>> {
     const staticHeaders = this.options.headers ?? {};
     if (this.options.getHeaders) {
@@ -415,8 +483,7 @@ export class PatchesREST implements PatchesConnection {
         if (isOnline && this.shouldBeConnected && !this.eventSource) {
           this.connect();
         } else if (!isOnline && this.eventSource) {
-          this.eventSource.close();
-          this.eventSource = null;
+          this._teardownStream();
           this._setState('disconnected');
         }
       });

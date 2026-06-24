@@ -459,6 +459,39 @@ describe('PatchesSync', () => {
     });
   });
 
+  describe('committed-changes gap recovery (SSE-2)', () => {
+    it('falls back to syncDoc when applying a non-contiguous server change throws "Missing changes"', async () => {
+      const gapErr = new Error('Missing changes from the server. Expected rev 6, got 9. Request changes since 5.');
+      vi.spyOn(sync as any, '_applyServerChangesToDoc').mockRejectedValue(gapErr);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      const onError = vi.fn();
+      sync.onError(onError);
+
+      await sync['_receiveCommittedChanges']('doc1', [
+        { id: 'c', rev: 9, baseRev: 8, ops: [], createdAt: 1, committedAt: 1 },
+      ]);
+
+      // Gap recovered by pulling the authoritative tail — not silently dropped.
+      expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+      expect(onError).not.toHaveBeenCalled();
+    });
+
+    it('emits onError without syncDoc for a non-gap apply error', async () => {
+      const otherErr = new Error('some other failure');
+      vi.spyOn(sync as any, '_applyServerChangesToDoc').mockRejectedValue(otherErr);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      const onError = vi.fn();
+      sync.onError(onError);
+
+      await sync['_receiveCommittedChanges']('doc1', [
+        { id: 'c', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 },
+      ]);
+
+      expect(syncDocSpy).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledWith(otherErr, { docId: 'doc1' });
+    });
+  });
+
   describe('transient sync-error auto-retry', () => {
     // First backoff is SYNC_RETRY_BASE_MS (1000ms) in PatchesSync.
     const FIRST_RETRY_MS = 1000;

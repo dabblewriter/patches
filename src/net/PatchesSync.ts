@@ -668,8 +668,27 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     try {
       await this._applyServerChangesToDoc(docId, serverChanges);
     } catch (err) {
+      // A non-contiguous server change (we missed an earlier event — a transient SSE drop the
+      // browser's replay didn't fully cover) throws "Missing changes from the server …". Without
+      // recovery the tail is dropped and `committedRev` freezes silently, so the client stops
+      // converging while believing it is up to date. Pull the authoritative tail via syncDoc
+      // (getChangesSince), mirroring applyMergeChanges' gap fallback. Keep onError for telemetry.
+      if (this._isMissingChangesGap(err)) {
+        try {
+          await this.syncDoc(docId);
+          return;
+        } catch (syncErr) {
+          this.onError.emit(syncErr as Error, { docId });
+          return;
+        }
+      }
       this.onError.emit(err as Error, { docId });
     }
+  }
+
+  /** True when an error is the "missing changes" revision-gap thrown by applyCommittedChanges. */
+  private _isMissingChangesGap(err: unknown): boolean {
+    return err instanceof Error && err.message.includes('Missing changes from the server');
   }
 
   /**

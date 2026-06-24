@@ -380,7 +380,10 @@ export class SSEServer {
 
   private _startHeartbeat(): void {
     this.heartbeatInterval = globalThis.setInterval(() => {
-      const heartbeat = ': heartbeat\n\n';
+      // Named event (not a `:` comment) so the EventSource client can observe it and
+      // distinguish a healthy-but-idle stream from a half-open one. A comment is invisible
+      // to EventSource handlers, which left clients unable to detect a silently dead stream.
+      const heartbeat = 'event: heartbeat\ndata: \n\n';
       for (const client of this.clients.values()) {
         if (client.writer) {
           client.writer.write(client.encoder.encode(heartbeat)).catch(() => {

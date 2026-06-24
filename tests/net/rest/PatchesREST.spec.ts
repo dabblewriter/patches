@@ -221,6 +221,78 @@ describe('PatchesREST', () => {
     });
   });
 
+  describe('half-open / fatal stream recovery', () => {
+    it('tears down and surfaces error on a fatal post-handshake error (readyState CLOSED) so a reconnect can rebuild (SSE-1)', async () => {
+      const p = rest.connect();
+      const es = MockEventSource.latest;
+      es.simulateOpen();
+      await p;
+
+      const states: string[] = [];
+      rest.onStateChange(s => states.push(s));
+
+      // Browser gave up and will NOT auto-reconnect: readyState CLOSED before the error fires.
+      es.readyState = MockEventSource.CLOSED;
+      es.simulateError();
+
+      expect(states).toEqual(['error']);
+      expect(es.close).toHaveBeenCalled();
+      expect(rest.state).toBe('error');
+
+      // The dead stream was nulled, so a fresh connect() can build a new EventSource
+      // (without the fix it no-ops on the stale non-null eventSource and stays stuck).
+      const p2 = rest.connect();
+      expect(MockEventSource.instances.length).toBe(2);
+      MockEventSource.latest.simulateOpen();
+      await p2;
+      expect(rest.state).toBe('connected');
+    });
+
+    it('forces a reconnect when no SSE frame arrives within the liveness window (SSE-3)', async () => {
+      vi.useFakeTimers();
+      try {
+        const p = rest.connect();
+        const es = MockEventSource.latest;
+        es.simulateOpen();
+        await p;
+
+        const states: string[] = [];
+        rest.onStateChange(s => states.push(s));
+
+        // Half-open stream: EventSource never fires onerror and no frames arrive.
+        vi.advanceTimersByTime(90_000);
+
+        expect(es.close).toHaveBeenCalled();
+        expect(states).toContain('error');
+        expect(rest.state).toBe('error');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not tear down a healthy-but-idle stream that keeps receiving heartbeats (SSE-3)', async () => {
+      vi.useFakeTimers();
+      try {
+        const p = rest.connect();
+        const es = MockEventSource.latest;
+        es.simulateOpen();
+        await p;
+
+        // Idle (no real changes) but the server's heartbeat keeps proving liveness
+        // across a span well beyond the liveness timeout.
+        for (let i = 0; i < 6; i++) {
+          vi.advanceTimersByTime(30_000);
+          es.simulateEvent('heartbeat', '');
+        }
+
+        expect(es.close).not.toHaveBeenCalled();
+        expect(rest.state).toBe('connected');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe('SSE notifications', () => {
     it('should emit onChangesCommitted from SSE event', async () => {
       const p = rest.connect();

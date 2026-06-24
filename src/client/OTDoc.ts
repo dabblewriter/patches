@@ -109,8 +109,25 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
 
     let newState: T = createStateFromSnapshot(snapshot);
     if (this._optimisticOps.length > 0) {
+      // De-dup optimistic ops already represented in the snapshot's pending changes.
+      // A local change can be persisted by the store (and so come back inside
+      // `snapshot.changes`) before its own confirmation has shifted the op off
+      // `_optimisticOps` — e.g. a sync-recovery `loadDoc()` whose snapshot already
+      // contains the just-typed change while its echo broadcast was dropped. Without
+      // this, `createStateFromSnapshot` applies the op (it is in `snapshot.changes`)
+      // AND the surviving optimistic op re-applies it on top, duplicating content for
+      // non-idempotent ops (text inserts, array appends). Match by structural op
+      // equality, consuming each pending change at most once so genuinely-distinct
+      // identical edits are preserved. See OTDoc.spec "SNAPIMP-1".
+      const pendingOpKeys = snapshot.changes.map(c => JSON.stringify(c.ops));
       const surviving: typeof this._optimisticOps = [];
       for (const ops of this._optimisticOps) {
+        const matchIndex = pendingOpKeys.indexOf(JSON.stringify(ops));
+        if (matchIndex !== -1) {
+          // Already applied via createStateFromSnapshot — consume the match and skip.
+          pendingOpKeys[matchIndex] = null as unknown as string;
+          continue;
+        }
         try {
           newState = applyPatch(newState, ops, { strict: true });
           surviving.push(ops);

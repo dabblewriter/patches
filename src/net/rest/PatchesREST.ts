@@ -23,6 +23,25 @@ import { normalizeIds } from './utils.js';
 const SESSION_STORAGE_KEY = 'patches-clientId';
 const REQUEST_TIMEOUT_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 30_000;
+/**
+ * If no SSE frame (a committed-change/signal/resync event OR the server's periodic
+ * `heartbeat` event) arrives within this window, the watchdog treats the stream as
+ * half-open and forces a reconnect. A half-open EventSource can stay `connected`
+ * forever without ever firing `onerror`, silently freezing the client.
+ *
+ * INVARIANT: this must be >= ~2x the server's `heartbeatIntervalMs` (SSEServer default
+ * 30s) plus margin for jitter/proxies, so a single dropped/late heartbeat on a healthy
+ * idle stream never false-fires the watchdog. The server interval is configurable and
+ * lives in a different module (no shared constant); if it is ever raised above ~37s,
+ * raise this in step.
+ */
+const LIVENESS_TIMEOUT_MS = 75_000;
+/** How often the liveness watchdog checks for a stalled stream. */
+const LIVENESS_CHECK_MS = 15_000;
+/** Initial reconnect backoff after a fatal error / watchdog teardown. */
+const INITIAL_RECONNECT_BACKOFF_MS = 1_000;
+/** Cap on the exponential reconnect backoff. */
+const MAX_RECONNECT_BACKOFF_MS = 30_000;
 
 /**
  * Options for creating a PatchesREST instance.
@@ -72,6 +91,14 @@ export class PatchesREST implements PatchesConnection {
   private options: PatchesRESTOptions;
   private shouldBeConnected = false;
   private onlineUnsubscriber: Unsubscriber | null = null;
+  /** Timestamp (ms) of the last SSE frame received (event or heartbeat). 0 until first open. */
+  private _lastEventAt = 0;
+  /** Interval handle for the half-open-stream watchdog; null while not connected. */
+  private livenessTimer: ReturnType<typeof globalThis.setInterval> | null = null;
+  /** Pending reconnect attempt scheduled after a fatal error / teardown; null when none. */
+  private reconnectTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
+  /** Current exponential reconnect backoff (ms); reset on a successful open. */
+  private reconnectBackoff = INITIAL_RECONNECT_BACKOFF_MS;
 
   constructor(url: string, options?: PatchesRESTOptions) {
     this._url = url.replace(/\/$/, ''); // Strip trailing slash
@@ -133,13 +160,19 @@ export class PatchesREST implements PatchesConnection {
       const timer = globalThis.setTimeout(() => {
         if (settled) return;
         settled = true;
-        es.close();
-        if (this.eventSource === es) this.eventSource = null;
+        if (this.eventSource === es) this._teardownStream();
+        else es.close();
         this._setState('error');
+        this._scheduleReconnect();
         reject(new Error('SSE connection timed out'));
       }, CONNECT_TIMEOUT_MS);
 
       es.onopen = () => {
+        // A healthy open clears any pending reconnect and resets the backoff.
+        this._cancelReconnect();
+        this.reconnectBackoff = INITIAL_RECONNECT_BACKOFF_MS;
+        this._noteTraffic();
+        this._startLivenessWatchdog();
         this._setState('connected');
         if (!settled) {
           settled = true;
@@ -150,22 +183,39 @@ export class PatchesREST implements PatchesConnection {
 
       es.onerror = () => {
         if (!settled) {
-          // First error during initial connection — reject the promise
+          // First error during initial connection — reject the promise so the caller knows
+          // this attempt failed, but tear the dead stream down and schedule a backoff
+          // reconnect so the transport keeps trying on its own (mirrors WebSocketTransport,
+          // which reconnects after an initial failure too). Without the teardown a CLOSED
+          // EventSource would linger and the next connect() would no-op on it.
           settled = true;
           globalThis.clearTimeout(timer);
+          this._teardownStream();
           this._setState('error');
+          this._scheduleReconnect();
           reject(new Error('SSE connection failed'));
           return;
         }
-        // Subsequent errors (after initial connection) — EventSource auto-reconnects
-        if (this._state === 'connected') {
+        // Post-handshake error.
+        if (es.readyState === EventSource.CLOSED) {
+          // Fatal: the browser has given up and will NOT auto-reconnect (e.g. the
+          // auto-reconnect attempt got a non-retryable response). Left untouched the
+          // stream sits dead while `connect()` no-ops on the still-non-null eventSource,
+          // so the client silently stops converging (the "stuck on connecting" hole).
+          // Tear it down, surface 'error', and schedule a backoff reconnect to rebuild.
+          this._teardownStream();
+          this._setState('error');
+          this._scheduleReconnect();
+        } else if (this._state === 'connected') {
+          // Transient drop — the browser is auto-reconnecting (readyState CONNECTING).
           this._setState('disconnected');
           this._setState('connecting');
         }
       };
 
-      // Listen for typed server events
+      // Listen for typed server events. Every frame also bumps the liveness clock.
       es.addEventListener('changesCommitted', (e: MessageEvent) => {
+        this._noteTraffic();
         try {
           const { docId, changes, options } = JSON.parse(e.data);
           this.onChangesCommitted.emit(docId, changes, options);
@@ -175,6 +225,7 @@ export class PatchesREST implements PatchesConnection {
       });
 
       es.addEventListener('docDeleted', (e: MessageEvent) => {
+        this._noteTraffic();
         try {
           const { docId } = JSON.parse(e.data);
           this.onDocDeleted.emit(docId);
@@ -184,28 +235,30 @@ export class PatchesREST implements PatchesConnection {
       });
 
       es.addEventListener('signal', (e: MessageEvent) => {
+        this._noteTraffic();
         this.onSignal.emit(e.data);
       });
 
       es.addEventListener('resync', () => {
+        this._noteTraffic();
         if (!this.shouldBeConnected) return;
         // Server's buffer expired — trigger a full re-sync by cycling state.
         // PatchesSync listens to onStateChange and calls syncAllKnownDocs on 'connected'.
         this._setState('disconnected');
         this._setState('connected');
       });
+
+      // Server's periodic keep-alive. Carries no payload — its only job is to prove the
+      // stream is still live so the watchdog doesn't tear down a healthy-but-idle connection.
+      es.addEventListener('heartbeat', () => this._noteTraffic());
     });
   }
 
   disconnect(): void {
     this.shouldBeConnected = false;
     this._removeOnlineOfflineListeners();
-
-    if (this.eventSource) {
-      this.eventSource.close();
-      this.eventSource = null;
-    }
-
+    this._cancelReconnect();
+    this._teardownStream();
     this._setState('disconnected');
   }
 
@@ -364,6 +417,73 @@ export class PatchesREST implements PatchesConnection {
     this.onStateChange.emit(state);
   }
 
+  /** Record that an SSE frame (event or heartbeat) just arrived, for the liveness watchdog. */
+  private _noteTraffic(): void {
+    this._lastEventAt = Date.now();
+  }
+
+  /** Close + null the EventSource and stop the liveness watchdog. Idempotent. */
+  private _teardownStream(): void {
+    this._stopLivenessWatchdog();
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+  }
+
+  /**
+   * Watchdog for half-open streams. A TCP connection can silently die without the
+   * browser firing `EventSource.onerror`, leaving `eventSource` non-null and the client
+   * stuck `connected` forever (frozen `committedRev`). If no frame — including the
+   * server's periodic `heartbeat` — has arrived within {@link LIVENESS_TIMEOUT_MS},
+   * force a reconnect: tear the stream down and surface `error`, which drives the
+   * consumer's reconnect path (re-subscribe + `syncAllKnownDocs` catch-up).
+   */
+  private _startLivenessWatchdog(): void {
+    this._stopLivenessWatchdog();
+    this.livenessTimer = globalThis.setInterval(() => {
+      if (!this.shouldBeConnected || onlineState.isOffline || !this.eventSource) return;
+      if (Date.now() - this._lastEventAt <= LIVENESS_TIMEOUT_MS) return;
+      this._teardownStream();
+      this._setState('error');
+      this._scheduleReconnect();
+    }, LIVENESS_CHECK_MS);
+  }
+
+  private _stopLivenessWatchdog(): void {
+    if (this.livenessTimer !== null) {
+      globalThis.clearInterval(this.livenessTimer);
+      this.livenessTimer = null;
+    }
+  }
+
+  /**
+   * Schedules a reconnect with exponential backoff after a fatal error or watchdog teardown.
+   * Mirrors WebSocketTransport's self-healing: unlike that transport, a fatal SSE error has no
+   * native auto-reconnect, and the consumer (PatchesSync) only re-syncs on a fresh `connected`
+   * event — it never calls `connect()` on `error`. Without this, a torn-down stream would
+   * surface `error` and never rebuild. The eventual `connected` re-emit drives the consumer's
+   * `syncAllKnownDocs` catch-up (re-subscribe + pull). Single-flight and gated on intent/online.
+   */
+  private _scheduleReconnect(): void {
+    if (!this.shouldBeConnected || onlineState.isOffline) return;
+    if (this.reconnectTimer !== null) return;
+    this.reconnectTimer = globalThis.setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect().catch(() => {
+        // connect() handles its own failure (teardown + 'error' + reschedule); nothing to do here.
+      });
+    }, this.reconnectBackoff);
+    this.reconnectBackoff = Math.min(this.reconnectBackoff * 1.5, MAX_RECONNECT_BACKOFF_MS);
+  }
+
+  private _cancelReconnect(): void {
+    if (this.reconnectTimer !== null) {
+      globalThis.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
   private async _getHeaders(): Promise<Record<string, string>> {
     const staticHeaders = this.options.headers ?? {};
     if (this.options.getHeaders) {
@@ -415,10 +535,14 @@ export class PatchesREST implements PatchesConnection {
       this.onlineUnsubscriber = onlineState.onOnlineChange(isOnline => {
         if (isOnline && this.shouldBeConnected && !this.eventSource) {
           this.connect();
-        } else if (!isOnline && this.eventSource) {
-          this.eventSource.close();
-          this.eventSource = null;
-          this._setState('disconnected');
+        } else if (!isOnline) {
+          // Going offline: cancel any pending backoff reconnect and tear down the stream.
+          // The online transition above rebuilds it when connectivity returns.
+          this._cancelReconnect();
+          if (this.eventSource) {
+            this._teardownStream();
+            this._setState('disconnected');
+          }
         }
       });
     }

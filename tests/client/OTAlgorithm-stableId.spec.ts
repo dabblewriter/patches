@@ -109,3 +109,28 @@ describe('OTAlgorithm.handleDocChange — idempotent retry after the original co
     expect(await store.getPendingChanges('doc1')).toHaveLength(1);
   });
 });
+
+describe('OTAlgorithm.handleDocChange — stable id survives storage-size batching', () => {
+  // The DW3 hub configures docOptions.maxStorageBytes (900_000), so _createChangesFromOps runs
+  // breakChanges. A change that fits under the limit must keep its caller-supplied id
+  // (breakSingleChange returns it as-is); otherwise the retry idempotency would break.
+  let store: OTInMemoryStore;
+  let algorithm: OTAlgorithm;
+
+  beforeEach(async () => {
+    store = new OTInMemoryStore();
+    algorithm = new OTAlgorithm(store, { maxStorageBytes: 900_000 });
+    await store.trackDocs(['doc1']);
+  });
+
+  it('preserves the stable id for a normally-sized change under maxStorageBytes', async () => {
+    const changes = await algorithm.handleDocChange('doc1', op('/a', 'hello'), undefined, {}, 'cid-1');
+    expect(changes.map(c => c.id)).toEqual(['cid-1']);
+  });
+
+  it('still dedups a retry idempotently with batching enabled', async () => {
+    await algorithm.handleDocChange('doc1', op('/a', 'hello'), undefined, {}, 'cid-1');
+    await algorithm.handleDocChange('doc1', op('/a', 'hello'), undefined, {}, 'cid-1', true);
+    expect(await store.getPendingChanges('doc1')).toHaveLength(1);
+  });
+});

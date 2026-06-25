@@ -42,7 +42,11 @@ export class LWWAlgorithm implements ClientAlgorithm {
     docId: string,
     ops: JSONPatchOp[],
     doc: PatchesDoc<T> | undefined,
-    metadata: Record<string, any>
+    metadata: Record<string, any>,
+    // LWW resolves by timestamp+path and is not part of the stable-id retry path; accept the
+    // params to satisfy the ClientAlgorithm interface but ignore them.
+    _id?: string,
+    _isRetry?: boolean
   ): Promise<Change[]> {
     if (ops.length === 0) return [];
 

@@ -10,6 +10,13 @@ import type { PatchesDoc, PatchesDocOptions } from './PatchesDoc.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
 /**
+ * On an idempotent retry, how far back in the committed tail to scan for the change id in
+ * case the original submit committed between attempts. Bounded so the scan stays cheap; a
+ * just-committed change sits at the head, so a small window catches the realistic cases.
+ */
+const RECENT_COMMITTED_ID_WINDOW = 200;
+
+/**
  * OT (Operational Transformation) algorithm implementation.
  *
  * OT uses revision-based history and rebasing for concurrent edits.
@@ -44,9 +51,20 @@ export class OTAlgorithm implements ClientAlgorithm {
     docId: string,
     ops: JSONPatchOp[],
     doc: PatchesDoc<T> | undefined,
-    metadata: Record<string, any>
+    metadata: Record<string, any>,
+    id?: string,
+    isRetry?: boolean
   ): Promise<Change[]> {
     if (ops.length === 0) return [];
+
+    // Idempotent retry: if this exact caller-minted change id was already accepted on a
+    // prior attempt (the submit RPC timed out *after* the hub had persisted it), return the
+    // existing change instead of minting+persisting+applying a duplicate. Only runs on a
+    // retry, so the first submit keeps its fast path.
+    if (isRetry && id) {
+      const existing = await this._findChangeById(docId, doc, id);
+      if (existing.length > 0) return existing;
+    }
 
     // Get revision info from doc if available, otherwise from store
     let committedRev: number;
@@ -66,7 +84,7 @@ export class OTAlgorithm implements ClientAlgorithm {
     }
 
     // Create changes from ops
-    const changes = this._createChangesFromOps(committedRev, pendingRev, ops, metadata);
+    const changes = this._createChangesFromOps(committedRev, pendingRev, ops, metadata, id);
 
     if (changes.length === 0) return [];
 
@@ -190,17 +208,43 @@ export class OTAlgorithm implements ClientAlgorithm {
   // --- Private helpers ---
 
   /**
-   * Creates Change objects from raw ops.
+   * Find an already-stored change by its (stable, caller-supplied) id, for idempotent
+   * retries. Checks pending first — the dominant case, since a "Call timed out" means the
+   * hub was slow/wedged so the change is still pending when the retry arrives (pending lives
+   * in shared IndexedDB, so this also covers a leader handoff to a fresh hub). As a bounded
+   * backstop, scans the most-recent committed tail in case the original committed between
+   * attempts.
+   */
+  protected async _findChangeById<T extends object>(
+    docId: string,
+    doc: PatchesDoc<T> | undefined,
+    id: string
+  ): Promise<Change[]> {
+    const pending = doc ? (doc as OTDoc<T>).getPendingChanges() : await this.store.getPendingChanges(docId);
+    const fromPending = pending.filter(c => c.id === id);
+    if (fromPending.length > 0) return fromPending;
+
+    if (!this.store.listChanges) return [];
+    const committedRev = doc ? (doc as OTDoc<T>).committedRev : await this.store.getCommittedRev(docId);
+    const since = Math.max(0, committedRev - RECENT_COMMITTED_ID_WINDOW);
+    const recent = await this.store.listChanges(docId, { startAfter: since });
+    return recent.filter(c => c.id === id);
+  }
+
+  /**
+   * Creates Change objects from raw ops. An optional `id` mints the (first) change with a
+   * caller-supplied stable id so a retried submit is idempotent end-to-end.
    */
   protected _createChangesFromOps(
     committedRev: number,
     pendingRev: number,
     ops: JSONPatchOp[],
-    metadata: Record<string, any>
+    metadata: Record<string, any>,
+    id?: string
   ): Change[] {
     const rev = pendingRev + 1;
 
-    let changes = [createChange(committedRev, rev, ops, metadata)];
+    let changes = [createChange(committedRev, rev, ops, metadata, id)];
 
     if (this._options.maxStorageBytes) {
       changes = breakChanges(changes, this._options.maxStorageBytes, this._options.sizeCalculator);

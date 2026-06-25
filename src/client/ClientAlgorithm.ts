@@ -54,13 +54,21 @@ export interface ClientAlgorithm {
    * @param ops The JSON Patch ops to process
    * @param doc The open doc instance, or undefined if in Worker (no docs)
    * @param metadata Metadata to attach to the change
+   * @param id Optional caller-supplied stable change id. Lets an upstream caller (e.g. a
+   *   spoke, before a hub RPC) mint the id once so a retried submit reuses it. OT mints with
+   *   this id; combined with `isRetry` it makes the submit idempotent.
+   * @param isRetry When true, this is a re-submission of a previously-attempted change (its
+   *   first attempt may have timed out after the hub already accepted it). With `id`, OT
+   *   returns the already-accepted change instead of minting a duplicate.
    * @returns The changes created (for broadcast to other tabs)
    */
   handleDocChange<T extends object>(
     docId: string,
     ops: JSONPatchOp[],
     doc: PatchesDoc<T> | undefined,
-    metadata: Record<string, any>
+    metadata: Record<string, any>,
+    id?: string,
+    isRetry?: boolean
   ): Promise<Change[]>;
 
   /**

@@ -23,6 +23,18 @@ export interface OTServerOptions {
    * Defaults to 30 minutes.
    */
   sessionTimeoutMinutes?: number;
+  /**
+   * Create a version automatically once roughly this many changes accumulate since the last
+   * version, independent of `sessionTimeoutMinutes`. Session-gap versioning never fires for a
+   * continuous high-rate stream (changes seconds apart), so without this a single document can
+   * accrue tens of thousands of un-versioned changes and become too expensive — or impossible —
+   * to load. Snapshots are taken forward in bounded steps of at most this many changes, which
+   * from a near-current state keeps cold-load replay under ~2N going forward; a document already
+   * further behind (or a single commit larger than N) is caught up over consecutive bounded
+   * steps. Defaults to 1000; set to `0` to disable. Note this is on by default, so enabling the
+   * server starts taking count-based snapshots on high-rate documents that previously had none.
+   */
+  maxChangesPerVersion?: number;
 }
 
 /**
@@ -52,6 +64,7 @@ export class OTServer implements PatchesServer {
   } as const;
 
   private readonly sessionTimeoutMillis: number;
+  private readonly maxChangesPerVersion: number;
   readonly store: OTStoreBackend;
 
   /** Notifies listeners whenever a batch of changes is *successfully* committed. */
@@ -63,6 +76,7 @@ export class OTServer implements PatchesServer {
 
   constructor(store: OTStoreBackend, options: OTServerOptions = {}) {
     this.sessionTimeoutMillis = (options.sessionTimeoutMinutes ?? 30) * 60 * 1000;
+    this.maxChangesPerVersion = options.maxChangesPerVersion ?? 1000;
     this.store = store;
   }
 
@@ -113,7 +127,7 @@ export class OTServer implements PatchesServer {
       docId,
       changes,
       this.sessionTimeoutMillis,
-      options
+      { ...options, maxChangesPerVersion: this.maxChangesPerVersion }
     );
 
     // Notify about newly committed changes (broadcast to other clients)

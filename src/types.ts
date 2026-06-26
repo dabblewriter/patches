@@ -236,6 +236,24 @@ export interface CommitChangesOptions {
    * - Creates versions with origin: 'main' instead of 'offline'
    */
   historicalImport?: boolean;
+  /**
+   * Create a version automatically once roughly this many changes have accumulated since the
+   * last version, independent of the session-gap timer. Session-gap versioning only fires when
+   * consecutive changes are far apart in time; a continuous high-rate stream (changes seconds
+   * apart) never triggers it, so without this a single document can accrue tens of thousands of
+   * un-versioned changes and become prohibitively expensive — or impossible — to load, since
+   * every cold load replays the entire change log.
+   *
+   * The watermark advances in steps of at most this many changes, so each version build stays
+   * bounded. From a near-current state this keeps the un-versioned tail (and thus cold-load
+   * replay) under ~2N going forward. A document that is already further behind than N — or a
+   * single commit larger than N — is caught up over consecutive bounded steps within the commit;
+   * each step is bounded but the number of steps scales with the backlog.
+   *
+   * The server passes its configured value (see `OTServerOptions.maxChangesPerVersion`);
+   * `<= 0` disables it.
+   */
+  maxChangesPerVersion?: number;
 }
 
 /**

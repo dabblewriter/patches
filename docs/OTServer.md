@@ -40,14 +40,21 @@ const store = new MyDatabaseStore();
 const server = new OTServer(store, {
   // Create version snapshots after 30 minutes of inactivity (default)
   sessionTimeoutMinutes: 30,
+  // ...and at least every 1000 changes, even with no inactivity gap (default)
+  maxChangesPerVersion: 1000,
 });
 ```
 
 ### Options
 
-| Option                  | Type     | Default | Description                                                  |
-| ----------------------- | -------- | ------- | ------------------------------------------------------------ |
-| `sessionTimeoutMinutes` | `number` | `30`    | Minutes of inactivity before creating a new version snapshot |
+| Option                  | Type     | Default | Description                                                                                            |
+| ----------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------ |
+| `sessionTimeoutMinutes` | `number` | `30`    | Minutes of inactivity before creating a new version snapshot                                           |
+| `maxChangesPerVersion`  | `number` | `1000`  | Snapshot forward in bounded steps of at most N changes when the un-versioned tail reaches N; `0` = off |
+
+> **Why `maxChangesPerVersion`?** Session-gap versioning only fires when consecutive changes are far apart in time. A continuous high-rate stream of changes (seconds apart) never triggers it, so without a count-based trigger a single document can accrue tens of thousands of un-versioned changes — every cold load then replays the entire log, which can grow large enough that the document can no longer be loaded at all. The count trigger snapshots forward in **bounded steps of at most N changes**, so each snapshot build stays cheap.
+>
+> **What it guarantees (and what it doesn't).** From a near-current state, the count trigger keeps the un-versioned tail — and therefore cold-load replay — under ~2N **going forward**. It is a _preventative_ bound, not a remediation: a document that is _already_ further behind than N (e.g. one that ran up a huge backlog before this option was enabled), or a single commit that lands more than N changes, is caught up over consecutive bounded steps. Each step is bounded, but the number of steps scales with the backlog, so a severely backlogged document heals over its next edit burst rather than instantly — and an already-unservable document still needs a one-off server-side compaction to become loadable again. This option is **on by default**: enabling it means high-rate documents that previously had no count-based snapshots will start getting them.
 
 ## Core Method: `commitChanges()`
 
@@ -80,7 +87,9 @@ The heavy lifting is handled by the `commitChanges` [algorithm](algorithms.md) i
    - Assigns sequential revision numbers
 
 2. **Check for Version Snapshots**
-   - If enough time has passed since the last change (based on `sessionTimeoutMinutes`), creates a new version
+   - If enough time has passed since the last change (based on `sessionTimeoutMinutes`), versions the completed session
+   - Otherwise, if at least `maxChangesPerVersion` changes have accrued since the last version, snapshots forward to catch up (keeps cold-load replay cheap during a continuous high-rate stream)
+   - Either way the version watermark advances in **bounded steps of at most `maxChangesPerVersion` changes**, so no single snapshot build ever scans a large backlog — a document far behind its last version is caught up over consecutive steps
 
 3. **Filter Duplicates**
    - Checks change IDs to prevent reprocessing already-committed changes

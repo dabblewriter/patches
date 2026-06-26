@@ -18,7 +18,10 @@ vi.mock('../../src/data/change');
 vi.mock('../../src/json-patch/createJSONPatch');
 vi.mock('../../src/json-patch/transformPatch');
 
-import { createVersion as createVersionAlgorithm } from '../../src/algorithms/ot/server/createVersion';
+import {
+  createVersion as createVersionAlgorithm,
+  createVersionAtRev,
+} from '../../src/algorithms/ot/server/createVersion';
 import { getSnapshotAtRevision, getSnapshotStream } from '../../src/algorithms/ot/server/getSnapshotAtRevision';
 import { getStateAtRevision } from '../../src/algorithms/ot/server/getStateAtRevision';
 import { handleOfflineSessionsAndBatches } from '../../src/algorithms/ot/server/handleOfflineSessionsAndBatches';
@@ -167,6 +170,49 @@ describe('OTServer', () => {
       // Should succeed, not throw - baseRev gets filled in with current revision
       expect(result.changes).toHaveLength(1);
       expect(result.changes[0].baseRev).toBe(1); // Current rev from mock
+    });
+
+    it('honors a configured maxChangesPerVersion (count-based versioning)', async () => {
+      const countServer = new OTServer(mockStore, { maxChangesPerVersion: 10 });
+      const recent = Date.now();
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(19);
+      // Session/count check returns the current tip (recent → no session gap); the last
+      // version is at rev 0, so 19 un-versioned changes cross the rev-20 boundary.
+      vi.mocked(mockStore.listChanges).mockImplementation(async (_doc, opts: any) =>
+        opts?.reverse && opts?.limit === 1 ? [{ ...mockChange, rev: 19, baseRev: 18, createdAt: recent }] : []
+      );
+      const change = {
+        id: 'c1',
+        rev: 20,
+        baseRev: 19,
+        ops: [{ op: 'add', path: '/x', value: 1 }],
+        createdAt: recent,
+      } as any;
+
+      await countServer.commitChanges('doc1', [change]);
+
+      expect(vi.mocked(createVersionAtRev)).toHaveBeenCalled();
+    });
+
+    it('does not count-version below the default threshold', async () => {
+      // Default server (maxChangesPerVersion 1000): a rev 19→20 commit is nowhere near a
+      // boundary, so no count-based version is created.
+      const recent = Date.now();
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(19);
+      vi.mocked(mockStore.listChanges).mockImplementation(async (_doc, opts: any) =>
+        opts?.reverse && opts?.limit === 1 ? [{ ...mockChange, rev: 19, baseRev: 18, createdAt: recent }] : []
+      );
+      const change = {
+        id: 'c1',
+        rev: 20,
+        baseRev: 19,
+        ops: [{ op: 'add', path: '/x', value: 1 }],
+        createdAt: recent,
+      } as any;
+
+      await server.commitChanges('doc1', [change]);
+
+      expect(vi.mocked(createVersionAtRev)).not.toHaveBeenCalled();
     });
 
     it('should throw error for inconsistent baseRev in batch', async () => {

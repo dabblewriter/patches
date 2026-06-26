@@ -28,6 +28,13 @@ export interface VersioningStoreBackend {
    * Saves version metadata and optionally the original changes.
    * Implementations are responsible for building and persisting version state —
    * inline or queued, but must throw if state creation fails.
+   *
+   * Concurrency: count-based versioning can fire during continuous high-rate streaming, so two
+   * server instances may attempt to create overlapping versions for the same `[startRev, endRev]`
+   * range at nearly the same time. This is not a data-loss/convergence hazard (versions are
+   * derived snapshots of already-committed changes), but implementations that care about a clean
+   * version history should make creation idempotent on the covered range (e.g. key on
+   * `docId + endRev`, or dedupe overlapping ranges) rather than blindly appending.
    * @param changes - Optional for LWW (which doesn't store changes), required for OT.
    */
   createVersion(docId: string, metadata: VersionMetadata, changes?: Change[]): Promise<void>;

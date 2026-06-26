@@ -25,11 +25,14 @@ export interface OTServerOptions {
   sessionTimeoutMinutes?: number;
   /**
    * Create a version automatically once roughly this many changes accumulate since the last
-   * version, independent of `sessionTimeoutMinutes`. This bounds how many changes a cold load
-   * ever has to replay: session-gap versioning never fires for a continuous high-rate stream
-   * (changes seconds apart), so without this a single document can accrue tens of thousands of
-   * un-versioned changes and become too expensive — or impossible — to load. Defaults to 1000;
-   * set to `0` to disable.
+   * version, independent of `sessionTimeoutMinutes`. Session-gap versioning never fires for a
+   * continuous high-rate stream (changes seconds apart), so without this a single document can
+   * accrue tens of thousands of un-versioned changes and become too expensive — or impossible —
+   * to load. Snapshots are taken forward in bounded steps of at most this many changes, which
+   * from a near-current state keeps cold-load replay under ~2N going forward; a document already
+   * further behind (or a single commit larger than N) is caught up over consecutive bounded
+   * steps. Defaults to 1000; set to `0` to disable. Note this is on by default, so enabling the
+   * server starts taking count-based snapshots on high-rate documents that previously had none.
    */
   maxChangesPerVersion?: number;
 }

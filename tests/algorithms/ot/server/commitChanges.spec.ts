@@ -242,21 +242,99 @@ describe('commitChanges', () => {
       expect(mockStore.createVersion).not.toHaveBeenCalled(); // but 19 - 15 = 4 < 10
     });
 
-    it('snapshots forward by at most N for a backlogged document (bounded step)', async () => {
-      // Last version at rev 0, tip at 99: do NOT load all 99 changes — version only up to
-      // rev 10 (0 + N) so the in-commit scan and out-of-band state build stay bounded.
+    it('drains a backlogged document in N-sized steps until the tail is below N (bounded builds)', async () => {
+      // Last version at rev 0, tip at 99, N=10; the 99→100 commit crosses the rev-100 boundary.
+      // It must catch the WHOLE backlog up in steps of at most N — not advance by a single N
+      // step (the bug: a per-commit +N step left a backlogged doc pinned at a constant lag
+      // forever, and let any commit larger than N grow the log without bound). Versions end at
+      // 10,20,...,90 (nine builds), each loading at most N changes, leaving a 9-change tail.
       vi.mocked(mockStore.getCurrentRev).mockResolvedValue(99);
-      vi.mocked(mockStore.listChanges)
-        .mockResolvedValueOnce([createChange('99', 99, 98)]) // session/count check
-        .mockResolvedValueOnce([createChange('v', 5, 4)]) // createVersionAtRev range load
-        .mockResolvedValueOnce([]); // committed changes
+      const lastChange = createChange('99', 99, 98);
+      const rangeLoads: Array<{ startAfter: number; endBefore: number }> = [];
+      vi.mocked(mockStore.listChanges).mockImplementation(async (_doc, opts: any) => {
+        if (opts?.reverse) return [lastChange]; // session/count tip check
+        if (opts?.endBefore !== undefined) {
+          // version range load: synthesize the contiguous changes in (startAfter, endBefore)
+          rangeLoads.push({ startAfter: opts.startAfter, endBefore: opts.endBefore });
+          const out: Change[] = [];
+          for (let r = opts.startAfter + 1; r <= Math.min(opts.endBefore - 1, 99); r++) {
+            out.push(createChange(String(r), r, r - 1));
+          }
+          return out;
+        }
+        return []; // committed-changes load (startAfter only, no endBefore)
+      });
 
-      await commitChanges(mockStore, 'doc1', [createChange('1', 100, 99)], sessionTimeoutMillis, {
+      await commitChanges(mockStore, 'doc1', [createChange('c', 100, 99)], sessionTimeoutMillis, {
         maxChangesPerVersion: 10,
       });
 
-      // createVersionAtRev was asked for changes up to rev 10 (endBefore 11), not rev 99.
-      expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', { startAfter: 0, endBefore: 11 });
+      // Nine bounded versions: [1..10], [11..20], ... [81..90]. Tail 91..99 (< N) left for later.
+      expect(mockStore.createVersion).toHaveBeenCalledTimes(9);
+      // Every build loaded at most N changes (endBefore - 1 - startAfter <= N).
+      for (const { startAfter, endBefore } of rangeLoads) {
+        expect(endBefore - 1 - startAfter).toBeLessThanOrEqual(10);
+      }
+      // listVersions is read once for the whole catch-up, not once per step.
+      expect(mockStore.listVersions).toHaveBeenCalledTimes(1);
+    });
+
+    it('bounds session-gap versioning too: a backlogged session drains in N-sized steps incl. the tail', async () => {
+      // A session gap on a doc with a large un-versioned backlog must NOT load the whole backlog
+      // in one build. With count versioning enabled it drains in N-sized steps and, because the
+      // session is complete, also versions the final < N tail (unlike the count trigger).
+      const oldTime = createTimestamp(-sessionTimeoutMillis - 1000);
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(25);
+      const lastChange = createChange('25', 25, 24, oldTime); // old → session gap
+      const rangeLoads: Array<{ startAfter: number; endBefore: number }> = [];
+      vi.mocked(mockStore.listChanges).mockImplementation(async (_doc, opts: any) => {
+        if (opts?.reverse) return [lastChange];
+        if (opts?.endBefore !== undefined) {
+          rangeLoads.push({ startAfter: opts.startAfter, endBefore: opts.endBefore });
+          const out: Change[] = [];
+          for (let r = opts.startAfter + 1; r <= Math.min(opts.endBefore - 1, 25); r++) {
+            out.push(createChange(String(r), r, r - 1));
+          }
+          return out;
+        }
+        return [];
+      });
+
+      await commitChanges(mockStore, 'doc1', [createChange('c', 26, 25)], sessionTimeoutMillis, {
+        maxChangesPerVersion: 10,
+      });
+
+      // 25 changes, N=10 → versions end at 10, 20, 25 (the tail IS versioned for a completed session).
+      expect(mockStore.createVersion).toHaveBeenCalledTimes(3);
+      for (const { startAfter, endBefore } of rangeLoads) {
+        expect(endBefore - 1 - startAfter).toBeLessThanOrEqual(10);
+      }
+    });
+
+    it('runs count-based versioning once even when the save retries on RevConflictError', async () => {
+      // Versioning happens before the save/retry loop, so a RevConflictError on save must not
+      // re-trigger it. Backlog 19, N=10 → exactly one version, regardless of the retry.
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValueOnce(19).mockResolvedValueOnce(19);
+      const lastChange = createChange('19', 19, 18);
+      vi.mocked(mockStore.listChanges).mockImplementation(async (_doc, opts: any) => {
+        if (opts?.reverse) return [lastChange];
+        if (opts?.endBefore !== undefined) {
+          const out: Change[] = [];
+          for (let r = opts.startAfter + 1; r <= Math.min(opts.endBefore - 1, 19); r++) {
+            out.push(createChange(String(r), r, r - 1));
+          }
+          return out;
+        }
+        return []; // committed-changes load
+      });
+      vi.mocked(mockStore.saveChanges).mockRejectedValueOnce(new RevConflictError()).mockResolvedValueOnce(undefined);
+
+      await commitChanges(mockStore, 'doc1', [createChange('c', 20, 19)], sessionTimeoutMillis, {
+        maxChangesPerVersion: 10,
+      });
+
+      expect(mockStore.saveChanges).toHaveBeenCalledTimes(2); // retried
+      expect(mockStore.createVersion).toHaveBeenCalledTimes(1); // versioned once, not per attempt
     });
 
     it('is disabled when maxChangesPerVersion is 0 (the default for direct callers)', async () => {

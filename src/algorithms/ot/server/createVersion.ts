@@ -12,6 +12,12 @@ export interface CreateVersionOptions {
   parentId?: string;
   /** Optional additional metadata for the version. */
   metadata?: EditableVersionMetadata;
+  /**
+   * Start this version's change range immediately after this revision, skipping the internal
+   * "find the last version" lookup. When set, the caller is also responsible for `parentId`.
+   * Used by a bounded catch-up loop so consecutive steps don't re-query `listVersions`.
+   */
+  startAfterRev?: number;
 }
 
 /**
@@ -33,12 +39,20 @@ export async function createVersionAtRev(
   endRev: number,
   options?: CreateVersionOptions
 ): Promise<VersionMetadata | undefined> {
-  const [lastVersion] = await store.listVersions(docId, {
-    limit: 1,
-    reverse: true,
-    orderBy: 'endRev',
-  });
-  const startAfterRev = lastVersion?.endRev ?? 0;
+  let startAfterRev = options?.startAfterRev;
+  let parentId = options?.parentId;
+
+  // Unless the caller already knows where the previous version ended, look it up to determine
+  // `startRev` and to chain `parentId`.
+  if (startAfterRev === undefined) {
+    const [lastVersion] = await store.listVersions(docId, {
+      limit: 1,
+      reverse: true,
+      orderBy: 'endRev',
+    });
+    startAfterRev = lastVersion?.endRev ?? 0;
+    parentId = parentId ?? lastVersion?.id;
+  }
 
   const changes = await store.listChanges(docId, {
     startAfter: startAfterRev,
@@ -47,10 +61,7 @@ export async function createVersionAtRev(
 
   if (changes.length === 0) return undefined;
 
-  return createVersion(store, docId, changes, {
-    ...options,
-    parentId: options?.parentId ?? lastVersion?.id,
-  });
+  return createVersion(store, docId, changes, { ...options, parentId });
 }
 
 /**

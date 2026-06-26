@@ -112,35 +112,35 @@ export async function commitChanges(
   }
 
   // 2. Versioning. Snapshot completed work so the change log doesn't grow without bound and
-  //    cold loads stay cheap. Two independent triggers, each bounded to one createVersionAtRev:
-  //    (a) Session gap — the previous change is older than the session timeout.
-  //    (b) Change count — at least `maxChangesPerVersion` changes have accrued since the last
+  //    cold loads stay cheap. Two triggers feed one bounded catch-up:
+  //    (a) Session gap — the previous change is older than the session timeout: version the
+  //        whole completed session up to the previous tip.
+  //    (b) Change count — `maxChangesPerVersion` (or more) changes have accrued since the last
   //        version. A continuous high-rate burst never satisfies (a) (changes are seconds
   //        apart), so without (b) a document can accumulate tens of thousands of un-versioned
   //        changes and become too expensive — or impossible — to cold-load, since every load
   //        replays the entire log.
+  //    Either way the version watermark is advanced in steps of at most `maxChangesPerVersion`
+  //    changes (see `catchUpVersions`), so no single version build ever scans a large backlog
+  //    and the un-versioned tail a cold load must replay stays bounded (< 2N in steady state).
   const maxChangesPerVersion = options?.maxChangesPerVersion ?? 0;
   const [lastChange] = await store.listChanges(docId, { reverse: true, limit: 1 });
-  const compareTime = options?.historicalImport ? (changes[0].createdAt ?? serverNow) : serverNow;
-  const newTipRev = changes[changes.length - 1].rev!;
-  if (lastChange && compareTime - lastChange.createdAt > sessionTimeoutMillis) {
-    // (a) Session boundary: version the completed session up to the previous tip.
-    await createVersionAtRev(store, docId, lastChange.rev);
-  } else if (
-    lastChange &&
-    maxChangesPerVersion > 0 &&
-    Math.floor(initialRev / maxChangesPerVersion) < Math.floor(newTipRev / maxChangesPerVersion)
-  ) {
-    // (b) This commit pushes the tip across a maxChangesPerVersion boundary — a cheap check
-    //     (no extra store read) that gates the version lookup to ~once per N commits. Only
-    //     then fetch the last version; if the log has grown >= N changes past it, snapshot
-    //     forward by at most N so both the in-commit change scan and the out-of-band state
-    //     build stay bounded even when a document is far behind its last version.
-    const [lastVersion] = await store.listVersions(docId, { limit: 1, reverse: true, orderBy: 'endRev' });
-    const lastVersionEndRev = lastVersion?.endRev ?? 0;
-    if (lastChange.rev - lastVersionEndRev >= maxChangesPerVersion) {
-      const versionEndRev = Math.min(lastChange.rev, lastVersionEndRev + maxChangesPerVersion);
-      await createVersionAtRev(store, docId, versionEndRev);
+  if (lastChange) {
+    const compareTime = options?.historicalImport ? (changes[0].createdAt ?? serverNow) : serverNow;
+    const sessionGap = compareTime - lastChange.createdAt > sessionTimeoutMillis;
+    // Project the post-commit tip from the *server* rev, not the client-claimed revs: a commit
+    // on a stale baseRev carries low claimed revs (it rebases forward on save), so gating on
+    // them would under-fire and let the boundary slip past. Take the max of both as a safe
+    // upper bound — over-firing only ever costs one extra listVersions read.
+    const projectedTipRev = Math.max(initialRev + changes.length, changes[changes.length - 1].rev!);
+    const crossesBoundary =
+      maxChangesPerVersion > 0 &&
+      Math.floor(initialRev / maxChangesPerVersion) < Math.floor(projectedTipRev / maxChangesPerVersion);
+
+    // The boundary check is pure arithmetic over values already in hand, so non-boundary
+    // commits never reach the store read inside catchUpVersions (~once per N commits).
+    if (sessionGap || crossesBoundary) {
+      await catchUpVersions(store, docId, lastChange.rev, maxChangesPerVersion, sessionGap);
     }
   }
 
@@ -222,4 +222,56 @@ export async function commitChanges(
 
   // Unreachable — the last iteration always re-throws
   throw new Error(`commitChanges: exhausted ${MAX_CONFLICT_RETRIES} retries for doc ${docId}`);
+}
+
+/**
+ * Advance the version watermark up toward `targetRev` in steps of at most `stepSize` changes,
+ * so neither the in-commit change scan nor the out-of-band state build inside
+ * `createVersionAtRev` ever loads a large backlog at once.
+ *
+ * - Session gap (`drainFully`): version everything through `targetRev`, including a final
+ *   partial step of fewer than `stepSize` changes — the session is complete.
+ * - Count trigger (`!drainFully`): version only while at least `stepSize` changes remain
+ *   un-versioned, leaving the in-progress tail (< `stepSize`) to a later boundary crossing or
+ *   session gap.
+ *
+ * A document many steps behind — e.g. one that accrued a large backlog before count versioning
+ * was enabled, or a single commit that lands more than `stepSize` changes at once — is caught up
+ * here over consecutive bounded steps in the *same* commit. Each step is individually bounded,
+ * so memory stays flat; the number of steps scales with the backlog. This is a one-time heal:
+ * once a document is within `stepSize` of its tip it stays there, so steady-state commits run at
+ * most one or two steps. Stores that build version state inline and want to cap per-commit
+ * latency for an extreme legacy backlog can throttle inside their `createVersion` implementation.
+ *
+ * With `stepSize <= 0` (count versioning disabled) a single unbounded version is created through
+ * `targetRev`, preserving the original session-gap behavior for opted-out callers.
+ */
+async function catchUpVersions(
+  store: OTStoreBackend,
+  docId: string,
+  targetRev: number,
+  stepSize: number,
+  drainFully: boolean
+): Promise<void> {
+  if (stepSize <= 0) {
+    await createVersionAtRev(store, docId, targetRev);
+    return;
+  }
+
+  // Read the watermark once; thereafter track it from each created version so neither this loop
+  // nor createVersionAtRev re-queries listVersions per step.
+  const [lastVersion] = await store.listVersions(docId, { limit: 1, reverse: true, orderBy: 'endRev' });
+  let endRev = lastVersion?.endRev ?? 0;
+  let parentId = lastVersion?.id;
+
+  const minBacklog = drainFully ? 1 : stepSize;
+  while (targetRev - endRev >= minBacklog) {
+    const versionEndRev = Math.min(targetRev, endRev + stepSize);
+    const version = await createVersionAtRev(store, docId, versionEndRev, { startAfterRev: endRev, parentId });
+    // No changes in the range (already versioned, or a concurrent writer got there first) →
+    // stop rather than spin.
+    if (!version || version.endRev <= endRev) break;
+    endRev = version.endRev;
+    parentId = version.id;
+  }
 }

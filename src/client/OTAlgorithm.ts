@@ -29,6 +29,9 @@ export class OTAlgorithm implements ClientAlgorithm {
 
   protected readonly _options: PatchesDocOptions;
 
+  /** Per-doc FIFO mutex (see {@link _withDocLock}). */
+  private readonly _docLocks = new Map<string, Promise<unknown>>();
+
   constructor(store: OTClientStore, options: PatchesDocOptions = {}) {
     this.store = store;
     this._options = options;
@@ -57,46 +60,50 @@ export class OTAlgorithm implements ClientAlgorithm {
   ): Promise<Change[]> {
     if (ops.length === 0) return [];
 
-    // Idempotent retry: if this exact caller-minted change id was already accepted on a
-    // prior attempt (the submit RPC timed out *after* the hub had persisted it), return the
-    // existing change instead of minting+persisting+applying a duplicate. Only runs on a
-    // retry, so the first submit keeps its fast path.
-    if (isRetry && id) {
-      const existing = await this._findChangeById(docId, doc, id);
-      if (existing.length > 0) return existing;
-    }
+    // Serialize per-doc so a concurrent receive-rebase and this mint can't read the
+    // same rev and clobber each other at the [docId, rev] store key (silent change loss).
+    return this._withDocLock(docId, async () => {
+      // Idempotent retry: if this exact caller-minted change id was already accepted on a
+      // prior attempt (the submit RPC timed out *after* the hub had persisted it), return the
+      // existing change instead of minting+persisting+applying a duplicate. Only runs on a
+      // retry, so the first submit keeps its fast path.
+      if (isRetry && id) {
+        const existing = await this._findChangeById(docId, doc, id);
+        if (existing.length > 0) return existing;
+      }
 
-    // Get revision info from doc if available, otherwise from store
-    let committedRev: number;
-    let pendingRev: number;
+      // Get revision info from doc if available, otherwise from store
+      let committedRev: number;
+      let pendingRev: number;
 
-    if (doc) {
-      const otDoc = doc as OTDoc<T>;
-      const pendingChanges = otDoc.getPendingChanges();
-      committedRev = otDoc.committedRev;
-      pendingRev = pendingChanges[pendingChanges.length - 1]?.rev ?? committedRev;
-    } else {
-      // Worker scenario: get from store
-      const snapshot = await this.store.getDoc(docId);
-      committedRev = snapshot?.rev ?? 0;
-      const pendingChanges = snapshot?.changes ?? [];
-      pendingRev = pendingChanges[pendingChanges.length - 1]?.rev ?? committedRev;
-    }
+      if (doc) {
+        const otDoc = doc as OTDoc<T>;
+        const pendingChanges = otDoc.getPendingChanges();
+        committedRev = otDoc.committedRev;
+        pendingRev = pendingChanges[pendingChanges.length - 1]?.rev ?? committedRev;
+      } else {
+        // Worker scenario: get from store
+        const snapshot = await this.store.getDoc(docId);
+        committedRev = snapshot?.rev ?? 0;
+        const pendingChanges = snapshot?.changes ?? [];
+        pendingRev = pendingChanges[pendingChanges.length - 1]?.rev ?? committedRev;
+      }
 
-    // Create changes from ops
-    const changes = this._createChangesFromOps(committedRev, pendingRev, ops, metadata, id);
+      // Create changes from ops
+      const changes = this._createChangesFromOps(committedRev, pendingRev, ops, metadata, id);
 
-    if (changes.length === 0) return [];
+      if (changes.length === 0) return [];
 
-    // Save to store
-    await this.store.savePendingChanges(docId, changes);
+      // Save to store
+      await this.store.savePendingChanges(docId, changes);
 
-    // Apply changes to doc if provided (uncommitted changes have committedAt === 0)
-    if (doc) {
-      (doc as OTDoc<T>).applyChanges(changes);
-    }
+      // Apply changes to doc if provided (uncommitted changes have committedAt === 0)
+      if (doc) {
+        (doc as OTDoc<T>).applyChanges(changes);
+      }
 
-    return changes;
+      return changes;
+    });
   }
 
   async hasPending(docId: string): Promise<boolean> {
@@ -116,44 +123,48 @@ export class OTAlgorithm implements ClientAlgorithm {
   ): Promise<Change[]> {
     if (serverChanges.length === 0) return [];
 
-    // Get current snapshot from store
-    const currentSnapshot = await this.store.getDoc(docId);
-    if (!currentSnapshot) {
-      console.warn(`Cannot apply server changes to non-existent doc: ${docId}`);
-      return [];
-    }
-
-    // If doc is open, add any in-memory pending changes not yet in store
-    if (doc) {
-      const otDoc = doc as OTDoc<T>;
-      const inMemoryPending = otDoc.getPendingChanges();
-      const latestRev = currentSnapshot.changes[currentSnapshot.changes.length - 1]?.rev ?? currentSnapshot.rev;
-      const newChanges = inMemoryPending.filter(change => change.rev > latestRev);
-      currentSnapshot.changes.push(...newChanges);
-    }
-
-    // Use the OT algorithm to apply server changes and rebase pending
-    const newSnapshot = applyCommittedChanges(currentSnapshot, serverChanges);
-
-    // Save to store atomically
-    await this.store.applyServerChanges(docId, serverChanges, newSnapshot.changes);
-
-    // Build the changes to return for broadcast
-    const changesToBroadcast = [...serverChanges, ...newSnapshot.changes];
-
-    // Update doc if open
-    if (doc) {
-      const otDoc = doc as OTDoc<T>;
-      if (otDoc.committedRev === serverChanges[0].rev - 1) {
-        // Doc is at the right revision, can apply incrementally
-        otDoc.applyChanges(changesToBroadcast);
-      } else {
-        // Doc is out of sync, do a full import
-        otDoc.import(newSnapshot as PatchesSnapshot<T>);
+    // Serialize per-doc so this receive-rebase and a concurrent local mint can't read the
+    // same rev and clobber each other at the [docId, rev] store key (silent change loss).
+    return this._withDocLock(docId, async () => {
+      // Get current snapshot from store
+      const currentSnapshot = await this.store.getDoc(docId);
+      if (!currentSnapshot) {
+        console.warn(`Cannot apply server changes to non-existent doc: ${docId}`);
+        return [];
       }
-    }
 
-    return changesToBroadcast;
+      // If doc is open, add any in-memory pending changes not yet in store
+      if (doc) {
+        const otDoc = doc as OTDoc<T>;
+        const inMemoryPending = otDoc.getPendingChanges();
+        const latestRev = currentSnapshot.changes[currentSnapshot.changes.length - 1]?.rev ?? currentSnapshot.rev;
+        const newChanges = inMemoryPending.filter(change => change.rev > latestRev);
+        currentSnapshot.changes.push(...newChanges);
+      }
+
+      // Use the OT algorithm to apply server changes and rebase pending
+      const newSnapshot = applyCommittedChanges(currentSnapshot, serverChanges);
+
+      // Save to store atomically
+      await this.store.applyServerChanges(docId, serverChanges, newSnapshot.changes);
+
+      // Build the changes to return for broadcast
+      const changesToBroadcast = [...serverChanges, ...newSnapshot.changes];
+
+      // Update doc if open
+      if (doc) {
+        const otDoc = doc as OTDoc<T>;
+        if (otDoc.committedRev === serverChanges[0].rev - 1) {
+          // Doc is at the right revision, can apply incrementally
+          otDoc.applyChanges(changesToBroadcast);
+        } else {
+          // Doc is out of sync, do a full import
+          otDoc.import(newSnapshot as PatchesSnapshot<T>);
+        }
+      }
+
+      return changesToBroadcast;
+    });
   }
 
   async confirmSent(_docId: string, _changes: Change[]): Promise<void> {
@@ -163,16 +174,18 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async dropResolvedPending(docId: string, sentChanges: Change[], committedChanges: Change[]): Promise<number> {
-    // A sent change the server didn't echo back in its response was rebased away
-    // to a no-op (its content was already committed). It will never return as a
-    // server change, so applyServerChanges' rebase can't clear it — and an op like
-    // a root-level replace never reduces to empty under rebase, so it would be
-    // resent on every flush. Drop those by id.
-    const survived = new Set(committedChanges.map(c => c.id));
-    const droppedIds = sentChanges.filter(c => !survived.has(c.id)).map(c => c.id);
-    if (droppedIds.length === 0) return 0;
-    await this.store.dropPendingChanges(docId, droppedIds);
-    return droppedIds.length;
+    return this._withDocLock(docId, async () => {
+      // A sent change the server didn't echo back in its response was rebased away
+      // to a no-op (its content was already committed). It will never return as a
+      // server change, so applyServerChanges' rebase can't clear it — and an op like
+      // a root-level replace never reduces to empty under rebase, so it would be
+      // resent on every flush. Drop those by id.
+      const survived = new Set(committedChanges.map(c => c.id));
+      const droppedIds = sentChanges.filter(c => !survived.has(c.id)).map(c => c.id);
+      if (droppedIds.length === 0) return 0;
+      await this.store.dropPendingChanges(docId, droppedIds);
+      return droppedIds.length;
+    });
   }
 
   // --- Store forwarding methods ---
@@ -194,11 +207,12 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async deleteDoc(docId: string): Promise<void> {
-    return this.store.deleteDoc(docId);
+    // Under the lock too: a delete must not race an in-flight mint/apply for the doc.
+    return this._withDocLock(docId, () => this.store.deleteDoc(docId));
   }
 
   async confirmDeleteDoc(docId: string): Promise<void> {
-    return this.store.confirmDeleteDoc(docId);
+    return this._withDocLock(docId, () => this.store.confirmDeleteDoc(docId));
   }
 
   async close(): Promise<void> {
@@ -206,6 +220,31 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   // --- Private helpers ---
+
+  /**
+   * Run `fn` exclusively per `docId`: same-doc calls run one at a time, FIFO, each to
+   * completion (none collapsed or dropped). Makes a read-modify-write on a doc's pending
+   * changes atomic against another, so a receive-rebase and a local mint can't interleave
+   * between each other's read and write and clobber one change at the shared [docId, rev] key.
+   *
+   * The lock is per-instance, so it relies on a single OTAlgorithm serving both mint and
+   * receive for a given doc (true today); two instances over one database would still race.
+   * handleDocChange is additionally serialized upstream by Patches._changeQueues (mint-vs-mint,
+   * which also owns onChange/optimistic-rollback); this adds the mint-vs-receive exclusion that
+   * queue lacks. The overlap is harmless — independent locks, no contention.
+   */
+  private _withDocLock<R>(docId: string, fn: () => Promise<R>): Promise<R> {
+    const prior = this._docLocks.get(docId) ?? Promise.resolve();
+    const run = prior.then(fn, fn);
+    // Stored tail never rejects, so one failed op doesn't reject the whole chain; the caller
+    // still sees `run`'s real outcome. GC the map entry once this is the last queued op.
+    const tail = run.catch(() => undefined);
+    this._docLocks.set(docId, tail);
+    void tail.then(() => {
+      if (this._docLocks.get(docId) === tail) this._docLocks.delete(docId);
+    });
+    return run;
+  }
 
   /**
    * Find an already-stored change by its (stable, caller-supplied) id, for idempotent

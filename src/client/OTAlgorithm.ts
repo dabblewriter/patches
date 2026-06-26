@@ -112,8 +112,12 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async getPendingToSend(docId: string): Promise<Change[] | null> {
-    const pending = await this.store.getPendingChanges(docId);
-    return pending.length > 0 ? pending : null;
+    // getDoc reads pending and the rev it's based on in one store transaction, so a concurrent
+    // receive-rebase can't advance committedRev between the two reads. Heal only the outgoing
+    // batch; the next server echo rebases the stored copy into agreement.
+    const snapshot = await this.store.getDoc(docId);
+    if (!snapshot || snapshot.changes.length === 0) return null;
+    return this._withConsistentBaseRev(snapshot.changes, snapshot.rev);
   }
 
   async applyServerChanges<T extends object>(
@@ -244,6 +248,16 @@ export class OTAlgorithm implements ClientAlgorithm {
       if (this._docLocks.get(docId) === tail) this._docLocks.delete(docId);
     });
     return run;
+  }
+
+  /**
+   * Pending OT changes all sit on `committedRev`, so the queue must share `baseRev ===
+   * committedRev` — the consistency the server enforces. Re-stamp any straggler a receive-vs-mint
+   * race left on a stale baseRev; lossless, and the next echo heals the stored copy.
+   */
+  private _withConsistentBaseRev(pending: Change[], committedRev: number): Change[] {
+    if (pending.every(c => c.baseRev === committedRev)) return pending;
+    return pending.map(c => (c.baseRev === committedRev ? c : { ...c, baseRev: committedRev }));
   }
 
   /**

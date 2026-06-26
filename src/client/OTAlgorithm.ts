@@ -207,11 +207,12 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async deleteDoc(docId: string): Promise<void> {
-    return this.store.deleteDoc(docId);
+    // Under the lock too: a delete must not race an in-flight mint/apply for the doc.
+    return this._withDocLock(docId, () => this.store.deleteDoc(docId));
   }
 
   async confirmDeleteDoc(docId: string): Promise<void> {
-    return this.store.confirmDeleteDoc(docId);
+    return this._withDocLock(docId, () => this.store.confirmDeleteDoc(docId));
   }
 
   async close(): Promise<void> {
@@ -221,10 +222,16 @@ export class OTAlgorithm implements ClientAlgorithm {
   // --- Private helpers ---
 
   /**
-   * Run `fn` exclusively per `docId`: calls for the same doc run one at a time, FIFO, each
-   * to completion (none collapsed or dropped). Makes a read-modify-write on a doc's pending
+   * Run `fn` exclusively per `docId`: same-doc calls run one at a time, FIFO, each to
+   * completion (none collapsed or dropped). Makes a read-modify-write on a doc's pending
    * changes atomic against another, so a receive-rebase and a local mint can't interleave
    * between each other's read and write and clobber one change at the shared [docId, rev] key.
+   *
+   * The lock is per-instance, so it relies on a single OTAlgorithm serving both mint and
+   * receive for a given doc (true today); two instances over one database would still race.
+   * handleDocChange is additionally serialized upstream by Patches._changeQueues (mint-vs-mint,
+   * which also owns onChange/optimistic-rollback); this adds the mint-vs-receive exclusion that
+   * queue lacks. The overlap is harmless — independent locks, no contention.
    */
   private _withDocLock<R>(docId: string, fn: () => Promise<R>): Promise<R> {
     const prior = this._docLocks.get(docId) ?? Promise.resolve();

@@ -111,13 +111,37 @@ export async function commitChanges(
     );
   }
 
-  // 2. Check if we need to create a version - if the last committed change
-  //    was created more than a session ago. Use listChanges with limit:1 + reverse.
+  // 2. Versioning. Snapshot completed work so the change log doesn't grow without bound and
+  //    cold loads stay cheap. Two independent triggers, each bounded to one createVersionAtRev:
+  //    (a) Session gap — the previous change is older than the session timeout.
+  //    (b) Change count — at least `maxChangesPerVersion` changes have accrued since the last
+  //        version. A continuous high-rate burst never satisfies (a) (changes are seconds
+  //        apart), so without (b) a document can accumulate tens of thousands of un-versioned
+  //        changes and become too expensive — or impossible — to cold-load, since every load
+  //        replays the entire log.
+  const maxChangesPerVersion = options?.maxChangesPerVersion ?? 0;
   const [lastChange] = await store.listChanges(docId, { reverse: true, limit: 1 });
   const compareTime = options?.historicalImport ? (changes[0].createdAt ?? serverNow) : serverNow;
+  const newTipRev = changes[changes.length - 1].rev!;
   if (lastChange && compareTime - lastChange.createdAt > sessionTimeoutMillis) {
-    // Create version for the previous session covering all changes since the last version
+    // (a) Session boundary: version the completed session up to the previous tip.
     await createVersionAtRev(store, docId, lastChange.rev);
+  } else if (
+    lastChange &&
+    maxChangesPerVersion > 0 &&
+    Math.floor(initialRev / maxChangesPerVersion) < Math.floor(newTipRev / maxChangesPerVersion)
+  ) {
+    // (b) This commit pushes the tip across a maxChangesPerVersion boundary — a cheap check
+    //     (no extra store read) that gates the version lookup to ~once per N commits. Only
+    //     then fetch the last version; if the log has grown >= N changes past it, snapshot
+    //     forward by at most N so both the in-commit change scan and the out-of-band state
+    //     build stay bounded even when a document is far behind its last version.
+    const [lastVersion] = await store.listVersions(docId, { limit: 1, reverse: true, orderBy: 'endRev' });
+    const lastVersionEndRev = lastVersion?.endRev ?? 0;
+    if (lastChange.rev - lastVersionEndRev >= maxChangesPerVersion) {
+      const versionEndRev = Math.min(lastChange.rev, lastVersionEndRev + maxChangesPerVersion);
+      await createVersionAtRev(store, docId, versionEndRev);
+    }
   }
 
   // 3. Retry loop: read current state, transform, and save. On RevConflictError

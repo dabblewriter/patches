@@ -192,6 +192,86 @@ describe('commitChanges', () => {
     expect(mockStore.createVersion).toHaveBeenCalledWith('doc1', expect.any(Object), [lastChange]);
   });
 
+  describe('count-based versioning (maxChangesPerVersion)', () => {
+    it('creates a version when a commit crosses a maxChangesPerVersion boundary', async () => {
+      // Tip 19 → 20 crosses the boundary at 20 (interval 10); last version at rev 0, so 19
+      // un-versioned changes (>= 10) trigger a snapshot even though there is no session gap.
+      const lastChange = createChange('19', 19, 18); // recent createdAt → no session-gap trigger
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(19);
+      vi.mocked(mockStore.listChanges)
+        .mockResolvedValueOnce([lastChange]) // session/count check (reverse, limit 1)
+        .mockResolvedValueOnce([createChange('v', 10, 9)]) // createVersionAtRev range load
+        .mockResolvedValueOnce([]); // committed changes for transformation
+
+      await commitChanges(mockStore, 'doc1', [createChange('1', 20, 19)], sessionTimeoutMillis, {
+        maxChangesPerVersion: 10,
+      });
+
+      expect(mockStore.createVersion).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not version below the boundary', async () => {
+      // Tip 5 → 6 stays within the same interval bucket; no version lookup, no version.
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(5);
+      vi.mocked(mockStore.listChanges)
+        .mockResolvedValueOnce([createChange('5', 5, 4)]) // session/count check
+        .mockResolvedValueOnce([]); // committed changes
+
+      await commitChanges(mockStore, 'doc1', [createChange('1', 6, 5)], sessionTimeoutMillis, {
+        maxChangesPerVersion: 10,
+      });
+
+      expect(mockStore.listVersions).not.toHaveBeenCalled();
+      expect(mockStore.createVersion).not.toHaveBeenCalled();
+    });
+
+    it('does not version when fewer than N changes have accrued since the last version', async () => {
+      // Boundary is crossed, but the last version is recent (endRev 15) so only 4 changes
+      // have accrued — below the threshold.
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(19);
+      vi.mocked(mockStore.listVersions).mockResolvedValue([{ endRev: 15 } as any]);
+      vi.mocked(mockStore.listChanges)
+        .mockResolvedValueOnce([createChange('19', 19, 18)]) // session/count check
+        .mockResolvedValueOnce([]); // committed changes
+
+      await commitChanges(mockStore, 'doc1', [createChange('1', 20, 19)], sessionTimeoutMillis, {
+        maxChangesPerVersion: 10,
+      });
+
+      expect(mockStore.listVersions).toHaveBeenCalled(); // boundary gate fired
+      expect(mockStore.createVersion).not.toHaveBeenCalled(); // but 19 - 15 = 4 < 10
+    });
+
+    it('snapshots forward by at most N for a backlogged document (bounded step)', async () => {
+      // Last version at rev 0, tip at 99: do NOT load all 99 changes — version only up to
+      // rev 10 (0 + N) so the in-commit scan and out-of-band state build stay bounded.
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(99);
+      vi.mocked(mockStore.listChanges)
+        .mockResolvedValueOnce([createChange('99', 99, 98)]) // session/count check
+        .mockResolvedValueOnce([createChange('v', 5, 4)]) // createVersionAtRev range load
+        .mockResolvedValueOnce([]); // committed changes
+
+      await commitChanges(mockStore, 'doc1', [createChange('1', 100, 99)], sessionTimeoutMillis, {
+        maxChangesPerVersion: 10,
+      });
+
+      // createVersionAtRev was asked for changes up to rev 10 (endBefore 11), not rev 99.
+      expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', { startAfter: 0, endBefore: 11 });
+    });
+
+    it('is disabled when maxChangesPerVersion is 0 (the default for direct callers)', async () => {
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(99);
+      vi.mocked(mockStore.listChanges)
+        .mockResolvedValueOnce([createChange('99', 99, 98)]) // session/count check
+        .mockResolvedValueOnce([]); // committed changes
+
+      await commitChanges(mockStore, 'doc1', [createChange('1', 100, 99)], sessionTimeoutMillis);
+
+      expect(mockStore.listVersions).not.toHaveBeenCalled();
+      expect(mockStore.createVersion).not.toHaveBeenCalled();
+    });
+  });
+
   it('does not version an offline change that rebases to a no-op (no orphan versions)', async () => {
     // Regression: an offline change whose content is already committed rebases to
     // nothing. It must not be saved AND must not mint an offline-session version —

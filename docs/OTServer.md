@@ -40,14 +40,19 @@ const store = new MyDatabaseStore();
 const server = new OTServer(store, {
   // Create version snapshots after 30 minutes of inactivity (default)
   sessionTimeoutMinutes: 30,
+  // ...and at least every 1000 changes, even with no inactivity gap (default)
+  maxChangesPerVersion: 1000,
 });
 ```
 
 ### Options
 
-| Option                  | Type     | Default | Description                                                  |
-| ----------------------- | -------- | ------- | ------------------------------------------------------------ |
-| `sessionTimeoutMinutes` | `number` | `30`    | Minutes of inactivity before creating a new version snapshot |
+| Option                  | Type     | Default | Description                                                                                       |
+| ----------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------- |
+| `sessionTimeoutMinutes` | `number` | `30`    | Minutes of inactivity before creating a new version snapshot                                      |
+| `maxChangesPerVersion`  | `number` | `1000`  | Snapshot at least every N changes regardless of timing, bounding cold-load replay cost; `0` = off |
+
+> **Why `maxChangesPerVersion`?** Session-gap versioning only fires when consecutive changes are far apart in time. A continuous high-rate stream of changes (seconds apart) never triggers it, so without a count-based trigger a single document can accrue tens of thousands of un-versioned changes — every cold load then replays the entire log, which can grow large enough that the document can no longer be loaded at all. The count trigger snapshots forward in bounded steps so both the snapshot build and cold-load replay stay bounded.
 
 ## Core Method: `commitChanges()`
 
@@ -81,6 +86,7 @@ The heavy lifting is handled by the `commitChanges` [algorithm](algorithms.md) i
 
 2. **Check for Version Snapshots**
    - If enough time has passed since the last change (based on `sessionTimeoutMinutes`), creates a new version
+   - Otherwise, if at least `maxChangesPerVersion` changes have accrued since the last version, snapshots forward by a bounded step (keeps cold-load replay cheap during a continuous high-rate stream)
 
 3. **Filter Duplicates**
    - Checks change IDs to prevent reprocessing already-committed changes

@@ -64,6 +64,20 @@ const SYNC_RETRY_MAX_MS = 30_000;
 const SYNC_RETRY_MAX_ATTEMPTS = 10;
 // Definitive StatusError codes — don't retry (auth, payment, permission, not-found, gone).
 const TERMINAL_SYNC_CODES = new Set([401, 402, 403, 404, 410]);
+// Slow background re-probe for a doc left at 'error' with pending changes while the
+// connection stays up (see `_scheduleSyncReprobe`).
+const SYNC_REPROBE_EXHAUSTED_MS = 5 * 60_000;
+const SYNC_REPROBE_TERMINAL_MS = 10 * 60_000;
+// Docs that fail together in the same syncAllKnownDocs pass (e.g. a bulk permission
+// revocation) would otherwise all schedule the exact same delay, then re-probe,
+// re-fail, and reschedule in lockstep every 5/10 minutes. Jitter downward only —
+// never later than the nominal delay, only ever equal or earlier — so callers can
+// still rely on the constants above as an upper bound.
+const SYNC_REPROBE_JITTER_RATIO = 0.2;
+
+function jitterReprobeDelay(delayMs: number): number {
+  return delayMs - Math.random() * delayMs * SYNC_REPROBE_JITTER_RATIO;
+}
 
 /**
  * Handles server connection, document subscriptions, and syncing logic between
@@ -155,6 +169,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   /** Pending per-doc retry timers + attempt counts for transient sync failures. */
   private _syncRetryTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
   private _syncRetryAttempts = new Map<string, number>();
+  /** Pending per-doc slow re-probe timers for docs latched at 'error' (see `_scheduleSyncReprobe`). */
+  private _syncReprobeTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
+  /**
+   * Docs whose current sync failure has already been surfaced (console + `onError`).
+   * A background re-probe re-enters `syncDoc` every few minutes; without this a
+   * permanently-latched doc (e.g. a 403) would re-log/re-emit the identical error on
+   * every probe. Cleared on recovery, untrack, remote delete, and disconnect — so a
+   * still-failing doc re-surfaces at most once per connection session.
+   */
+  private _surfacedSyncErrors = new Set<string>();
 
   /**
    * Gets the algorithm for a document. Uses the open doc's algorithm if available,
@@ -464,7 +488,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   protected async syncDoc(docId: string): Promise<void> {
     if (!this.state.connected || onlineState.isOffline || !this.trackedDocs.has(docId)) return;
 
-    this._updateDocSyncState(docId, { syncStatus: 'syncing' });
+    this._initDocSyncState(docId, { syncStatus: 'syncing' });
 
     const doc = this.patches.getOpenDoc(docId);
     const algorithm = this._getAlgorithm(docId);
@@ -475,9 +499,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (baseDoc) {
       baseDoc.updateSyncStatus('syncing');
     }
+    let pending: Change[] | null | undefined;
     try {
       // Use algorithm to get pending changes to send
-      const pending = await algorithm.getPendingToSend(docId);
+      pending = await algorithm.getPendingToSend(docId);
 
       if (pending && pending.length > 0) {
         await this.flushDoc(docId, pending);
@@ -508,6 +533,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       }
       this._updateDocSyncState(docId, { syncStatus: 'synced' });
       this._clearSyncRetry(docId);
+      this._surfacedSyncErrors.delete(docId);
       if (baseDoc) {
         baseDoc.updateSyncStatus('synced');
       }
@@ -534,9 +560,18 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       if (!willRetry) {
         this._clearSyncRetry(docId);
         const recoverableOnReconnect = retryable && !this._isConnectedAndOnline();
-        if (!recoverableOnReconnect) {
+        if (!recoverableOnReconnect && !this._surfacedSyncErrors.has(docId)) {
+          this._surfacedSyncErrors.add(docId);
           console.error(`Error syncing doc ${docId}:`, err);
           this.onError.emit(syncError, { docId });
+        }
+        // Left at 'error' with pending changes while the connection is up: nothing else
+        // re-attempts this doc until a local edit or reconnect, so a server-side recovery
+        // (a commit-path outage ending after the ladder, or a policy fix un-rejecting the
+        // pending change) would never be noticed. Keep probing slowly in the background.
+        // 410 never reaches here — it diverted to the remote-delete path above.
+        if (pending?.length) {
+          this._scheduleSyncReprobe(docId, retryable);
         }
       }
     }
@@ -580,6 +615,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (!this.state.connected || onlineState.isOffline) {
       throw new Error('Not connected to server');
     }
+
+    // Guarantee a docStates entry exists. flushDoc is protected/subclass-callable and
+    // only checks trackedDocs above, not that _initDocSyncState already ran for this
+    // doc — without this, a flush reached before that init is a silent no-op below
+    // (_updateDocSyncState no-ops for an absent entry), so the doc looks like it never
+    // synced even though the flush succeeded. Merges into any existing entry.
+    this._initDocSyncState(docId, {});
 
     const algorithm = this._getAlgorithm(docId);
 
@@ -652,8 +694,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       }
       const flushError = err instanceof Error ? err : new Error(String(err));
       this._updateDocSyncState(docId, { syncStatus: 'error', syncError: flushError });
-      console.error(`Flush failed for doc ${docId}:`, err);
-      this.onError.emit(flushError, { docId });
+      // Don't surface here — `syncDoc` (our only caller) owns the decision of whether
+      // to log/emit: it stays quiet while a retry can still recover the doc, and
+      // surfaces a latched failure exactly once. Emitting here too would double-report
+      // every flush failure and spam onError on transient blips syncDoc means to swallow.
       throw err;
     }
   }
@@ -699,6 +743,15 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   protected async _applyServerChangesToDoc(docId: string, serverChanges: Change[]): Promise<void> {
     const doc = this.patches.getOpenDoc(docId);
     const algorithm = this._getAlgorithm(docId);
+
+    // Guarantee a docStates entry exists for a tracked doc. This is reachable from
+    // paths that don't run _initDocSyncState first — the public applyMergeChanges API
+    // and the raw onChangesCommitted push both call this directly — so without this,
+    // the committedRev update below silently no-ops for a doc whose entry hasn't been
+    // created yet. Gated on trackedDocs so a genuinely-untracked doc still gets no entry.
+    if (this.trackedDocs.has(docId)) {
+      this._initDocSyncState(docId, {});
+    }
 
     // Delegate to algorithm - it handles store updates and doc updates
     await algorithm.applyServerChanges(docId, serverChanges, doc);
@@ -802,7 +855,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // Batch all synced doc updates so subscribers are only notified once
     batch(() => {
       for (const { docId, committedRev, hasPending } of docData) {
-        this._updateDocSyncState(docId, {
+        // Skip docs untracked while we were reading their stores above
+        if (!this.trackedDocs.has(docId)) continue;
+        this._initDocSyncState(docId, {
           committedRev,
           hasPending,
           syncStatus: committedRev === 0 ? 'unsynced' : 'synced',
@@ -835,6 +890,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     existingIds.forEach(id => this.trackedDocs.delete(id));
     existingIds.forEach(id => this._clearSyncRetry(id));
+    existingIds.forEach(id => this._surfacedSyncErrors.delete(id));
     batch(() => {
       existingIds.forEach(id => this._updateDocSyncState(id, undefined));
     });
@@ -854,7 +910,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
   protected _handleDocChange(docId: string): void {
     if (!this.trackedDocs.has(docId)) return;
-    this._updateDocSyncState(docId, { hasPending: true });
+    this._initDocSyncState(docId, { hasPending: true });
     if (!this.state.connected || onlineState.isOffline) return;
     this.syncDoc(docId);
   }
@@ -878,6 +934,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // Clean up tracking and local storage
     this.trackedDocs.delete(docId);
     this._clearSyncRetry(docId);
+    this._surfacedSyncErrors.delete(docId);
     this._updateDocSyncState(docId, undefined);
     await algorithm.confirmDeleteDoc(docId);
 
@@ -886,10 +943,12 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
-   * Adds, updates, or removes a doc state entry immutably and notifies via store.
-   * - Pass a full DocSyncState to add a new entry or overwrite an existing one.
-   * - Pass a Partial<DocSyncState> to merge into an existing entry (no-ops if doc not in map).
+   * Updates or removes a doc state entry immutably and notifies via store.
+   * - Pass a Partial<DocSyncState> to merge into an existing entry. No-ops when the doc
+   *   has no entry, so a late write from an in-flight sync can't resurrect an entry for
+   *   a doc that was untracked or deleted while the request was in the air.
    * - Pass undefined to remove the entry.
+   * Creation is explicit via `_initDocSyncState`.
    * No-ops if nothing actually changed.
    */
   protected _updateDocSyncState(docId: string, updates: Partial<DocSyncState> | undefined): void {
@@ -902,18 +961,34 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       delete newDocs[docId];
       this.docStates.state = newDocs;
     } else {
-      const updated = { ...EMPTY_DOC_STATE, ...currentDocs[docId], ...updates } as DocSyncState;
-      // Clear error when moving away from 'error' status
-      if (updated.syncStatus !== 'error' && updated.syncError) {
-        updated.syncError = undefined;
-      }
-      // Latch isLoaded: once true, stays true for this sync lifecycle
-      if (!updated.isLoaded) {
-        updated.isLoaded = isDocLoaded(updated.committedRev, updated.hasPending, updated.syncStatus);
-      }
-      if (isEqual(currentDocs[docId], updated)) return;
-      this.docStates.state = { ...currentDocs, [docId]: updated };
+      if (!(docId in currentDocs)) return;
+      this._setDocSyncState(docId, updates);
     }
+  }
+
+  /**
+   * Creates a doc state entry (merging into any existing one) for a doc known to be
+   * tracked. Callers must be synchronous with a `trackedDocs.has(docId)` check —
+   * creation from an async continuation is exactly what `_updateDocSyncState`'s
+   * no-op-when-absent behavior exists to prevent.
+   */
+  protected _initDocSyncState(docId: string, state: Partial<DocSyncState>): void {
+    this._setDocSyncState(docId, state);
+  }
+
+  private _setDocSyncState(docId: string, updates: Partial<DocSyncState>): void {
+    const currentDocs = this.docStates.state;
+    const updated = { ...EMPTY_DOC_STATE, ...currentDocs[docId], ...updates } as DocSyncState;
+    // Clear error when moving away from 'error' status
+    if (updated.syncStatus !== 'error' && updated.syncError) {
+      updated.syncError = undefined;
+    }
+    // Latch isLoaded: once true, stays true for this sync lifecycle
+    if (!updated.isLoaded) {
+      updated.isLoaded = isDocLoaded(updated.committedRev, updated.hasPending, updated.syncStatus);
+    }
+    if (isEqual(currentDocs[docId], updated)) return;
+    this.docStates.state = { ...currentDocs, [docId]: updated };
   }
 
   /**
@@ -991,6 +1066,32 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     return true;
   }
 
+  /**
+   * Schedule a slow background re-probe for a doc left latched at 'error' with pending
+   * changes while the connection stayed up. Neither the fast retry ladder (exhausted)
+   * nor a reconnect will touch the doc again, so without this the only recovery is a
+   * local edit. The probe re-enters the normal `syncDoc` path with a fresh retry ladder;
+   * if that fails again the ladder/probe cycle repeats. Exhausted transient failures
+   * re-probe sooner than definitive rejections, which only heal via a server-side
+   * policy change. One timer per doc; cleared alongside the fast retry state on
+   * success, untrack, delete, and true disconnect (a reconnect re-arms only through
+   * `syncAllKnownDocs` re-attempting the doc — never from here). A transient
+   * `connecting` flap leaves the timer pending; it self-bails at fire time when it
+   * finds the connection down rather than being cleared up front.
+   */
+  protected _scheduleSyncReprobe(docId: string, retryable: boolean): void {
+    if (!this._isConnectedAndOnline() || !this.trackedDocs.has(docId)) return;
+    const delay = jitterReprobeDelay(retryable ? SYNC_REPROBE_EXHAUSTED_MS : SYNC_REPROBE_TERMINAL_MS);
+    const existing = this._syncReprobeTimers.get(docId);
+    if (existing !== undefined) globalThis.clearTimeout(existing);
+    const timer = globalThis.setTimeout(() => {
+      this._syncReprobeTimers.delete(docId);
+      if (!this._isConnectedAndOnline() || !this.trackedDocs.has(docId)) return;
+      void this.syncDoc(docId);
+    }, delay);
+    this._syncReprobeTimers.set(docId, timer);
+  }
+
   protected _clearSyncRetry(docId: string): void {
     const timer = this._syncRetryTimers.get(docId);
     if (timer !== undefined) {
@@ -998,11 +1099,20 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this._syncRetryTimers.delete(docId);
     }
     this._syncRetryAttempts.delete(docId);
+    const reprobe = this._syncReprobeTimers.get(docId);
+    if (reprobe !== undefined) {
+      globalThis.clearTimeout(reprobe);
+      this._syncReprobeTimers.delete(docId);
+    }
   }
 
   protected _clearAllSyncRetries(): void {
     for (const timer of this._syncRetryTimers.values()) globalThis.clearTimeout(timer);
     this._syncRetryTimers.clear();
     this._syncRetryAttempts.clear();
+    for (const timer of this._syncReprobeTimers.values()) globalThis.clearTimeout(timer);
+    this._syncReprobeTimers.clear();
+    // A reconnect re-attempts every doc; let a still-failing one surface once more.
+    this._surfacedSyncErrors.clear();
   }
 }

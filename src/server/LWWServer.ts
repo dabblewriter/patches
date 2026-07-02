@@ -60,7 +60,8 @@ export class LWWServer implements PatchesServer {
   static api: ApiDefinition = {
     getDoc: 'read',
     getChangesSince: 'read',
-    commitChanges: 'write',
+    // Named params let AuthorizationProviders validate the commit payload (role-scoped writes)
+    commitChanges: { access: 'write', params: ['docId', 'changes', 'options'] },
     deleteDoc: 'write',
     undeleteDoc: 'write',
   } as const;

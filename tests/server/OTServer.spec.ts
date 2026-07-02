@@ -490,7 +490,9 @@ describe('assertVersionMetadata', () => {
   });
 
   it('should throw error for non-modifiable fields', () => {
-    const invalidFields = ['id', 'parentId', 'groupId', 'origin', 'startedAt', 'endedAt', 'rev', 'baseRev'];
+    // Mirrors the Disallowed list in EditableVersionMetadata — startRev/endRev (not the
+    // Change fields rev/baseRev) are the protected version range fields.
+    const invalidFields = ['id', 'parentId', 'groupId', 'origin', 'startedAt', 'endedAt', 'startRev', 'endRev'];
 
     invalidFields.forEach(field => {
       const metadata = { [field]: 'value' } as any;

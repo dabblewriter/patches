@@ -1,5 +1,7 @@
 import type { EditableVersionMetadata } from '../types.js';
 
+// Must match the Disallowed list in EditableVersionMetadata (types.ts) — RPC callers
+// bypass compile-time checks, and forged startRev/endRev corrupt snapshot selection.
 const nonModifiableVersionFields = new Set([
   'id',
   'parentId',
@@ -7,8 +9,8 @@ const nonModifiableVersionFields = new Set([
   'origin',
   'startedAt',
   'endedAt',
-  'rev',
-  'baseRev',
+  'startRev',
+  'endRev',
 ]);
 
 /**

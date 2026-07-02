@@ -11,6 +11,7 @@ import {
   branchManagerApi,
   createBranchRecord,
   generateBranchId,
+  stripMergeWatermark,
   wrapMergeCommit,
 } from './branchUtils.js';
 import type { PatchesServer } from './PatchesServer.js';
@@ -96,13 +97,16 @@ export class OTBranchManager implements BranchManager {
 
       await this.store.saveChanges(branchDocId, initChanges);
 
-      // Create an initial version representing the branch point (metadata + init changes, no state)
+      // Create an initial version representing the branch point (metadata + init changes, no state).
+      // Stamped with branch-local revs: cold loads pick the latest 'main' version by endRev in the
+      // branch's own rev-space (init changes start at rev 1), so stamping the source's rev here
+      // would hide the first branch changes once the branch's rev count reaches branchedAtRev.
       const initialVersionMetadata = createVersionMetadata({
         origin: 'main',
         startedAt: now,
         endedAt: now,
-        endRev: rev,
-        startRev: rev,
+        endRev: initChanges[initChanges.length - 1].rev,
+        startRev: initChanges[0].rev,
         groupId: branchDocId,
         ...(metadata?.name !== undefined && { name: metadata.name }),
       });
@@ -122,7 +126,7 @@ export class OTBranchManager implements BranchManager {
    */
   async updateBranch(branchId: string, metadata: EditableBranchMetadata): Promise<void> {
     assertBranchMetadata(metadata);
-    await this.store.updateBranch(branchId, { ...metadata, modifiedAt: Date.now() });
+    await this.store.updateBranch(branchId, { ...stripMergeWatermark(metadata), modifiedAt: Date.now() });
   }
 
   /**
@@ -180,8 +184,20 @@ export class OTBranchManager implements BranchManager {
 
     const lastBranchRev = branchChanges[branchChanges.length - 1].rev;
 
-    // Get all versions from the branch doc (skip offline-branch versions)
-    const branchVersions = await this.store.listVersions(branchId, { origin: 'main' });
+    // Get not-yet-merged versions from the branch doc, using the same cursor as the changes
+    // query — repeat merges must not re-copy versions already on the source. This also skips
+    // the branch's initial version (the branch point already exists in source history) and
+    // offline-branch versions.
+    const branchVersions = await this.store.listVersions(branchId, {
+      origin: 'main',
+      orderBy: 'endRev',
+      startAfter,
+    });
+
+    // Map branch-local revs onto the claimed source revs of the commit below. Copied versions
+    // must live in the source's rev-space: a branch-local endRev past the source tip would
+    // become the source's version watermark and leave real source revs un-versioned.
+    const toSourceRev = (rev: number) => branchStartRevOnSource + Math.max(0, rev - startAfter);
 
     // Note: if version creation succeeds but commit fails, orphaned versions
     // may remain in the store. The store interface does not currently expose a
@@ -192,7 +208,8 @@ export class OTBranchManager implements BranchManager {
       const base = {
         ...v,
         origin: 'branch' as const,
-        startRev: branchStartRevOnSource,
+        startRev: toSourceRev(v.startRev),
+        endRev: toSourceRev(v.endRev),
         groupId: branchId,
         parentId: lastVersionId,
       };

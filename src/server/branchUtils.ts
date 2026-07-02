@@ -42,6 +42,19 @@ export function assertBranchMetadata(metadata?: EditableBranchMetadata) {
 }
 
 /**
+ * Drops the merge watermark from client-supplied branch metadata. Only server merge code
+ * may set `lastMergedRev` — clients sync whole branch records (PatchesSync), so a stale
+ * value arrives on ordinary metadata updates and must be ignored rather than rejected:
+ * honoring it would rewind or advance the merge cursor, re-merging or skipping changes.
+ */
+export function stripMergeWatermark(metadata: EditableBranchMetadata): EditableBranchMetadata {
+  if (!('lastMergedRev' in metadata)) return metadata;
+  const safe = { ...metadata };
+  delete safe.lastMergedRev;
+  return safe;
+}
+
+/**
  * Store interface for branch ID generation.
  */
 export interface BranchIdGenerator {
@@ -107,14 +120,20 @@ export async function assertNotABranch(store: BranchLoader, docId: string): Prom
 }
 
 /**
- * Validates that a branch exists.
+ * Validates that a branch exists and is not a tombstone. Stores return tombstone records
+ * from `loadBranch`, and merging one would misbehave: the tombstone drops `lastMergedRev`
+ * (and possibly `branchedAtRev`), so the merge would re-copy versions and commit against
+ * garbage revs.
  * @param branch - The branch to validate (may be null).
  * @param branchId - The branch ID (for error messages).
- * @throws Error if branch not found.
+ * @throws Error if branch not found or deleted.
  */
 export function assertBranchExists(branch: Branch | null, branchId: string): asserts branch is Branch {
   if (!branch) {
     throw new Error(`Branch with ID ${branchId} not found.`);
+  }
+  if (branch.deleted) {
+    throw new Error(`Branch ${branchId} has been deleted.`);
   }
 }
 

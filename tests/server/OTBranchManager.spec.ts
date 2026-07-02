@@ -171,12 +171,14 @@ describe('OTBranchManager', () => {
       expect(mockStore.loadBranch).toHaveBeenCalledWith('doc1');
       // getStateAtRevision calls listVersions and loadVersionState
       expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', expect.objectContaining({ orderBy: 'endRev' }));
+      // The initial version is stamped with branch-local revs (init changes start at rev 1),
+      // not the source's branch-point rev — cold loads select versions in the branch's rev-space.
       expect(createVersionMetadata).toHaveBeenCalledWith({
         origin: 'main',
         startedAt: expect.any(Number),
         endedAt: expect.any(Number),
-        endRev: 5,
-        startRev: 5,
+        endRev: 1,
+        startRev: 1,
         name: 'Test Branch',
         groupId: 'generated-id',
       });
@@ -338,6 +340,19 @@ describe('OTBranchManager', () => {
 
       await expect(branchManager.updateBranch('branch1', { name: 'Test' })).rejects.toThrow('Update failed');
     });
+
+    it('should drop client-supplied lastMergedRev (server-authoritative merge watermark)', async () => {
+      // PatchesSync forwards whole branch records, so a stale lastMergedRev arrives on
+      // ordinary renames — honoring it would rewind the merge cursor and re-merge changes.
+      vi.mocked(mockStore.updateBranch).mockResolvedValue();
+
+      await branchManager.updateBranch('branch1', { name: 'Renamed', lastMergedRev: 1 });
+
+      expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
+        name: 'Renamed',
+        modifiedAt: expect.any(Number),
+      });
+    });
   });
 
   describe('deleteBranch', () => {
@@ -424,7 +439,12 @@ describe('OTBranchManager', () => {
 
       expect(mockStore.loadBranch).toHaveBeenCalledWith('branch1');
       expect(mockStore.listChanges).toHaveBeenCalledWith('branch1', { startAfter: 1 });
-      expect(mockStore.listVersions).toHaveBeenCalledWith('branch1', { origin: 'main' });
+      // Versions use the same cursor as changes so repeat merges don't re-copy them
+      expect(mockStore.listVersions).toHaveBeenCalledWith('branch1', {
+        origin: 'main',
+        orderBy: 'endRev',
+        startAfter: 1,
+      });
       // Should send original changes re-stamped with baseRev and batchId
       expect(mockServer.commitChanges).toHaveBeenCalledWith('doc1', [
         expect.objectContaining({ id: 'change1', baseRev: 5, rev: 6, batchId: 'branch1' }),
@@ -470,6 +490,21 @@ describe('OTBranchManager', () => {
       vi.mocked(mockStore.loadBranch).mockResolvedValue(null);
 
       await expect(branchManager.mergeBranch('nonexistent')).rejects.toThrow('Branch with ID nonexistent not found.');
+    });
+
+    it('should reject a deleted (tombstoned) branch', async () => {
+      // Tombstones drop lastMergedRev (and possibly branchedAtRev); merging one would
+      // re-copy versions and commit against garbage revs.
+      vi.mocked(mockStore.loadBranch).mockResolvedValue({
+        id: 'branch1',
+        docId: 'doc1',
+        modifiedAt: Date.now(),
+        deleted: true,
+      } as any);
+
+      await expect(branchManager.mergeBranch('branch1')).rejects.toThrow('Branch branch1 has been deleted.');
+      expect(mockServer.commitChanges).not.toHaveBeenCalled();
+      expect(mockStore.createVersion).not.toHaveBeenCalled();
     });
 
     it('should return empty array when no changes to merge', async () => {
@@ -607,11 +642,15 @@ describe('OTBranchManager', () => {
       await branchManager.mergeBranch('branch1');
 
       expect(mockStore.createVersion).toHaveBeenCalledTimes(2);
+      // Copied versions are re-stamped into the source's rev-space (branchStartRevOnSource=5,
+      // startAfter=1): branch rev r maps to 5 + max(0, r - 1). Keeping branch-local revs would
+      // poison the source's version watermark.
       expect(createVersionMetadata).toHaveBeenNthCalledWith(
         1,
         expect.objectContaining({
           origin: 'branch',
           startRev: 5,
+          endRev: 5,
           groupId: 'branch1',
           name: 'Feature Branch',
         })
@@ -625,6 +664,7 @@ describe('OTBranchManager', () => {
         expect.objectContaining({
           origin: 'branch',
           startRev: 5,
+          endRev: 6,
           groupId: 'branch1',
           name: 'Feature Branch',
           parentId: 'new-version1',

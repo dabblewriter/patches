@@ -8,6 +8,7 @@ import {
   branchManagerApi,
   createBranchRecord,
   generateBranchId,
+  stripMergeWatermark,
   wrapMergeCommit,
 } from './branchUtils.js';
 import { readStreamAsString } from './jsonReadable.js';
@@ -90,19 +91,24 @@ export class LWWBranchManager implements BranchManager {
       if (opsAfterSnapshot.length > 0) {
         state = new JSONPatch(opsAfterSnapshot).apply(state);
       }
-      const rev = ops.length > 0 ? Math.max(baseRev, ...ops.map(op => op.rev ?? 0)) : baseRev;
 
-      // Initialize the branch document with current state as snapshot
-      await this.store.saveSnapshot(branchDocId, state, rev);
-
-      // Copy ops metadata to the branch document (preserving timestamps)
-      if (ops.length > 0) {
-        await this.store.saveOps(branchDocId, ops);
-      }
+      // Initialize the branch in its OWN rev-space: snapshot at rev 0, copied ops at the rev
+      // saveOps assigns from the branch's counter (1). Stamping the source's rev here would
+      // desync contentStartRev from the branch's actual revs, hiding branch edits from getDoc
+      // and dropping them from merges. Clone the ops — saveOps mutates op.rev in place and
+      // these objects belong to the source doc.
+      await this.store.saveSnapshot(branchDocId, state, 0);
+      const branchRev =
+        ops.length > 0
+          ? await this.store.saveOps(
+              branchDocId,
+              ops.map(op => ({ ...op }))
+            )
+          : 0;
 
       // Create the branch metadata record
-      // contentStartRev: first rev of user content after init (for LWW, init is just the snapshot copy)
-      const branch = createBranchRecord(branchDocId, docId, atPoint, rev + 1, metadata);
+      // contentStartRev: first rev of user content after init (for LWW, init is the copy commit)
+      const branch = createBranchRecord(branchDocId, docId, atPoint, branchRev + 1, metadata);
       await this.store.createBranch(branch);
       return branchDocId;
     }
@@ -120,7 +126,7 @@ export class LWWBranchManager implements BranchManager {
    */
   async updateBranch(branchId: string, metadata: EditableBranchMetadata): Promise<void> {
     assertBranchMetadata(metadata);
-    await this.store.updateBranch(branchId, { ...metadata, modifiedAt: Date.now() });
+    await this.store.updateBranch(branchId, { ...stripMergeWatermark(metadata), modifiedAt: Date.now() });
   }
 
   /**

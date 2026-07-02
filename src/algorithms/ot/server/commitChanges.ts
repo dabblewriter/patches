@@ -156,8 +156,17 @@ export async function commitChanges(
       const allCommittedChanges = await store.listChanges(docId, { startAfter: baseRev });
       const committedChanges = batchId ? allCommittedChanges.filter(c => c.batchId !== batchId) : allCommittedChanges;
 
+      // Filter changes already committed after baseRev AND duplicates within the incoming
+      // batch itself — a client retry/flush race can repeat a change id in one array, and
+      // committing it twice double-applies its ops (the second copy is never transformed
+      // against the first).
       const committedIds = new Set(allCommittedChanges.map(c => c.id));
-      const incomingChanges = changes.filter(c => !committedIds.has(c.id)) as Change[];
+      const seenIncomingIds = new Set<string>();
+      const incomingChanges = changes.filter(c => {
+        if (committedIds.has(c.id) || seenIncomingIds.has(c.id)) return false;
+        seenIncomingIds.add(c.id);
+        return true;
+      }) as Change[];
 
       // Committed copies of changes this request re-sent (a retry after a lost ack) must be echoed back so the
       // client can confirm them, even though same-batch changes are excluded from the transform set above.

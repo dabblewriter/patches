@@ -6,6 +6,15 @@ import type { Change } from '../../../types.js';
  * Stateless: passes null to transformPatch (no server state needed for transformation).
  * Bad transformations produce empty ops and are filtered as noops.
  *
+ * Both inputs are *sequential programs*: incoming change N is expressed in the frame produced by
+ * incoming changes 1..N-1, and likewise for the committed log. Each committed change is therefore
+ * walked through the incoming queue — transforming each incoming change against it and advancing
+ * it through that change's (pre-transform) ops before meeting the next one (the standard OT
+ * diamond). Transforming every incoming change against the same raw committed ops would land
+ * changes 2..N at shifted offsets, permanently committing deletes/inserts of the wrong
+ * characters. The client performs the mirror walk in `rebaseChanges`; the two must stay in
+ * lockstep for client and server to converge.
+ *
  * @param changes The incoming changes.
  * @param committedChanges The committed changes that happened *after* the client's baseRev.
  * @param currentRev The current/latest revision number (these changes will have their `rev` set > `currentRev`).
@@ -18,22 +27,22 @@ export function transformIncomingChanges(
   currentRev: number,
   forceCommit = false
 ): Change[] {
-  let committedOps = committedChanges.flatMap(c => c.ops);
-  let rev = currentRev + 1;
+  const queue = changes.map(change => ({ change, ops: change.ops }));
 
-  return changes
-    .map(change => {
-      // Transform the incoming change's ops against the ops committed since baseRev
-      // Stateless: null state means transformPatch doesn't check against state
-      const transformedOps = transformPatch(null, committedOps, change.ops);
-      // Each change in the batch is written in the coordinate space of the changes before it, so advance the
-      // committed ops over this change's original ops before transforming the next one
-      committedOps = transformPatch(null, change.ops, committedOps);
-      if (transformedOps.length === 0 && !forceCommit) {
-        return null; // Change is obsolete after transformation
-      }
-      // Return a new change object with transformed ops and original metadata
-      return { ...change, rev: rev++, ops: transformedOps };
-    })
-    .filter(Boolean) as Change[];
+  for (const committed of committedChanges) {
+    let committedOps = committed.ops;
+    for (const entry of queue) {
+      const transformed = transformPatch(null, committedOps, entry.ops);
+      committedOps = transformPatch(null, entry.ops, committedOps);
+      entry.ops = transformed;
+    }
+  }
+
+  let rev = currentRev + 1;
+  const result: Change[] = [];
+  for (const entry of queue) {
+    if (entry.ops.length === 0 && !forceCommit) continue; // Change is obsolete after transformation
+    result.push({ ...entry.change, rev: rev++, ops: entry.ops });
+  }
+  return result;
 }

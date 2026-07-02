@@ -63,6 +63,10 @@ export class OTAlgorithm implements ClientAlgorithm {
     // Serialize per-doc so a concurrent receive-rebase and this mint can't read the
     // same rev and clobber each other at the [docId, rev] store key (silent change loss).
     return this._withDocLock(docId, async () => {
+      // Re-check under the lock: ops arrays are shared with the doc's optimistic queue,
+      // and a receive-rebase that ran while we waited may have rebased them away.
+      if (ops.length === 0) return [];
+
       // Idempotent retry: if this exact caller-minted change id was already accepted on a
       // prior attempt (the submit RPC timed out *after* the hub had persisted it), return the
       // existing change instead of minting+persisting+applying a duplicate. Only runs on a

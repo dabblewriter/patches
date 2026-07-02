@@ -1,7 +1,9 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OTAlgorithm } from '../../src/client/OTAlgorithm';
+import type { OTDoc } from '../../src/client/OTDoc';
 import { OTIndexedDBStore } from '../../src/client/OTIndexedDBStore';
+import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
 import { createChange } from '../../src/data/change';
 import type { JSONPatchOp } from '../../src/json-patch/types';
 
@@ -49,5 +51,66 @@ describe('OTAlgorithm receive-vs-mint interleave (real OTIndexedDBStore)', () =>
     expect(new Set(pending.map(c => c.baseRev)).size).toBe(1); // one baseRev — a valid single commit
     expect(paths).toContain('/local'); // the rebased local change survived
     expect(paths).toContain('/typed'); // the concurrently-typed change survived
+  });
+});
+
+// Finding #29 (mint half): a receive processed between change() and its queued mint
+// rebases the optimistic ops array IN PLACE (the mint shares the reference), so the
+// mint must package the rebased ops — or skip entirely when they rebased away.
+describe('OTAlgorithm mint after an interleaved receive (finding #29)', () => {
+  interface State {
+    items: string[];
+  }
+
+  let store: OTInMemoryStore;
+  let algorithm: OTAlgorithm;
+  let doc: OTDoc<State>;
+  let captured: JSONPatchOp[];
+
+  beforeEach(async () => {
+    store = new OTInMemoryStore();
+    algorithm = new OTAlgorithm(store);
+    await store.trackDocs(['doc1'], 'ot');
+    const seed = createChange(0, 1, [{ op: 'replace', path: '', value: { items: ['a', 'b', 'c'] } }], {
+      committedAt: 1,
+    });
+    await store.applyServerChanges('doc1', [seed], []);
+    doc = algorithm.createDoc<State>('doc1', await algorithm.loadDoc('doc1')) as OTDoc<State>;
+    doc.onChange(ops => (captured = ops));
+  });
+
+  it('mints the rebased ops at the post-receive committedRev when the receive wins the lock', async () => {
+    // User intent: insert 'X' between 'a' and 'b'.
+    doc.change(patch => patch.add('/items/1', 'X'));
+
+    // Foreign server change is processed BEFORE the queued mint runs.
+    const foreign = createChange(1, 2, [{ op: 'add', path: '/items/0', value: 'Z' }], { committedAt: 2 });
+    await algorithm.applyServerChanges('doc1', [foreign], doc);
+
+    const minted = await algorithm.handleDocChange('doc1', captured, doc, {});
+
+    expect(doc.state.items).toEqual(['Z', 'a', 'X', 'b', 'c']);
+    expect(minted).toHaveLength(1);
+    expect(minted[0].baseRev).toBe(2);
+    // Server at rev 2 applies baseRev-2 ops verbatim — they must be in the rev-2 frame.
+    expect(minted[0].ops).toEqual([{ op: 'add', path: '/items/2', value: 'X' }]);
+    expect(await store.getPendingChanges('doc1')).toEqual(minted);
+  });
+
+  it('skips a mint whose queued ops the receive rebased away while it waited on the lock', async () => {
+    doc.change(patch => patch.add('/items/1', 'X'));
+    const foreign = createChange(1, 2, [{ op: 'replace', path: '/items', value: ['q'] }], { committedAt: 2 });
+
+    // Fire both without awaiting: the mint passes its pre-lock ops check, then queues
+    // behind the receive, which empties the shared ops array. The in-lock re-check
+    // must skip the mint instead of persisting an empty (or misplaced) change.
+    const receive = algorithm.applyServerChanges('doc1', [foreign], doc);
+    const mint = algorithm.handleDocChange('doc1', captured, doc, {});
+    await receive;
+
+    expect(await mint).toEqual([]);
+    expect(doc.state.items).toEqual(['q']);
+    expect(doc.hasPending).toBe(false);
+    expect(await store.getPendingChanges('doc1')).toEqual([]);
   });
 });

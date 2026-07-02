@@ -414,6 +414,157 @@ describe('Patches', () => {
 
       expect(mockAlgorithm.deleteDoc).toHaveBeenCalledWith('doc1');
     });
+
+    it('awaits an in-flight openDoc so the doc is force-closed, not left live over a tombstone (finding #33)', async () => {
+      let resolveLoad!: (s?: PatchesSnapshot) => void;
+      vi.mocked(mockAlgorithm.loadDoc).mockReturnValue(
+        new Promise(r => {
+          resolveLoad = r;
+        })
+      );
+      const unsubscribe = vi.fn();
+      mockDoc.onChange.mockReturnValue(unsubscribe);
+
+      const openPromise = patches.openDoc('doc1');
+      await new Promise(r => setTimeout(r, 0)); // open reaches the loadDoc await
+
+      const deletePromise = patches.deleteDoc('doc1');
+      let deleteResolved = false;
+      deletePromise.then(() => {
+        deleteResolved = true;
+      });
+      await new Promise(r => setTimeout(r, 0));
+      expect(deleteResolved).toBe(false); // deleteDoc waits out the open
+
+      resolveLoad({ state: {}, rev: 0, changes: [] });
+      await openPromise;
+      await deletePromise;
+
+      expect(patches.getOpenDoc('doc1')).toBeUndefined();
+      expect(unsubscribe).toHaveBeenCalled();
+      expect(mockAlgorithm.deleteDoc).toHaveBeenCalledWith('doc1');
+    });
+  });
+
+  describe('closeDoc drains the in-flight change queue (finding #30)', () => {
+    let capturedChangeHandler: any;
+
+    beforeEach(async () => {
+      mockDoc.onChange.mockImplementation((cb: any) => {
+        capturedChangeHandler = cb;
+        return vi.fn();
+      });
+      await patches.openDoc('doc1');
+    });
+
+    it('does not resolve the final closeDoc until a pending change has been processed', async () => {
+      let resolveMint!: (v: any) => void;
+      vi.mocked(mockAlgorithm.handleDocChange).mockReturnValue(
+        new Promise(r => {
+          resolveMint = r;
+        })
+      );
+      capturedChangeHandler([{ op: 'add', path: '/t', value: 1 }]);
+
+      const closePromise = patches.closeDoc('doc1');
+      let closed = false;
+      closePromise.then(() => {
+        closed = true;
+      });
+      await new Promise(r => setTimeout(r, 0));
+      expect(closed).toBe(false);
+
+      resolveMint([]);
+      await closePromise;
+      expect(patches.getOpenDoc('doc1')).toBeUndefined();
+    });
+
+    it('reopen waits for the previous instance queue before loading the snapshot', async () => {
+      expect(mockAlgorithm.loadDoc).toHaveBeenCalledTimes(1);
+      let resolveMint!: (v: any) => void;
+      vi.mocked(mockAlgorithm.handleDocChange).mockReturnValue(
+        new Promise(r => {
+          resolveMint = r;
+        })
+      );
+      capturedChangeHandler([{ op: 'add', path: '/t', value: 1 }]);
+
+      void patches.closeDoc('doc1'); // not awaited — close and reopen back-to-back
+      const reopenPromise = patches.openDoc('doc1');
+      await new Promise(r => setTimeout(r, 0));
+      // The snapshot must not be read while the mint's store write is in flight —
+      // it would miss the pending change and remint at the same rev.
+      expect(mockAlgorithm.loadDoc).toHaveBeenCalledTimes(1);
+
+      resolveMint([]);
+      await reopenPromise;
+      expect(mockAlgorithm.loadDoc).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('change queue failure isolation (finding #31)', () => {
+    it('skips changes queued behind a failure that rolled back the optimistic queue', async () => {
+      mockDoc.rollbackOptimistic = vi.fn();
+      let capturedChangeHandler: any;
+      mockDoc.onChange.mockImplementation((cb: any) => {
+        capturedChangeHandler = cb;
+        return vi.fn();
+      });
+      await patches.openDoc('doc1');
+
+      const onErrorSpy = vi.fn();
+      patches.onError(onErrorSpy);
+
+      let rejectFirst!: (e: Error) => void;
+      vi.mocked(mockAlgorithm.handleDocChange).mockImplementationOnce(
+        () =>
+          new Promise((_, rej) => {
+            rejectFirst = rej;
+          })
+      );
+
+      const first = capturedChangeHandler([{ op: 'add', path: '/a', value: [] }]);
+      const second = capturedChangeHandler([{ op: 'add', path: '/a/0', value: 'x' }]); // depends on first
+      await new Promise(r => setTimeout(r, 0));
+
+      rejectFirst(new Error('transient store failure'));
+      await first;
+      await second;
+
+      // The dependent change must NOT be minted — its base was rolled back.
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledTimes(1);
+      expect(mockDoc.rollbackOptimistic).toHaveBeenCalledTimes(1);
+      expect(onErrorSpy).toHaveBeenCalledTimes(1);
+
+      // A change made after the rollback processes normally.
+      await capturedChangeHandler([{ op: 'add', path: '/c', value: 3 }]);
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('submitDocChange', () => {
+    it('takes an optimistic slot on the open doc before queueing (finding #32)', async () => {
+      mockDoc._applyOptimistic = vi.fn();
+      await patches.openDoc('doc1');
+      const ops = [{ op: 'add' as const, path: '/x', value: 1 }];
+
+      await patches.submitDocChange('doc1', ops);
+
+      expect(mockDoc._applyOptimistic).toHaveBeenCalledWith(ops);
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {});
+    });
+
+    it('passes undefined doc when the doc is not open', async () => {
+      const ops = [{ op: 'add' as const, path: '/x', value: 1 }];
+      await patches.submitDocChange('doc1', ops);
+
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, undefined, {});
+    });
+
+    it('is a no-op for empty ops', async () => {
+      await patches.submitDocChange('doc1', []);
+      expect(mockAlgorithm.handleDocChange).not.toHaveBeenCalled();
+    });
   });
 
   describe('getOpenDoc', () => {
@@ -477,9 +628,8 @@ describe('Patches', () => {
       );
 
       const openPromise = patches.openDoc('doc1');
-      // Yield once so openDoc reaches the loadDoc await before we call close().
-      await Promise.resolve();
-      await Promise.resolve();
+      // Yield so openDoc reaches the loadDoc await before we call close().
+      await new Promise(r => setTimeout(r, 0));
 
       const closePromise = patches.close();
       // close() must not resolve yet — openDoc is still pending on loadDoc.

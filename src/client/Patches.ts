@@ -54,6 +54,12 @@ export class Patches {
   protected options: PatchesOptions;
   protected docs: Map<string, ManagedDoc<any>> = new Map();
   private _changeQueues: Map<string, Promise<void>> = new Map();
+  /**
+   * Per-doc epoch, bumped when a change fails and the doc's optimistic queue is rolled
+   * back. Changes queued behind the failure captured ops against state that included it,
+   * so their processing is skipped when their captured epoch is stale.
+   */
+  private _changeEpochs: Map<string, number> = new Map();
   /** Doc IDs whose openDoc() body is currently in flight (between createDoc and this.docs.set). */
   private _openingDocs: Set<string> = new Set();
   /** Single-slot, latest-wins snapshot stash for docs in `_openingDocs`. Drained on open completion. */
@@ -297,6 +303,12 @@ export class Patches {
       // Ensure the doc is tracked before proceeding
       await this.trackDocs([docId], algorithmName);
 
+      // A just-closed instance of this doc may still be draining its change queue
+      // (closeDoc awaits it, but callers may not await closeDoc). Wait it out so the
+      // snapshot read below includes those writes — otherwise the reopened doc mints
+      // its next change at the same rev and silently overwrites the in-flight one.
+      await this._changeQueues.get(docId);
+
       // Load initial state from store via algorithm
       const snapshot = await algorithm.loadDoc(docId);
       const mergedMetadata = { ...this.options.metadata, ...opts.metadata };
@@ -385,9 +397,9 @@ export class Patches {
 
   /**
    * Releases one reference to an open document. The doc is fully closed
-   * (listener removed, cache entry evicted, change queue cleared) only when
-   * the last outstanding `openDoc` is matched by its `closeDoc`. Calling
-   * `closeDoc` on a doc that isn't open is a no-op.
+   * (listener removed, cache entry evicted, change queue drained then cleared)
+   * only when the last outstanding `openDoc` is matched by its `closeDoc`.
+   * Calling `closeDoc` on a doc that isn't open is a no-op.
    * @param docId - The document ID to close.
    * @param options - Optional: set untrack to true to also untrack the doc
    *   on the final close.
@@ -404,7 +416,15 @@ export class Patches {
     }
     managed.unsubscribe();
     this.docs.delete(docId);
-    this._changeQueues.delete(docId);
+    // Drain the in-flight change queue before finishing teardown so pending mints
+    // land in the store first — a reopen's snapshot must include them, and an
+    // untrack must not race a write that would resurrect the doc's data. The entry
+    // is only deleted if a reopen hasn't already queued fresh work behind it.
+    const drain = this._changeQueues.get(docId);
+    if (drain) {
+      await drain;
+      if (this._changeQueues.get(docId) === drain) this._changeQueues.delete(docId);
+    }
     if (untrack) {
       await this.untrackDocs([docId]);
     }
@@ -416,6 +436,12 @@ export class Patches {
    * @param docId - The document ID to delete.
    */
   async deleteDoc(docId: string): Promise<void> {
+    // Wait out any in-flight open for this id so the doc registers and gets
+    // force-closed below — otherwise the open resumes after the tombstone and
+    // leaves a live doc over a deleted, untracked store entry. The opening
+    // deferred resolves unconditionally (never rejects), mirroring close().
+    await this._openingPromises.get(docId);
+
     // Resolve algorithm by store membership rather than defaulting. For a closed doc
     // opened on a non-default algorithm, defaulting would tombstone the wrong store
     // (writing a stranded tombstone in the default algorithm while leaving the real
@@ -464,6 +490,7 @@ export class Patches {
     this.docs.forEach(managed => managed.unsubscribe());
     this.docs.clear();
     this._changeQueues.clear();
+    this._changeEpochs.clear();
     this._openingDocs.clear();
     this._openingSnapshots.clear();
 
@@ -484,9 +511,14 @@ export class Patches {
    * against concurrent user edits on the same document.
    */
   submitDocChange(docId: string, ops: JSONPatchOp[], metadata: Record<string, any> = {}): Promise<void> {
+    if (ops.length === 0) return Promise.resolve();
     const managed = this.docs.get(docId);
     const algorithm = this.getDocAlgorithm(docId) ?? this.algorithms[this.defaultAlgorithm];
     if (!algorithm) throw new Error(`No algorithm found for document ${docId}`);
+    // Take an optimistic slot like change() does. applyChanges confirmations shift the
+    // FIFO queue 1:1, so a submitted change without its own slot would consume a user
+    // change's slot instead — double-applying the user's ops and dropping these.
+    if (managed) (managed.doc as unknown as BaseDoc<any>)._applyOptimistic(ops);
     return this._handleDocChange(docId, ops, managed?.doc as PatchesDoc<any>, algorithm, metadata);
   }
 
@@ -503,8 +535,16 @@ export class Patches {
     algorithm: ClientAlgorithm,
     metadata: Record<string, any>
   ): Promise<void> {
+    const epoch = this._changeEpochs.get(docId) ?? 0;
     const prev = this._changeQueues.get(docId) ?? Promise.resolve();
-    const current = prev.then(() => this._processDocChange(docId, ops, doc, algorithm, metadata));
+    const current = prev.then(() => {
+      // A change that failed while this one was queued rolled back the doc's whole
+      // optimistic queue — including these ops, which were captured against state
+      // that contained the failure. Skip them instead of persisting a change whose
+      // base no longer exists.
+      if (doc && (this._changeEpochs.get(docId) ?? 0) !== epoch) return;
+      return this._processDocChange(docId, ops, doc, algorithm, metadata);
+    });
     this._changeQueues.set(
       docId,
       // eslint-disable-next-line @typescript-eslint/no-empty-function
@@ -525,8 +565,11 @@ export class Patches {
       this.onChange.emit(docId);
     } catch (err) {
       console.error(`Error handling doc change for ${docId}:`, err);
-      const baseDoc = doc as unknown as BaseDoc<T>;
-      if (typeof baseDoc.rollbackOptimistic === 'function') {
+      const baseDoc = doc as unknown as BaseDoc<T> | undefined;
+      if (baseDoc && typeof baseDoc.rollbackOptimistic === 'function') {
+        // Bump the epoch BEFORE rolling back so changes already queued behind this
+        // failure (whose optimistic ops the rollback just discarded) are skipped.
+        this._changeEpochs.set(docId, (this._changeEpochs.get(docId) ?? 0) + 1);
         baseDoc.rollbackOptimistic();
       }
       this.onError.emit(err as Error, { docId });

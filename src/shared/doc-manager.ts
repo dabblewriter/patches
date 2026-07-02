@@ -78,8 +78,18 @@ export class DocManager {
     const currentCount = this.refCounts.get(docId) || 0;
 
     if (currentCount === 0) {
-      // No references - nothing to do (or already closed)
-      return;
+      // A close can arrive while the first open is still pending (e.g. a component
+      // unmounting before its openDoc resolves). The reference only lands after the
+      // open resolves, so wait for it and retry — otherwise the close is silently
+      // dropped and the doc leaks open forever.
+      const pending = this.pendingOps.get(docId);
+      if (!pending) return;
+      try {
+        await pending;
+      } catch {
+        return; // failed open never established a reference
+      }
+      return this.closeDoc(patches, docId, untrack);
     }
 
     if (currentCount === 1) {

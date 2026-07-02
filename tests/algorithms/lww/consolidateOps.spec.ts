@@ -288,6 +288,39 @@ describe('consolidateFieldOp', () => {
     });
   });
 
+  describe('timestamp preservation when combining', () => {
+    // Combining must keep the newest ts of the pair — inheriting an older delta's ts would
+    // downgrade the field's winning timestamp and let stale replays overwrite newer values
+    it('should keep the existing newer timestamp when an older delta combines', () => {
+      const existing: JSONPatchOp = { op: 'replace', path: '/count', value: 10, ts: 1000 };
+      const incoming: JSONPatchOp = { op: '@inc', path: '/count', value: 1, ts: 500 };
+
+      expect(consolidateFieldOp(existing, incoming)).toEqual({ op: 'replace', path: '/count', value: 11, ts: 1000 });
+    });
+
+    it('should keep the incoming newer timestamp when it combines', () => {
+      const existing: JSONPatchOp = { op: '@inc', path: '/count', value: 1, ts: 1000 };
+      const incoming: JSONPatchOp = { op: '@inc', path: '/count', value: 2, ts: 2000 };
+
+      expect(consolidateFieldOp(existing, incoming)).toEqual({ op: '@inc', path: '/count', value: 3, ts: 2000 });
+    });
+
+    it('should keep a newer remove timestamp when an older delta resurrects the field', () => {
+      const existing: JSONPatchOp = { op: 'remove', path: '/count', ts: 1000 };
+      const incoming: JSONPatchOp = { op: '@inc', path: '/count', value: 5, ts: 500 };
+
+      expect(consolidateFieldOp(existing, incoming)).toEqual({ op: 'replace', path: '/count', value: 5, ts: 1000 });
+    });
+
+    it('should reject a stale replay after an older delta combined with a newer value', () => {
+      const existing: JSONPatchOp = { op: 'replace', path: '/count', value: 10, ts: 1000 };
+      const combined = consolidateFieldOp(existing, { op: '@inc', path: '/count', value: 1, ts: 500 })!;
+
+      // A stale write with a ts between the delta's and the original winner's must still lose
+      expect(consolidateFieldOp(combined, { op: 'replace', path: '/count', value: 3, ts: 700 })).toBeNull();
+    });
+  });
+
   describe('soft ops', () => {
     it('should not overwrite existing when incoming has explicit soft flag', () => {
       const existing: JSONPatchOp = { op: 'replace', path: '/name', value: 'Alice', ts: 1000 };
@@ -662,5 +695,76 @@ describe('convertDeltaOps', () => {
 
     expect(result[0].path).toBe('/nested/count');
     expect(result[0].ts).toBe(5000);
+  });
+});
+
+describe('batch self-consolidation', () => {
+  it('sums multiple @inc ops on the same path within one batch', () => {
+    const newOps: JSONPatchOp[] = [
+      { op: '@inc', path: '/counter', value: 5, ts: 1000 },
+      { op: '@inc', path: '/counter', value: 3, ts: 1001 },
+      { op: '@inc', path: '/counter', value: 2, ts: 1002 },
+    ];
+
+    const { opsToSave } = consolidateOps([], newOps);
+
+    expect(opsToSave).toHaveLength(1);
+    expect(opsToSave[0].op).toBe('@inc');
+    expect(opsToSave[0].value).toBe(10);
+  });
+
+  it('lets a later replace in the batch win over an earlier delta on the same path', () => {
+    const newOps: JSONPatchOp[] = [
+      { op: '@inc', path: '/counter', value: 5, ts: 1000 },
+      { op: 'replace', path: '/counter', value: 100, ts: 1001 },
+    ];
+
+    const { opsToSave } = consolidateOps([], newOps);
+
+    expect(opsToSave).toHaveLength(1);
+    expect(opsToSave[0]).toEqual({ op: 'replace', path: '/counter', value: 100, ts: 1001 });
+  });
+
+  it('a parent write later in the batch drops earlier child ops from the batch', () => {
+    const newOps: JSONPatchOp[] = [
+      { op: 'replace', path: '/user/name', value: 'Bob', ts: 1000 },
+      { op: 'replace', path: '/user', value: { name: 'Alice' }, ts: 1001 },
+    ];
+
+    const { opsToSave, pathsToDelete } = consolidateOps([], newOps);
+
+    expect(opsToSave).toHaveLength(1);
+    expect(opsToSave[0].path).toBe('/user');
+    expect(pathsToDelete).toContain('/user/name');
+  });
+});
+
+describe('delta ops against removed or missing fields', () => {
+  it('converts a delta after a remove into a replace from a fresh base (not a remove)', () => {
+    const existing: JSONPatchOp = { op: 'remove', path: '/counter', ts: 1000 };
+    const incoming: JSONPatchOp = { op: '@inc', path: '/counter', value: 5, ts: 2000 };
+
+    const result = consolidateFieldOp(existing, incoming);
+
+    expect(result).toEqual({ op: 'replace', path: '/counter', value: 5, ts: 2000 });
+  });
+
+  it('sets the operand for @min/@max after a remove (matching client apply semantics)', () => {
+    const existing: JSONPatchOp = { op: 'remove', path: '/createdAt', ts: 1000 };
+    const incoming: JSONPatchOp = { op: '@min', path: '/createdAt', value: 1738761234567, ts: 2000 };
+
+    const result = consolidateFieldOp(existing, incoming);
+
+    expect(result).toEqual({ op: 'replace', path: '/createdAt', value: 1738761234567, ts: 2000 });
+  });
+
+  it('convertDeltaOps stores the operand for a fresh @min instead of min(0, value)', () => {
+    const result = convertDeltaOps([{ op: '@min', path: '/createdAt', value: 1738761234567, ts: 1 }]);
+    expect(result).toEqual([{ op: 'replace', path: '/createdAt', value: 1738761234567, ts: 1 }]);
+  });
+
+  it('convertDeltaOps stores the operand for a fresh @max of a negative number', () => {
+    const result = convertDeltaOps([{ op: '@max', path: '/depth', value: -5, ts: 1 }]);
+    expect(result).toEqual([{ op: 'replace', path: '/depth', value: -5, ts: 1 }]);
   });
 });

@@ -9,6 +9,11 @@ import type { TrackedDoc } from './PatchesStore.js';
 
 const SNAPSHOT_INTERVAL = 200;
 
+/** Sort ops in commit (rev) order, ts as tiebreak — mirrors the server's ordering. */
+function sortOpsByCommitOrder(ops: JSONPatchOp[]): JSONPatchOp[] {
+  return [...ops].sort((a, b) => (a.rev ?? 0) - (b.rev ?? 0) || (a.ts ?? 0) - (b.ts ?? 0));
+}
+
 /** A committed op stored after server confirmation (JSONPatchOp fields with docId, without ts/rev) */
 interface CommittedOp extends JSONPatchOp {
   docId: string;
@@ -61,6 +66,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
     this.db = !db || typeof db === 'string' ? new IndexedDBStore(db) : db;
 
     // Subscribe to upgrade event to create LWW-specific stores
+    this.db.requireStores('committedOps', 'pendingOps', 'sendingChanges');
     this.db.onUpgrade((db, _oldVersion, transaction) => {
       LWWIndexedDBStore.upgradeStores(db, transaction);
     });
@@ -224,6 +230,12 @@ export class LWWIndexedDBStore implements LWWClientStore {
       this.deleteFieldsForDoc(committedOps, docId),
     ]);
 
+    // A server getDoc envelope carries uncompacted ops in `changes` — its `rev` is the head
+    // revision but its `state` excludes those ops. Persist them or a fresh client stores an
+    // empty snapshot at the head rev and never re-fetches the missing fields.
+    const changes = (docState as PatchesSnapshot).changes ?? [];
+    await Promise.all(changes.flatMap(change => change.ops.map(op => committedOps.put<CommittedOp>({ ...op, docId }))));
+
     await tx.complete();
   }
 
@@ -384,9 +396,9 @@ export class LWWIndexedDBStore implements LWWClientStore {
    * after) overwrite any stale ops for fields the server won via LWW.
    */
   @blockable
-  async confirmSendingChange(docId: string): Promise<void> {
-    const [tx, sendingChanges, committedOps, docsStore] = await this.db.transaction(
-      ['sendingChanges', 'committedOps', 'docs'],
+  async confirmSendingChange(docId: string, ops?: JSONPatchOp[]): Promise<void> {
+    const [tx, sendingChanges, committedOps] = await this.db.transaction(
+      ['sendingChanges', 'committedOps'],
       'readwrite'
     );
 
@@ -396,23 +408,28 @@ export class LWWIndexedDBStore implements LWWClientStore {
       return;
     }
 
+    const confirmedPaths = ops && new Set(ops.map(op => op.path));
+    const confirmed = confirmedPaths
+      ? sending.change.ops.filter(op => confirmedPaths.has(op.path))
+      : sending.change.ops;
+
     // Move ops to committed, deleting child-path ops to match server saveOps behavior.
     // Without this, a parent write (e.g. replace /trash {}) would leave stale child ops
     // (e.g. /trash/collectionId/name) that re-create nested structure on doc rebuild.
     await Promise.all(
-      sending.change.ops.map(async op => {
+      confirmed.map(async op => {
         await committedOps.delete([docId, op.path + '/'], [docId, op.path + '/\uffff']);
         await committedOps.put<CommittedOp>({ ...op, docId });
       })
     );
 
-    // Update committed rev
-    const rev = sending.change.rev;
-    if (rev !== undefined) {
-      const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0, algorithm: 'lww' as const };
-      if (rev > docMeta.committedRev) {
-        await docsStore.put({ ...docMeta, committedRev: rev });
-      }
+    // Keep the unconfirmed remainder in the sending slot (a change split across wire batches)
+    // so a disconnect between batches resends it
+    const remaining = confirmedPaths ? sending.change.ops.filter(op => !confirmedPaths.has(op.path)) : [];
+    if (remaining.length > 0) {
+      await sendingChanges.put<SendingChange>({ docId, change: { ...sending.change, ops: remaining } });
+      await tx.complete();
+      return;
     }
 
     await sendingChanges.delete(docId);
@@ -432,13 +449,13 @@ export class LWWIndexedDBStore implements LWWClientStore {
     // Store server ops, deleting child-path ops to match server saveOps behavior.
     // Without this, a parent write (e.g. replace /trash {}) would leave stale child ops
     // (e.g. /trash/collectionId/name) that re-create nested structure on doc rebuild.
-    const allOps = serverChanges.flatMap(change => change.ops);
-    await Promise.all(
-      allOps.map(async op => {
-        await committedOps.delete([docId, op.path + '/'], [docId, op.path + '/\uffff']);
-        await committedOps.put<CommittedOp>({ ...op, docId });
-      })
-    );
+    // Apply sequentially in commit order: a flush response can carry corrections ahead
+    // of catchup ops (child@rev3 before parent@rev2), and an out-of-order parent write
+    // would prune the newer child value.
+    for (const op of sortOpsByCommitOrder(serverChanges.flatMap(change => change.ops))) {
+      await committedOps.delete([docId, op.path + '/'], [docId, op.path + '/\uffff']);
+      await committedOps.put<CommittedOp>({ ...op, docId });
+    }
 
     // Note: Don't clear sendingChange here - these are changes from other clients,
     // not confirmation of our own change. Only confirmSendingChange should clear it.

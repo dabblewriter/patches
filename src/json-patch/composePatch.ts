@@ -22,7 +22,10 @@ export function composePatch(patches: JSONPatchOp[], custom: JSONPatchOpHandlerM
         } else {
           const prefix = `${op.path}/`;
           for (const path of opsByPath.keys()) {
-            if (path.startsWith(prefix)) opsByPath.delete(path);
+            // Descendants: this write covers them. Ancestors: composing a later parent write
+            // into an entry from before an intervening child write would reorder the child
+            // after the parent, so break their chains instead.
+            if (path.startsWith(prefix) || op.path.startsWith(`${path}/`)) opsByPath.delete(path);
           }
           opsByPath.set(op.path, (op = getValue(state, op)));
         }

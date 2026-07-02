@@ -24,7 +24,11 @@ export function applyPatch(
     return object;
   }
   if (opts.atPath) {
-    patches = patches.map(op => ({ ...op, path: opts.atPath + op.path }));
+    patches = patches.map(op =>
+      op.from != null
+        ? { ...op, path: opts.atPath + op.path, from: opts.atPath + op.from }
+        : { ...op, path: opts.atPath + op.path }
+    );
   }
 
   const types = getTypes(custom);

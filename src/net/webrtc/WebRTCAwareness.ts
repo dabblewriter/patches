@@ -25,9 +25,9 @@ export class WebRTCAwareness<T extends AwarenessState = AwarenessState> {
   readonly onUpdate = signal<(states: T[]) => void>();
 
   /**
-   * The peer ID of this client, obtained from the WebRTC transport.
+   * Whether localState has been set (an empty object is a legal state).
    */
-  private myId: string | undefined;
+  private hasLocalState = false;
 
   /**
    * Creates a new WebRTC awareness instance.
@@ -45,8 +45,6 @@ export class WebRTCAwareness<T extends AwarenessState = AwarenessState> {
    */
   async connect(): Promise<void> {
     await this.transport.connect();
-    // Get the peer ID from the transport after connection
-    this.myId = this.transport.id;
   }
 
   /**
@@ -87,8 +85,13 @@ export class WebRTCAwareness<T extends AwarenessState = AwarenessState> {
    * @param value - The new local awareness state to set and broadcast
    */
   set localState(value: T) {
-    this._localState = { ...value, id: this.myId! } as T;
-    this.transport.send(JSON.stringify(this._localState));
+    this.hasLocalState = true;
+    // The transport's id arrives with peer-welcome, which can land after connect() resolves —
+    // read it lazily so the state is never broadcast without an id (receivers drop those)
+    this._localState = { ...value, id: this.transport.id } as T;
+    if (this._localState.id) {
+      this.transport.send(JSON.stringify(this._localState));
+    }
   }
 
   /**
@@ -97,7 +100,12 @@ export class WebRTCAwareness<T extends AwarenessState = AwarenessState> {
    * @param peerId - ID of the newly connected peer
    */
   private _addPeer(peerId: string) {
-    // If localState has been set (id will exist once set)
+    if (!this.hasLocalState) return;
+    // Peers only connect after the welcome assigned our id, so stamp it now if the state was
+    // set before the id arrived
+    if (!this._localState.id && this.transport.id) {
+      this._localState = { ...this._localState, id: this.transport.id } as T;
+    }
     if (this._localState.id) {
       this.transport.send(JSON.stringify(this._localState), peerId);
     }
@@ -129,7 +137,9 @@ export class WebRTCAwareness<T extends AwarenessState = AwarenessState> {
     const update = [...this.states];
     const existingIndex = update.findIndex(s => (s as any).id === peerState.id);
     if (existingIndex !== -1) {
-      update.splice(existingIndex, 1, { ...update[existingIndex], ...peerState });
+      // Senders always transmit their complete state, so replace — merging would resurrect
+      // fields the sender removed and diverge from peers that joined after the removal
+      update.splice(existingIndex, 1, peerState);
     } else {
       update.push(peerState as unknown as T);
     }

@@ -58,7 +58,6 @@ export function updateRemovedOps(
   state: State,
   thisPath: string,
   otherOps: JSONPatchOp[],
-  isRemove = false,
   updatableObject = false,
   opOp?: string,
   customHandler?: (op: JSONPatchOp) => any
@@ -84,8 +83,10 @@ export function updateRemovedOps(
       if (customOp) return customOp;
     }
 
-    if (isRemove && !updatableObject && from === thisPath) {
-      // Because of the check above, moves and copies will only hit here when the "from" field matches
+    if (!updatableObject && from === thisPath) {
+      // Because of the check above, moves and copies will only hit here when the "from" field matches. Whether this
+      // op removed or overwrote the value at thisPath, the other patch's move/copy never got it, so ops following the
+      // move/copy that target its destination must be dropped rather than let them clobber unrelated data
       if (opLike === 'move') {
         // We need the rest of the otherOps to be adjusted against this "move"
         breakAfter();
@@ -125,6 +126,6 @@ export function transformRemove(
   if (isArrayPath(thisPath, state)) {
     return updateArrayIndexes(state, thisPath, otherOps, -1, isRemove);
   } else {
-    return updateRemovedOps(state, thisPath, otherOps, isRemove);
+    return updateRemovedOps(state, thisPath, otherOps);
   }
 }

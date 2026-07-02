@@ -109,16 +109,22 @@ export class WebSocketTransport implements ClientTransport {
       // Pass protocol option if available (standard 2nd arg)
       // Other options like headers are not standard and require specific server/client handling
       // or a different WebSocket client library.
-      this.ws = new WebSocket(this.url, this.wsOptions?.protocol);
+      // Capture the socket locally: each handler no-ops if the socket has been
+      // replaced, so a stale close/error from an old socket (e.g. after a quick
+      // disconnect()+connect()) can't flip the state of a healthy new one.
+      const ws = new WebSocket(this.url, this.wsOptions?.protocol);
+      this.ws = ws;
 
-      this.ws.onopen = () => {
+      ws.onopen = () => {
+        if (this.ws !== ws) return;
         this.backoff = 1000; // Reset backoff on successful connection
         this.state = 'connected';
         this.connecting = false;
         resolve();
       };
 
-      this.ws.onclose = () => {
+      ws.onclose = () => {
+        if (this.ws !== ws) return;
         this.state = 'disconnected';
 
         // If we were in the process of connecting, reject the promise
@@ -132,7 +138,8 @@ export class WebSocketTransport implements ClientTransport {
         this._scheduleReconnect();
       };
 
-      this.ws.onerror = error => {
+      ws.onerror = error => {
+        if (this.ws !== ws) return;
         this.state = 'error';
 
         // If we're in the connection phase, reject the promise
@@ -150,7 +157,8 @@ export class WebSocketTransport implements ClientTransport {
         console.error('WebSocket error:', error);
       };
 
-      this.ws.onmessage = event => {
+      ws.onmessage = event => {
+        if (this.ws !== ws) return;
         this.onMessage.emit(event.data);
       };
     } catch (error) {
@@ -181,11 +189,13 @@ export class WebSocketTransport implements ClientTransport {
     this.connecting = false;
 
     if (this.ws) {
-      // Only attempt to close if not already closed
-      if (this.ws.readyState !== WebSocket.CLOSED && this.ws.readyState !== WebSocket.CLOSING) {
-        this.ws.close();
-      }
+      // Clear the reference first so this socket's close/error events are stale no-ops
+      const ws = this.ws;
       this.ws = null;
+      // Only attempt to close if not already closed
+      if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+        ws.close();
+      }
     }
 
     this.state = 'disconnected';

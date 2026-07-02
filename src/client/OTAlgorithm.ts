@@ -64,6 +64,10 @@ export class OTAlgorithm implements ClientAlgorithm {
     // Serialize per-doc so a concurrent receive-rebase and this mint can't read the
     // same rev and clobber each other at the [docId, rev] store key (silent change loss).
     return this._withDocLock(docId, async () => {
+      // Re-check under the lock: ops arrays are shared with the doc's optimistic queue,
+      // and a receive-rebase that ran while we waited may have rebased them away.
+      if (ops.length === 0) return [];
+
       // Idempotent retry: if this exact caller-minted change id was already accepted on a
       // prior attempt (the submit RPC timed out *after* the hub had persisted it), return the
       // existing change instead of minting+persisting+applying a duplicate. Only runs on a
@@ -176,6 +180,22 @@ export class OTAlgorithm implements ClientAlgorithm {
     // For OT, nothing special needed here.
     // The server response (applyServerChanges) handles everything.
     // Pending changes remain until server commits them back.
+  }
+
+  async replacePendingChanges(docId: string, oldChanges: Change[], newChanges: Change[]): Promise<void> {
+    return this._withDocLock(docId, async () => {
+      // Preserve any changes minted after oldChanges was read, renumbered after the new queue.
+      // `newChanges` may be empty: splitting can collapse a pending set to nothing (e.g. an
+      // oversized @txt op whose delta carries no sendable ops breaks into zero pieces). The
+      // local edits then amount to a no-op — clear the old pending and renumber any survivors
+      // straight off the committed rev instead of reading `.rev` off an empty array.
+      const oldIds = new Set(oldChanges.map(c => c.id));
+      const current = await this.store.getPendingChanges(docId);
+      let rev = newChanges.length > 0 ? newChanges[newChanges.length - 1].rev : await this.store.getCommittedRev(docId);
+      const mintedSince = current.filter(c => !oldIds.has(c.id)).map(c => ({ ...c, rev: ++rev }));
+      // applyServerChanges with no server changes atomically replaces the pending queue
+      await this.store.applyServerChanges(docId, [], [...newChanges, ...mintedSince]);
+    });
   }
 
   async dropResolvedPending(docId: string, sentChanges: Change[], committedChanges: Change[]): Promise<number> {

@@ -66,6 +66,8 @@ export class OTServer implements PatchesServer {
 
   private readonly sessionTimeoutMillis: number;
   private readonly maxChangesPerVersion: number;
+  /** Per-doc FIFO mutex (see {@link _withDocLock}). */
+  private readonly _docLocks = new Map<string, Promise<unknown>>();
   readonly store: OTStoreBackend;
 
   /** Notifies listeners whenever a batch of changes is *successfully* committed. */
@@ -123,28 +125,30 @@ export class OTServer implements PatchesServer {
     options?: CommitChangesOptions
   ): Promise<{ changes: Change[]; docReloadRequired?: true }> {
     const clientId = getClientId();
-    const { catchupChanges, newChanges, docReloadRequired } = await commitChanges(
-      this.store,
-      docId,
-      changes,
-      this.sessionTimeoutMillis,
-      { ...options, maxChangesPerVersion: this.maxChangesPerVersion }
-    );
+    return this._withDocLock(docId, async () => {
+      const { catchupChanges, newChanges, docReloadRequired } = await commitChanges(
+        this.store,
+        docId,
+        changes,
+        this.sessionTimeoutMillis,
+        { ...options, maxChangesPerVersion: this.maxChangesPerVersion }
+      );
 
-    // Notify about newly committed changes (broadcast to other clients)
-    if (newChanges.length > 0) {
-      try {
-        await this.onChangesCommitted.emit(docId, newChanges, options, clientId);
-      } catch (error) {
-        console.error(`Failed to notify clients about committed changes for doc ${docId}:`, error);
+      // Notify about newly committed changes (broadcast to other clients)
+      if (newChanges.length > 0) {
+        try {
+          await this.onChangesCommitted.emit(docId, newChanges, options, clientId);
+        } catch (error) {
+          console.error(`Failed to notify clients about committed changes for doc ${docId}:`, error);
+        }
       }
-    }
 
-    const result: { changes: Change[]; docReloadRequired?: true } = {
-      changes: [...catchupChanges, ...newChanges],
-    };
-    if (docReloadRequired) result.docReloadRequired = true;
-    return result;
+      const result: { changes: Change[]; docReloadRequired?: true } = {
+        changes: [...catchupChanges, ...newChanges],
+      };
+      if (docReloadRequired) result.docReloadRequired = true;
+      return result;
+    });
   }
 
   /**
@@ -178,10 +182,12 @@ export class OTServer implements PatchesServer {
    */
   async deleteDoc(docId: string, options?: DeleteDocOptions): Promise<void> {
     const clientId = getClientId();
-    const rev = await this.store.getCurrentRev(docId);
-    await createTombstoneIfSupported(this.store, docId, rev, clientId, options?.skipTombstone);
-    await this.store.deleteDoc(docId);
-    await this.onDocDeleted.emit(docId, options, clientId);
+    return this._withDocLock(docId, async () => {
+      const rev = await this.store.getCurrentRev(docId);
+      await createTombstoneIfSupported(this.store, docId, rev, clientId, options?.skipTombstone);
+      await this.store.deleteDoc(docId);
+      await this.onDocDeleted.emit(docId, options, clientId);
+    });
   }
 
   /**
@@ -190,7 +196,7 @@ export class OTServer implements PatchesServer {
    * @returns True if tombstone was found and removed, false if no tombstone existed.
    */
   async undeleteDoc(docId: string): Promise<boolean> {
-    return removeTombstoneIfExists(this.store, docId);
+    return this._withDocLock(docId, () => removeTombstoneIfExists(this.store, docId));
   }
 
   // === Version Operations ===
@@ -212,5 +218,25 @@ export class OTServer implements PatchesServer {
       return null;
     }
     return version.id;
+  }
+
+  /**
+   * Run `fn` exclusively per `docId`: same-doc calls run one at a time, FIFO. Without this a
+   * `deleteDoc` can complete inside an in-flight commit's read-then-save window, so the commit
+   * lands after the store wipe — leaving a live tombstone plus an orphan change tail (and a
+   * broadcast for a deleted doc). Per-instance only; multi-instance deployments still rely on
+   * the store's `RevConflictError` guard for commit races.
+   */
+  private _withDocLock<R>(docId: string, fn: () => Promise<R>): Promise<R> {
+    const prior = this._docLocks.get(docId) ?? Promise.resolve();
+    const run = prior.then(fn, fn);
+    // Stored tail never rejects, so one failed op doesn't reject the whole chain; the caller
+    // still sees `run`'s real outcome. GC the map entry once this is the last queued op.
+    const tail = run.catch(() => undefined);
+    this._docLocks.set(docId, tail);
+    void tail.then(() => {
+      if (this._docLocks.get(docId) === tail) this._docLocks.delete(docId);
+    });
+    return run;
   }
 }

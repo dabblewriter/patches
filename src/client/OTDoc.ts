@@ -1,5 +1,6 @@
 import { createStateFromSnapshot } from '../algorithms/ot/client/createStateFromSnapshot.js';
 import { applyChanges as applyChangesToState } from '../algorithms/ot/shared/applyChanges.js';
+import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { Change, PatchesSnapshot } from '../types.js';
 import { BaseDoc } from './BaseDoc.js';
@@ -125,7 +126,10 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         const matchIndex = pendingOpKeys.indexOf(JSON.stringify(ops));
         if (matchIndex !== -1) {
           // Already applied via createStateFromSnapshot — consume the match and skip.
+          // Emptied in place so a mint still queued for this entry doesn't re-mint
+          // ops the snapshot already holds as pending.
           pendingOpKeys[matchIndex] = null as unknown as string;
+          ops.length = 0;
           continue;
         }
         try {
@@ -134,7 +138,9 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         } catch {
           // Optimistic ops created against the prior state may not apply cleanly
           // to the imported state (e.g., parent path was replaced). Drop them
-          // — the algorithm will retry/reissue any genuinely pending work.
+          // (emptied in place so a queued mint skips them) — the algorithm will
+          // retry/reissue any genuinely pending work.
+          ops.length = 0;
         }
       }
       this._optimisticOps = surviving;
@@ -147,10 +153,51 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
    */
   protected _recomputeState(): void {
     let newState: T = applyChangesToState(this._committedState, this._pendingChanges);
-    for (const ops of this._optimisticOps) {
-      newState = applyPatch(newState, ops, { strict: true });
-    }
+    this._optimisticOps = this._optimisticOps.filter(ops => {
+      try {
+        newState = applyPatch(newState, ops, { strict: true });
+        return true;
+      } catch {
+        // Ops invalidated by a rebase or rollback are dropped; emptied in place so
+        // a queued mint holding the same array skips them.
+        ops.length = 0;
+        return false;
+      }
+    });
     this.state = newState;
+  }
+
+  /**
+   * Rebases ops still awaiting their mint (queued by change() but not yet packaged
+   * into a Change) into the post-server frame. Without this, a server change landing
+   * between change() and its queued mint leaves the raw ops in the pre-server frame:
+   * _recomputeState re-applies them position-shifted and the mint stamps them at the
+   * new committedRev, committing misplaced ops verbatim.
+   *
+   * Arrays are mutated IN PLACE: the queued mint holds the same array reference that
+   * change() emitted, so transforming here retargets the mint too. Entries that
+   * transform away entirely are emptied (the mint skips empty ops) and dropped.
+   */
+  private _rebaseOptimisticOps(serverChanges: Change[]): void {
+    const tag = `optimistic-${Math.random().toString(36).slice(2)}`;
+    const synthetic: Change[] = this._optimisticOps.map((ops, i) => ({
+      id: `${tag}-${i}`,
+      ops,
+      rev: 0,
+      baseRev: 0,
+      createdAt: 0,
+      committedAt: 0,
+    }));
+    // Thread the optimistic queue behind the pending queue so the server ops advance
+    // through both frames in order — the same walk rebaseChanges does server-side.
+    const rebased = rebaseChanges(serverChanges, [...this._pendingChanges, ...synthetic]);
+    const opsById = new Map(rebased.map(c => [c.id, c.ops]));
+    this._optimisticOps = this._optimisticOps.filter((ops, i) => {
+      const newOps = opsById.get(`${tag}-${i}`) ?? [];
+      ops.length = 0;
+      ops.push(...newOps);
+      return ops.length > 0;
+    });
   }
 
   /**
@@ -189,6 +236,13 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // but defends against `[].every() === true` if a future refactor weakens the invariant.
       const priorPendingIds = new Set(this._pendingChanges.map(c => c.id));
       const isPureEcho = serverChanges.length > 0 && serverChanges.every(c => priorPendingIds.has(c.id));
+
+      // Must run against the OLD pending queue (the frame the optimistic ops live in),
+      // so before _pendingChanges is replaced below. Pure echoes need no rebase — the
+      // optimistic frames already include our own changes.
+      if (!isPureEcho && this._optimisticOps.length > 0) {
+        this._rebaseOptimisticOps(serverChanges);
+      }
 
       this._committedState = applyChangesToState(this._committedState, serverChanges);
       this._committedRev = serverChanges[serverChanges.length - 1].rev;

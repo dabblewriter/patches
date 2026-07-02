@@ -1,6 +1,7 @@
 import type { JSONPatchOpHandler } from '../types.js';
 import { getOpData } from '../utils/getOpData.js';
 import { log } from '../utils/log.js';
+import { shallowCopy } from '../utils/shallowCopy.js';
 import { updateRemovedOps } from '../utils/ops.js';
 import { isArrayPath } from '../utils/paths.js';
 import { updateArrayIndexes } from '../utils/updateArrayIndexes.js';
@@ -16,11 +17,14 @@ export const copy: JSONPatchOpHandler = {
       return `[op:copy] path not found: ${from}`;
     }
 
-    return add.apply(state, path, target[lastKey]);
+    // Insert a copy, not the live reference: the source may be a cached working copy from an
+    // earlier op in this patch, and inserting it at a second path would let later writes mutate
+    // both locations through the copy-on-write cache
+    return add.apply(state, path, shallowCopy(target[lastKey]));
   },
 
   invert(_state, { path }, value, changedObj, isIndex) {
-    if (path.endsWith('/-')) return { op: 'remove', path: path.replace('-', changedObj.length) };
+    if (path.endsWith('/-')) return { op: 'remove', path: path.slice(0, -1) + changedObj.length };
     else if (isIndex) return { op: 'remove', path };
     return value === undefined ? { op: 'remove', path } : { op: 'replace', path, value };
   },

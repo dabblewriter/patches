@@ -285,9 +285,9 @@ describe('OTServer', () => {
     });
 
     it('should handle offline sessions with batchId (divergent)', async () => {
-      const committedChange = { ...mockChange, id: 'committed' } as Change;
+      // A foreign committed change (different batch) = divergent
+      const committedChange = { ...mockChange, id: 'committed', batchId: undefined } as Change;
       vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue();
-      // Has committed changes = divergent
       vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
 
       await server.commitChanges('doc1', [mockChange]);
@@ -490,7 +490,9 @@ describe('assertVersionMetadata', () => {
   });
 
   it('should throw error for non-modifiable fields', () => {
-    const invalidFields = ['id', 'parentId', 'groupId', 'origin', 'startedAt', 'endedAt', 'rev', 'baseRev'];
+    // Mirrors the Disallowed list in EditableVersionMetadata — startRev/endRev (not the
+    // Change fields rev/baseRev) are the protected version range fields.
+    const invalidFields = ['id', 'parentId', 'groupId', 'origin', 'startedAt', 'endedAt', 'startRev', 'endRev'];
 
     invalidFields.forEach(field => {
       const metadata = { [field]: 'value' } as any;

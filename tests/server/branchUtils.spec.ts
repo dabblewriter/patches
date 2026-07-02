@@ -6,6 +6,7 @@ import {
   branchManagerApi,
   createBranchRecord,
   generateBranchId,
+  stripMergeWatermark,
   wrapMergeCommit,
 } from '../../src/server/branchUtils';
 import type { Branch } from '../../src/types';
@@ -167,6 +168,34 @@ describe('branchUtils', () => {
 
     it('should throw when branch is null', () => {
       expect(() => assertBranchExists(null, 'branch1')).toThrow('Branch with ID branch1 not found.');
+    });
+
+    it('should throw for a tombstoned branch', () => {
+      // Contract-compliant tombstones keep only id/docId/modifiedAt/deleted
+      const tombstone = {
+        id: 'branch1',
+        docId: 'doc1',
+        modifiedAt: Date.now(),
+        deleted: true,
+      } as unknown as Branch;
+
+      expect(() => assertBranchExists(tombstone, 'branch1')).toThrow('Branch branch1 has been deleted.');
+    });
+  });
+
+  describe('stripMergeWatermark', () => {
+    it('should remove lastMergedRev without mutating the input', () => {
+      const metadata = { name: 'Feature', lastMergedRev: 7 };
+
+      const result = stripMergeWatermark(metadata);
+
+      expect(result).toEqual({ name: 'Feature' });
+      expect(metadata.lastMergedRev).toBe(7);
+    });
+
+    it('should return metadata unchanged when no watermark present', () => {
+      const metadata = { name: 'Feature' };
+      expect(stripMergeWatermark(metadata)).toBe(metadata);
     });
   });
 

@@ -281,6 +281,76 @@ interface ListDoc {
   items: string[];
 }
 
+// Finding #29: a server change landing between change() and its queued mint must rebase
+// the still-unminted optimistic ops — IN PLACE, since the queued mint holds the same array
+// change() emitted. Otherwise _recomputeState re-applies raw ops position-shifted and the
+// mint stamps them at the post-server committedRev, committing misplaced ops verbatim.
+describe('OTDoc — optimistic ops rebase over interleaved server changes', () => {
+  let doc: InstanceType<typeof OTDoc<ListDoc>>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    doc = new OTDoc<ListDoc>('doc-1', { state: { items: ['a', 'b', 'c'] }, rev: 1, changes: [] });
+  });
+
+  it('rebases unminted optimistic ops (and the emitted array) when a foreign change arrives first', () => {
+    doc.change(patch => patch.add('/items/1', 'X'));
+    const emittedOps = (doc.onChange.emit as any).mock.calls[0][0];
+
+    doc.applyChanges([makeChange('c-foreign', 1, 2, [{ op: 'add', path: '/items/0', value: 'Z' }], true)]);
+
+    expect(doc.state.items).toEqual(['Z', 'a', 'X', 'b', 'c']);
+    // The queued mint shares this array; it must now mint the rebased op.
+    expect(emittedOps).toEqual([{ op: 'add', path: '/items/2', value: 'X' }]);
+  });
+
+  it('threads the foreign op past the pending queue before rebasing optimistic ops', () => {
+    doc = new OTDoc<ListDoc>('doc-1', {
+      state: { items: ['a', 'b', 'c'] },
+      rev: 1,
+      changes: [makeChange('c-p', 1, 2, [{ op: 'add', path: '/items/1', value: 'P' }], false)],
+    });
+    doc.change(patch => patch.add('/items/3', 'X'));
+    const emittedOps = (doc.onChange.emit as any).mock.calls[0][0];
+
+    // Server committed a foreign change at rev 2; our pending change rebased to rev 3.
+    doc.applyChanges([
+      makeChange('c-foreign', 1, 2, [{ op: 'add', path: '/items/0', value: 'Z' }], true),
+      makeChange('c-p', 2, 3, [{ op: 'add', path: '/items/2', value: 'P' }], false),
+    ]);
+
+    expect(doc.state.items).toEqual(['Z', 'a', 'P', 'b', 'X', 'c']);
+    expect(emittedOps).toEqual([{ op: 'add', path: '/items/4', value: 'X' }]);
+  });
+
+  it('drops (and empties in place) optimistic ops a server change invalidates, without throwing', () => {
+    doc.change(patch => patch.add('/items/1', 'X'));
+    const emittedOps = (doc.onChange.emit as any).mock.calls[0][0];
+
+    doc.applyChanges([makeChange('c-foreign', 1, 2, [{ op: 'replace', path: '/items', value: ['q'] }], true)]);
+
+    expect(doc.committedRev).toBe(2);
+    expect(doc.state.items).toEqual(['q']);
+    // Emptied in place so the queued mint sees no ops and skips.
+    expect(emittedOps).toEqual([]);
+    expect((doc as any)._optimisticOps).toEqual([]);
+  });
+
+  it('leaves optimistic ops untouched on a pure echo of pending changes', () => {
+    doc.change(patch => patch.add('/items/-', 'M'));
+    const mintedOps = (doc.onChange.emit as any).mock.calls[0][0];
+    doc.applyChanges([makeChange('c-mine', 1, 2, mintedOps, false)]);
+
+    doc.change(patch => patch.add('/items/-', 'N'));
+    const optimisticOps = (doc.onChange.emit as any).mock.calls[1][0];
+
+    doc.applyChanges([makeChange('c-mine', 1, 2, mintedOps, true)]);
+
+    expect(optimisticOps).toEqual([{ op: 'add', path: '/items/-', value: 'N' }]);
+    expect(doc.state.items).toEqual(['a', 'b', 'c', 'M', 'N']);
+  });
+});
+
 // Regression repro for SNAPIMP-1 (sync data-loss audit, 2026-06-24; live report DABBLE-WRITER-3-42
 // "manuscript changes revert and then duplicate / add other characters").
 //

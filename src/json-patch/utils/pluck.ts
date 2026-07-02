@@ -34,7 +34,8 @@ export function pluckWithShallowCopy(
         object.push(newItem);
         object = newItem;
       } else {
-        object = getValue(state, object[object.length - 1]);
+        // Assign the copy back into the array, or the write lands on an orphan
+        object = object[object.length - 1] = getValue(state, object[object.length - 1]);
       }
     } else {
       object = object[key] =

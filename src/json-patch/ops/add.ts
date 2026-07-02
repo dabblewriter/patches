@@ -44,7 +44,7 @@ export const add: JSONPatchOpHandler = {
   },
 
   invert(_state, { path }, value, changedObj, isIndex) {
-    if (path.endsWith('/-')) return { op: 'remove', path: path.replace('-', changedObj.length) };
+    if (path.endsWith('/-')) return { op: 'remove', path: path.slice(0, -1) + changedObj.length };
     else if (isIndex) return { op: 'remove', path };
     return value === undefined ? { op: 'remove', path } : { op: 'replace', path, value };
   },

@@ -53,6 +53,18 @@ describe('rebaseChanges', () => {
     expect(result[0].rev).toBe(6);
   });
 
+  it('transforms local changes against foreign server changes', () => {
+    const serverChange = createChange('server', 3, 2, [{ op: 'add', path: '/list/0', value: 'S' }]);
+    const localChange = createChange('local', 4, 2, [{ op: 'replace', path: '/list/1', value: 'edited' }]);
+
+    const result = rebaseChanges([serverChange], [localChange]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].ops).toEqual([{ op: 'replace', path: '/list/2', value: 'edited' }]);
+    expect(result[0].baseRev).toBe(3);
+    expect(result[0].rev).toBe(4);
+  });
+
   it('transforms each queued change in its own frame (off-by-N regression)', () => {
     // base "abc\n"; local queue: L1 inserts "12345" at 1, then L2 deletes the "2"
     // (offset 2 in L1's frame). Foreign server change deletes "b" (offset 1 in base).
@@ -68,6 +80,22 @@ describe('rebaseChanges', () => {
     const final = applyChanges(applyChanges(base, [S]), rebased);
 
     expect(textOf(final)).toBe('a1345c\n');
+  });
+
+  it('rebases each pending change in the coordinate space of the changes before it (list index regression)', () => {
+    // Confirmed TP1 regression (client side of transformIncomingChanges): a foreign add at /list/10 must not be
+    // destroyed by the second pending change, whose index was written after the first pending change's remove
+    const serverChange = createChange('server', 6, 5, [{ op: 'add', path: '/list/10', value: 'X' }]);
+    const local1 = createChange('l1', 6, 5, [{ op: 'remove', path: '/list/0' }]);
+    const local2 = createChange('l2', 7, 5, [{ op: 'replace', path: '/list/9', value: 'NEW' }]);
+
+    const result = rebaseChanges([serverChange], [local1, local2]);
+
+    expect(result).toHaveLength(2);
+    expect(result[0].ops).toEqual([{ op: 'remove', path: '/list/0' }]);
+    expect(result[1].ops).toEqual([{ op: 'replace', path: '/list/10', value: 'NEW' }]);
+    expect(result[0].rev).toBe(7);
+    expect(result[1].rev).toBe(8);
   });
 
   it('converges with the server transform for the same concurrent edits', () => {
@@ -118,6 +146,64 @@ describe('rebaseChanges', () => {
     expect(rebased).toHaveLength(1);
     expect(rebased[0].id).toBe('L2');
     expect(textOf(final)).toBe('XYbc\n');
+  });
+
+  it('transforms pending changes against foreign changes in the space after its own acknowledged change', () => {
+    // The client committed own1 (remove /list/0) after a foreign change it had not yet seen. The foreign change's
+    // ops are in the pre-own1 space, so they must be advanced over own1 before transforming the later pending
+    // change, which was written post-own1.
+    const foreign = createChange('f1', 4, 3, [{ op: 'remove', path: '/list/2' }]);
+    const own = createChange('own1', 5, 4, [{ op: 'remove', path: '/list/0' }]);
+    const pendingOwn = createChange('own1', 4, 3, [{ op: 'remove', path: '/list/0' }]);
+    const local2 = createChange('l2', 5, 3, [{ op: 'replace', path: '/list/1', value: 'C2' }]);
+
+    const result = rebaseChanges([foreign, own], [pendingOwn, local2]);
+
+    // In the post-own1 space the foreign remove is at /list/1 — the same element local2 replaces — so the replace
+    // becomes an add into the removed slot instead of surviving at a stale index
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('l2');
+    expect(result[0].ops).toEqual([{ op: 'add', path: '/list/1', value: 'C2' }]);
+    expect(result[0].baseRev).toBe(5);
+    expect(result[0].rev).toBe(6);
+  });
+
+  it('handles a mix of foreign and own changes across the server sequence', () => {
+    const serverChange1 = createChange('s1', 3, 2, [{ op: 'add', path: '/s1', value: 'data' }]);
+    const sharedChange = createChange('shared', 4, 3, [{ op: 'add', path: '/shared', value: 'data' }]);
+    const serverChange2 = createChange('s2', 5, 4, [{ op: 'add', path: '/s2', value: 'data' }]);
+
+    const localChange1 = createChange('l1', 6, 5, [{ op: 'add', path: '/l1', value: 'data' }]);
+    const localChange2 = createChange('l2', 7, 5, [{ op: 'add', path: '/l2', value: 'data' }]);
+
+    const result = rebaseChanges(
+      [serverChange1, sharedChange, serverChange2],
+      [localChange1, sharedChange, localChange2]
+    );
+
+    expect(result).toHaveLength(2);
+    expect(result[0].id).toBe('l1');
+    expect(result[1].id).toBe('l2');
+    expect(result[0].baseRev).toBe(5); // Last server change rev
+    expect(result[1].baseRev).toBe(5);
+    expect(result[0].rev).toBe(6);
+    expect(result[1].rev).toBe(7);
+  });
+
+  it('preserves other change properties during rebase', () => {
+    const serverChange = createChange('server', 3, 2, [{ op: 'add', path: '/server', value: 'data' }]);
+    const localChange = createChange('local', 4, 2, [{ op: 'add', path: '/local', value: 'data' }]);
+    localChange.createdAt = 1718450000000;
+    localChange.committedAt = 1718450001000;
+    (localChange as any).customField = 'test';
+
+    const result = rebaseChanges([serverChange], [localChange]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('local');
+    expect(result[0].createdAt).toBe(1718450000000);
+    expect(result[0].committedAt).toBe(1718450001000);
+    expect((result[0] as any).customField).toBe('test');
   });
 
   it('drops changes whose ops transform away without consuming a rev', () => {

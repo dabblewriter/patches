@@ -350,14 +350,18 @@ describe('LWWInMemoryStore', () => {
       expect(result?.changes).toHaveLength(0);
     });
 
-    it('should update committed rev', async () => {
+    it('does not advance committedRev (applyServerChanges owns it using the server rev)', async () => {
+      // The sending change's rev is client-minted. On a noop commit the server head
+      // does not advance, so bumping here would make the client skip the next real
+      // revision on catchup. The server's echoed response (applied after confirm via
+      // applyServerChanges) carries the true head rev.
       await store.saveDoc('doc1', createState({}, 5));
       const change = createChange('send1', 6, 5, [{ op: 'replace', path: '/title', value: 'Test', ts: Date.now() }]);
       await store.saveSendingChange('doc1', change);
       await store.confirmSendingChange('doc1');
 
       const rev = await store.getCommittedRev('doc1');
-      expect(rev).toBe(6);
+      expect(rev).toBe(5);
     });
 
     it('should delete sending change', async () => {
@@ -417,6 +421,33 @@ describe('LWWInMemoryStore', () => {
       const pendingOps = await store.getPendingOps('doc1');
       expect(pendingOps).toHaveLength(1);
       expect(pendingOps[0].path).toBe('/local');
+    });
+
+    it('applies ops in commit order so an older parent op cannot prune a newer child op', async () => {
+      // A flush response carries corrections before catchup ops, so a child
+      // correction (rev 3) can precede a parent catchup op (rev 2). Applied
+      // as-delivered, the parent's child-pruning would delete the newer value.
+      await store.applyServerChanges('doc1', [
+        createChange('c1', 3, 0, [
+          { op: 'replace', path: '/settings/theme', value: 'dark', ts: 200, rev: 3 },
+          { op: 'replace', path: '/settings', value: { theme: 'old', font: 'serif' }, ts: 100, rev: 2 },
+        ]),
+      ]);
+
+      const doc = await store.getDoc('doc1');
+      expect(doc?.state.settings).toEqual({ theme: 'dark', font: 'serif' });
+    });
+
+    it('applies ops in commit order so a newer parent op prunes an older child op', async () => {
+      await store.applyServerChanges('doc1', [
+        createChange('c1', 5, 0, [
+          { op: 'replace', path: '/settings', value: { font: 'serif' }, ts: 500, rev: 5 },
+          { op: 'replace', path: '/settings/theme', value: 'stale', ts: 300, rev: 3 },
+        ]),
+      ]);
+
+      const doc = await store.getDoc('doc1');
+      expect(doc?.state.settings).toEqual({ font: 'serif' });
     });
   });
 
@@ -552,8 +583,10 @@ describe('LWWInMemoryStore', () => {
       expect(doc?.state.count).toBe(5);
       expect(doc?.state.title).toBe('Updated');
 
-      // Confirm send
+      // Confirm send, then apply the server's echoed response (flush order) —
+      // applyServerChanges advances committedRev using the server's rev
       await store.confirmSendingChange('doc1');
+      await store.applyServerChanges('doc1', [createChange('send1', 1, 0, pendingOps)]);
 
       // Verify committed state
       doc = await store.getDoc('doc1');
@@ -613,6 +646,72 @@ describe('LWWInMemoryStore', () => {
       const remainingOps = await store.getPendingOps('doc1');
       expect(remainingOps).toHaveLength(1);
       expect(remainingOps[0].path).toBe('/score');
+    });
+  });
+
+  describe('committed op fidelity', () => {
+    it('rebuilds confirmed delta ops as deltas over the snapshot base', async () => {
+      await store.saveDoc('doc1', createState({ counter: 10 }, 3));
+      await store.savePendingOps('doc1', [{ op: '@inc', path: '/counter', value: 5, ts: 1000 }]);
+      const pendingOps = await store.getPendingOps('doc1');
+      await store.saveSendingChange('doc1', createChange('send1', 4, 3, pendingOps));
+      await store.confirmSendingChange('doc1');
+
+      const doc = await store.getDoc('doc1');
+      expect(doc?.state.counter).toBe(15);
+    });
+
+    it('replays confirmed removes as removes so deleted fields stay deleted', async () => {
+      await store.saveDoc('doc1', createState({ counter: 10, obsolete: 'x' }, 3));
+      await store.savePendingOps('doc1', [{ op: 'remove', path: '/obsolete', ts: 1000 }]);
+      const pendingOps = await store.getPendingOps('doc1');
+      await store.saveSendingChange('doc1', createChange('send1', 4, 3, pendingOps));
+      await store.confirmSendingChange('doc1');
+
+      const doc = await store.getDoc('doc1');
+      expect(doc?.state).toEqual({ counter: 10 });
+    });
+  });
+
+  describe('saveDoc with a server getDoc envelope', () => {
+    it('persists the envelope changes so uncompacted server fields survive', async () => {
+      // A server with no snapshot streams {state:{}, rev:1, changes:[all the ops]}
+      const envelope = {
+        state: {},
+        rev: 1,
+        changes: [
+          createChange('srv1', 1, 0, [
+            { op: 'replace', path: '/theme', value: 'dark', ts: 500 },
+            { op: 'replace', path: '/lang', value: 'en', ts: 500 },
+          ]),
+        ],
+      };
+      await store.saveDoc('doc1', envelope as PatchesState);
+
+      const doc = await store.getDoc('doc1');
+      expect(doc?.state).toEqual({ theme: 'dark', lang: 'en' });
+      expect(doc?.rev).toBe(1);
+    });
+  });
+
+  describe('partial confirmSendingChange', () => {
+    it('keeps unconfirmed ops in the sending slot until every batch is confirmed', async () => {
+      const ops: JSONPatchOp[] = [
+        { op: 'replace', path: '/a', value: 1, ts: 1000 },
+        { op: 'replace', path: '/b', value: 2, ts: 1000 },
+      ];
+      await store.savePendingOps('doc1', ops);
+      await store.saveSendingChange('doc1', createChange('send1', 4, 3, ops));
+
+      await store.confirmSendingChange('doc1', [ops[0]]);
+      const partiallyConfirmed = await store.getSendingChange('doc1');
+      expect(partiallyConfirmed?.ops).toEqual([ops[1]]);
+
+      await store.confirmSendingChange('doc1', [ops[1]]);
+      expect(await store.getSendingChange('doc1')).toBeNull();
+
+      const doc = await store.getDoc('doc1');
+      expect(doc?.state).toEqual({ a: 1, b: 2 });
     });
   });
 });

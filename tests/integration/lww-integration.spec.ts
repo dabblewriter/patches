@@ -138,8 +138,8 @@ class LWWTestHarness {
     // Server commits the changes - this triggers onChangesCommitted
     const responseChanges = await this.server.commitChanges(docId, pendingChanges);
 
-    // Confirm sent to client
-    await algorithm.confirmSent(docId, responseChanges.changes);
+    // Confirm the SENT changes (matching PatchesSync.flushDoc), not the server response
+    await algorithm.confirmSent(docId, pendingChanges);
 
     // Apply server response to sending client (updates committedRev, applies catchup ops)
     await algorithm.applyServerChanges(docId, responseChanges.changes, doc);
@@ -391,6 +391,87 @@ describe('LWW Integration', () => {
     });
   });
 
+  describe('in-flight send window', () => {
+    it('should shield the open doc from an older foreign broadcast while a change is in flight', async () => {
+      const docId = 'doc1';
+      const docA = harness.createClient('clientA', docId);
+      harness.createClient('clientB', docId);
+      const algorithmA = harness.getAlgorithm('clientA');
+
+      // A writes at time 2000 and the change enters the sending slot (in flight)
+      vi.setSystemTime(1700000002000);
+      await harness.makeChange('clientA', d => {
+        d.change((patch, path) => {
+          patch.replace(path.title, 'From A');
+        });
+      });
+      const inFlight = await algorithmA.getPendingToSend(docId);
+      expect(inFlight).not.toBeNull();
+
+      // B commits an OLDER write that broadcasts to A mid-flight
+      vi.setSystemTime(1700000001000);
+      await harness.makeChange('clientB', d => {
+        d.change((patch, path) => {
+          patch.replace(path.title, 'From B (older)');
+        });
+      });
+      const broadcastB = await harness.sendToServer('clientB');
+      await harness.receiveFromServer('clientA', broadcastB);
+
+      // The in-flight (newer) value must keep shielding the open doc
+      expect(docA.state.title).toBe('From A');
+
+      // Complete A's flush: everything converges on the newer in-flight value
+      const response = await harness.server.commitChanges(docId, inFlight!);
+      await algorithmA.confirmSent(docId, inFlight!);
+      await algorithmA.applyServerChanges(docId, response.changes, docA);
+
+      expect(docA.state.title).toBe('From A');
+      expect(await algorithmA.hasPending(docId)).toBe(false);
+      const serverOps = harness.serverStore.getDocData(docId)?.ops ?? [];
+      expect(serverOps).toContainEqual(expect.objectContaining({ path: '/title', value: 'From A' }));
+    });
+
+    it('should self-heal via the commit response when the in-flight change loses', async () => {
+      const docId = 'doc1';
+      const docA = harness.createClient('clientA', docId);
+      harness.createClient('clientB', docId);
+      const algorithmA = harness.getAlgorithm('clientA');
+
+      // A writes at time 1000 and the change enters the sending slot
+      vi.setSystemTime(1700000001000);
+      await harness.makeChange('clientA', d => {
+        d.change((patch, path) => {
+          patch.replace(path.title, 'From A (older)');
+        });
+      });
+      const inFlight = await algorithmA.getPendingToSend(docId);
+
+      // B commits a NEWER write that broadcasts to A mid-flight
+      vi.setSystemTime(1700000002000);
+      await harness.makeChange('clientB', d => {
+        d.change((patch, path) => {
+          patch.replace(path.title, 'From B');
+        });
+      });
+      const broadcastB = await harness.sendToServer('clientB');
+      await harness.receiveFromServer('clientA', broadcastB);
+
+      // During the send window the doc shows the optimistic local value
+      expect(docA.state.title).toBe('From A (older)');
+
+      // Complete A's flush: the server rejects the older write and its response
+      // (applied after confirmSent clears the sending slot) carries the winner
+      const response = await harness.server.commitChanges(docId, inFlight!);
+      await algorithmA.confirmSent(docId, inFlight!);
+      await algorithmA.applyServerChanges(docId, response.changes, docA);
+
+      expect(docA.state.title).toBe('From B');
+      const serverOps = harness.serverStore.getDocData(docId)?.ops ?? [];
+      expect(serverOps).toContainEqual(expect.objectContaining({ path: '/title', value: 'From B' }));
+    });
+  });
+
   describe('delta operations (combinable ops)', () => {
     it('should combine @inc operations', async () => {
       const docId = 'doc1';
@@ -425,9 +506,10 @@ describe('LWW Integration', () => {
       expect(ops[0].op).toBe('replace');
       expect(ops[0].value).toBe(8); // Delta applied to 0 = 8
 
-      // After sending, client's state should still be 18 (local state preserved)
-      // The sending client already applied changes locally, doesn't need broadcast
-      expect(doc.state.count).toBe(18);
+      // The server echoes the stored concrete value for sent delta paths, so the client
+      // converges with the server: the seeded local 10 was never committed server-side,
+      // so the authoritative value is 0 + 8 = 8 everywhere
+      expect(doc.state.count).toBe(8);
       expect(doc.committedRev).toBe(1);
     });
 
@@ -483,10 +565,10 @@ describe('LWW Integration', () => {
 
       const broadcast = await harness.sendToServer('clientA');
       const ops = broadcast[0].ops;
-      // The broadcast contains converted replace ops
-      // @min combines to min(5, 8) = 5, then applied to 0 (no server value) = min(0, 5) = 0
+      // The broadcast contains converted replace ops. A @min on a field with no server value
+      // sets the operand (matching client apply semantics): min(5, 8) = 5
       expect(ops[0].op).toBe('replace');
-      expect(ops[0].value).toBe(0); // min(0, 5) where 0 is the default
+      expect(ops[0].value).toBe(5);
 
       // After sending, client's state should still be 5 (local state preserved)
       expect(doc.state.count).toBe(5);

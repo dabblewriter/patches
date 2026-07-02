@@ -593,17 +593,44 @@ describe('commitChanges', () => {
     expect(result.newChanges).toEqual([transformedChange]);
   });
 
-  it('should exclude changes with matching batchId from committed changes', async () => {
-    const changes = [createChange('1', 1, 0)];
-    changes[0].batchId = 'test-batch';
+  it('should exclude same-batch committed changes from transformation but dedupe resent ids', async () => {
+    // A previous upload of this batch committed change 'a'. The client resends 'a' (lost ack) plus a new 'b'.
+    const previouslyCommitted = createChange('a', 1, 0);
+    previouslyCommitted.batchId = 'test-batch';
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(1);
+    vi.mocked(mockStore.listChanges).mockResolvedValue([previouslyCommitted]);
 
-    await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+    const resent = createChange('a', 1, 0);
+    resent.batchId = 'test-batch';
+    const fresh = createChange('b', 2, 0);
+    fresh.batchId = 'test-batch';
 
-    // The second listChanges call should filter by batchId
-    expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', {
-      startAfter: 0,
-      withoutBatchId: 'test-batch',
-    });
+    const result = await commitChanges(mockStore, 'doc1', [resent, fresh], sessionTimeoutMillis);
+
+    // 'a' must not be committed twice, and its committed copy is echoed back for confirmation
+    expect(result.catchupChanges).toEqual([previouslyCommitted]);
+    expect(result.newChanges).toHaveLength(1);
+    expect(result.newChanges[0].id).toBe('b');
+    expect(result.newChanges[0].rev).toBe(2);
+    expect(mockStore.saveChanges).toHaveBeenCalledTimes(1);
+    expect(mockStore.saveChanges).toHaveBeenCalledWith('doc1', [expect.objectContaining({ id: 'b', rev: 2 })]);
+  });
+
+  it('should renumber fast-forward changes from the authoritative tip', async () => {
+    // A second branch merge claims revs starting at the branch point, which would collide with the first merge
+    const firstMerge = createChange('m1', 6, 5);
+    firstMerge.batchId = 'branch1';
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(6);
+    vi.mocked(mockStore.listChanges).mockResolvedValue([firstMerge]);
+
+    const secondMerge = createChange('m2', 6, 5);
+    secondMerge.batchId = 'branch1';
+
+    const result = await commitChanges(mockStore, 'doc1', [secondMerge], sessionTimeoutMillis);
+
+    expect(result.newChanges).toHaveLength(1);
+    expect(result.newChanges[0].rev).toBe(7);
+    expect(mockStore.saveChanges).toHaveBeenCalledWith('doc1', [expect.objectContaining({ id: 'm2', rev: 7 })]);
   });
 
   describe('RevConflictError retry', () => {

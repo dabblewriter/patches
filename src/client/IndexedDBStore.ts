@@ -47,6 +47,7 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
   protected dbName?: string;
   protected dbPromise: Deferred<IDBDatabase>;
   protected external: boolean;
+  protected requiredStores = new Set(['docs', 'snapshots', 'branches']);
 
   /**
    * Signal emitted during database upgrade, allowing algorithm-specific stores
@@ -106,13 +107,40 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     }
   }
 
-  protected async initDB() {
-    if (!this.dbName) return;
-    const request = indexedDB.open(this.dbName, IndexedDBStore.DB_VERSION);
+  /**
+   * Registers object stores that must exist after the database opens. Algorithm-specific
+   * stores (OT, LWW) call this so a database first created by a factory with a different
+   * algorithm set (same dbName, same version, so no upgrade fires) gets its missing stores
+   * created via a version bump instead of failing every operation with NotFoundError.
+   */
+  requireStores(...names: string[]): void {
+    for (const name of names) this.requiredStores.add(name);
+  }
 
-    request.onerror = () => this.dbPromise.reject(request.error);
+  /** Opens the database. `version: null` opens at whatever version currently exists. */
+  protected async initDB(version: number | null = IndexedDBStore.DB_VERSION) {
+    if (!this.dbName) return;
+    const request = indexedDB.open(this.dbName, version ?? undefined);
+
+    request.onerror = () => {
+      // A previous session bumped past DB_VERSION to add missing stores — reopen at the current version
+      if (version !== null && request.error?.name === 'VersionError') {
+        this.initDB(null);
+      } else {
+        this.dbPromise.reject(request.error);
+      }
+    };
     request.onsuccess = () => {
-      this.db = request.result;
+      const db = request.result;
+      // Missing stores mean the database was created without this store's upgrade
+      // subscribers — bump the version so onupgradeneeded fires and creates them
+      const missing = [...this.requiredStores].some(name => !db.objectStoreNames.contains(name));
+      if (missing) {
+        db.close();
+        this.initDB(db.version + 1);
+        return;
+      }
+      this.db = db;
       this.dbPromise.resolve(this.db);
     };
 
@@ -166,6 +194,10 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
       this.db = null;
       this.dbPromise = deferred();
       this.dbPromise.reject(new Error('Store has been closed'));
+      // Nothing may ever await this promise again — swallow the rejection here so
+      // close() doesn't produce a guaranteed unhandled rejection. Later getDB()
+      // callers still receive the rejected promise.
+      this.dbPromise.promise.catch(() => undefined);
     }
   }
 

@@ -75,6 +75,21 @@ describe('transformIncomingChanges', () => {
     expect((result[0] as any).timestamp).toBe(12345);
   });
 
+  it('should transform against the ops of every committed change', () => {
+    const incomingChanges = [createChange(1, 0, [{ op: 'replace', path: '/list/2', value: 'edited' }])];
+
+    // Two committed changes each insert before the incoming change's index, shifting it by two
+    const committedChanges = [
+      createChange(0, 2, [{ op: 'add', path: '/list/0', value: 'x' }]),
+      createChange(1, 3, [{ op: 'add', path: '/list/0', value: 'y' }]),
+    ];
+
+    const result = transformIncomingChanges(incomingChanges, committedChanges, 3);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].ops).toEqual([{ op: 'replace', path: '/list/4', value: 'edited' }]);
+  });
+
   it('transforms each incoming change in its own frame (off-by-N regression)', () => {
     // base "abc\n"; incoming queue: L1 inserts "12345" at 1, then L2 deletes the "2"
     // (offset 2 in L1's frame). Committed foreign change deletes "b" (offset 1 in base).
@@ -102,6 +117,25 @@ describe('transformIncomingChanges', () => {
     expect(transformed[1].rev).toBe(3);
   });
 
+  it('transforms each change in the coordinate space of the changes before it in the batch', () => {
+    // Confirmed TP1 regression: doc rev 5 is {list:[e0..e11]}. A concurrent user committed add /list/10 "X" (rev 6).
+    // The incoming batch removes e0 then replaces the element at index 9 (e10 in its own space). Without advancing
+    // the committed ops over the first change, the second change lands on index 9 and destroys "X".
+    const committedChanges = [createChange(5, 6, [{ op: 'add', path: '/list/10', value: 'X' }])];
+    const incomingChanges = [
+      createChange(5, 0, [{ op: 'remove', path: '/list/0' }]),
+      createChange(5, 0, [{ op: 'replace', path: '/list/9', value: 'NEW' }]),
+    ];
+
+    const result = transformIncomingChanges(incomingChanges, committedChanges, 6);
+
+    expect(result).toHaveLength(2);
+    expect(result[0].rev).toBe(7);
+    expect(result[0].ops).toEqual([{ op: 'remove', path: '/list/0' }]);
+    expect(result[1].rev).toBe(8);
+    expect(result[1].ops).toEqual([{ op: 'replace', path: '/list/10', value: 'NEW' }]);
+  });
+
   describe('forceCommit option', () => {
     it('should preserve changes with empty ops when forceCommit is true', () => {
       const incomingChanges = [
@@ -118,6 +152,34 @@ describe('transformIncomingChanges', () => {
       expect(result[0].ops).toEqual([]);
       expect(result[1].rev).toBe(4);
       expect(result[1].ops).toEqual([{ op: 'replace', path: '/text', value: 'world' }]);
+    });
+
+    it('should preserve changes that arrive with empty ops when forceCommit is true', () => {
+      const incomingChanges = [
+        createChange(1, 0, []), // Empty ops
+        createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }]),
+      ];
+
+      const result = transformIncomingChanges(incomingChanges, [], 1, true);
+
+      expect(result).toHaveLength(2);
+      expect(result[0].rev).toBe(2);
+      expect(result[0].ops).toEqual([]);
+      expect(result[1].rev).toBe(3);
+      expect(result[1].ops).toEqual([{ op: 'replace', path: '/text', value: 'world' }]);
+    });
+
+    it('should still filter out changes with empty ops when forceCommit is false', () => {
+      const incomingChanges = [
+        createChange(1, 0, []), // Empty ops
+        createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }]),
+      ];
+
+      const result = transformIncomingChanges(incomingChanges, [], 1, false);
+
+      // Only the second change should be included
+      expect(result).toHaveLength(1);
+      expect(result[0].rev).toBe(2);
     });
   });
 });

@@ -1,6 +1,19 @@
 import { signal, type Signal, type SignalSubscriber, type Unsubscriber } from 'easy-signal';
-import { JSONRPCParseError } from '../error.js';
+import { JSONRPCError, JSONRPCParseError, StatusError } from '../error.js';
 import type { ClientTransport, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from './types.js';
+
+/**
+ * Rehydrates a JSON-RPC error object into a real Error. Positive codes are
+ * HTTP-style statuses (the StatusError contract callers branch on); negative
+ * codes are JSON-RPC protocol errors.
+ */
+function rehydrateError(error: { code?: number; message?: string; data?: any }): Error {
+  const message = error.message ?? 'Unknown error';
+  if (typeof error.code === 'number' && error.code > 0) {
+    return new StatusError(error.code, message, error.data);
+  }
+  return new JSONRPCError(error.code ?? -32000, message, error.data);
+}
 
 /**
  * Implementation of a JSON-RPC 2.0 client that communicates over a provided transport layer.
@@ -108,7 +121,7 @@ export class JSONRPCClient {
         if (pending) {
           this.pending.delete(response.id as number);
           if ('error' in response) {
-            pending.reject(response.error);
+            pending.reject(rehydrateError(response.error ?? {}));
           } else {
             pending.resolve(response.result);
           }

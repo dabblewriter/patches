@@ -134,3 +134,64 @@ describe('OTAlgorithm.handleDocChange — stable id survives storage-size batchi
     expect(await store.getPendingChanges('doc1')).toHaveLength(1);
   });
 });
+
+describe('OTAlgorithm.handleDocChange — stable id survives an actual split', () => {
+  let store: OTInMemoryStore;
+  let algorithm: OTAlgorithm;
+
+  beforeEach(async () => {
+    store = new OTInMemoryStore();
+    algorithm = new OTAlgorithm(store, { maxStorageBytes: 250 });
+    await store.trackDocs(['doc1']);
+  });
+
+  const bigOps = [
+    { op: 'add' as const, path: '/a', value: 'x'.repeat(120) },
+    { op: 'add' as const, path: '/b', value: 'y'.repeat(120) },
+  ];
+
+  it('keeps the caller-supplied id on the first split piece', async () => {
+    const changes = await algorithm.handleDocChange('doc1', bigOps, undefined, {}, 'cid-split');
+    expect(changes.length).toBeGreaterThan(1);
+    expect(changes[0].id).toBe('cid-split');
+  });
+
+  it('a retry after a split finds the stable id and does not duplicate', async () => {
+    const first = await algorithm.handleDocChange('doc1', bigOps, undefined, {}, 'cid-split');
+    const pieceCount = first.length;
+    expect(pieceCount).toBeGreaterThan(1);
+
+    const retry = await algorithm.handleDocChange('doc1', bigOps, undefined, {}, 'cid-split', true);
+
+    expect(retry.map(c => c.id)).toEqual(['cid-split']);
+    expect(await store.getPendingChanges('doc1')).toHaveLength(pieceCount); // no re-mint
+  });
+});
+
+describe('OTAlgorithm.replacePendingChanges', () => {
+  let store: OTInMemoryStore;
+  let algorithm: OTAlgorithm;
+
+  beforeEach(async () => {
+    store = new OTInMemoryStore();
+    algorithm = new OTAlgorithm(store);
+    await store.trackDocs(['doc1']);
+  });
+
+  it('replaces the queue and renumbers changes minted since the read', async () => {
+    const [original] = await algorithm.handleDocChange('doc1', op('/a', 1), undefined, {}, 'orig');
+    const oldQueue = await store.getPendingChanges('doc1');
+    // Simulate a concurrent mint after the flush read the queue
+    await algorithm.handleDocChange('doc1', op('/b', 2), undefined, {}, 'later');
+
+    const split: Change[] = [
+      { ...original, ops: [original.ops[0]], rev: 1 },
+      { ...original, id: 'piece-2', ops: [{ op: 'add', path: '/a2', value: 1 }], rev: 2 },
+    ];
+    await algorithm.replacePendingChanges('doc1', oldQueue, split);
+
+    const pending = await store.getPendingChanges('doc1');
+    expect(pending.map(c => c.id)).toEqual(['orig', 'piece-2', 'later']);
+    expect(pending.map(c => c.rev)).toEqual([1, 2, 3]);
+  });
+});

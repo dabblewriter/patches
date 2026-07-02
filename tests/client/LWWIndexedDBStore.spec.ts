@@ -312,6 +312,40 @@ describe('LWWIndexedDBStore', () => {
       expect(pendingStore.delete).not.toHaveBeenCalled();
       expect(sendingStore.delete).not.toHaveBeenCalled();
     });
+
+    it('persists the getDoc envelope changes as committed ops', async () => {
+      // A server with no snapshot streams {state:{}, rev:1, changes:[all the ops]} — those ops
+      // must be persisted or a fresh client stores an empty state at the head rev and never
+      // re-fetches the missing fields
+      const committedStore = createMockIDBStore();
+      mockStores.set('committedOps', committedStore);
+
+      const envelope = {
+        state: {},
+        rev: 1,
+        changes: [
+          {
+            id: 'srv1',
+            rev: 1,
+            baseRev: 0,
+            createdAt: 1,
+            committedAt: 1,
+            ops: [
+              { op: 'replace', path: '/theme', value: 'dark', ts: 500 },
+              { op: 'replace', path: '/lang', value: 'en', ts: 500 },
+            ],
+          },
+        ],
+      };
+      await store.saveDoc('doc1', envelope as PatchesState);
+
+      expect(committedStore.put).toHaveBeenCalledWith(
+        expect.objectContaining({ docId: 'doc1', path: '/theme', value: 'dark' })
+      );
+      expect(committedStore.put).toHaveBeenCalledWith(
+        expect.objectContaining({ docId: 'doc1', path: '/lang', value: 'en' })
+      );
+    });
   });
 
   describe('getPendingOps', () => {
@@ -497,7 +531,11 @@ describe('LWWIndexedDBStore', () => {
       );
     });
 
-    it('should update committed rev', async () => {
+    it('does not advance committedRev (applyServerChanges owns it using the server rev)', async () => {
+      // The sending change's rev is client-minted. On a noop commit the server head
+      // does not advance, so bumping here would make the client skip the next real
+      // revision on catchup. The server's echoed response (applied after confirm via
+      // applyServerChanges) carries the true head rev.
       const sendingStore = createMockIDBStore();
       sendingStore.data.set('"doc1"', {
         docId: 'doc1',
@@ -520,12 +558,8 @@ describe('LWWIndexedDBStore', () => {
 
       await store.confirmSendingChange('doc1');
 
-      expect(docsStore.put).toHaveBeenCalledWith(
-        expect.objectContaining({
-          docId: 'doc1',
-          committedRev: 6,
-        })
-      );
+      expect(docsStore.put).not.toHaveBeenCalled();
+      expect(docsStore.data.get('"doc1"')).toEqual({ docId: 'doc1', committedRev: 5 });
     });
 
     it('should delete sending change after confirmation', async () => {
@@ -623,38 +657,6 @@ describe('LWWIndexedDBStore', () => {
   });
 
   describe('algorithm field preservation', () => {
-    it('should include algorithm in confirmSendingChange fallback doc meta', async () => {
-      const sendingStore = createMockIDBStore();
-      sendingStore.data.set('"doc1"', {
-        docId: 'doc1',
-        change: {
-          id: 'c1',
-          rev: 6,
-          baseRev: 5,
-          ops: [],
-          createdAt: Date.now(),
-          committedAt: Date.now(),
-        },
-      });
-
-      const docsStore = createMockIDBStore();
-      // No existing doc meta — forces the fallback path
-      docsStore.get.mockResolvedValue(undefined);
-
-      mockStores.set('sendingChanges', sendingStore);
-      mockStores.set('committedOps', createMockIDBStore());
-      mockStores.set('docs', docsStore);
-
-      await store.confirmSendingChange('doc1');
-
-      expect(docsStore.put).toHaveBeenCalledWith(
-        expect.objectContaining({
-          docId: 'doc1',
-          algorithm: 'lww',
-        })
-      );
-    });
-
     it('should include algorithm in applyServerChanges fallback doc meta', async () => {
       const docsStore = createMockIDBStore();
       // No existing doc meta — forces the fallback path

@@ -174,6 +174,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   /** Pending per-doc retry timers + attempt counts for transient sync failures. */
   private _syncRetryTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
   private _syncRetryAttempts = new Map<string, number>();
+  /** Doc ids untracked while `syncAllKnownDocs` rebuilds from a store snapshot (null when no rebuild in flight). */
+  private _untrackedDuringResync: Set<string> | null = null;
+  /** Per-doc buffers for committed-change broadcasts landing while `_reloadDocFromServer` is in flight. */
+  private _reloadBuffers = new Map<string, Change[]>();
   /** Pending per-doc slow re-probe timers for docs latched at 'error' (see `_scheduleSyncReprobe`). */
   private _syncReprobeTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
   /**
@@ -392,6 +396,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (!this.state.connected) return;
     this.updateState({ syncStatus: 'syncing' });
 
+    this._untrackedDuringResync = new Set();
     try {
       // Sync pending branch metas first — branches must exist on the server
       // before their document content can be synced.
@@ -419,9 +424,6 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
       const activeDocIds = activeDocs.map((t: TrackedDoc) => t.docId);
 
-      // Ensure tracked set reflects only active docs for subscription purposes
-      this.trackedDocs = new Set(activeDocIds);
-
       // Populate synced map for active docs
       const syncedEntries: Record<string, DocSyncState> = {};
       for (const doc of activeDocs) {
@@ -439,12 +441,36 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         entry.isLoaded = existing?.isLoaded || isDocLoaded(entry.committedRev, entry.hasPending, entry.syncStatus);
         syncedEntries[doc.docId] = entry;
       }
-      this.docStates.state = syncedEntries;
+
+      // The store snapshot above is stale by however long the reads took. Merge it with what
+      // happened meanwhile instead of replacing wholesale: docs tracked during the window stay
+      // tracked (evicting them would silently stop sending their edits until the next
+      // reconnect), docs untracked during the window stay untracked. Both merges run in one
+      // synchronous block so track/untrack handlers can't interleave.
+      // `??` guards a connection flap overlapping two runs: the first run's finally may null
+      // the set while the second is mid-flight.
+      const untracked = this._untrackedDuringResync ?? new Set<string>();
+      const tracked = new Set(this.trackedDocs);
+      for (const id of activeDocIds) if (!untracked.has(id)) tracked.add(id);
+      for (const { docId } of deletedDocs) tracked.delete(docId);
+      this.trackedDocs = tracked;
+
+      const docStates: Record<string, DocSyncState> = {};
+      for (const [id, entry] of Object.entries(syncedEntries)) {
+        if (!untracked.has(id)) docStates[id] = entry;
+      }
+      for (const [id, entry] of Object.entries(this.docStates.state)) {
+        if (!(id in docStates) && tracked.has(id)) docStates[id] = entry;
+      }
+      this.docStates.state = docStates;
+
+      // Docs tracked during the window were already subscribed + synced by _handleDocsTracked
+      const syncIds = activeDocIds.filter(id => tracked.has(id));
 
       // Subscribe to active docs
-      if (activeDocIds.length > 0) {
+      if (syncIds.length > 0) {
         try {
-          const subscribeIds = this._filterSubscribeIds(activeDocIds);
+          const subscribeIds = this._filterSubscribeIds(syncIds);
           if (subscribeIds.length) {
             await this.connection.subscribe(subscribeIds);
           }
@@ -455,7 +481,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       }
 
       // Sync each active doc
-      const activeSyncPromises = activeDocIds.map((id: string) => this.syncDoc(id));
+      const activeSyncPromises = syncIds.map((id: string) => this.syncDoc(id));
 
       // Attempt to delete docs marked with tombstones
       const deletePromises = deletedDocs.map(async ({ docId }) => {
@@ -482,6 +508,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       const syncError = error instanceof Error ? error : new Error(String(error));
       this.updateState({ syncStatus: 'error', syncError });
       this.onError.emit(syncError);
+    } finally {
+      this._untrackedDuringResync = null;
     }
   }
 
@@ -520,7 +548,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           }
         } else {
           // No committed rev means this is a new doc - fetch from server
-          await this._reloadDocFromServer(docId, algorithm);
+          await this._reloadDocFromServer(docId, algorithm, true);
         }
       }
       this._updateDocSyncState(docId, { syncStatus: 'synced' });
@@ -601,7 +629,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * keeping pending/optimistic work (the store keeps pending across saveDoc; doc.import()
    * re-applies optimistic ops). Used to hydrate a brand-new doc (no committed rev) and to
    * recover when incremental catch-up can't proceed — a change that fails to apply (see the
-   * ApplyChangesError handling in syncDoc).
+   * ApplyChangesError handling in syncDoc) or a flush the server answered with
+   * docReloadRequired.
    *
    * Pending work is kept but NOT verbatim: it is first reconciled against the committed
    * tail the snapshot subsumes (see `ClientAlgorithm.reconcilePending`). A pending change
@@ -612,42 +641,110 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * the server's idempotency dedupe no longer covers (permanently duplicated content for
    * every collaborator). Survivors are transformed into the snapshot's frame — a pure op
    * transform that never applies the tail, so it works even though applying it just failed.
+   * `resolvedChanges` extends the resolved set with changes the caller already knows the
+   * server committed (e.g. a batch answered with docReloadRequired).
+   *
+   * Two races with the in-flight fetch are also handled:
+   *
+   * - A committed-change broadcast landing mid-fetch can't be applied — the store may not have
+   *   the doc yet, so the algorithm would drop it silently while the doc still reports
+   *   'synced'. Such broadcasts are buffered (see `_receiveCommittedChanges`) and reconciled
+   *   after the save: a contiguous tail applies directly, a gap pulls the authoritative tail.
+   * - A local change minted mid-fetch is based on rev 0, not the fetched snapshot. Installing
+   *   the snapshot would advance committedRev, and the next flush would re-stamp the change's
+   *   baseRev without transforming its ops — a root-replace "init" would then overwrite the
+   *   existing server doc, bypassing the server's baseRev-0 guard. With `flushPendingFirst`
+   *   (the brand-new-doc hydration path), flush at the true baseRev instead of installing,
+   *   keeping the server in the loop (it rejects root ops on an existing doc and heals the
+   *   rest via docReloadRequired).
    */
-  protected async _reloadDocFromServer(docId: string, algorithm: ClientAlgorithm): Promise<void> {
-    // Read the rev the local committed state (and thus pending) sits on BEFORE overwriting it.
-    const baseRev = await algorithm.getCommittedRev(docId);
-    const snapshot = await this.connection.getDoc(docId);
-    let reconciled = false;
-    let committedTail: Change[] = [];
-    if (algorithm.reconcilePending && snapshot.rev > baseRev && (await algorithm.hasPending(docId))) {
-      // Changes past the snapshot's rev are excluded: the snapshot doesn't contain them, so
-      // the normal catch-up path will deliver them and rebase pending against them itself.
-      committedTail = (await this.connection.getChangesSince(docId, baseRev)).filter(c => c.rev <= snapshot.rev);
-      if (committedTail.length > 0) {
-        await algorithm.reconcilePending(docId, committedTail);
-        reconciled = true;
+  protected async _reloadDocFromServer(
+    docId: string,
+    algorithm: ClientAlgorithm,
+    flushPendingFirst = false,
+    resolvedChanges: Change[] = []
+  ): Promise<void> {
+    this._reloadBuffers.set(docId, []);
+    try {
+      // Read the rev the local committed state (and thus pending) sits on BEFORE overwriting it.
+      const baseRev = await algorithm.getCommittedRev(docId);
+      const snapshot = await this.connection.getDoc(docId);
+      if (flushPendingFirst && snapshot.rev > 0 && (await algorithm.hasPending(docId))) {
+        await this.flushDoc(docId);
+        // A foreign broadcast that landed during the flush was parked in the reload buffer
+        // (see `_receiveCommittedChanges`) — drain it before the finally destroys the buffer,
+        // or the change is lost until the next full catch-up. The flush's commit response
+        // already advanced committedRev (the server returns catchup changes + our own
+        // committed changes, applied via `_applyServerChangesToDoc`), so a parked broadcast
+        // may overlap what the flush applied: the drain's `rev > committedRev` filter drops
+        // the overlap and its contiguity check refetches the authoritative tail on a gap.
+        // If flushDoc throws we deliberately skip the drain — the throw propagates to
+        // syncDoc's catch, whose retry/backoff re-runs the flush (its commit response
+        // carries the catchup changes the dropped broadcast contained) and the reconnect
+        // path re-syncs everything, so the buffered changes are recovered there.
+        await this._drainReloadBuffer(docId, await algorithm.getCommittedRev(docId));
+        return;
       }
+      let reconciled = false;
+      let committedTail: Change[] = [];
+      if (algorithm.reconcilePending && snapshot.rev > baseRev && (await algorithm.hasPending(docId))) {
+        // Changes past the snapshot's rev are excluded: the snapshot doesn't contain them, so
+        // the normal catch-up path will deliver them and rebase pending against them itself.
+        committedTail = (await this.connection.getChangesSince(docId, baseRev)).filter(c => c.rev <= snapshot.rev);
+        if (committedTail.length > 0) {
+          await algorithm.reconcilePending(docId, committedTail);
+          reconciled = true;
+        }
+      }
+      // Save via algorithm's store
+      await algorithm.store.saveDoc(docId, snapshot);
+      // Read back the actual committed rev (store may compute from changes)
+      const committedRev = await algorithm.getCommittedRev(docId);
+      this._updateDocSyncState(docId, {
+        committedRev,
+        // Reconciliation may have cleared every pending change (they were already committed);
+        // refresh the flag so the doc doesn't read as having unsynced work indefinitely.
+        ...(reconciled ? { hasPending: await algorithm.hasPending(docId) } : undefined),
+      });
+      // Re-read the snapshot from the algorithm's store so it includes any pending
+      // changes the store kept across saveDoc. Passing `changes: []` here would let
+      // doc.import() wipe in-memory pending state (OTDoc._pendingChanges) and LWW
+      // echo tracking (_inFlightOpKeys), diverging the doc from its store.
+      const fullSnapshot = await algorithm.loadDoc(docId);
+      if (fullSnapshot) {
+        // resolvedChanges + committedTail as the resolved set: the open doc's in-memory
+        // pending may still list changes reconcilePending just dropped as server-committed —
+        // without this, the pending-preserving union would re-add them and reintroduce the
+        // double-apply.
+        this._applySnapshotPreservingPending(docId, fullSnapshot, [...resolvedChanges, ...committedTail]);
+      }
+      await this._drainReloadBuffer(docId, committedRev);
+    } finally {
+      this._reloadBuffers.delete(docId);
     }
-    // Save via algorithm's store
-    await algorithm.store.saveDoc(docId, snapshot);
-    // Read back the actual committed rev (store may compute from changes)
-    const savedRev = await algorithm.getCommittedRev(docId);
-    this._updateDocSyncState(docId, {
-      committedRev: savedRev,
-      // Reconciliation may have cleared every pending change (they were already committed);
-      // refresh the flag so the doc doesn't read as having unsynced work indefinitely.
-      ...(reconciled ? { hasPending: await algorithm.hasPending(docId) } : undefined),
-    });
-    // Re-read the snapshot from the algorithm's store so it includes any pending
-    // changes the store kept across saveDoc. Passing `changes: []` here would let
-    // doc.import() wipe in-memory pending state (OTDoc._pendingChanges) and LWW
-    // echo tracking (_inFlightOpKeys), diverging the doc from its store.
-    const fullSnapshot = await algorithm.loadDoc(docId);
-    if (fullSnapshot) {
-      // committedTail as the resolved set: the open doc's in-memory pending may still
-      // list changes reconcilePending just dropped as server-committed — without this,
-      // the pending-preserving union would re-add them and reintroduce the double-apply.
-      this._applySnapshotPreservingPending(docId, fullSnapshot, committedTail);
+  }
+
+  /**
+   * Reconciles broadcasts parked in `_reloadBuffers` while `_reloadDocFromServer` was
+   * fetching/flushing: a contiguous tail past `committedRev` applies directly, a gap pulls
+   * the authoritative tail. Loops because applying is async and more may buffer meanwhile;
+   * the final empty check and the buffer removal (the caller's finally) share a microtask,
+   * so nothing slips between them. Must only run while the buffer entry still exists.
+   */
+  private async _drainReloadBuffer(docId: string, committedRev: number): Promise<void> {
+    let buffered = this._reloadBuffers.get(docId)!;
+    while (buffered.length > 0) {
+      this._reloadBuffers.set(docId, []);
+      const tail = buffered.filter(c => c.rev > committedRev);
+      if (tail.length > 0) {
+        const contiguous = tail.every((c, i) => c.rev === committedRev + 1 + i);
+        const changes = contiguous ? tail : await this.connection.getChangesSince(docId, committedRev);
+        if (changes.length > 0) {
+          await this._applyServerChangesToDoc(docId, changes);
+          committedRev = changes[changes.length - 1].rev;
+        }
+      }
+      buffered = this._reloadBuffers.get(docId)!;
     }
   }
 
@@ -713,6 +810,29 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         sizeCalculator: this.sizeCalculator,
       });
 
+      // Splitting an oversized change re-identifies and renumbers part of the queue. The store
+      // must hold exactly what we send: the commit echo clears pending by id, so a stored
+      // original whose pieces were sent under other ids would survive, re-apply on top of its
+      // own committed content, and duplicate it.
+      const flattened = batches.flat();
+      if (flattened.length !== pending.length) {
+        await algorithm.replacePendingChanges?.(docId, pending, flattened);
+        if (this.patches.getOpenDoc(docId)) {
+          const fullSnapshot = await algorithm.loadDoc(docId);
+          if (fullSnapshot) this.patches.applySnapshot(docId, fullSnapshot);
+        }
+        // Splitting collapsed every change to nothing (e.g. an oversized @txt op whose delta
+        // carries no sendable ops): the local edits amount to a no-op. The queue was cleared
+        // above (changes minted since the read survive in the store), so there is nothing to
+        // put on the wire — batches would be [[]] here. Report the store's real hasPending
+        // and finish; a change minted mid-replace re-triggers sync via its own onChange.
+        if (flattened.length === 0) {
+          const stillHasPending = await algorithm.hasPending(docId);
+          this._updateDocSyncState(docId, { hasPending: stillHasPending, syncStatus: 'synced' });
+          return;
+        }
+      }
+
       for (const changeBatch of batches) {
         if (!this.state.connected || onlineState.isOffline) {
           throw new Error('Disconnected during flush');
@@ -724,24 +844,17 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // Our local state is stale (baseRev:0 on existing doc). Confirm the sent
           // changes (they were committed), then reload the full state from the server.
           await algorithm.confirmSent(docId, changeBatch);
-          const snapshot = await this.connection.getDoc(docId);
-          await algorithm.store.saveDoc(docId, snapshot);
           // The batch WAS committed — the server transformed it onto its tip, so the
-          // snapshot just saved already contains its effects. OT's confirmSent is a
+          // snapshot reloaded below already contains its effects. OT's confirmSent is a
           // no-op (the normal path clears pending via the commit echo, which never
           // comes on this path), so drop the batch from the pending queue explicitly.
           // Leaving it there would re-apply its ops on import (duplicating content)
           // and re-send it on the next flush (re-committing it — the server's id
           // de-dup window `startAfter: baseRev` no longer covers the original commit).
           await algorithm.dropResolvedPending?.(docId, changeBatch, []);
-          this._updateDocSyncState(docId, { committedRev: snapshot.rev });
-          // Re-read from the algorithm's store so applySnapshot sees any pending the
-          // store kept (e.g., user kept typing during the commit roundtrip). Without
-          // this, doc.import() with `changes: []` wipes _pendingChanges / _inFlightOpKeys.
-          const fullSnapshot = await algorithm.loadDoc(docId);
-          if (fullSnapshot) {
-            this._applySnapshotPreservingPending(docId, fullSnapshot, changeBatch);
-          }
+          // Pass the batch as resolved so the pending-preserving import can't re-add it
+          // from the open doc's stale in-memory queue.
+          await this._reloadDocFromServer(docId, algorithm, false, changeBatch);
         } else {
           // Confirm sent first so server corrections (applied next) overwrite
           // any stale ops for fields the server won via LWW timestamp resolution.
@@ -792,6 +905,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   @blockable
   protected async _receiveCommittedChanges(docId: string, serverChanges: Change[]): Promise<void> {
+    // A broadcast landing while the doc's snapshot reload is in flight can't be applied yet —
+    // the store may not have the doc, so the algorithm would drop it silently while
+    // committedRev still advanced. Park it; the reload reconciles it after the save.
+    const reloadBuffer = this._reloadBuffers.get(docId);
+    if (reloadBuffer) {
+      reloadBuffer.push(...serverChanges);
+      return;
+    }
     try {
       await this._applyServerChangesToDoc(docId, serverChanges);
     } catch (err) {
@@ -934,7 +1055,15 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // Snapshot current subscriptions before adding new docs
     const alreadySubscribed = this._getActiveSubscriptions();
 
-    newIds.forEach(id => this.trackedDocs.add(id));
+    newIds.forEach(id => {
+      this.trackedDocs.add(id);
+      // A doc untracked then re-tracked inside one resync window must not keep its
+      // untracked mark: syncAllKnownDocs' merge treats the set as "untracked during the
+      // window and still untracked", and a stale mark there excludes the doc's fresh
+      // store entry from the rebuilt docStates — the doc would silently stop syncing
+      // until the next reconnect.
+      this._untrackedDuringResync?.delete(id);
+    });
 
     // Populate docAlgorithms Map
     if (algorithmName) {
@@ -991,12 +1120,15 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         if (subscribeIds.length) {
           await this.connection.subscribe(subscribeIds);
         }
-        // Trigger sync for newly tracked docs immediately
-        await Promise.all(newIds.map(id => this.syncDoc(id)));
       } catch (err) {
-        console.warn(`Failed to subscribe/sync newly tracked docs: ${newIds.join(', ')}`, err);
+        // A failed subscribe must not skip the initial sync below — a doc with offline
+        // pending changes would never send them (nothing retries a skipped syncDoc).
+        console.warn(`Failed to subscribe newly tracked docs: ${newIds.join(', ')}`, err);
         this.onError.emit(err as Error);
       }
+      // Trigger sync for newly tracked docs immediately. Per-doc failures are handled
+      // inside syncDoc (retry/backoff), so this never rejects.
+      await Promise.all(newIds.map(id => this.syncDoc(id)));
     }
   }
 
@@ -1007,9 +1139,12 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // Snapshot current subscriptions before removing docs
     const subscribedBefore = this._getActiveSubscriptions();
 
-    existingIds.forEach(id => this.trackedDocs.delete(id));
-    existingIds.forEach(id => this._clearSyncRetry(id));
-    existingIds.forEach(id => this._surfacedSyncErrors.delete(id));
+    existingIds.forEach(id => {
+      this.trackedDocs.delete(id);
+      this._untrackedDuringResync?.add(id);
+      this._clearSyncRetry(id);
+      this._surfacedSyncErrors.delete(id);
+    });
     batch(() => {
       existingIds.forEach(id => this._updateDocSyncState(id, undefined));
     });
@@ -1052,6 +1187,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     // Clean up tracking and local storage
     this.trackedDocs.delete(docId);
+    this._untrackedDuringResync?.add(docId);
     this._clearSyncRetry(docId);
     this._surfacedSyncErrors.delete(docId);
     this._updateDocSyncState(docId, undefined);

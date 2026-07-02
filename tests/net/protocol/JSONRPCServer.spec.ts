@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StatusError } from '../../../src/net/error';
 import { JSONRPCServer } from '../../../src/net/protocol/JSONRPCServer';
 import type { JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, Message } from '../../../src/net/protocol/types';
-import { getAuthContext } from '../../../src/net/serverContext';
+import { getAuthContext, getClientId } from '../../../src/net/serverContext';
 import type { AuthContext } from '../../../src/net/websocket/AuthorizationProvider';
 import { LWWServer } from '../../../src/server/LWWServer';
 import { OTServer } from '../../../src/server/OTServer';
@@ -436,6 +436,91 @@ describe('JSONRPCServer', () => {
 
       // After the handler completes, ctx should be cleared
       expect(getAuthContext()).toBeUndefined();
+    });
+  });
+
+  describe('register() auth context', () => {
+    class CtxServer {
+      static api = { getDoc: 'read' as const };
+      seenClientId: string | undefined;
+      async getDoc(docId: string) {
+        this.seenClientId = getClientId();
+        return { docId };
+      }
+    }
+
+    it('should expose the auth context to methods registered via register()', async () => {
+      const obj = new CtxServer();
+      server.register(obj);
+
+      const response = (await server.processMessage(
+        { jsonrpc: '2.0', id: 1, method: 'getDoc', params: ['doc1'] },
+        { clientId: 'clientA' }
+      )) as JsonRpcResponse;
+
+      expect(response.error).toBeUndefined();
+      expect(obj.seenClientId).toBe('clientA');
+    });
+
+    it('should expose the auth context when an auth provider is configured', async () => {
+      const auth = { canAccess: vi.fn().mockResolvedValue(true) };
+      const authServer = new JSONRPCServer({ auth });
+      const obj = new CtxServer();
+      authServer.register(obj);
+
+      await authServer.processMessage(
+        { jsonrpc: '2.0', id: 1, method: 'getDoc', params: ['doc1'] },
+        { clientId: 'clientB' }
+      );
+
+      expect(obj.seenClientId).toBe('clientB');
+    });
+
+    it('should clear the auth context after the method starts', async () => {
+      server.register(new CtxServer());
+
+      await server.processMessage({ jsonrpc: '2.0', id: 1, method: 'getDoc', params: ['doc1'] }, { clientId: 'x' });
+
+      expect(getAuthContext()).toBeUndefined();
+    });
+
+    it('should clear the auth context when the method throws synchronously', async () => {
+      class ThrowServer {
+        static api = { boom: 'read' as const };
+        boom(): any {
+          throw new StatusError(400, 'boom');
+        }
+      }
+      server.register(new ThrowServer());
+
+      const response = (await server.processMessage(
+        { jsonrpc: '2.0', id: 1, method: 'boom', params: ['doc1'] },
+        { clientId: 'x' }
+      )) as JsonRpcResponse;
+
+      expect(response.error?.code).toBe(400);
+      expect(getAuthContext()).toBeUndefined();
+    });
+  });
+
+  describe('StatusError data passthrough', () => {
+    it('should include StatusError data in the error response', async () => {
+      server.registerMethod('gone', () => {
+        throw new StatusError(410, 'DOC_DELETED: doc1', { deletedAt: '2026-01-01', lastRev: 5 });
+      });
+
+      const response = (await server.processMessage({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'gone',
+        params: ['doc1'],
+      })) as JsonRpcResponse;
+
+      expect(response.error).toEqual({
+        code: 410,
+        message: 'DOC_DELETED: doc1',
+        data: { deletedAt: '2026-01-01', lastRev: 5 },
+      });
     });
   });
 

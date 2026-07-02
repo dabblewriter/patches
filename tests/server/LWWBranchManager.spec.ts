@@ -183,6 +183,40 @@ describe('LWWBranchManager', () => {
 
       expect(branchId).toBe('custom-branch-id');
     });
+
+    it('should not mutate the source doc ops when copying to the branch', async () => {
+      // saveOps re-revs the ops it's given in place; passing the source's live op objects
+      // clobbered source revs to the branch's counter, breaking sinceRev catchup.
+      await server.commitChanges('doc1', [{ id: 'c1', ops: [{ op: 'replace', path: '/a', value: 1, ts: 1000 }] }]);
+      await server.commitChanges('doc1', [{ id: 'c2', ops: [{ op: 'replace', path: '/b', value: 2, ts: 1100 }] }]);
+      await server.commitChanges('doc1', [{ id: 'c3', ops: [{ op: 'replace', path: '/c', value: 3, ts: 1200 }] }]);
+
+      await branchManager.createBranch('doc1', 3);
+
+      const sourceOps = await store.listOps('doc1');
+      expect(sourceOps.map(op => op.rev).sort()).toEqual([1, 2, 3]);
+      const catchup = await server.getChangesSince('doc1', 2);
+      expect(catchup[0].ops.map(op => op.path)).toEqual(['/c']);
+    });
+
+    it('should keep the branch in its own rev-space so getDoc sees branch edits', async () => {
+      await server.commitChanges('doc1', [
+        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'v1', ts: 1000 }] },
+      ]);
+      await server.commitChanges('doc1', [
+        { id: 'c2', ops: [{ op: 'replace', path: '/name', value: 'v2', ts: 1500 }] },
+      ]);
+
+      const branchId = await branchManager.createBranch('doc1', 2);
+      await server.commitChanges(branchId, [
+        { id: 'c3', ops: [{ op: 'replace', path: '/name', value: 'BranchEdit', ts: 2000 }] },
+      ]);
+
+      // The copy commit is branch rev 1, the edit rev 2 — a snapshot stamped with the
+      // source's rev (2) would hide the edit from getDoc.
+      const branchDoc = await getDocState(server, branchId);
+      expect(branchDoc.state.name).toBe('BranchEdit');
+    });
   });
 
   describe('updateBranch', () => {
@@ -300,6 +334,60 @@ describe('LWWBranchManager', () => {
       expect(sourceDoc.state.name).toBe('SourceValue'); // ts=3000 > ts=2000
 
       const branches = await branchManager.listBranches('doc1');
+    });
+
+    it('should merge branch edits when branched from a source at rev >= 2', async () => {
+      // Regression: contentStartRev was computed in the source's rev-space while the branch's
+      // rev counter restarts at 1, silently excluding branch edits from the merge whenever the
+      // source rev was >= 2 at branch time.
+      await server.commitChanges('doc1', [
+        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'v1', ts: 1000 }] },
+      ]);
+      await server.commitChanges('doc1', [
+        { id: 'c2', ops: [{ op: 'replace', path: '/name', value: 'v2', ts: 1500 }] },
+      ]);
+
+      const branchId = await branchManager.createBranch('doc1', 2);
+      await server.commitChanges(branchId, [
+        { id: 'c3', ops: [{ op: 'replace', path: '/name', value: 'BranchEdit', ts: 2000 }] },
+      ]);
+
+      const result = await branchManager.mergeBranch(branchId);
+      expect(result).not.toEqual([]);
+
+      const sourceDoc = await getDocState(server, 'doc1');
+      expect(sourceDoc.state.name).toBe('BranchEdit');
+    });
+
+    it('should not let updateBranch rewind lastMergedRev', async () => {
+      await server.commitChanges('doc1', [
+        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'v1', ts: 1000 }] },
+      ]);
+      const branchId = await branchManager.createBranch('doc1', 1);
+      await server.commitChanges(branchId, [
+        { id: 'c2', ops: [{ op: 'replace', path: '/name', value: 'BranchEdit', ts: 2000 }] },
+      ]);
+      await branchManager.mergeBranch(branchId);
+
+      const merged = (await branchManager.listBranches('doc1'))[0].lastMergedRev;
+      expect(merged).toBeGreaterThan(0);
+
+      // A client pushing a stale local branch record must not move the merge cursor
+      await branchManager.updateBranch(branchId, { name: 'Renamed', lastMergedRev: 0 });
+
+      const branch = (await branchManager.listBranches('doc1'))[0];
+      expect(branch.name).toBe('Renamed');
+      expect(branch.lastMergedRev).toBe(merged);
+    });
+
+    it('should reject merging a deleted branch', async () => {
+      await server.commitChanges('doc1', [
+        { id: 'c1', ops: [{ op: 'replace', path: '/name', value: 'v1', ts: 1000 }] },
+      ]);
+      const branchId = await branchManager.createBranch('doc1', 1);
+      await branchManager.deleteBranch(branchId);
+
+      await expect(branchManager.mergeBranch(branchId)).rejects.toThrow(`Branch ${branchId} has been deleted.`);
     });
 
     it('should handle merge with multiple fields', async () => {

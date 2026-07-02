@@ -63,12 +63,31 @@ describe('WebRTCAwareness', () => {
       expect(mockTransport.connect).toHaveBeenCalled();
     });
 
-    it('should set myId from transport after connection', async () => {
-      mockTransport.id = 'test-peer-id';
-
+    it('should stamp the transport id even when it arrives after connect resolves', async () => {
+      // The signaling peer-welcome (which assigns the id) is a later network message, so the id
+      // is often undefined when connect() resolves
       await awareness.connect();
+      expect(mockTransport.id).toBeUndefined();
 
-      expect(awareness['myId']).toBe('test-peer-id');
+      mockTransport.id = 'test-peer-id';
+      awareness.localState = { data: 'test' };
+
+      expect(mockTransport.send).toHaveBeenCalledWith(JSON.stringify({ data: 'test', id: 'test-peer-id' }));
+    });
+
+    it('should send the stamped state to peers when the id arrived after localState was set', async () => {
+      await awareness.connect();
+      awareness.localState = { data: 'test' };
+      expect(mockTransport.send).not.toHaveBeenCalled(); // no id yet — receivers would drop it
+
+      // peer-welcome assigns the id, then the first peer connects
+      mockTransport.id = 'test-peer-id';
+      transportEventHandlers['peerConnect']('new-peer-id');
+
+      expect(mockTransport.send).toHaveBeenCalledWith(
+        JSON.stringify({ data: 'test', id: 'test-peer-id' }),
+        'new-peer-id'
+      );
     });
 
     it('should handle connection errors', async () => {
@@ -115,7 +134,7 @@ describe('WebRTCAwareness', () => {
 
   describe('localState property', () => {
     beforeEach(() => {
-      awareness['myId'] = 'my-peer-id';
+      mockTransport.id = 'my-peer-id';
     });
 
     it('should return current local state', () => {
@@ -140,7 +159,7 @@ describe('WebRTCAwareness', () => {
     });
 
     it('should handle setting state before peer ID is available', () => {
-      awareness['myId'] = undefined;
+      mockTransport.id = undefined;
       const newState = { data: 'test' };
 
       expect(() => {
@@ -151,23 +170,25 @@ describe('WebRTCAwareness', () => {
 
   describe('_addPeer method', () => {
     beforeEach(() => {
-      awareness['myId'] = 'my-peer-id';
+      mockTransport.id = 'my-peer-id';
     });
 
     it('should send local state to new peer if local state exists', () => {
-      awareness['_localState'] = { id: 'my-peer-id', data: 'test' };
+      awareness.localState = { data: 'test' };
+      mockTransport.send.mockClear();
 
       const addPeerHandler = transportEventHandlers['peerConnect'];
       addPeerHandler('new-peer-id');
 
       expect(mockTransport.send).toHaveBeenCalledWith(
-        JSON.stringify({ id: 'my-peer-id', data: 'test' }),
+        JSON.stringify({ data: 'test', id: 'my-peer-id' }),
         'new-peer-id'
       );
     });
 
-    it('should not send local state if local state has no id', () => {
-      awareness['_localState'] = { data: 'test' }; // No id
+    it('should not send local state if no id is available', () => {
+      mockTransport.id = undefined;
+      awareness.localState = { data: 'test' };
 
       const addPeerHandler = transportEventHandlers['peerConnect'];
       addPeerHandler('new-peer-id');
@@ -175,9 +196,7 @@ describe('WebRTCAwareness', () => {
       expect(mockTransport.send).not.toHaveBeenCalled();
     });
 
-    it('should not send local state if local state is empty', () => {
-      awareness['_localState'] = {};
-
+    it('should not send local state if local state was never set', () => {
       const addPeerHandler = transportEventHandlers['peerConnect'];
       addPeerHandler('new-peer-id');
 
@@ -246,8 +265,10 @@ describe('WebRTCAwareness', () => {
       expect(awareness.states).toEqual([peerState]);
     });
 
-    it('should update existing peer state', () => {
-      const initialStates = [{ id: 'peer1', data: 'old', other: 'keep' }];
+    it('should replace an existing peer state with the full state the peer sent', () => {
+      // Senders always transmit their complete state; merging would resurrect fields the
+      // sender removed (e.g. a cursor cleared on blur) and diverge from late-joining peers
+      const initialStates = [{ id: 'peer1', data: 'old', removed: 'stale' }];
       awareness['_states'] = initialStates;
 
       const updatedState = { id: 'peer1', data: 'new' };
@@ -255,7 +276,7 @@ describe('WebRTCAwareness', () => {
       const receiveDataHandler = transportEventHandlers['message'];
       receiveDataHandler(JSON.stringify(updatedState));
 
-      expect(awareness.states).toEqual([{ id: 'peer1', data: 'new', other: 'keep' }]);
+      expect(awareness.states).toEqual([{ id: 'peer1', data: 'new' }]);
     });
 
     it('should emit onUpdate when state is received', () => {
@@ -408,7 +429,7 @@ describe('WebRTCAwareness', () => {
       expect(awareness.states[0]).toEqual(complexState);
     });
 
-    it('should preserve existing properties when updating peer state', () => {
+    it('should drop properties the peer removed from its state', () => {
       const receiveDataHandler = transportEventHandlers['message'];
 
       // Initial state
@@ -420,17 +441,16 @@ describe('WebRTCAwareness', () => {
         })
       );
 
-      // Partial update (should preserve user info)
+      // The peer cleared its cursor (e.g. on blur) — its full state no longer carries it
       receiveDataHandler(
         JSON.stringify({
           id: 'peer1',
-          cursor: { line: 5, column: 10 },
+          user: { name: 'John' },
         })
       );
 
       expect(awareness.states[0]).toEqual({
         id: 'peer1',
-        cursor: { line: 5, column: 10 },
         user: { name: 'John' },
       });
     });

@@ -271,6 +271,28 @@ describe('OTInMemoryStore', () => {
       const result = await store.getPendingChanges('doc1');
       expect(result).toEqual([]);
     });
+
+    it('should drop already-stored revs on duplicated delivery', async () => {
+      // Echoes, re-broadcasts, and catchup overlapping a broadcast redeliver the same
+      // revision; appending it again would double-apply the ops on every getDoc rebuild
+      const c1 = createChange('c1', 1);
+      const c2 = createChange('c2', 2);
+      await store.applyServerChanges('doc1', [c1, c2], []);
+      await store.applyServerChanges('doc1', [c2], []);
+
+      const result = await store.getDoc('doc1');
+      expect(result?.state).toEqual({ appliedChanges: 2 });
+      expect(result?.rev).toBe(2);
+    });
+
+    it('should drop revs at or below the snapshot rev', async () => {
+      await store.saveDoc('doc1', createState({ text: 'hello' }, 5));
+      await store.applyServerChanges('doc1', [createChange('c5', 5), createChange('c6', 6)], []);
+
+      const result = await store.getDoc('doc1');
+      expect(result?.state).toEqual({ text: 'hello', appliedChanges: 1 });
+      expect(result?.rev).toBe(6);
+    });
   });
 
   describe('trackDocs', () => {

@@ -330,6 +330,55 @@ describe('PatchesSync', () => {
 
       expect(syncDocSpy).not.toHaveBeenCalled();
     });
+
+    it('should keep docs tracked concurrently during the rebuild window', async () => {
+      let releaseListDocs!: () => void;
+      const gate = new Promise<void>(resolve => (releaseListDocs = resolve));
+      mockAlgorithm.listDocs.mockImplementation(async () => {
+        await gate;
+        return [{ docId: 'doc1', committedRev: 5 }];
+      });
+      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      const syncAll = sync['syncAllKnownDocs']();
+      // Tracked while the store snapshot read is in flight
+      const trackHandler = vi.mocked(mockPatches.onTrackDocs).mock.calls[0][0];
+      await trackHandler(['docNew'], 'ot');
+      expect(sync['trackedDocs'].has('docNew')).toBe(true);
+
+      releaseListDocs();
+      await syncAll;
+
+      // The stale snapshot must not evict the concurrently tracked doc
+      expect(sync['trackedDocs'].has('docNew')).toBe(true);
+      expect(sync.docStates.state.docNew).toBeDefined();
+      expect(sync['trackedDocs'].has('doc1')).toBe(true);
+    });
+
+    it('should not resurrect docs untracked during the rebuild window', async () => {
+      let releaseListDocs!: () => void;
+      const gate = new Promise<void>(resolve => (releaseListDocs = resolve));
+      mockAlgorithm.listDocs.mockImplementation(async () => {
+        await gate;
+        // Stale snapshot: still lists doc2, untracked mid-rebuild below
+        return [
+          { docId: 'doc1', committedRev: 5 },
+          { docId: 'doc2', committedRev: 3 },
+        ];
+      });
+      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      const syncAll = sync['syncAllKnownDocs']();
+      const untrackHandler = vi.mocked(mockPatches.onUntrackDocs).mock.calls[0][0];
+      await untrackHandler(['doc2']);
+
+      releaseListDocs();
+      await syncAll;
+
+      expect(sync['trackedDocs'].has('doc2')).toBe(false);
+      expect(sync.docStates.state.doc2).toBeUndefined();
+      expect(sync.docStates.state.doc1).toBeDefined();
+    });
   });
 
   describe('syncDoc method', () => {
@@ -1265,6 +1314,22 @@ describe('PatchesSync', () => {
       expect(mockWebSocket.subscribe).not.toHaveBeenCalled();
     });
 
+    it('should still run the initial syncDoc when subscribe fails for newly tracked docs', async () => {
+      const trackHandler = vi.mocked(mockPatches.onTrackDocs).mock.calls[0][0];
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      const errors: Error[] = [];
+      sync.onError(err => errors.push(err));
+      mockWebSocket.subscribe.mockRejectedValue(new Error('transient subscribe failure'));
+
+      await trackHandler(['doc3', 'doc4'], 'ot');
+
+      // A failed subscribe surfaces but must not skip the initial sync — offline pending
+      // changes would otherwise never be sent (nothing retries a skipped syncDoc).
+      expect(errors).toHaveLength(1);
+      expect(syncDocSpy).toHaveBeenCalledWith('doc3');
+      expect(syncDocSpy).toHaveBeenCalledWith('doc4');
+    });
+
     it('should handle untracked documents', async () => {
       const untrackHandler = vi.mocked(mockPatches.onUntrackDocs).mock.calls[0][0];
 
@@ -1549,6 +1614,29 @@ describe('PatchesSync', () => {
         sync['_updateDocSyncState']('nonexistent', undefined);
 
         expect(handler).not.toHaveBeenCalled();
+      });
+
+      it('should not resurrect the entry when a doc is untracked mid-sync', async () => {
+        sync['updateState']({ connected: true });
+        let resolveGetChanges!: (changes: Change[]) => void;
+        mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+        mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+        mockWebSocket.getChangesSince.mockImplementation(
+          () => new Promise<Change[]>(resolve => (resolveGetChanges = resolve))
+        );
+
+        const syncPromise = sync['syncDoc']('doc1');
+        await vi.waitFor(() => expect(sync.docStates.state.doc1?.syncStatus).toBe('syncing'));
+
+        const untrackHandler = vi.mocked(mockPatches.onUntrackDocs).mock.calls[0][0];
+        await untrackHandler(['doc1']);
+        expect(sync.docStates.state.doc1).toBeUndefined();
+
+        resolveGetChanges([]);
+        await syncPromise;
+
+        // The 'synced' continuation must not recreate a ghost entry for the untracked doc
+        expect(sync.docStates.state.doc1).toBeUndefined();
       });
 
       it('should create new object reference on remove', () => {

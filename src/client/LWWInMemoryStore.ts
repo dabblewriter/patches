@@ -5,9 +5,14 @@ import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
 import type { LWWClientStore } from './LWWClientStore.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
+/** Sort ops in commit (rev) order, ts as tiebreak — mirrors the server's ordering. */
+function sortOpsByCommitOrder(ops: JSONPatchOp[]): JSONPatchOp[] {
+  return [...ops].sort((a, b) => (a.rev ?? 0) - (b.rev ?? 0) || (a.ts ?? 0) - (b.ts ?? 0));
+}
+
 interface LWWDocBuffers {
   snapshot?: { state: any; rev: number };
-  committedFields: Map<string, any>;
+  committedFields: Map<string, JSONPatchOp>;
   pendingOps: Map<string, JSONPatchOp>;
   sendingChange: Change | null;
   committedRev: number;
@@ -39,12 +44,9 @@ export class LWWInMemoryStore implements LWWClientStore {
     // Start with snapshot state
     let state = buf.snapshot?.state ? { ...buf.snapshot.state } : {};
 
-    // Apply committed fields (these are resolved values stored as replace ops)
-    const committedOps: JSONPatchOp[] = Array.from(buf.committedFields.entries()).map(([path, value]) => ({
-      op: 'replace',
-      path,
-      value,
-    }));
+    // Apply committed ops with their real op types: a confirmed delta must apply as a delta
+    // and a remove as a remove, or reloads diverge from the server
+    const committedOps: JSONPatchOp[] = Array.from(buf.committedFields.values());
     if (committedOps.length > 0) {
       state = applyPatch(state, committedOps, { partial: true });
     }
@@ -99,9 +101,18 @@ export class LWWInMemoryStore implements LWWClientStore {
    */
   async saveDoc(docId: string, docState: PatchesState): Promise<void> {
     const existing = this.docs.get(docId);
+    // A server getDoc envelope carries uncompacted ops in `changes` — its `rev` is the head
+    // revision but its `state` excludes those ops. Persist them or a fresh client stores an
+    // empty snapshot at the head rev and never re-fetches the missing fields.
+    const committedFields = new Map<string, JSONPatchOp>();
+    for (const change of (docState as PatchesSnapshot).changes ?? []) {
+      for (const op of change.ops) {
+        committedFields.set(op.path, op);
+      }
+    }
     this.docs.set(docId, {
       snapshot: { state: docState.state, rev: docState.rev },
-      committedFields: new Map(),
+      committedFields,
       pendingOps: existing?.pendingOps ?? new Map(),
       sendingChange: existing?.sendingChange ?? null,
       committedRev: docState.rev,
@@ -226,24 +237,32 @@ export class LWWInMemoryStore implements LWWClientStore {
    * Call this BEFORE applyServerChanges so that server corrections (which run
    * after) overwrite any stale ops for fields the server won via LWW.
    */
-  async confirmSendingChange(docId: string): Promise<void> {
+  async confirmSendingChange(docId: string, ops?: JSONPatchOp[]): Promise<void> {
     const buf = this.docs.get(docId);
     if (!buf?.sendingChange) return;
+
+    const confirmedPaths = ops && new Set(ops.map(op => op.path));
+    const confirmed = confirmedPaths
+      ? buf.sendingChange.ops.filter(op => confirmedPaths.has(op.path))
+      : buf.sendingChange.ops;
 
     // Move ops to committed fields, deleting child-path entries to match server
     // saveOps behavior. Without this, a parent write (e.g. replace /trash {}) leaves
     // stale child entries that re-create nested structure on doc rebuild.
-    for (const op of buf.sendingChange.ops) {
+    for (const op of confirmed) {
       const childPrefix = op.path + '/';
       for (const key of buf.committedFields.keys()) {
         if (key.startsWith(childPrefix)) buf.committedFields.delete(key);
       }
-      buf.committedFields.set(op.path, op.value);
+      buf.committedFields.set(op.path, op);
     }
 
-    // Update committed rev
-    if (buf.sendingChange.rev > buf.committedRev) {
-      buf.committedRev = buf.sendingChange.rev;
+    // Keep the unconfirmed remainder in the sending slot (a change split across wire batches)
+    // so a disconnect between batches resends it
+    const remaining = confirmedPaths ? buf.sendingChange.ops.filter(op => !confirmedPaths.has(op.path)) : [];
+    if (remaining.length > 0) {
+      buf.sendingChange = { ...buf.sendingChange, ops: remaining };
+      return;
     }
 
     buf.sendingChange = null;
@@ -258,14 +277,15 @@ export class LWWInMemoryStore implements LWWClientStore {
     // Store server ops, deleting child-path entries to match server saveOps behavior.
     // Without this, a parent write (e.g. replace /trash {}) leaves stale child entries
     // that re-create nested structure on doc rebuild.
-    for (const change of serverChanges) {
-      for (const op of change.ops) {
-        const childPrefix = op.path + '/';
-        for (const key of buf.committedFields.keys()) {
-          if (key.startsWith(childPrefix)) buf.committedFields.delete(key);
-        }
-        buf.committedFields.set(op.path, op.value);
+    // Apply in commit order — a flush response can carry corrections ahead of catchup
+    // ops (child@rev3 before parent@rev2), and an out-of-order parent write would prune
+    // the newer child value.
+    for (const op of sortOpsByCommitOrder(serverChanges.flatMap(change => change.ops))) {
+      const childPrefix = op.path + '/';
+      for (const key of buf.committedFields.keys()) {
+        if (key.startsWith(childPrefix)) buf.committedFields.delete(key);
       }
+      buf.committedFields.set(op.path, op);
     }
 
     // Note: Don't clear sendingChange here - these are changes from other clients,

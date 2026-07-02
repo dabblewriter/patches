@@ -43,8 +43,13 @@ export function getJSONByteSize(data: unknown): number {
  */
 export function breakChanges(changes: Change[], maxBytes: number, sizeCalculator?: SizeCalculator): Change[] {
   const results: Change[] = [];
+  // Splitting one change into N pieces occupies N revs, so every change after it shifts up
+  let revShift = 0;
   for (const change of changes) {
-    results.push(...breakSingleChange(change, maxBytes, sizeCalculator));
+    const shifted = revShift ? { ...change, rev: change.rev + revShift } : change;
+    const pieces = breakSingleChange(shifted, maxBytes, sizeCalculator);
+    revShift += pieces.length - 1;
+    results.push(...pieces);
   }
   return results;
 }
@@ -96,6 +101,10 @@ export function breakChangesIntoBatches(
     return [processedChanges];
   }
 
+  // Split any change too large for one wire batch (shouldn't happen if maxStorageBytes < maxPayloadBytes).
+  // breakChanges renumbers the whole queue so split pieces never collide with the revs that follow them.
+  processedChanges = breakChanges(processedChanges, maxPayloadBytes);
+
   const batchId = createId(12);
   const batches: Change[][] = [];
   let currentBatch: Change[] = [];
@@ -103,32 +112,19 @@ export function breakChangesIntoBatches(
 
   for (const change of processedChanges) {
     // Add batchId if breaking up
-    const changeWithBatchId = { ...change, batchId };
-    const individualActualSize = getJSONByteSize(changeWithBatchId);
-    let itemsToProcess: Change[];
+    const item = { ...change, batchId };
+    const itemActualSize = getJSONByteSize(item);
+    const itemSizeForBatching = itemActualSize + (currentBatch.length > 0 ? 1 : 0);
 
-    // If individual change exceeds wire limit (shouldn't happen if maxStorageBytes < maxPayloadBytes)
-    if (individualActualSize > maxPayloadBytes) {
-      // Break using wire limit (uncompressed)
-      itemsToProcess = breakSingleChange(changeWithBatchId, maxPayloadBytes).map(c => ({ ...c, batchId }));
-    } else {
-      itemsToProcess = [changeWithBatchId];
+    if (currentBatch.length > 0 && currentSize + itemSizeForBatching > maxPayloadBytes) {
+      batches.push(currentBatch);
+      currentBatch = [];
+      currentSize = 2;
     }
 
-    for (const item of itemsToProcess) {
-      const itemActualSize = getJSONByteSize(item);
-      const itemSizeForBatching = itemActualSize + (currentBatch.length > 0 ? 1 : 0);
-
-      if (currentBatch.length > 0 && currentSize + itemSizeForBatching > maxPayloadBytes) {
-        batches.push(currentBatch);
-        currentBatch = [];
-        currentSize = 2;
-      }
-
-      const actualItemContribution = itemActualSize + (currentBatch.length > 0 ? 1 : 0);
-      currentBatch.push(item);
-      currentSize += actualItemContribution;
-    }
+    const actualItemContribution = itemActualSize + (currentBatch.length > 0 ? 1 : 0);
+    currentBatch.push(item);
+    currentSize += actualItemContribution;
   }
 
   if (currentBatch.length > 0) {
@@ -160,6 +156,13 @@ function breakSingleChange(orig: Change, maxBytes: number, sizeCalculator?: Size
   const byOps: Change[] = [];
   let group: JSONPatchOp[] = [];
   let rev = orig.rev;
+
+  const finish = () => {
+    // The first piece keeps the original change's id: retries look the change up by its
+    // caller-supplied stable id, and the id must survive splitting for that linkage to hold
+    if (byOps.length > 0) byOps[0] = { ...byOps[0], id: orig.id };
+    return byOps;
+  };
 
   const flush = () => {
     if (!group.length) return;
@@ -202,7 +205,7 @@ function breakSingleChange(orig: Change, maxBytes: number, sizeCalculator?: Size
   }
 
   flush();
-  return byOps;
+  return finish();
 }
 
 /**

@@ -42,6 +42,7 @@ export class OTIndexedDBStore implements OTClientStore {
     this.db = !db || typeof db === 'string' ? new IndexedDBStore(db) : db;
 
     // Subscribe to upgrade event to create OT-specific stores
+    this.db.requireStores('committedChanges', 'pendingChanges');
     this.db.onUpgrade((db, _oldVersion, transaction) => {
       OTIndexedDBStore.upgradeStores(db, transaction);
     });
@@ -133,7 +134,9 @@ export class OTIndexedDBStore implements OTClientStore {
     }
 
     const snapshot = await snapshots.get<Snapshot>(docId);
-    const committed = await committedChanges.getAll<StoredChange>([docId, snapshot?.rev ?? 0], [docId, Infinity]);
+    // Lower bound excludes the snapshot rev — a change at rev == snapshot.rev is already
+    // baked into the snapshot state and would double-apply
+    const committed = await committedChanges.getAll<StoredChange>([docId, (snapshot?.rev ?? 0) + 1], [docId, Infinity]);
     const pending = await pendingChanges.getAll<StoredChange>([docId, 0], [docId, Infinity]);
 
     if (!snapshot && !committed.length && !pending.length) return undefined;
@@ -290,8 +293,12 @@ export class OTIndexedDBStore implements OTClientStore {
       'readwrite'
     );
 
-    // Save committed changes
-    await Promise.all(serverChanges.map(change => committedChangesStore.put<StoredChange>({ ...change, docId })));
+    // Save committed changes, dropping already-applied revs — duplicated deliveries
+    // (echo, re-broadcast, catchup overlapping a broadcast) would otherwise resurrect
+    // compacted rows and double-apply into the snapshot
+    const docMeta = await docsStore.get<TrackedDoc>(docId);
+    const newChanges = serverChanges.filter(change => change.rev > (docMeta?.committedRev ?? 0));
+    await Promise.all(newChanges.map(change => committedChangesStore.put<StoredChange>({ ...change, docId })));
 
     // Replace all pending changes with rebased versions
     await pendingChangesStore.delete([docId, 0], [docId, Infinity]);
@@ -318,11 +325,11 @@ export class OTIndexedDBStore implements OTClientStore {
     }
 
     // Update committedRev in the docs store
-    const lastCommittedRev = serverChanges.at(-1)?.rev;
+    const lastCommittedRev = newChanges.at(-1)?.rev;
     if (lastCommittedRev !== undefined) {
-      const docMeta = (await docsStore.get<TrackedDoc>(docId)) ?? { docId, committedRev: 0, algorithm: 'ot' as const };
-      if (lastCommittedRev > docMeta.committedRev) {
-        await docsStore.put({ ...docMeta, committedRev: lastCommittedRev, deleted: undefined });
+      const meta = docMeta ?? { docId, committedRev: 0, algorithm: 'ot' as const };
+      if (lastCommittedRev > meta.committedRev) {
+        await docsStore.put({ ...meta, committedRev: lastCommittedRev, deleted: undefined });
       }
     }
 

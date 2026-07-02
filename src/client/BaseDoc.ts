@@ -32,6 +32,11 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
    * means confirmation simply shifts from the front. The ops are stored (not
    * just counted) so _recomputeState() can reconstruct the full state when
    * server changes arrive during the optimistic window.
+   *
+   * Entry arrays are shared by reference with the pending mint (change() emits the
+   * same array it queues), so OTDoc can rebase them IN PLACE when server changes
+   * land before the mint runs — the mint then packages the rebased ops. An entry
+   * rebased away entirely is emptied and removed; its mint sees empty ops and skips.
    */
   protected _optimisticOps: JSONPatchOp[][] = [];
 
@@ -88,9 +93,20 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
     if (patch.ops.length === 0) {
       return;
     }
-    this.state = applyPatch(this.state, patch.ops, { strict: true });
-    this._optimisticOps.push(patch.ops);
+    this._applyOptimistic(patch.ops);
     this.onChange.emit(patch.ops);
+  }
+
+  /**
+   * Internal: applies raw ops optimistically to state and takes a slot in the FIFO
+   * confirmation queue — the same path change() uses. Called by Patches.submitDocChange
+   * so submitted ops hold their own 1:1 slot; without one, applyChanges' confirmation
+   * shift would consume a user change's slot instead (double-applying the user's ops
+   * and never applying the submitted ones).
+   */
+  _applyOptimistic(ops: JSONPatchOp[]): void {
+    this.state = applyPatch(this.state, ops, { strict: true });
+    this._optimisticOps.push(ops);
   }
 
   /**

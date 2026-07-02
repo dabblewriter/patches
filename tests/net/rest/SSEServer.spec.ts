@@ -90,6 +90,38 @@ describe('SSEServer', () => {
     });
   });
 
+  describe('stale disconnect after reconnect', () => {
+    it('should ignore a lagging disconnect from a replaced connection', async () => {
+      server.connect('client1');
+      await server.subscribe('client1', ['doc1']);
+
+      // Client reconnects while the old response is still open server-side
+      // (half-open connection); connect() force-closes the old writer.
+      const stream2 = server.connect('client1');
+
+      // The old response finally closes and the framework reports it late.
+      server.disconnect('client1');
+
+      // The fresh connection must stay live and keep receiving events.
+      expect(server.getConnectionIds()).toContain('client1');
+
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
+      const chunks = await readStream(stream2, 1);
+      expect(chunks[0]).toContain('event: changesCommitted');
+    });
+
+    it('should still process a genuine disconnect after swallowing a stale one', () => {
+      server.connect('client1');
+      server.connect('client1'); // reconnect replaces the live connection
+
+      server.disconnect('client1'); // stale close of the replaced connection
+      expect(server.getConnectionIds()).toContain('client1');
+
+      server.disconnect('client1'); // genuine close of the current connection
+      expect(server.getConnectionIds()).not.toContain('client1');
+    });
+  });
+
   describe('subscriptions', () => {
     beforeEach(() => {
       server.connect('client1');

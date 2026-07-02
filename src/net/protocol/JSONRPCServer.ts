@@ -127,7 +127,14 @@ export class JSONRPCServer {
         // that case — it would just be discarded unused.
         const params = this.auth ? buildNamedParams(paramNames, args) : undefined;
         await this.assertAccess(access, ctx, method, args, params);
-        return (obj as any)[method](...args);
+        // _dispatch cleared the context during the await above; re-establish it
+        // around the method's synchronous start so getClientId() works inside.
+        setAuthContext(ctx);
+        try {
+          return (obj as any)[method](...args);
+        } finally {
+          clearAuthContext();
+        }
       });
     }
   }
@@ -227,7 +234,7 @@ export class JSONRPCServer {
         return respond(response);
       } catch (err: any) {
         return respond(
-          rpcError(err?.code ?? -32000, err?.message ?? 'Server error', err?.code ? undefined : err?.stack, message.id)
+          rpcError(err?.code ?? -32000, err?.message ?? 'Server error', err?.code ? err?.data : err?.stack, message.id)
         );
       }
     } else {

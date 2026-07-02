@@ -140,6 +140,21 @@ export interface ClientAlgorithm {
   dropResolvedPending?(docId: string, sentChanges: Change[], committedChanges: Change[]): Promise<number>;
 
   /**
+   * Replaces pending changes with a re-split version of themselves (same content, different
+   * change boundaries/ids/revs). Sync calls this when flush-time batching had to split an
+   * oversized change: the store must hold exactly what is sent, or the commit echo can't clear
+   * the stored original by id and its content is duplicated. Changes minted after `oldChanges`
+   * was read are preserved (renumbered after the new queue).
+   *
+   * Optional — only OT splits changes.
+   *
+   * @param docId Document identifier
+   * @param oldChanges The pending changes the split was computed from
+   * @param newChanges The split replacement queue
+   */
+  replacePendingChanges?(docId: string, oldChanges: Change[], newChanges: Change[]): Promise<void>;
+
+  /**
    * Reconciles stored pending changes against a committed server tail WITHOUT applying that
    * tail to local state: pending changes the server has already committed (matched by change
    * id) are dropped, and the survivors are transformed into the tail's frame.

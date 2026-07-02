@@ -19,6 +19,8 @@ export function updateArrayPath(
   if (!path || !path.startsWith(thisPrefix)) return otherOp;
 
   const [otherIndex, end] = getIndexAndEnd(state, path, thisPrefix.length);
+  // Non-numeric segments under an array prefix (e.g. the append syntax /arr/-) have no index to shift
+  if (otherIndex === undefined) return otherOp;
   const opLike = getTypeLike(state, otherOp);
 
   // A bit of complex logic to handle moves upwards in an array. Since an item is removed earier in the array and added later, the other index is like it was one less (or this index was one more), so we correct it

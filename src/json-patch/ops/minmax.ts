@@ -20,7 +20,7 @@ export const max: JSONPatchOpHandler = {
   },
 
   transform(state, thisOp, otherOps) {
-    return updateRemovedOps(state, thisOp.path, otherOps, false, true);
+    return updateRemovedOps(state, thisOp.path, otherOps, true);
   },
 
   invert(state, op, value, changedObj, isIndex) {
@@ -49,7 +49,7 @@ export const min: JSONPatchOpHandler = {
   },
 
   transform(state, thisOp, otherOps) {
-    return updateRemovedOps(state, thisOp.path, otherOps, false, true);
+    return updateRemovedOps(state, thisOp.path, otherOps, true);
   },
 
   invert(state, op, value, changedObj, isIndex) {

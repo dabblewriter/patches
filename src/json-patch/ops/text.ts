@@ -57,19 +57,22 @@ export const text: JSONPatchOpHandler = {
     log('Transforming ', otherOps, ' against "@txt"', thisOp);
 
     const thisOps = toOps(thisOp.value);
-    return updateRemovedOps(state, thisOp.path, otherOps, false, true, thisOp.op, op => {
+    // Sequential @txt ops in otherOps each apply after the previous, so this op's delta must be advanced over each
+    // one to stay in the same coordinate space as the next
+    let thisDelta = thisOps && new Delta(thisOps);
+    return updateRemovedOps(state, thisOp.path, otherOps, true, thisOp.op, op => {
       if (op.path !== thisOp.path) return null; // If a subpath, it is overwritten
       const otherOpsArr = toOps(op.value);
-      if (!thisOps || !otherOpsArr) return null; // If not a delta, it is overwritten
-      const thisDelta = new Delta(thisOps);
-      let otherDelta = new Delta(otherOpsArr);
-      otherDelta = thisDelta.transform(otherDelta, true);
-      return { ...op, value: otherDelta.ops };
+      if (!thisDelta || !otherOpsArr) return null; // If not a delta, it is overwritten
+      const otherDelta = new Delta(otherOpsArr);
+      const transformed = thisDelta.transform(otherDelta, true);
+      thisDelta = otherDelta.transform(thisDelta, false);
+      return { ...op, value: transformed.ops };
     });
   },
 
   invert(state, { path, value }, oldValue: Delta, changedObj) {
-    if (path.endsWith('/-')) path = path.replace('-', changedObj.length);
+    if (path.endsWith('/-')) path = path.slice(0, -1) + changedObj.length;
     if (oldValue === undefined) return { op: 'remove', path };
     const ops = toOps(value);
     if (!ops) throw new Error(`Cannot invert @txt op at ${path}: value is not a Delta ops array`);

@@ -65,6 +65,10 @@ export const move: JSONPatchOpHandler = {
     // they won't be altered by `updateArrayIndexes`, then remove the markers afterwards
     otherOps = mapAndFilterOps(otherOps, otherOp => {
       if (removed) {
+        // The moved value was removed by an earlier op in this patch, so this side's state (moved then removed) now
+        // matches the space these ops were written in; mark them so the array shifts below leave them untouched
+        otherOp = { ...otherOp, path: '$' + otherOp.path };
+        if (otherOp.from) otherOp.from = '$' + otherOp.from;
         return otherOp;
       }
       const opLike = getTypeLike(state, otherOp);

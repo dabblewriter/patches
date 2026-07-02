@@ -1,15 +1,15 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { Delta } from '@dabble/delta';
+import { describe, expect, it } from 'vitest';
+import { applyChanges } from '../../../../src/algorithms/ot/shared/applyChanges';
 import { rebaseChanges } from '../../../../src/algorithms/ot/shared/rebaseChanges';
+import { transformIncomingChanges } from '../../../../src/algorithms/ot/server/transformIncomingChanges';
 import type { Change } from '../../../../src/types';
-import * as jsonPatchModule from '../../../../src/json-patch/JSONPatch';
 
-// Mock the dependencies
-vi.mock('../../../../src/json-patch/JSONPatch');
+// These tests run against the real transform machinery (no mocks): the off-by-N frame bug
+// this file guards against was invisible to mocked transforms.
 
 describe('rebaseChanges', () => {
-  const mockJSONPatch = vi.mocked(jsonPatchModule.JSONPatch);
-
-  const createChange = (id: string, rev: number, ops: any[], baseRev = rev - 1): Change => ({
+  const createChange = (id: string, rev: number, baseRev: number, ops: any[]): Change => ({
     id,
     rev,
     baseRev,
@@ -18,208 +18,118 @@ describe('rebaseChanges', () => {
     committedAt: 0,
   });
 
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
+  const txt = (value: any[]) => ({ op: '@txt', path: '/text', value });
 
-  it('should return local changes unchanged when no server changes', () => {
+  const textOf = (state: any): string =>
+    new Delta(state.text).ops.map((op: any) => (typeof op.insert === 'string' ? op.insert : '')).join('');
+
+  it('returns local changes unchanged when no server changes', () => {
     const localChanges = [
-      createChange('local1', 3, [{ op: 'add', path: '/test', value: 'hello' }]),
-      createChange('local2', 4, [{ op: 'add', path: '/count', value: 1 }]),
+      createChange('local1', 3, 2, [{ op: 'add', path: '/test', value: 'hello' }]),
+      createChange('local2', 4, 2, [{ op: 'add', path: '/count', value: 1 }]),
     ];
 
-    const result = rebaseChanges([], localChanges);
-
-    expect(result).toBe(localChanges);
+    expect(rebaseChanges([], localChanges)).toBe(localChanges);
   });
 
-  it('should return local changes unchanged when no local changes', () => {
-    const serverChanges = [createChange('server1', 3, [{ op: 'add', path: '/server', value: 'data' }])];
+  it('returns empty array when no local changes', () => {
+    const serverChanges = [createChange('server1', 3, 2, [{ op: 'add', path: '/server', value: 'data' }])];
 
-    const result = rebaseChanges(serverChanges, []);
-
-    expect(result).toEqual([]);
+    expect(rebaseChanges(serverChanges, [])).toEqual([]);
   });
 
-  it('should filter out local changes that exist in server changes', () => {
-    const sharedChange = createChange('shared', 3, [{ op: 'add', path: '/shared', value: 'data' }]);
-    const localOnlyChange = createChange('local', 4, [{ op: 'add', path: '/local', value: 'data' }]);
+  it('drops own committed changes from the queue untransformed', () => {
+    // Own change come back committed: later local changes were created on top of it,
+    // so they must pass through unchanged (no transform against our own ops).
+    const own = createChange('own', 5, 4, [txt([{ insert: 'X' }])]);
+    const later = createChange('later', 6, 4, [txt([{ retain: 2 }, { insert: 'Y' }])]);
 
-    const serverChanges = [sharedChange];
-    const localChanges = [sharedChange, localOnlyChange];
-
-    const mockTransform = vi.fn().mockReturnValue({ ops: localOnlyChange.ops });
-    const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(function () {
-      return mockPatch as any;
-    });
-
-    const result = rebaseChanges(serverChanges, localChanges);
+    const result = rebaseChanges([own], [own, later]);
 
     expect(result).toHaveLength(1);
-    expect(result[0].id).toBe('local');
-    expect(result[0].baseRev).toBe(3); // Updated to last server change rev
-    expect(result[0].rev).toBe(4); // Incremented from last server change
-  });
-
-  it('should transform local changes against server changes', () => {
-    const serverChange = createChange('server', 3, [{ op: 'add', path: '/server', value: 'data' }]);
-    const localChange = createChange('local', 4, [{ op: 'add', path: '/local', value: 'data' }]);
-
-    const transformedOps = [{ op: 'add', path: '/local_transformed', value: 'data' }];
-    const mockTransform = vi.fn().mockReturnValue({ ops: transformedOps });
-    const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(function () {
-      return mockPatch as any;
-    });
-
-    const result = rebaseChanges([serverChange], [localChange]);
-
-    expect(mockJSONPatch).toHaveBeenCalledWith([serverChange.ops].flat());
-    expect(mockTransform).toHaveBeenCalledWith(localChange.ops);
-    expect(result).toHaveLength(1);
-    expect(result[0].ops).toBe(transformedOps);
-    expect(result[0].baseRev).toBe(3);
-    expect(result[0].rev).toBe(4);
-  });
-
-  it('should update revision numbers correctly for multiple local changes', () => {
-    const serverChange = createChange('server', 5, [{ op: 'add', path: '/server', value: 'data' }]);
-    const localChange1 = createChange('local1', 3, [{ op: 'add', path: '/local1', value: 'data' }]);
-    const localChange2 = createChange('local2', 4, [{ op: 'add', path: '/local2', value: 'data' }]);
-
-    const mockTransform = vi
-      .fn()
-      .mockReturnValueOnce({ ops: [{ op: 'add', path: '/local1_t', value: 'data' }] })
-      .mockReturnValueOnce({ ops: [{ op: 'add', path: '/local2_t', value: 'data' }] });
-    const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(function () {
-      return mockPatch as any;
-    });
-
-    const result = rebaseChanges([serverChange], [localChange1, localChange2]);
-
-    expect(result).toHaveLength(2);
+    expect(result[0].id).toBe('later');
+    expect(result[0].ops).toEqual(later.ops);
     expect(result[0].baseRev).toBe(5);
     expect(result[0].rev).toBe(6);
-    expect(result[1].baseRev).toBe(5);
-    expect(result[1].rev).toBe(7);
   });
 
-  it('should filter out changes with empty ops after transformation', () => {
-    const serverChange = createChange('server', 3, [{ op: 'add', path: '/server', value: 'data' }]);
-    const localChange1 = createChange('local1', 4, [{ op: 'add', path: '/local1', value: 'data' }]);
-    const localChange2 = createChange('local2', 5, [{ op: 'add', path: '/local2', value: 'data' }]);
+  it('transforms each queued change in its own frame (off-by-N regression)', () => {
+    // base "abc\n"; local queue: L1 inserts "12345" at 1, then L2 deletes the "2"
+    // (offset 2 in L1's frame). Foreign server change deletes "b" (offset 1 in base).
+    // L2 must be transformed against the foreign delete *advanced through L1* (where it
+    // sits at offset 6), not the raw foreign delete — the old code shifted L2 to offset 1
+    // and deleted the "1" instead of the "2".
+    const base = { text: [{ insert: 'abc\n' }] };
+    const L1 = createChange('L1', 1, 0, [txt([{ retain: 1 }, { insert: '12345' }])]);
+    const L2 = createChange('L2', 2, 0, [txt([{ retain: 2 }, { delete: 1 }])]);
+    const S = createChange('S', 1, 0, [txt([{ retain: 1 }, { delete: 1 }])]);
 
-    const mockTransform = vi
-      .fn()
-      .mockReturnValueOnce({ ops: [] }) // Empty ops - should be filtered out
-      .mockReturnValueOnce({ ops: [{ op: 'add', path: '/local2_t', value: 'data' }] });
-    const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(function () {
-      return mockPatch as any;
-    });
+    const rebased = rebaseChanges([S], [L1, L2]);
+    const final = applyChanges(applyChanges(base, [S]), rebased);
 
-    const result = rebaseChanges([serverChange], [localChange1, localChange2]);
+    expect(textOf(final)).toBe('a1345c\n');
+  });
+
+  it('converges with the server transform for the same concurrent edits', () => {
+    const base = { text: [{ insert: 'abc\n' }] };
+    const L1 = createChange('L1', 1, 0, [txt([{ retain: 1 }, { insert: '12345' }])]);
+    const L2 = createChange('L2', 2, 0, [txt([{ retain: 2 }, { delete: 1 }])]);
+    const S = createChange('S', 1, 0, [txt([{ retain: 1 }, { delete: 1 }])]);
+
+    const clientFinal = applyChanges(applyChanges(base, [S]), rebaseChanges([S], [L1, L2]));
+    const serverFinal = applyChanges(applyChanges(base, [S]), transformIncomingChanges([L1, L2], [S], 1));
+
+    expect(textOf(clientFinal)).toBe(textOf(serverFinal));
+  });
+
+  it('advances multiple server changes through the queue in order', () => {
+    // base "abcdef\n"; two foreign deletes: "b" (offset 1), then "d" (offset 2 in the
+    // frame after the first delete). Local L1 appends "!" after "abcdef", local L2
+    // appends "?" after the "!". Both must shift left by 2.
+    const base = { text: [{ insert: 'abcdef\n' }] };
+    const S1 = createChange('S1', 1, 0, [txt([{ retain: 1 }, { delete: 1 }])]);
+    const S2 = createChange('S2', 2, 0, [txt([{ retain: 2 }, { delete: 1 }])]);
+    const L1 = createChange('L1', 1, 0, [txt([{ retain: 6 }, { insert: '!' }])]);
+    const L2 = createChange('L2', 2, 0, [txt([{ retain: 7 }, { insert: '?' }])]);
+
+    const rebased = rebaseChanges([S1, S2], [L1, L2]);
+    const final = applyChanges(applyChanges(base, [S1, S2]), rebased);
+
+    expect(textOf(final)).toBe('acef!?\n');
+    expect(rebased[0].baseRev).toBe(2);
+    expect(rebased[0].rev).toBe(3);
+    expect(rebased[1].rev).toBe(4);
+  });
+
+  it('handles own committed change interleaved with foreign changes', () => {
+    // Committed order: our L1 first, then a foreign change whose frame includes L1.
+    // The queue keeps L2 (created on top of L1); it must be transformed against the
+    // foreign change only.
+    const base = { text: [{ insert: 'abc\n' }] };
+    const L1 = createChange('L1', 1, 0, [txt([{ insert: 'X' }])]); // "Xabc\n"
+    const L2 = createChange('L2', 2, 0, [txt([{ retain: 2 }, { insert: 'Y' }])]); // "XaYbc\n"
+    const committedL1 = { ...L1, rev: 1, committedAt: 99 };
+    // Foreign S in the committed frame after L1: deletes the "a" at offset 1.
+    const S = createChange('S', 2, 1, [txt([{ retain: 1 }, { delete: 1 }])]);
+
+    const rebased = rebaseChanges([committedL1, S], [L1, L2]);
+    const final = applyChanges(applyChanges(base, [committedL1, S]), rebased);
+
+    expect(rebased).toHaveLength(1);
+    expect(rebased[0].id).toBe('L2');
+    expect(textOf(final)).toBe('XYbc\n');
+  });
+
+  it('drops changes whose ops transform away without consuming a rev', () => {
+    const S = createChange('S', 5, 4, [{ op: 'remove', path: '/item' }]);
+    const emptied = createChange('emptied', 5, 4, [{ op: 'replace', path: '/item/name', value: 'x' }]);
+    const kept = createChange('kept', 6, 4, [{ op: 'add', path: '/other', value: 1 }]);
+
+    const result = rebaseChanges([S], [emptied, kept]);
 
     expect(result).toHaveLength(1);
-    expect(result[0].id).toBe('local2');
-    expect(result[0].rev).toBe(4); // First assigned rev (dropped change does not consume a rev)
-  });
-
-  it('should handle multiple server changes', () => {
-    const serverChange1 = createChange('server1', 3, [{ op: 'add', path: '/s1', value: 'data' }]);
-    const serverChange2 = createChange('server2', 4, [{ op: 'add', path: '/s2', value: 'data' }]);
-    const localChange = createChange('local', 5, [{ op: 'add', path: '/local', value: 'data' }]);
-
-    const mockTransform = vi.fn().mockReturnValue({ ops: [{ op: 'add', path: '/local_t', value: 'data' }] });
-    const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(function () {
-      return mockPatch as any;
-    });
-
-    const result = rebaseChanges([serverChange1, serverChange2], [localChange]);
-
-    expect(mockJSONPatch).toHaveBeenCalledWith([...serverChange1.ops, ...serverChange2.ops]);
-    expect(result).toHaveLength(1);
-    expect(result[0].baseRev).toBe(4); // Last server change rev
-    expect(result[0].rev).toBe(5);
-  });
-
-  it('should exclude server changes that are also in local changes from transformation', () => {
-    const sharedChange = createChange('shared', 3, [{ op: 'add', path: '/shared', value: 'data' }]);
-    const serverOnlyChange = createChange('server', 4, [{ op: 'add', path: '/server', value: 'data' }]);
-    const localOnlyChange = createChange('local', 5, [{ op: 'add', path: '/local', value: 'data' }]);
-
-    const serverChanges = [sharedChange, serverOnlyChange];
-    const localChanges = [sharedChange, localOnlyChange];
-
-    const mockTransform = vi.fn().mockReturnValue({ ops: [{ op: 'add', path: '/local_t', value: 'data' }] });
-    const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(function () {
-      return mockPatch as any;
-    });
-
-    const result = rebaseChanges(serverChanges, localChanges);
-
-    // Should only transform against serverOnlyChange, not sharedChange
-    expect(mockJSONPatch).toHaveBeenCalledWith([serverOnlyChange.ops].flat());
-    expect(result).toHaveLength(1);
-    expect(result[0].id).toBe('local');
-  });
-
-  it('should preserve other change properties during rebase', () => {
-    const serverChange = createChange('server', 3, [{ op: 'add', path: '/server', value: 'data' }]);
-    const localChange = createChange('local', 4, [{ op: 'add', path: '/local', value: 'data' }]);
-    localChange.createdAt = 1718450000000;
-    localChange.committedAt = 1718450001000;
-    (localChange as any).customField = 'test';
-
-    const mockTransform = vi.fn().mockReturnValue({ ops: [{ op: 'add', path: '/local_t', value: 'data' }] });
-    const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(function () {
-      return mockPatch as any;
-    });
-
-    const result = rebaseChanges([serverChange], [localChange]);
-
-    expect(result).toHaveLength(1);
-    expect(result[0].id).toBe('local');
-    expect(result[0].createdAt).toBe(1718450000000);
-    expect(result[0].committedAt).toBe(1718450001000);
-    expect((result[0] as any).customField).toBe('test');
-  });
-
-  it('should handle complex scenario with mixed changes', () => {
-    const serverChange1 = createChange('s1', 3, [{ op: 'add', path: '/s1', value: 'data' }]);
-    const sharedChange = createChange('shared', 4, [{ op: 'add', path: '/shared', value: 'data' }]);
-    const serverChange2 = createChange('s2', 5, [{ op: 'add', path: '/s2', value: 'data' }]);
-
-    const localChange1 = createChange('l1', 6, [{ op: 'add', path: '/l1', value: 'data' }]);
-    const localChange2 = createChange('l2', 7, [{ op: 'add', path: '/l2', value: 'data' }]);
-
-    const serverChanges = [serverChange1, sharedChange, serverChange2];
-    const localChanges = [localChange1, sharedChange, localChange2];
-
-    const mockTransform = vi
-      .fn()
-      .mockReturnValueOnce({ ops: [{ op: 'add', path: '/l1_t', value: 'data' }] })
-      .mockReturnValueOnce({ ops: [{ op: 'add', path: '/l2_t', value: 'data' }] });
-    const mockPatch = { transform: mockTransform };
-    mockJSONPatch.mockImplementation(function () {
-      return mockPatch as any;
-    });
-
-    const result = rebaseChanges(serverChanges, localChanges);
-
-    // Should transform against s1 and s2, but not shared
-    expect(mockJSONPatch).toHaveBeenCalledWith([...serverChange1.ops, ...serverChange2.ops]);
-    expect(result).toHaveLength(2);
-    expect(result[0].id).toBe('l1');
-    expect(result[1].id).toBe('l2');
-    expect(result[0].baseRev).toBe(5); // Last server change rev
-    expect(result[1].baseRev).toBe(5);
+    expect(result[0].id).toBe('kept');
+    expect(result[0].baseRev).toBe(5);
     expect(result[0].rev).toBe(6);
-    expect(result[1].rev).toBe(7);
   });
 });

@@ -32,6 +32,10 @@ export interface JSONRPCServerOptions {
  *   • the unique `clientId` that identifies the connection in subscription
  *     calls.  How you generate that ID (auth token, random GUID, etc.) is left
  *     to the host application.
+ *
+ * Authorization is opt-in by design: without an {@link AuthorizationProvider}
+ * every registered method is callable by any connected client. Patches is a
+ * toolkit, not an end solution — production servers must supply `options.auth`.
  */
 export class JSONRPCServer {
   /** Map of fully-qualified JSON-RPC method → handler function */

@@ -203,6 +203,62 @@ describe('PatchesSync races', () => {
     });
   });
 
+  describe('broadcast parked during a flush-pending-first reload', () => {
+    it('reconciles a broadcast parked while the reload flushed pending instead of destroying it', async () => {
+      const store = new OTInMemoryStore();
+      const algorithm = new OTAlgorithm(store);
+      const patches = new Patches({ algorithms: { ot: algorithm } });
+
+      // The doc already exists on the server at rev 1.
+      const serverLog: Change[] = [makeChange(1, 0, '/title', 'Existing')];
+      const connection = makeConnection({
+        getDoc: vi.fn(async () => ({ state: applyChanges(null, serverLog), rev: serverLog.at(-1)!.rev })),
+        getChangesSince: vi.fn(async (_id: string, rev: number) => serverLog.filter(c => c.rev > rev)),
+        commitChanges: vi.fn(async (_docId: string, changes: Change[]) => {
+          // Commit at the tip. A transport is not required to signal docReloadRequired for
+          // a non-root baseRev-0 batch (LWW servers never do, OT batched continuations
+          // don't), so the flush-pending-first path can return without a snapshot reload.
+          const catchup = serverLog.filter(c => c.rev > (changes[0].baseRev ?? 0));
+          let rev = serverLog.at(-1)!.rev;
+          const committed = changes.map(c => ({ ...c, baseRev: rev, rev: ++rev, committedAt: Date.now() }));
+          serverLog.push(...committed);
+          // A foreign client commits right behind ours — its broadcast beats our RPC response.
+          const foreign = makeChange(rev + 1, rev, '/foreign', 'landed-during-flush');
+          serverLog.push(foreign);
+          connection.onChangesCommitted.emit('doc1', [foreign]);
+          await tick(); // let the broadcast park in the reload buffer before the RPC resolves
+          return { changes: [...catchup, ...committed] };
+        }),
+      });
+      sync = new PatchesSync(patches, connection as any);
+      // Focused on the reload path: block the auto syncDoc triggers so a queued follow-up's
+      // getChangesSince catch-up can't mask the buffer destruction this test guards against.
+      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      sync['updateState']({ connected: true });
+      await patches.trackDocs(['doc1']);
+
+      // A local edit exists before the reload flushes (the brand-new-doc hydration race).
+      await algorithm.handleDocChange(
+        'doc1',
+        [{ op: 'replace', path: '/note', value: 'minted before reload' }],
+        undefined,
+        {}
+      );
+
+      await sync['_reloadDocFromServer']('doc1', algorithm, true);
+
+      // The parked broadcast was reconciled by the reload itself — contiguous with the
+      // flush's commit echo, so applied directly without a getChangesSince round trip.
+      expect((await store.getDoc('doc1'))?.rev).toBe(3);
+      expect((await store.getDoc('doc1'))?.state).toEqual({
+        title: 'Existing',
+        note: 'minted before reload',
+        foreign: 'landed-during-flush',
+      });
+      expect(connection.getChangesSince).not.toHaveBeenCalled();
+    });
+  });
+
   describe('tracking racing syncAllKnownDocs', () => {
     function gateFirstListDocs(algorithm: OTAlgorithm) {
       let release!: () => void;

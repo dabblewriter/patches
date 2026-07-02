@@ -671,6 +671,18 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       const snapshot = await this.connection.getDoc(docId);
       if (flushPendingFirst && snapshot.rev > 0 && (await algorithm.hasPending(docId))) {
         await this.flushDoc(docId);
+        // A foreign broadcast that landed during the flush was parked in the reload buffer
+        // (see `_receiveCommittedChanges`) — drain it before the finally destroys the buffer,
+        // or the change is lost until the next full catch-up. The flush's commit response
+        // already advanced committedRev (the server returns catchup changes + our own
+        // committed changes, applied via `_applyServerChangesToDoc`), so a parked broadcast
+        // may overlap what the flush applied: the drain's `rev > committedRev` filter drops
+        // the overlap and its contiguity check refetches the authoritative tail on a gap.
+        // If flushDoc throws we deliberately skip the drain — the throw propagates to
+        // syncDoc's catch, whose retry/backoff re-runs the flush (its commit response
+        // carries the catchup changes the dropped broadcast contained) and the reconnect
+        // path re-syncs everything, so the buffered changes are recovered there.
+        await this._drainReloadBuffer(docId, await algorithm.getCommittedRev(docId));
         return;
       }
       let reconciled = false;
@@ -687,7 +699,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // Save via algorithm's store
       await algorithm.store.saveDoc(docId, snapshot);
       // Read back the actual committed rev (store may compute from changes)
-      let committedRev = await algorithm.getCommittedRev(docId);
+      const committedRev = await algorithm.getCommittedRev(docId);
       this._updateDocSyncState(docId, {
         committedRev,
         // Reconciliation may have cleared every pending change (they were already committed);
@@ -706,25 +718,33 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         // double-apply.
         this._applySnapshotPreservingPending(docId, fullSnapshot, [...resolvedChanges, ...committedTail]);
       }
-      // Reconcile buffered broadcasts. Loop because applying is async and more may buffer
-      // meanwhile; the final empty check and the buffer removal (finally) share a microtask,
-      // so nothing slips between them.
-      let buffered = this._reloadBuffers.get(docId)!;
-      while (buffered.length > 0) {
-        this._reloadBuffers.set(docId, []);
-        const tail = buffered.filter(c => c.rev > committedRev);
-        if (tail.length > 0) {
-          const contiguous = tail.every((c, i) => c.rev === committedRev + 1 + i);
-          const changes = contiguous ? tail : await this.connection.getChangesSince(docId, committedRev);
-          if (changes.length > 0) {
-            await this._applyServerChangesToDoc(docId, changes);
-            committedRev = changes[changes.length - 1].rev;
-          }
-        }
-        buffered = this._reloadBuffers.get(docId)!;
-      }
+      await this._drainReloadBuffer(docId, committedRev);
     } finally {
       this._reloadBuffers.delete(docId);
+    }
+  }
+
+  /**
+   * Reconciles broadcasts parked in `_reloadBuffers` while `_reloadDocFromServer` was
+   * fetching/flushing: a contiguous tail past `committedRev` applies directly, a gap pulls
+   * the authoritative tail. Loops because applying is async and more may buffer meanwhile;
+   * the final empty check and the buffer removal (the caller's finally) share a microtask,
+   * so nothing slips between them. Must only run while the buffer entry still exists.
+   */
+  private async _drainReloadBuffer(docId: string, committedRev: number): Promise<void> {
+    let buffered = this._reloadBuffers.get(docId)!;
+    while (buffered.length > 0) {
+      this._reloadBuffers.set(docId, []);
+      const tail = buffered.filter(c => c.rev > committedRev);
+      if (tail.length > 0) {
+        const contiguous = tail.every((c, i) => c.rev === committedRev + 1 + i);
+        const changes = contiguous ? tail : await this.connection.getChangesSince(docId, committedRev);
+        if (changes.length > 0) {
+          await this._applyServerChangesToDoc(docId, changes);
+          committedRev = changes[changes.length - 1].rev;
+        }
+      }
+      buffered = this._reloadBuffers.get(docId)!;
     }
   }
 

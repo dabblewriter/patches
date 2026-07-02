@@ -312,6 +312,40 @@ describe('LWWIndexedDBStore', () => {
       expect(pendingStore.delete).not.toHaveBeenCalled();
       expect(sendingStore.delete).not.toHaveBeenCalled();
     });
+
+    it('persists the getDoc envelope changes as committed ops', async () => {
+      // A server with no snapshot streams {state:{}, rev:1, changes:[all the ops]} — those ops
+      // must be persisted or a fresh client stores an empty state at the head rev and never
+      // re-fetches the missing fields
+      const committedStore = createMockIDBStore();
+      mockStores.set('committedOps', committedStore);
+
+      const envelope = {
+        state: {},
+        rev: 1,
+        changes: [
+          {
+            id: 'srv1',
+            rev: 1,
+            baseRev: 0,
+            createdAt: 1,
+            committedAt: 1,
+            ops: [
+              { op: 'replace', path: '/theme', value: 'dark', ts: 500 },
+              { op: 'replace', path: '/lang', value: 'en', ts: 500 },
+            ],
+          },
+        ],
+      };
+      await store.saveDoc('doc1', envelope as PatchesState);
+
+      expect(committedStore.put).toHaveBeenCalledWith(
+        expect.objectContaining({ docId: 'doc1', path: '/theme', value: 'dark' })
+      );
+      expect(committedStore.put).toHaveBeenCalledWith(
+        expect.objectContaining({ docId: 'doc1', path: '/lang', value: 'en' })
+      );
+    });
   });
 
   describe('getPendingOps', () => {

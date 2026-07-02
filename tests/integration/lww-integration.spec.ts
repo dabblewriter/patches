@@ -138,8 +138,8 @@ class LWWTestHarness {
     // Server commits the changes - this triggers onChangesCommitted
     const responseChanges = await this.server.commitChanges(docId, pendingChanges);
 
-    // Confirm sent to client
-    await algorithm.confirmSent(docId, responseChanges.changes);
+    // Confirm the SENT changes (matching PatchesSync.flushDoc), not the server response
+    await algorithm.confirmSent(docId, pendingChanges);
 
     // Apply server response to sending client (updates committedRev, applies catchup ops)
     await algorithm.applyServerChanges(docId, responseChanges.changes, doc);
@@ -425,9 +425,10 @@ describe('LWW Integration', () => {
       expect(ops[0].op).toBe('replace');
       expect(ops[0].value).toBe(8); // Delta applied to 0 = 8
 
-      // After sending, client's state should still be 18 (local state preserved)
-      // The sending client already applied changes locally, doesn't need broadcast
-      expect(doc.state.count).toBe(18);
+      // The server echoes the stored concrete value for sent delta paths, so the client
+      // converges with the server: the seeded local 10 was never committed server-side,
+      // so the authoritative value is 0 + 8 = 8 everywhere
+      expect(doc.state.count).toBe(8);
       expect(doc.committedRev).toBe(1);
     });
 
@@ -483,10 +484,10 @@ describe('LWW Integration', () => {
 
       const broadcast = await harness.sendToServer('clientA');
       const ops = broadcast[0].ops;
-      // The broadcast contains converted replace ops
-      // @min combines to min(5, 8) = 5, then applied to 0 (no server value) = min(0, 5) = 0
+      // The broadcast contains converted replace ops. A @min on a field with no server value
+      // sets the operand (matching client apply semantics): min(5, 8) = 5
       expect(ops[0].op).toBe('replace');
-      expect(ops[0].value).toBe(0); // min(0, 5) where 0 is the default
+      expect(ops[0].value).toBe(5);
 
       // After sending, client's state should still be 5 (local state preserved)
       expect(doc.state.count).toBe(5);

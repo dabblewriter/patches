@@ -61,6 +61,12 @@ export function consolidateFieldOp(existing: JSONPatchOp, incoming: JSONPatchOp)
 
   // If incoming is combinable AND existing has same op type, combine
   if (combiner) {
+    // A delta on a removed field starts from a fresh base, matching how clients apply a delta
+    // to a missing field — folding it into the remove would swallow the delta on the server
+    // while clients resurrect the field
+    if (existing.op === 'remove' || existing.value === undefined) {
+      return { ...incoming, op: 'replace', value: applyDeltaToMissing(incoming) };
+    }
     const op = existing.op === incoming.op ? incoming.op : existing.op;
     const value =
       existing.op === incoming.op
@@ -92,10 +98,28 @@ export function consolidateOps(
   existingOps: JSONPatchOp[],
   newOps: JSONPatchOp[]
 ): { opsToSave: JSONPatchOp[]; pathsToDelete: string[]; opsToReturn: JSONPatchOp[] } {
-  const opsToSave: JSONPatchOp[] = [];
+  const toSave = new Map<string, JSONPatchOp>();
   const pathsToDelete = new Set<string>();
   const existingByPath = new Map(existingOps.map(op => [op.path, op]));
   const opsToReturnMap = new Map<string, JSONPatchOp>();
+
+  // Winners are recorded in existingByPath so later newOps on the same path consolidate with
+  // them (two @inc ops in one batch must sum) instead of silently replacing them in the
+  // path-keyed stores every consumer writes to
+  const save = (op: JSONPatchOp) => {
+    // A parent write deletes existing child paths — both store rows and ops saved earlier in
+    // this same batch
+    for (const path of existingByPath.keys()) {
+      if (path.startsWith(op.path + '/')) {
+        pathsToDelete.add(path);
+        toSave.delete(path);
+        existingByPath.delete(path);
+      }
+    }
+    pathsToDelete.delete(op.path);
+    toSave.set(op.path, op);
+    existingByPath.set(op.path, op);
+  };
 
   for (const newOp of newOps) {
     const existing = existingByPath.get(newOp.path);
@@ -113,7 +137,7 @@ export function consolidateOps(
       // Consolidate with existing op
       const consolidated = consolidateFieldOp(existing, newOp);
       if (consolidated !== null) {
-        opsToSave.push(consolidated);
+        save(consolidated);
       } else if (!isSoftOp(newOp) && !combinableOps[newOp.op]) {
         // Non-combinable, non-soft op was rejected by LWW (existing has higher ts).
         // Include existing value as correction so caller learns the current value.
@@ -137,17 +161,15 @@ export function consolidateOps(
         if (dataExists) continue;
       }
 
-      // Check if this op overwrites child paths (parent write deletes children)
-      for (const existingPath of existingByPath.keys()) {
-        if (existingPath.startsWith(newOp.path + '/')) {
-          pathsToDelete.add(existingPath);
-        }
-      }
-      opsToSave.push(newOp);
+      save(newOp);
     }
   }
 
-  return { opsToSave, pathsToDelete: Array.from(pathsToDelete), opsToReturn: Array.from(opsToReturnMap.values()) };
+  return {
+    opsToSave: Array.from(toSave.values()),
+    pathsToDelete: Array.from(pathsToDelete),
+    opsToReturn: Array.from(opsToReturnMap.values()),
+  };
 }
 
 /**
@@ -156,11 +178,19 @@ export function consolidateOps(
 export function convertDeltaOps(ops: JSONPatchOp[]): JSONPatchOp[] {
   return ops.map(op => {
     if (op.op === 'remove') return op;
-    const combiner = combinableOps[op.op];
-    const value = typeof op.value === 'string' ? '' : 0;
-    if (combiner) return { ...op, op: 'replace', value: combiner.apply(value, op.value) };
+    if (combinableOps[op.op]) return { ...op, op: 'replace', value: applyDeltaToMissing(op) };
     return { ...op, op: 'replace', value: op.value };
   });
+}
+
+/**
+ * The concrete value a delta op produces against a missing base, matching client apply semantics:
+ * @inc/@bit start from 0, @min/@max set the operand (minmax.apply when current is null).
+ */
+function applyDeltaToMissing(op: JSONPatchOp): any {
+  if (op.op === '@min' || op.op === '@max') return op.value;
+  const base = typeof op.value === 'string' ? '' : 0;
+  return combinableOps[op.op].apply(base, op.value);
 }
 
 /**

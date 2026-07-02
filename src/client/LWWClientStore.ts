@@ -61,8 +61,12 @@ export interface LWWClientStore extends PatchesStore {
    * Clear sendingChange after server ack, move ops to committed.
    *
    * @param docId Document identifier
+   * @param ops When the sending change was split across wire batches, the ops the server just
+   *   confirmed. Only these move to committed; the sending slot is kept until all its ops are
+   *   confirmed, so a disconnect between batches leaves the remainder to be resent. Omitted =
+   *   confirm the whole sending change.
    */
-  confirmSendingChange(docId: string): Promise<void>;
+  confirmSendingChange(docId: string, ops?: JSONPatchOp[]): Promise<void>;
 
   /**
    * Apply server changes using LWW timestamp resolution.

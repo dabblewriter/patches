@@ -1,8 +1,9 @@
 import { createVersionMetadata } from '../data/version.js';
-import { consolidateOps, convertDeltaOps } from '../algorithms/lww/consolidateOps.js';
+import { combinableOps, consolidateOps, convertDeltaOps } from '../algorithms/lww/consolidateOps.js';
 import { createChange } from '../data/change.js';
 import { signal } from 'easy-signal';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
+import type { JSONPatchOp } from '../json-patch/types.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import { getClientId } from '../net/serverContext.js';
 import type {
@@ -97,7 +98,7 @@ export class LWWServer implements PatchesServer {
     // Synthesize a change from ops (if any)
     let changes: Change[] = [];
     if (ops.length > 0) {
-      const sortedOps = [...ops].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+      const sortedOps = sortOpsByCommitOrder(ops);
       const maxRev = Math.max(baseRev, ...ops.map(op => op.rev ?? 0));
       const maxTs = Math.max(...ops.map(op => op.ts ?? 0));
       changes = [createChange(baseRev, maxRev, sortedOps, { committedAt: maxTs || Date.now() })];
@@ -123,8 +124,8 @@ export class LWWServer implements PatchesServer {
       return [];
     }
 
-    // Sort by ts so older ops apply first
-    const sortedOps = [...ops].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+    // Sort in commit order so catch-up clients apply ops in the same order live clients did
+    const sortedOps = sortOpsByCommitOrder(ops);
     const maxRev = Math.max(...ops.map(op => op.rev ?? 0));
     // Use max timestamp from ops as committedAt (these are already-committed changes)
     const maxTs = Math.max(...ops.map(op => op.ts ?? 0));
@@ -156,13 +157,15 @@ export class LWWServer implements PatchesServer {
       return { changes: [] };
     }
 
-    const change = changes[0]; // LWW always receives 1 change
+    // A batch normally carries 1 change for LWW, but flush-time batching can split an oversized
+    // change into several — process every change's ops, not just the first
+    const change = changes[0];
     const serverNow = Date.now();
     const clientRev = change.rev; // Client's last known rev (for catchup)
 
     // Add timestamps to ops that don't have them
-    // Prefer change.createdAt if available, fallback to server time
-    const newOps = change.ops.map(op => (op.ts ? op : { ...op, ts: change.createdAt ?? serverNow }));
+    // Prefer the change's createdAt if available, fallback to server time
+    const newOps = changes.flatMap(c => c.ops.map(op => (op.ts ? op : { ...op, ts: c.createdAt ?? serverNow })));
 
     // Load all existing ops for this doc
     const existingOps = await this.store.listOps(docId);
@@ -186,13 +189,22 @@ export class LWWServer implements PatchesServer {
     const responseOps = [...opsToReturn];
     if (clientRev !== undefined) {
       const opsSince = await this.store.listOps(docId, { sinceRev: clientRev });
-      const sentPaths = new Set(change.ops.map(o => o.path));
+      const sentPaths = new Set(newOps.map(o => o.path));
 
-      // Filter out ops client just sent (and their children), sort by ts
-      const catchupOps = opsSince
-        .filter(op => !isPathOrChild(op.path, sentPaths))
-        .sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+      // Filter out ops client just sent (and their children), in commit order
+      const catchupOps = sortOpsByCommitOrder(opsSince.filter(op => !isPathOrChild(op.path, sentPaths)));
       responseOps.push(...catchupOps);
+    }
+
+    // A sent delta op (@inc/@bit/@max/@min) combined with whatever the server had — possibly a
+    // concurrent write the sender never saw — so echo the stored concrete result back for those
+    // paths. Without this the sender applies its delta to a stale base and diverges permanently.
+    const echoedPaths = new Set<string>();
+    for (const sentOp of newOps) {
+      if (!combinableOps[sentOp.op] || echoedPaths.has(sentOp.path)) continue;
+      echoedPaths.add(sentOp.path);
+      const stored = opsToStore.find(o => o.path === sentOp.path) ?? existingOps.find(o => o.path === sentOp.path);
+      if (stored) responseOps.push(stored);
     }
 
     // Build response using createChange
@@ -318,6 +330,15 @@ export class LWWServer implements PatchesServer {
 }
 
 // === Helper Functions ===
+
+/**
+ * Sort ops in commit (rev) order, ts as tiebreak. Live clients apply broadcasts in commit
+ * order, so this is the only ordering that keeps catch-up replicas consistent with them —
+ * a ts sort disagrees whenever a writer's clock ran behind (parent/child ops on one field).
+ */
+function sortOpsByCommitOrder(ops: JSONPatchOp[]): JSONPatchOp[] {
+  return [...ops].sort((a, b) => (a.rev ?? 0) - (b.rev ?? 0) || (a.ts ?? 0) - (b.ts ?? 0));
+}
 
 /**
  * Check if a path equals or is a child of any sent path.

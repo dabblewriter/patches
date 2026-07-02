@@ -224,6 +224,12 @@ export class LWWIndexedDBStore implements LWWClientStore {
       this.deleteFieldsForDoc(committedOps, docId),
     ]);
 
+    // A server getDoc envelope carries uncompacted ops in `changes` — its `rev` is the head
+    // revision but its `state` excludes those ops. Persist them or a fresh client stores an
+    // empty snapshot at the head rev and never re-fetches the missing fields.
+    const changes = (docState as PatchesSnapshot).changes ?? [];
+    await Promise.all(changes.flatMap(change => change.ops.map(op => committedOps.put<CommittedOp>({ ...op, docId }))));
+
     await tx.complete();
   }
 
@@ -384,7 +390,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
    * after) overwrite any stale ops for fields the server won via LWW.
    */
   @blockable
-  async confirmSendingChange(docId: string): Promise<void> {
+  async confirmSendingChange(docId: string, ops?: JSONPatchOp[]): Promise<void> {
     const [tx, sendingChanges, committedOps, docsStore] = await this.db.transaction(
       ['sendingChanges', 'committedOps', 'docs'],
       'readwrite'
@@ -396,15 +402,29 @@ export class LWWIndexedDBStore implements LWWClientStore {
       return;
     }
 
+    const confirmedPaths = ops && new Set(ops.map(op => op.path));
+    const confirmed = confirmedPaths
+      ? sending.change.ops.filter(op => confirmedPaths.has(op.path))
+      : sending.change.ops;
+
     // Move ops to committed, deleting child-path ops to match server saveOps behavior.
     // Without this, a parent write (e.g. replace /trash {}) would leave stale child ops
     // (e.g. /trash/collectionId/name) that re-create nested structure on doc rebuild.
     await Promise.all(
-      sending.change.ops.map(async op => {
+      confirmed.map(async op => {
         await committedOps.delete([docId, op.path + '/'], [docId, op.path + '/\uffff']);
         await committedOps.put<CommittedOp>({ ...op, docId });
       })
     );
+
+    // Keep the unconfirmed remainder in the sending slot (a change split across wire batches)
+    // so a disconnect between batches resends it
+    const remaining = confirmedPaths ? sending.change.ops.filter(op => !confirmedPaths.has(op.path)) : [];
+    if (remaining.length > 0) {
+      await sendingChanges.put<SendingChange>({ docId, change: { ...sending.change, ops: remaining } });
+      await tx.complete();
+      return;
+    }
 
     // Update committed rev
     const rev = sending.change.rev;

@@ -215,13 +215,24 @@ describe('LWWServer', () => {
       expect(result[0].rev).toBe(3);
     });
 
-    it('should sort ops by timestamp', async () => {
+    it('should sort ops in commit (rev) order so catch-up matches live application order', async () => {
+      // /name committed first (rev 2) even though its writer's clock was ahead (higher ts).
+      // Live clients applied rev 2 then rev 3, so catch-up must deliver the same order.
       mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 2000, rev: 2, value: 'Alice' });
       mockStore.ops.set('doc1:/age', { op: 'replace', path: '/age', ts: 1000, rev: 3, value: 30 });
 
       const result = await server.getChangesSince('doc1', 0);
 
-      // Age should come first (lower ts)
+      expect(result[0].ops[0].path).toBe('/name');
+      expect(result[0].ops[1].path).toBe('/age');
+    });
+
+    it('should tiebreak equal revs by timestamp', async () => {
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 2000, rev: 2, value: 'Alice' });
+      mockStore.ops.set('doc1:/age', { op: 'replace', path: '/age', ts: 1000, rev: 2, value: 30 });
+
+      const result = await server.getChangesSince('doc1', 0);
+
       expect(result[0].ops[0].path).toBe('/age');
       expect(result[0].ops[1].path).toBe('/name');
     });
@@ -808,6 +819,56 @@ describe('LWWServer', () => {
       // Should use Date.now() as fallback
       expect(result[0].committedAt).toBeGreaterThanOrEqual(before);
       expect(result[0].committedAt).toBeLessThanOrEqual(after);
+    });
+  });
+
+  describe('commitChanges - delta merge echo', () => {
+    it('echoes the stored concrete value when a sent delta combined with a concurrent write', async () => {
+      // Client B is at rev 1 (counter=10); client C committed replace 100 at rev 2 which B never saw
+      mockStore.ops.set('doc1:/counter', { op: 'replace', path: '/counter', ts: 2000, rev: 2, value: 100 });
+      mockStore.revs.set('doc1', 2);
+
+      const change: ChangeInput = {
+        id: 'delta1',
+        rev: 1,
+        ops: [{ op: '@inc', path: '/counter', value: 5, ts: 3000 }],
+      };
+
+      const result = await server.commitChanges('doc1', [change]);
+
+      // The stored value merged to 105; without the echo the sender applies +5 to its stale 10
+      expect(result.changes[0].ops).toContainEqual(
+        expect.objectContaining({ path: '/counter', op: 'replace', value: 105 })
+      );
+      expect(mockStore.ops.get('doc1:/counter')).toEqual(expect.objectContaining({ op: 'replace', value: 105 }));
+    });
+
+    it('echoes the stored value for a fresh delta so the sender converges with the server', async () => {
+      const change: ChangeInput = {
+        id: 'delta2',
+        rev: 0,
+        ops: [{ op: '@inc', path: '/counter', value: 5, ts: 3000 }],
+      };
+
+      const result = await server.commitChanges('doc1', [change]);
+
+      expect(result.changes[0].ops).toContainEqual(
+        expect.objectContaining({ path: '/counter', op: 'replace', value: 5 })
+      );
+    });
+  });
+
+  describe('commitChanges - multi-change batches', () => {
+    it('processes ops from every change in the batch, not just the first', async () => {
+      const changes: ChangeInput[] = [
+        { id: 'c1', rev: 0, ops: [{ op: 'replace', path: '/a', value: 1, ts: 1000 }] },
+        { id: 'c2', rev: 0, ops: [{ op: 'replace', path: '/b', value: 2, ts: 1000 }] },
+      ];
+
+      await server.commitChanges('doc1', changes);
+
+      expect(mockStore.ops.get('doc1:/a')).toEqual(expect.objectContaining({ value: 1 }));
+      expect(mockStore.ops.get('doc1:/b')).toEqual(expect.objectContaining({ value: 2 }));
     });
   });
 });

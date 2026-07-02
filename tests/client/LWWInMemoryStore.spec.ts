@@ -615,4 +615,70 @@ describe('LWWInMemoryStore', () => {
       expect(remainingOps[0].path).toBe('/score');
     });
   });
+
+  describe('committed op fidelity', () => {
+    it('rebuilds confirmed delta ops as deltas over the snapshot base', async () => {
+      await store.saveDoc('doc1', createState({ counter: 10 }, 3));
+      await store.savePendingOps('doc1', [{ op: '@inc', path: '/counter', value: 5, ts: 1000 }]);
+      const pendingOps = await store.getPendingOps('doc1');
+      await store.saveSendingChange('doc1', createChange('send1', 4, 3, pendingOps));
+      await store.confirmSendingChange('doc1');
+
+      const doc = await store.getDoc('doc1');
+      expect(doc?.state.counter).toBe(15);
+    });
+
+    it('replays confirmed removes as removes so deleted fields stay deleted', async () => {
+      await store.saveDoc('doc1', createState({ counter: 10, obsolete: 'x' }, 3));
+      await store.savePendingOps('doc1', [{ op: 'remove', path: '/obsolete', ts: 1000 }]);
+      const pendingOps = await store.getPendingOps('doc1');
+      await store.saveSendingChange('doc1', createChange('send1', 4, 3, pendingOps));
+      await store.confirmSendingChange('doc1');
+
+      const doc = await store.getDoc('doc1');
+      expect(doc?.state).toEqual({ counter: 10 });
+    });
+  });
+
+  describe('saveDoc with a server getDoc envelope', () => {
+    it('persists the envelope changes so uncompacted server fields survive', async () => {
+      // A server with no snapshot streams {state:{}, rev:1, changes:[all the ops]}
+      const envelope = {
+        state: {},
+        rev: 1,
+        changes: [
+          createChange('srv1', 1, 0, [
+            { op: 'replace', path: '/theme', value: 'dark', ts: 500 },
+            { op: 'replace', path: '/lang', value: 'en', ts: 500 },
+          ]),
+        ],
+      };
+      await store.saveDoc('doc1', envelope as PatchesState);
+
+      const doc = await store.getDoc('doc1');
+      expect(doc?.state).toEqual({ theme: 'dark', lang: 'en' });
+      expect(doc?.rev).toBe(1);
+    });
+  });
+
+  describe('partial confirmSendingChange', () => {
+    it('keeps unconfirmed ops in the sending slot until every batch is confirmed', async () => {
+      const ops: JSONPatchOp[] = [
+        { op: 'replace', path: '/a', value: 1, ts: 1000 },
+        { op: 'replace', path: '/b', value: 2, ts: 1000 },
+      ];
+      await store.savePendingOps('doc1', ops);
+      await store.saveSendingChange('doc1', createChange('send1', 4, 3, ops));
+
+      await store.confirmSendingChange('doc1', [ops[0]]);
+      const partiallyConfirmed = await store.getSendingChange('doc1');
+      expect(partiallyConfirmed?.ops).toEqual([ops[1]]);
+
+      await store.confirmSendingChange('doc1', [ops[1]]);
+      expect(await store.getSendingChange('doc1')).toBeNull();
+
+      const doc = await store.getDoc('doc1');
+      expect(doc?.state).toEqual({ a: 1, b: 2 });
+    });
+  });
 });

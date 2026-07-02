@@ -1,18 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { transformIncomingChanges } from '../../../../src/algorithms/ot/server/transformIncomingChanges';
 import { createChange } from '../../../../src/data/change';
-import * as transformPatchModule from '../../../../src/json-patch/transformPatch';
-
-// Mock the dependencies
-vi.mock('../../../../src/json-patch/transformPatch');
 
 describe('transformIncomingChanges', () => {
-  const mockTransformPatch = vi.mocked(transformPatchModule.transformPatch);
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
   it('should transform changes and assign sequential revision numbers', () => {
     const incomingChanges = [
       createChange(2, 0, [{ op: 'replace', path: '/text', value: 'hello world' }]),
@@ -21,34 +11,25 @@ describe('transformIncomingChanges', () => {
 
     const committedChanges = [createChange(1, 3, [{ op: 'add', path: '/author', value: 'user1' }])];
 
-    const transformedOps1 = [{ op: 'replace', path: '/text', value: 'hello world' }];
-    const transformedOps2 = [{ op: 'replace', path: '/count', value: 5 }];
-
-    mockTransformPatch.mockReturnValueOnce(transformedOps1).mockReturnValueOnce(transformedOps2);
-
     const result = transformIncomingChanges(incomingChanges, committedChanges, 3);
 
     expect(result).toHaveLength(2);
     expect(result[0].rev).toBe(4);
     expect(result[1].rev).toBe(5);
-    expect(result[0].ops).toEqual(transformedOps1);
-    expect(result[1].ops).toEqual(transformedOps2);
+    expect(result[0].ops).toEqual([{ op: 'replace', path: '/text', value: 'hello world' }]);
+    expect(result[1].ops).toEqual([{ op: 'replace', path: '/count', value: 5 }]);
     expect(result[0].id).toBe(incomingChanges[0].id);
     expect(result[1].id).toBe(incomingChanges[1].id);
   });
 
   it('should filter out obsolete changes (empty ops after transformation)', () => {
     const incomingChanges = [
-      createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }]),
+      createChange(1, 0, [{ op: 'replace', path: '/obj/text', value: 'world' }]),
       createChange(1, 0, [{ op: 'replace', path: '/count', value: 5 }]),
     ];
 
-    const committedChanges = [createChange(0, 2, [{ op: 'replace', path: '/text', value: 'world' }])];
-
-    // First change becomes obsolete (empty ops), second change is valid
-    mockTransformPatch
-      .mockReturnValueOnce([]) // Obsolete change
-      .mockReturnValueOnce([{ op: 'replace', path: '/count', value: 5 }]);
+    // Removing /obj makes the first incoming change obsolete
+    const committedChanges = [createChange(0, 2, [{ op: 'remove', path: '/obj' }])];
 
     const result = transformIncomingChanges(incomingChanges, committedChanges, 2);
 
@@ -58,22 +39,17 @@ describe('transformIncomingChanges', () => {
   });
 
   it('should handle empty incoming changes', () => {
-    const result = transformIncomingChanges([], [], 1);
-    expect(result).toEqual([]);
-    expect(mockTransformPatch).not.toHaveBeenCalled();
+    expect(transformIncomingChanges([], [], 1)).toEqual([]);
   });
 
   it('should handle empty committed changes', () => {
     const incomingChanges = [createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }])];
 
-    mockTransformPatch.mockReturnValue([{ op: 'replace', path: '/text', value: 'world' }]);
-
     const result = transformIncomingChanges(incomingChanges, [], 1);
 
     expect(result).toHaveLength(1);
     expect(result[0].rev).toBe(2);
-    // Stateless: passes null as state to transformPatch
-    expect(mockTransformPatch).toHaveBeenCalledWith(null, [], incomingChanges[0].ops);
+    expect(result[0].ops).toEqual([{ op: 'replace', path: '/text', value: 'world' }]);
   });
 
   it('should preserve change metadata during transformation', () => {
@@ -82,8 +58,6 @@ describe('transformIncomingChanges', () => {
       { ...createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }]), ...metadata },
     ];
 
-    mockTransformPatch.mockReturnValue([{ op: 'replace', path: '/text', value: 'world' }]);
-
     const result = transformIncomingChanges(incomingChanges, [], 1);
 
     expect(result).toHaveLength(1);
@@ -91,29 +65,38 @@ describe('transformIncomingChanges', () => {
     expect(result[0].timestamp).toBe(12345);
   });
 
-  it('should flatten committed changes ops correctly', () => {
-    const incomingChanges = [createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }])];
+  it('should transform against the ops of every committed change', () => {
+    const incomingChanges = [createChange(1, 0, [{ op: 'replace', path: '/list/2', value: 'edited' }])];
 
+    // Two committed changes each insert before the incoming change's index, shifting it by two
     const committedChanges = [
-      createChange(0, 2, [{ op: 'add', path: '/author', value: 'user1' }]),
-      createChange(1, 3, [
-        { op: 'replace', path: '/count', value: 5 },
-        { op: 'add', path: '/tags', value: [] },
-      ]),
+      createChange(0, 2, [{ op: 'add', path: '/list/0', value: 'x' }]),
+      createChange(1, 3, [{ op: 'add', path: '/list/0', value: 'y' }]),
     ];
 
-    const expectedCommittedOps = [
-      { op: 'add', path: '/author', value: 'user1' },
-      { op: 'replace', path: '/count', value: 5 },
-      { op: 'add', path: '/tags', value: [] },
+    const result = transformIncomingChanges(incomingChanges, committedChanges, 3);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].ops).toEqual([{ op: 'replace', path: '/list/4', value: 'edited' }]);
+  });
+
+  it('transforms each change in the coordinate space of the changes before it in the batch', () => {
+    // Confirmed TP1 regression: doc rev 5 is {list:[e0..e11]}. A concurrent user committed add /list/10 "X" (rev 6).
+    // The incoming batch removes e0 then replaces the element at index 9 (e10 in its own space). Without advancing
+    // the committed ops over the first change, the second change lands on index 9 and destroys "X".
+    const committedChanges = [createChange(5, 6, [{ op: 'add', path: '/list/10', value: 'X' }])];
+    const incomingChanges = [
+      createChange(5, 0, [{ op: 'remove', path: '/list/0' }]),
+      createChange(5, 0, [{ op: 'replace', path: '/list/9', value: 'NEW' }]),
     ];
 
-    mockTransformPatch.mockReturnValue([{ op: 'replace', path: '/text', value: 'world' }]);
+    const result = transformIncomingChanges(incomingChanges, committedChanges, 6);
 
-    transformIncomingChanges(incomingChanges, committedChanges, 3);
-
-    // Stateless: passes null as state to transformPatch
-    expect(mockTransformPatch).toHaveBeenCalledWith(null, expectedCommittedOps, incomingChanges[0].ops);
+    expect(result).toHaveLength(2);
+    expect(result[0].rev).toBe(7);
+    expect(result[0].ops).toEqual([{ op: 'remove', path: '/list/0' }]);
+    expect(result[1].rev).toBe(8);
+    expect(result[1].ops).toEqual([{ op: 'replace', path: '/list/10', value: 'NEW' }]);
   });
 
   describe('forceCommit option', () => {
@@ -122,11 +105,6 @@ describe('transformIncomingChanges', () => {
         createChange(1, 0, []), // Empty ops
         createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }]),
       ];
-
-      // First change has empty ops, second change is valid
-      mockTransformPatch
-        .mockReturnValueOnce([]) // Empty ops
-        .mockReturnValueOnce([{ op: 'replace', path: '/text', value: 'world' }]);
 
       const result = transformIncomingChanges(incomingChanges, [], 1, true);
 
@@ -143,10 +121,6 @@ describe('transformIncomingChanges', () => {
         createChange(1, 0, []), // Empty ops
         createChange(1, 0, [{ op: 'replace', path: '/text', value: 'world' }]),
       ];
-
-      mockTransformPatch
-        .mockReturnValueOnce([])
-        .mockReturnValueOnce([{ op: 'replace', path: '/text', value: 'world' }]);
 
       const result = transformIncomingChanges(incomingChanges, [], 1, false);
 

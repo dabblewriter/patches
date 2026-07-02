@@ -18,7 +18,7 @@ export function transformIncomingChanges(
   currentRev: number,
   forceCommit = false
 ): Change[] {
-  const committedOps = committedChanges.flatMap(c => c.ops);
+  let committedOps = committedChanges.flatMap(c => c.ops);
   let rev = currentRev + 1;
 
   return changes
@@ -26,6 +26,9 @@ export function transformIncomingChanges(
       // Transform the incoming change's ops against the ops committed since baseRev
       // Stateless: null state means transformPatch doesn't check against state
       const transformedOps = transformPatch(null, committedOps, change.ops);
+      // Each change in the batch is written in the coordinate space of the changes before it, so advance the
+      // committed ops over this change's original ops before transforming the next one
+      committedOps = transformPatch(null, change.ops, committedOps);
       if (transformedOps.length === 0 && !forceCommit) {
         return null; // Change is obsolete after transformation
       }

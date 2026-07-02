@@ -1,19 +1,17 @@
-import { JSONPatch } from '../../../json-patch/JSONPatch.js';
+import { transformPatch } from '../../../json-patch/transformPatch.js';
 import type { Change } from '../../../types.js';
 
 /**
  * Rebases local changes against server changes using operational transformation.
- * This function handles the transformation of local changes to be compatible with server changes
- * that have been applied in the meantime.
  *
- * The process:
- * 1. Filters out local changes that are already in server changes
- * 2. Creates a patch from server changes that need to be transformed against
- * 3. Transforms each remaining local change against the server patch
- * 4. Updates revision numbers for the transformed changes
+ * Server changes are walked in commit order so every transform happens in the right coordinate space:
+ * - A server change that echoes one of our own (matched by id) is removed from the pending set without transforming —
+ *   the remaining pending changes were already written after it locally, so their coordinates already include it.
+ * - A foreign server change is transformed against each pending change in sequence, advancing its ops over each
+ *   pending change's ops so the next pending change (written after the previous one) sees the right coordinates.
  *
- * @param serverChanges - Array of changes received from the server
- * @param localChanges - Array of local changes that need to be rebased
+ * @param serverChanges - Array of changes received from the server, in commit order
+ * @param localChanges - Array of local changes that need to be rebased, in creation order
  * @returns Array of rebased local changes with updated revision numbers
  */
 export function rebaseChanges(serverChanges: Change[], localChanges: Change[]): Change[] {
@@ -21,38 +19,26 @@ export function rebaseChanges(serverChanges: Change[], localChanges: Change[]): 
     return localChanges;
   }
 
-  const lastChange = serverChanges[serverChanges.length - 1];
-  const receivedIds = new Set(serverChanges.map(change => change.id));
-  const transformAgainstIds = new Set(receivedIds);
-
-  // Filter out local changes that are already in server changes
-  const filteredLocalChanges: Change[] = [];
-  for (const change of localChanges) {
-    if (receivedIds.has(change.id)) {
-      transformAgainstIds.delete(change.id);
-    } else {
-      filteredLocalChanges.push(change);
+  let pending = localChanges;
+  for (const serverChange of serverChanges) {
+    const ownIndex = pending.findIndex(change => change.id === serverChange.id);
+    if (ownIndex !== -1) {
+      pending = pending.filter((_, i) => i !== ownIndex);
+      continue;
     }
+    let serverOps = serverChange.ops;
+    const rebased: Change[] = [];
+    for (const change of pending) {
+      const ops = transformPatch(null, serverOps, change.ops);
+      // Advance the server ops over this change's original ops for the next pending change in the sequence
+      serverOps = transformPatch(null, change.ops, serverOps);
+      if (!ops.length) continue; // Drop changes that became no-ops
+      rebased.push({ ...change, ops });
+    }
+    pending = rebased;
   }
 
-  // Create a patch from server changes that need to be transformed against
-  const transformPatch = new JSONPatch(
-    serverChanges
-      .filter(change => transformAgainstIds.has(change.id))
-      .map(change => change.ops)
-      .flat()
-  );
-
-  // Rebase local changes against server changes
-  const baseRev = lastChange.rev;
-  let rev = lastChange.rev;
-  const result: Change[] = [];
-  for (const change of filteredLocalChanges) {
-    const ops = transformPatch.transform(change.ops).ops;
-    if (!ops.length) continue; // Drop empty changes without incrementing rev
-    rev++;
-    result.push({ ...change, baseRev, rev, ops });
-  }
-
-  return result;
+  // Renumber the surviving changes on top of the last server revision
+  const baseRev = serverChanges[serverChanges.length - 1].rev;
+  return pending.map((change, i) => ({ ...change, baseRev, rev: baseRev + i + 1 }));
 }

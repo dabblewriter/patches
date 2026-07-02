@@ -285,9 +285,9 @@ describe('OTServer', () => {
     });
 
     it('should handle offline sessions with batchId (divergent)', async () => {
-      const committedChange = { ...mockChange, id: 'committed' } as Change;
+      // A foreign committed change (different batch) = divergent
+      const committedChange = { ...mockChange, id: 'committed', batchId: undefined } as Change;
       vi.mocked(handleOfflineSessionsAndBatches).mockResolvedValue();
-      // Has committed changes = divergent
       vi.mocked(mockStore.listChanges).mockResolvedValue([committedChange]);
 
       await server.commitChanges('doc1', [mockChange]);

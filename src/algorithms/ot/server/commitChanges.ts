@@ -67,13 +67,19 @@ export async function commitChanges(
   // The caller signals docReloadRequired so the client knows to call getDoc.
   let docReloadRequired: true | undefined;
   if (changes[0].baseRev === 0 && initialRev > 0 && !batchedContinuation) {
+    // Prevent stale clients from wiping existing data with a root creation op anywhere in the batch
     const hasRootOp = changes.some(c => c.ops.some(op => op.path === ''));
-    if (!hasRootOp) {
-      docReloadRequired = true;
-      baseRev = initialRev;
-      for (const c of changes) {
-        c.baseRev = baseRev;
-      }
+    if (hasRootOp) {
+      throw new Error(
+        `Document ${docId} already exists (rev ${initialRev}). ` +
+          `Cannot apply root-level replace (path: '') with baseRev 0 - this would overwrite the existing document. ` +
+          `Load the existing document first, or use nested paths instead of replacing at root.`
+      );
+    }
+    docReloadRequired = true;
+    baseRev = initialRev;
+    for (const c of changes) {
+      c.baseRev = baseRev;
     }
   }
 
@@ -99,15 +105,6 @@ export async function commitChanges(
   if (baseRev > initialRev) {
     throw new Error(
       `Client baseRev (${baseRev}) is ahead of server revision (${initialRev}) for doc ${docId}. Client needs to reload the document.`
-    );
-  }
-
-  // Prevent stale clients from wiping existing data with a root creation op (unless it's a batched continuation)
-  if (changes[0].baseRev === 0 && initialRev > 0 && !batchedContinuation && changes[0].ops[0]?.path === '') {
-    throw new Error(
-      `Document ${docId} already exists (rev ${initialRev}). ` +
-        `Cannot apply root-level replace (path: '') with baseRev 0 - this would overwrite the existing document. ` +
-        `Load the existing document first, or use nested paths instead of replacing at root.`
     );
   }
 
@@ -153,18 +150,26 @@ export async function commitChanges(
       // Re-read currentRev on retry to pick up the conflicting commit
       const currentRev = attempt === 0 ? initialRev : await store.getCurrentRev(docId);
 
-      // Load committed changes *after* the client's baseRev for transformation and idempotency checks
-      const committedChanges = await store.listChanges(docId, {
-        startAfter: baseRev,
-        withoutBatchId: batchId,
-      });
+      // Load ALL committed changes *after* the client's baseRev. The idempotency check must see previously
+      // committed changes from this same batch (a resend carries the same batchId), so filter the batch out of the
+      // transform set in memory rather than at the store.
+      const allCommittedChanges = await store.listChanges(docId, { startAfter: baseRev });
+      const committedChanges = batchId ? allCommittedChanges.filter(c => c.batchId !== batchId) : allCommittedChanges;
 
-      const committedIds = new Set(committedChanges.map(c => c.id));
+      const committedIds = new Set(allCommittedChanges.map(c => c.id));
       const incomingChanges = changes.filter(c => !committedIds.has(c.id)) as Change[];
+
+      // Committed copies of changes this request re-sent (a retry after a lost ack) must be echoed back so the
+      // client can confirm them, even though same-batch changes are excluded from the transform set above.
+      const changeIds = new Set(changes.map(c => c.id));
+      const resentCommitted = batchId ? allCommittedChanges.filter(c => changeIds.has(c.id)) : [];
+      const catchupChanges = resentCommitted.length
+        ? [...committedChanges, ...resentCommitted].sort((a, b) => a.rev - b.rev)
+        : committedChanges;
 
       // If all incoming changes were already committed, return the committed changes found
       if (incomingChanges.length === 0) {
-        return { catchupChanges: committedChanges, newChanges: [], docReloadRequired };
+        return { catchupChanges, newChanges: [], docReloadRequired };
       }
 
       // 4. Offline-session versioning applies when:
@@ -174,18 +179,26 @@ export async function commitChanges(
       const isOfflineOrBatch = isOfflineTimestamp || !!batchId;
 
       // Fast-forward: nothing committed after baseRev, so the incoming changes save
-      // verbatim. Their revs are final, so version them directly (origin 'main').
+      // without transformation. Their revs are renumbered from the authoritative tip —
+      // the identity mapping for offline resumes and batch continuations, but required
+      // for client-claimed revs that would collide with existing history (a repeat
+      // branch merge, or a baseRev-0 heal onto an existing doc). Versions are created
+      // from the saved revs (origin 'main').
       // Save before versioning: if `saveChanges` throws a RevConflictError (a
       // concurrent commit landed first), nothing was versioned and the retry falls
       // through to the transform branch cleanly — no version minted from the
       // pre-transform changes is left stranded ahead of the real log.
       if (isOfflineOrBatch && committedChanges.length === 0) {
+        if (!options?.historicalImport) {
+          let nextRev = currentRev + 1;
+          incomingChanges.forEach(c => (c.rev = nextRev++));
+        }
         await store.saveChanges(docId, incomingChanges);
         if (!offlineSessionsHandled) {
           await handleOfflineSessionsAndBatches(store, sessionTimeoutMillis, docId, incomingChanges, 'main');
           offlineSessionsHandled = true;
         }
-        return { catchupChanges: [], newChanges: incomingChanges, docReloadRequired };
+        return { catchupChanges, newChanges: incomingChanges, docReloadRequired };
       }
 
       // 5. Transform the incoming changes against committed changes (stateless — no state loaded)
@@ -213,7 +226,7 @@ export async function commitChanges(
       }
 
       // Return catchup changes and newly transformed changes separately
-      return { catchupChanges: committedChanges, newChanges: transformedChanges, docReloadRequired };
+      return { catchupChanges, newChanges: transformedChanges, docReloadRequired };
     } catch (error) {
       if (error instanceof RevConflictError && attempt < MAX_CONFLICT_RETRIES - 1) continue;
       throw error;

@@ -585,3 +585,55 @@ describe('breakChanges with sizeCalculator', () => {
     expect(result).toHaveLength(1);
   });
 });
+
+describe('split identity and rev threading', () => {
+  const createChange = (rev: number, ops: any[], baseRev = 0): Change => ({
+    id: `change-${rev}`,
+    rev,
+    baseRev,
+    ops,
+    createdAt: 0,
+    committedAt: 0,
+  });
+
+  const bigOps = [
+    { op: 'add', path: '/a', value: 'x'.repeat(120) },
+    { op: 'add', path: '/b', value: 'y'.repeat(120) },
+  ];
+
+  it('keeps the original change id on the first split piece', () => {
+    const change = createChange(1, bigOps);
+    const maxBytes = getJSONByteSize({ ...change, ops: [bigOps[0]] }) + 10;
+
+    const pieces = breakChanges([change], maxBytes);
+
+    expect(pieces.length).toBeGreaterThan(1);
+    expect(pieces[0].id).toBe(change.id);
+    expect(pieces[1].id).not.toBe(change.id);
+  });
+
+  it('renumbers changes that follow a split so revs never collide', () => {
+    const oversized = createChange(1, bigOps);
+    const follower = createChange(2, [{ op: 'add', path: '/c', value: 'small' }]);
+    const maxBytes = getJSONByteSize({ ...oversized, ops: [bigOps[0]] }) + 10;
+
+    const result = breakChanges([oversized, follower], maxBytes);
+
+    const revs = result.map(c => c.rev);
+    expect(new Set(revs).size).toBe(revs.length);
+    expect(revs).toEqual([1, 2, 3]);
+    expect(result[2].id).toBe(follower.id);
+  });
+
+  it('produces unique revs across batches when the wire limit splits a change', () => {
+    const oversized = createChange(1, bigOps);
+    const follower = createChange(2, [{ op: 'add', path: '/c', value: 'small' }]);
+    const maxPayloadBytes = getJSONByteSize({ ...oversized, ops: [bigOps[0]] }) + 60;
+
+    const batches = breakChangesIntoBatches([oversized, follower], { maxPayloadBytes });
+
+    const all = batches.flat();
+    const revs = all.map(c => c.rev);
+    expect(new Set(revs).size).toBe(revs.length);
+  });
+});

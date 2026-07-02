@@ -1055,7 +1055,15 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // Snapshot current subscriptions before adding new docs
     const alreadySubscribed = this._getActiveSubscriptions();
 
-    newIds.forEach(id => this.trackedDocs.add(id));
+    newIds.forEach(id => {
+      this.trackedDocs.add(id);
+      // A doc untracked then re-tracked inside one resync window must not keep its
+      // untracked mark: syncAllKnownDocs' merge treats the set as "untracked during the
+      // window and still untracked", and a stale mark there excludes the doc's fresh
+      // store entry from the rebuilt docStates — the doc would silently stop syncing
+      // until the next reconnect.
+      this._untrackedDuringResync?.delete(id);
+    });
 
     // Populate docAlgorithms Map
     if (algorithmName) {

@@ -311,6 +311,47 @@ describe('PatchesSync races', () => {
       await vi.waitFor(() => expect(commitCalls).toContain('docB'));
     });
 
+    it('keeps a doc untracked then re-tracked during the rebuild window syncing', async () => {
+      const store = new OTInMemoryStore();
+      const algorithm = new OTAlgorithm(store);
+      const patches = new Patches({ algorithms: { ot: algorithm } });
+      await patches.trackDocs(['docA', 'docB']);
+
+      const commitCalls: string[] = [];
+      const connection = makeConnection({
+        commitChanges: vi.fn(async (docId: string, changes: Change[]) => {
+          commitCalls.push(docId);
+          return { changes: changes.map(c => ({ ...c, committedAt: Date.now() })) };
+        }),
+      });
+      const releaseListDocs = gateFirstListDocs(algorithm);
+      sync = new PatchesSync(patches, connection as any);
+
+      connection.onStateChange.emit('connected');
+      await tick();
+
+      // Untracked, then re-tracked, while syncAllKnownDocs holds a stale store snapshot.
+      await patches.untrackDocs(['docB']);
+      await tick();
+      await patches.trackDocs(['docB']);
+      await tick();
+
+      // Re-tracking must clear the untracked-during-resync mark — a stale mark makes the
+      // rebuild treat docB as still untracked and silently stop syncing it.
+      expect((sync as any)._untrackedDuringResync?.has('docB')).toBe(false);
+
+      releaseListDocs();
+      await vi.waitFor(() => expect(sync!.state.syncStatus).toBe('synced'));
+
+      expect((sync as any).trackedDocs.has('docB')).toBe(true);
+      expect(sync.docStates.state.docB).toBeDefined();
+
+      // Edits to the re-tracked doc must still reach the server
+      const doc = await patches.openDoc<{ text?: string }>('docB');
+      doc.change(patch => patch.replace('/text', 'back again'));
+      await vi.waitFor(() => expect(commitCalls).toContain('docB'));
+    });
+
     it('does not resurrect a doc untracked during the rebuild window', async () => {
       const store = new OTInMemoryStore();
       const algorithm = new OTAlgorithm(store);

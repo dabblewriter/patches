@@ -62,6 +62,12 @@ export class WebRTCTransport implements ClientTransport {
    */
   constructor(private transport: SignalingTransport) {
     this.rpc = new JSONRPCClient(transport);
+    this.subscriptions = [];
+    this._subscribe();
+  }
+
+  private _subscribe() {
+    if (this.subscriptions.length > 0) return;
 
     this.subscriptions = [
       this.rpc.on('peer-welcome', ({ id, peers }) => {
@@ -74,7 +80,19 @@ export class WebRTCTransport implements ClientTransport {
       }),
 
       this.rpc.on('signal', ({ from, data }) => {
-        if (!this.peers.has(from)) {
+        const existing = this.peers.get(from);
+        // Glare: both sides initiated at once and this is the competing remote offer. Break the
+        // tie deterministically — the lexicographically smaller id yields and answers instead;
+        // the larger id ignores the competing offer and waits for its own to be answered.
+        if (existing && !existing.connected && data?.type === 'offer' && this._id) {
+          if (this._id < from) {
+            this.peers.delete(from);
+            existing.peer.destroy();
+            this._connectToPeer(from, false);
+          } else {
+            return;
+          }
+        } else if (!existing) {
           this._connectToPeer(from, false);
         }
         this.peers.get(from)?.peer.signal(data);
@@ -104,6 +122,9 @@ export class WebRTCTransport implements ClientTransport {
    * @returns A promise that resolves when connected to the signaling server
    */
   async connect() {
+    // disconnect() tears the signaling subscriptions down; restore them so a reconnect can
+    // process peer-welcome/signal again
+    this._subscribe();
     await this.transport.connect();
   }
 
@@ -114,6 +135,7 @@ export class WebRTCTransport implements ClientTransport {
   disconnect(): void {
     this.subscriptions.forEach(u => u());
     this.subscriptions.length = 0;
+    this._id = undefined;
 
     // Call _removePeer for each peer, which handles destroy()
     const peerIds = Array.from(this.peers.keys());
@@ -151,13 +173,22 @@ export class WebRTCTransport implements ClientTransport {
    * @param initiator - Whether this peer is initiating the connection
    */
   private _connectToPeer(peerId: string, initiator: boolean) {
+    // A repeat welcome (signaling reconnect) replaces the entry; destroy the old Peer or it
+    // lingers alive and its close/error handlers would tear down the replacement
+    if (this.peers.has(peerId)) {
+      this._removePeer(peerId);
+    }
+
     const peer = new Peer({ initiator, trickle: false });
+    // Stale handlers from a replaced Peer must never act on its replacement
+    const isCurrent = () => this.peers.get(peerId)?.peer === peer;
 
     peer.on('signal', data => {
       this.rpc.notify('peer-signal', peerId, data);
     });
 
     peer.on('connect', () => {
+      if (!isCurrent()) return;
       this.peers.set(peerId, { id: peerId, peer, connected: true });
       this.onPeerConnect.emit(peerId, peer);
     });
@@ -171,12 +202,12 @@ export class WebRTCTransport implements ClientTransport {
     });
 
     peer.on('close', () => {
-      this._removePeer(peerId);
+      if (isCurrent()) this._removePeer(peerId);
     });
 
     peer.on('error', err => {
       this.onMessage.emit(JSON.stringify(rpcError(-32000, (err as Error).message)), peerId, peer);
-      this._removePeer(peerId);
+      if (isCurrent()) this._removePeer(peerId);
     });
 
     this.peers.set(peerId, { id: peerId, peer, connected: false });

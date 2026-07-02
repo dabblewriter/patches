@@ -13,8 +13,20 @@ export type JsonRpcMessage = JsonRpcRequest | JsonRpcResponse;
  */
 export abstract class SignalingService {
   protected clients = new Set<string>();
+  private _registryLock: Promise<unknown> = Promise.resolve();
 
   abstract send(id: string, message: JsonRpcMessage): void | Promise<void>;
+
+  /**
+   * Serialize read-modify-write updates of the client registry. getClients/setClients are async
+   * and overridable (external storage), so the get→mutate→set composition is not atomic on its
+   * own — two overlapping connect/disconnect calls would interleave and the last write wins.
+   */
+  private _updateClients<R>(fn: () => Promise<R>): Promise<R> {
+    const run = this._registryLock.then(fn, fn);
+    this._registryLock = run.catch(() => undefined);
+    return run;
+  }
 
   /**
    * Returns the list of all connected client IDs.
@@ -40,9 +52,12 @@ export abstract class SignalingService {
    * @returns The client's assigned ID
    */
   async onClientConnected(id: string = createId(14)): Promise<string> {
-    const clients = await this.getClients();
-    clients.add(id);
-    await this.setClients(clients);
+    const clients = await this._updateClients(async () => {
+      const clients = await this.getClients();
+      clients.add(id);
+      await this.setClients(clients);
+      return clients;
+    });
 
     const welcome: JsonRpcRequest = {
       jsonrpc: '2.0',
@@ -64,9 +79,12 @@ export abstract class SignalingService {
    * @param id - ID of the disconnected client
    */
   async onClientDisconnected(id: string): Promise<void> {
-    const clients = await this.getClients();
-    clients.delete(id);
-    await this.setClients(clients);
+    const clients = await this._updateClients(async () => {
+      const clients = await this.getClients();
+      clients.delete(id);
+      await this.setClients(clients);
+      return clients;
+    });
 
     // Notify others
     const message: JsonRpcRequest = {

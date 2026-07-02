@@ -562,18 +562,45 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
   /**
    * Pulls the authoritative snapshot from the server and resets local committed state to it,
-   * preserving pending/optimistic work (the store keeps pending across saveDoc; doc.import()
+   * keeping pending/optimistic work (the store keeps pending across saveDoc; doc.import()
    * re-applies optimistic ops). Used to hydrate a brand-new doc (no committed rev) and to
    * recover when incremental catch-up can't proceed — a change that fails to apply (see the
    * ApplyChangesError handling in syncDoc).
+   *
+   * Pending work is kept but NOT verbatim: it is first reconciled against the committed
+   * tail the snapshot subsumes (see `ClientAlgorithm.reconcilePending`). A pending change
+   * the server has ALREADY committed — e.g. a flush that succeeded on the wire but whose
+   * echo failed to apply locally, the exact class this recovery handles — must be dropped
+   * here, or doc.import() re-applies it on top of a state that already contains it (the
+   * user sees their edits doubled) and the next flush re-sends it with a re-stamped baseRev
+   * the server's idempotency dedupe no longer covers (permanently duplicated content for
+   * every collaborator). Survivors are transformed into the snapshot's frame — a pure op
+   * transform that never applies the tail, so it works even though applying it just failed.
    */
   protected async _reloadDocFromServer(docId: string, algorithm: ClientAlgorithm): Promise<void> {
+    // Read the rev the local committed state (and thus pending) sits on BEFORE overwriting it.
+    const baseRev = await algorithm.getCommittedRev(docId);
     const snapshot = await this.connection.getDoc(docId);
+    let reconciled = false;
+    if (algorithm.reconcilePending && snapshot.rev > baseRev && (await algorithm.hasPending(docId))) {
+      // Changes past the snapshot's rev are excluded: the snapshot doesn't contain them, so
+      // the normal catch-up path will deliver them and rebase pending against them itself.
+      const committedTail = (await this.connection.getChangesSince(docId, baseRev)).filter(c => c.rev <= snapshot.rev);
+      if (committedTail.length > 0) {
+        await algorithm.reconcilePending(docId, committedTail);
+        reconciled = true;
+      }
+    }
     // Save via algorithm's store
     await algorithm.store.saveDoc(docId, snapshot);
     // Read back the actual committed rev (store may compute from changes)
     const savedRev = await algorithm.getCommittedRev(docId);
-    this._updateDocSyncState(docId, { committedRev: savedRev });
+    this._updateDocSyncState(docId, {
+      committedRev: savedRev,
+      // Reconciliation may have cleared every pending change (they were already committed);
+      // refresh the flag so the doc doesn't read as having unsynced work indefinitely.
+      ...(reconciled ? { hasPending: await algorithm.hasPending(docId) } : undefined),
+    });
     // Re-read the snapshot from the algorithm's store so it includes any pending
     // changes the store kept across saveDoc. Passing `changes: []` here would let
     // doc.import() wipe in-memory pending state (OTDoc._pendingChanges) and LWW

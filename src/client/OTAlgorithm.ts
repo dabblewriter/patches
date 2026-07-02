@@ -1,5 +1,6 @@
 import { applyCommittedChanges } from '../algorithms/ot/client/applyCommittedChanges.js';
 import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
+import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
 import { createChange } from '../data/change.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change, PatchesSnapshot } from '../types.js';
@@ -189,6 +190,33 @@ export class OTAlgorithm implements ClientAlgorithm {
       if (droppedIds.length === 0) return 0;
       await this.store.dropPendingChanges(docId, droppedIds);
       return droppedIds.length;
+    });
+  }
+
+  async reconcilePending(docId: string, committedChanges: Change[]): Promise<void> {
+    if (committedChanges.length === 0) return;
+    return this._withDocLock(docId, async () => {
+      const pending = await this.store.getPendingChanges(docId);
+      if (pending.length === 0) return;
+
+      // rebaseChanges drops pending the server already committed (matched by id) and
+      // transforms the survivors into the tail's frame — a pure op transform that never
+      // applies the tail, so it is safe even when the local committed state is corrupt
+      // (which is why the snapshot-reload recovery calling this exists at all).
+      const rebased = rebaseChanges(committedChanges, pending);
+
+      // Replace pending without touching committed history. Drop must come first: the
+      // rebased changes keep their original ids, so saving them before dropping would let
+      // the id-matched delete remove the rebased copies too. The crash window between the
+      // two store calls loses at most the pending tail — recoverable and bounded — whereas
+      // keeping an already-committed pending change doubles content permanently.
+      await this.store.dropPendingChanges(
+        docId,
+        pending.map(c => c.id)
+      );
+      if (rebased.length > 0) {
+        await this.store.savePendingChanges(docId, rebased);
+      }
     });
   }
 

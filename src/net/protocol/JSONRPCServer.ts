@@ -8,13 +8,35 @@ import { rpcError, rpcNotification, rpcResponse } from './utils.js';
 export type ConnectionSignalSubscriber = (params: any, clientId?: string) => any;
 export type MessageHandler<R = any> = (...args: any[]) => Promise<R> | R;
 
+/**
+ * Access level for a method, optionally naming its positional wire parameters.
+ * When `params` is declared, `register()` zips the names with the call arguments and
+ * passes the resulting object to `AuthorizationProvider.canAccess` — required for
+ * providers that validate request payloads (e.g. role-scoped commit rules on `changes`).
+ */
+export type ApiMethodDefinition = Access | { access: Access; params?: readonly string[] };
+
 /** Static API definition mapping method names to access levels */
-export type ApiDefinition = Record<string, Access>;
+export type ApiDefinition = Record<string, ApiMethodDefinition>;
 
 /** Options for creating a JSONRPCServer */
 export interface JSONRPCServerOptions {
   /** Authorization provider for document access control */
   auth?: AuthorizationProvider;
+}
+
+/**
+ * Zip declared positional param names with call args into the named object providers receive.
+ * `undefined` args are intentionally dropped, so an omitted trailing arg is absent from the
+ * object rather than present-and-undefined — providers key on presence (e.g. `params.changes`).
+ */
+function buildNamedParams(names: readonly string[] | undefined, args: any[]): Record<string, any> | undefined {
+  if (!names) return undefined;
+  const params: Record<string, any> = {};
+  names.forEach((name, i) => {
+    if (args[i] !== undefined) params[name] = args[i];
+  });
+  return params;
 }
 
 /**
@@ -84,10 +106,12 @@ export class JSONRPCServer {
       throw new Error('Object must have static api property');
     }
 
-    for (const [method, access] of Object.entries(api)) {
+    for (const [method, definition] of Object.entries(api)) {
       if (typeof (obj as any)[method] !== 'function') {
         throw new Error(`Method '${method}' not found on object`);
       }
+      const access = typeof definition === 'string' ? definition : definition.access;
+      const paramNames = typeof definition === 'string' ? undefined : definition.params;
 
       this.registerMethod(method, async (...args: any[]) => {
         const docId = args[0];
@@ -98,7 +122,11 @@ export class JSONRPCServer {
           );
         }
         const ctx = getAuthContext();
-        await this.assertAccess(access, ctx, method, args);
+        // assertAccess no-ops immediately when there's no auth provider, so skip
+        // building the named-params object (allocated on every call otherwise) in
+        // that case — it would just be discarded unused.
+        const params = this.auth ? buildNamedParams(paramNames, args) : undefined;
+        await this.assertAccess(access, ctx, method, args, params);
         // _dispatch cleared the context during the await above; re-establish it
         // around the method's synchronous start so getClientId() works inside.
         setAuthContext(ctx);
@@ -228,13 +256,16 @@ export class JSONRPCServer {
    * @param ctx - The authentication context
    * @param method - The method being called
    * @param args - The method arguments (first arg is typically docId)
+   * @param params - Named request params for providers that validate payloads
+   *                 (built from the api definition's declared param names)
    * @throws StatusError if access is denied
    */
   protected async assertAccess(
     access: Access,
     ctx: AuthContext | undefined,
     method: string,
-    args?: any[]
+    args?: any[],
+    params?: Record<string, any>
   ): Promise<void> {
     if (!this.auth) return; // No auth provider = allow all
 
@@ -245,7 +276,9 @@ export class JSONRPCServer {
         `INVALID_REQUEST: docId is required (got ${docId === '' ? 'empty string' : String(docId)})`
       );
     }
-    const ok = await this.auth.canAccess(ctx, docId, access, method);
+    const ok = params
+      ? await this.auth.canAccess(ctx, docId, access, method, params)
+      : await this.auth.canAccess(ctx, docId, access, method);
     if (!ok) {
       throw new StatusError(403, `${access.toUpperCase()}_FORBIDDEN:${docId}`);
     }

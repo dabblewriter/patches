@@ -154,7 +154,7 @@ describe('LWWServer', () => {
       expect(LWWServer.api).toEqual({
         getDoc: 'read',
         getChangesSince: 'read',
-        commitChanges: 'write',
+        commitChanges: { access: 'write', params: ['docId', 'changes', 'options'] },
         deleteDoc: 'write',
         undeleteDoc: 'write',
       });

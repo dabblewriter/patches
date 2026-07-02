@@ -4,6 +4,8 @@ import { JSONRPCServer } from '../../../src/net/protocol/JSONRPCServer';
 import type { JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, Message } from '../../../src/net/protocol/types';
 import { getAuthContext, getClientId } from '../../../src/net/serverContext';
 import type { AuthContext } from '../../../src/net/websocket/AuthorizationProvider';
+import { LWWServer } from '../../../src/server/LWWServer';
+import { OTServer } from '../../../src/server/OTServer';
 
 describe('JSONRPCServer', () => {
   let server: JSONRPCServer;
@@ -956,6 +958,107 @@ describe('JSONRPCServer', () => {
       expect(response.error).toBeUndefined();
       expect(auth.canAccess).toHaveBeenCalledWith(undefined, 'users/test', 'read', 'getDoc');
       expect(fake.getDoc).toHaveBeenCalledWith('users/test');
+    });
+  });
+
+  describe('canAccess request params', () => {
+    class FakeServer {
+      static api = {
+        getDoc: 'read',
+        commitChanges: { access: 'write', params: ['docId', 'changes', 'options'] },
+      } as const;
+      getDoc = vi.fn().mockResolvedValue({ state: {}, rev: 0 });
+      commitChanges = vi.fn().mockResolvedValue({ changes: [] });
+    }
+
+    const changes = [{ id: 'c1', rev: 1, baseRev: 0, ops: [] }];
+
+    it('passes named params to canAccess when the api declares them', async () => {
+      const auth = { canAccess: vi.fn().mockReturnValue(true) };
+      const authServer = new JSONRPCServer({ auth });
+      const fake = new FakeServer();
+      authServer.register(fake);
+
+      const request: JsonRpcRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'commitChanges',
+        params: ['docs/1', changes],
+      };
+
+      const response = (await authServer.processMessage(request)) as JsonRpcResponse;
+
+      expect(response.error).toBeUndefined();
+      expect(auth.canAccess).toHaveBeenCalledWith(undefined, 'docs/1', 'write', 'commitChanges', {
+        docId: 'docs/1',
+        changes,
+      });
+      expect(fake.commitChanges).toHaveBeenCalledWith('docs/1', changes);
+    });
+
+    it('lets a provider deny a commit based on the params payload', async () => {
+      const auth = {
+        canAccess: vi.fn((ctx: AuthContext | undefined, docId: string, kind: string, method: string, params?: any) => {
+          if (method === 'commitChanges') return Boolean(params?.changes);
+          return true;
+        }),
+      };
+      const authServer = new JSONRPCServer({ auth });
+      const fake = new FakeServer();
+      authServer.register(fake);
+
+      const allowed = (await authServer.processMessage({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'commitChanges',
+        params: ['docs/1', changes],
+      })) as JsonRpcResponse;
+      expect(allowed.error).toBeUndefined();
+
+      // A provider gating on params sees them even over the RPC path — no params, no commit
+      const denied = (await authServer.processMessage({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'commitChanges',
+        params: ['docs/1'],
+      })) as JsonRpcResponse;
+      expect(denied.error).toBeDefined();
+      expect(denied.error!.code).toBe(403);
+    });
+
+    it('omits params for methods without declared param names (back-compat)', async () => {
+      const auth = { canAccess: vi.fn().mockReturnValue(true) };
+      const authServer = new JSONRPCServer({ auth });
+      const fake = new FakeServer();
+      authServer.register(fake);
+
+      await authServer.processMessage({ jsonrpc: '2.0', id: 1, method: 'getDoc', params: ['docs/1'] });
+
+      expect(auth.canAccess).toHaveBeenCalledWith(undefined, 'docs/1', 'read', 'getDoc');
+      expect(auth.canAccess.mock.calls[0]).toHaveLength(4);
+    });
+
+    it('skips building named params when no auth provider is configured', async () => {
+      // No auth = assertAccess returns before touching params, so this must not need to
+      // build the named-params object for a method that declares them.
+      const noAuthServer = new JSONRPCServer();
+      const fake = new FakeServer();
+      noAuthServer.register(fake);
+
+      const response = (await noAuthServer.processMessage({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'commitChanges',
+        params: ['docs/1', changes],
+      })) as JsonRpcResponse;
+
+      expect(response.error).toBeUndefined();
+      expect(fake.commitChanges).toHaveBeenCalledWith('docs/1', changes);
+    });
+
+    it('bundled server apis declare commitChanges params for providers', () => {
+      expect(OTServer.api.commitChanges).toEqual({ access: 'write', params: ['docId', 'changes', 'options'] });
+      expect(LWWServer.api.commitChanges).toEqual({ access: 'write', params: ['docId', 'changes', 'options'] });
     });
   });
 

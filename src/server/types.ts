@@ -85,6 +85,16 @@ export interface OTStoreBackend extends ServerStoreBackend, VersioningStoreBacke
 export type ListFieldsOptions = { sinceRev: number } | { paths: string[] };
 
 /**
+ * Change ids to record atomically with a saveOps call, for retry idempotency.
+ * `expireAt` is a unix-ms timestamp after which the ids may be discarded —
+ * provided so implementations can TTL-index rather than track age themselves.
+ */
+export interface CommittedChangeIds {
+  ids: string[];
+  expireAt: number;
+}
+
+/**
  * Result from LWW getSnapshot. State is a ReadableStream so large snapshots
  * can be streamed to clients without full materialization.
  */
@@ -144,13 +154,30 @@ export interface LWWStoreBackend extends ServerStoreBackend {
    * - Set the rev on all saved fields to the new revision
    * - Delete children atomically when saving a parent (e.g., saving /obj deletes /obj/name)
    * - Delete paths in pathsToDelete atomically with saving ops
+   * - Persist changeIds.ids in the same transaction as the ops (see below) — recording
+   *   them in a separate call could ack the ops and lose the ids, silently re-enabling
+   *   double-applied retries
    *
    * @param docId - The document ID.
    * @param ops - Array of ops to save.
    * @param pathsToDelete - Optional paths to delete atomically.
+   * @param changeIds - Optional change ids to record atomically for retry dedup.
+   *   Only passed by servers when the backend implements {@link seenChangeIds}.
    * @returns The new revision number.
    */
-  saveOps(docId: string, ops: JSONPatchOp[], pathsToDelete?: string[]): Promise<number>;
+  saveOps(docId: string, ops: JSONPatchOp[], pathsToDelete?: string[], changeIds?: CommittedChangeIds): Promise<number>;
+
+  /**
+   * Return which of the given change ids were recorded by a prior saveOps call and have
+   * not yet expired. Enables retry idempotency: LWW compacts ops per path and keeps no
+   * change log, so without this a client retrying an unacked commit re-applies delta ops
+   * (@inc/@bit/@max/@min) and double-counts.
+   *
+   * Optional — when absent, LWWServer skips dedup and retried deltas double-apply.
+   * Expiry is the implementation's job; use the expireAt passed to saveOps (a TTL index
+   * or lazy pruning both work).
+   */
+  seenChangeIds?(docId: string, ids: string[]): Promise<string[]>;
 }
 
 /**

@@ -9,6 +9,7 @@ Most collaborative apps don't need the complexity of Operational Transformation.
 - [How It's Different from OT](#how-its-different-from-ot)
 - [The Architecture](#the-architecture)
 - [Client-Server Flow](#client-server-flow)
+- [Retries and Idempotency](#retries-and-idempotency)
 - [The Key Players](#the-key-players)
 - [Batching Operations with LWWBatcher](#batching-operations-with-lwwbatcher)
 - [Algorithm Functions](#algorithm-functions)
@@ -229,7 +230,12 @@ The ops move from `pendingOps` to `sendingChange` atomically. This ensures retri
 
 ### 3. Server Processes Changes
 
-The server receives the change and uses `consolidateOps`:
+Before touching the algorithm, the server does two things:
+
+- **Dedups retries.** If the store records committed change ids, changes the server already applied are dropped instead of re-applied. See [Retries and Idempotency](#retries-and-idempotency).
+- **Clamps timestamps.** No client-supplied `ts` may exceed server time. Without this, one client with a fast clock stamps values in the future and wedges those fields against every other writer until reality catches up.
+
+Then it uses `consolidateOps`:
 
 ```typescript
 // LWWServer.commitChanges()
@@ -301,6 +307,21 @@ The cycle is complete. The client's state reflects:
 
 - Server-committed changes (with updated committedRev)
 - Any remaining pending local changes (waiting to be sent)
+
+## Retries and Idempotency
+
+The sending slot guarantees a retry sends the same change with the same id. That's half the story. The other half is what the server does when that retry arrives.
+
+OT recognizes a retried change because its change log retains ids. LWW stores current field values per path and throws everything else away, so a naive LWW server treats the retry as brand new and applies it again. For plain `replace` ops that's a harmless overwrite with the same value. For delta ops it's data corruption: an `@inc` of 5, committed, retried after a lost ack, becomes an increment of 10.
+
+The mechanism that closes this hole:
+
+- `LWWServer` keeps recently committed change ids per doc, for `changeIdTTL` (default 30 days, long enough for an offline client that restarts and retries a persisted sending change days later).
+- On `commitChanges`, incoming changes whose ids were already committed are dropped. The response still echoes the currently committed ops for the paths those changes touched, so the retrying client clears its sending slot and converges on the server's values.
+- Fresh change ids are persisted in the **same** `saveOps` call as the ops themselves. Ids and ops commit or fail together; there is no window where the ops landed but the server forgot it applied them.
+- Expiry is the backend's job. The server passes `expireAt` with the ids so a backend can TTL-index them; the in-memory reference backend prunes lazily.
+
+This only works when the store implements the optional `seenChangeIds()` method (see [Backend Store Interface](#backend-store-interface)). Without it, the server skips dedup and retried deltas double-apply, exactly as before the mechanism existed.
 
 ## The Key Players
 
@@ -708,14 +729,24 @@ interface LWWStoreBackend extends ServerStoreBackend {
   // List ops, optionally filtered
   listOps(docId: string, options?: ListFieldsOptions): Promise<JSONPatchOp[]>;
 
-  // Save ops atomically, increment revision
-  saveOps(docId: string, ops: JSONPatchOp[], pathsToDelete?: string[]): Promise<number>;
+  // Save ops atomically, increment revision; changeIds (when given) must
+  // persist in the same transaction as the ops
+  saveOps(docId: string, ops: JSONPatchOp[], pathsToDelete?: string[], changeIds?: CommittedChangeIds): Promise<number>;
+
+  // Optional: which of these change ids were committed and have not expired?
+  // Implementing this enables retry dedup (see Retries and Idempotency)
+  seenChangeIds?(docId: string, ids: string[]): Promise<string[]>;
 
   // Delete document and all data
   deleteDoc(docId: string): Promise<void>;
 }
 
 type ListFieldsOptions = { sinceRev: number } | { paths: string[] };
+
+interface CommittedChangeIds {
+  ids: string[];
+  expireAt: number; // Unix ms after which the ids may be discarded (TTL index hint)
+}
 ```
 
 **Key implementation requirements for `saveOps`:**
@@ -724,6 +755,7 @@ type ListFieldsOptions = { sinceRev: number } | { paths: string[] };
 - Set `rev` on all saved ops to the new revision
 - Delete child paths when saving parent (e.g., saving `/obj` deletes `/obj/name`)
 - Delete paths in `pathsToDelete` atomically
+- Persist `changeIds.ids` in the same transaction as the ops (a separate write can ack the ops and lose the ids, re-enabling double-applied retries)
 
 ### VersioningStoreBackend
 

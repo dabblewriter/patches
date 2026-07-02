@@ -733,6 +733,42 @@ describe('LWW Integration', () => {
     });
   });
 
+  describe('retry idempotency', () => {
+    it('should not double-apply @inc when a client retries a commit after a lost ack', async () => {
+      const docId = 'doc1';
+      const doc = harness.createClient('clientA', docId, { count: 10 });
+      const algorithm = harness.getAlgorithm('clientA');
+
+      await harness.makeChange('clientA', d => {
+        d.change(patch => {
+          patch.increment('/count', 5);
+        });
+      });
+
+      // First send reaches the server, but the ack is lost
+      const inFlight = await algorithm.getPendingToSend(docId);
+      await harness.server.commitChanges(docId, inFlight!);
+
+      // Client retries: the sending slot re-yields the same change (same id)
+      const retry = await algorithm.getPendingToSend(docId);
+      expect(retry![0].id).toBe(inFlight![0].id);
+
+      const response = await harness.server.commitChanges(docId, retry!);
+      await algorithm.confirmSent(docId, retry!);
+      await algorithm.applyServerChanges(docId, response.changes, doc);
+
+      // Server applied the increment once: 0 (no committed base) + 5, not 10
+      const serverOps = harness.serverStore.getDocData(docId)?.ops ?? [];
+      expect(serverOps).toContainEqual(expect.objectContaining({ path: '/count', op: 'replace', value: 5 }));
+      expect(serverOps).not.toContainEqual(expect.objectContaining({ path: '/count', value: 10 }));
+
+      // The retry response echoed the committed op, so the client converged on it
+      expect(doc.state.count).toBe(5);
+      expect(doc.hasPending).toBe(false);
+      expect(doc.committedRev).toBe(1);
+    });
+  });
+
   describe('edge cases', () => {
     it('should handle empty change gracefully', async () => {
       const docId = 'doc1';

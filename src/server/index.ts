@@ -46,6 +46,7 @@ export type { DeleteDocOptions } from '../types.js';
 export type { GetDocOptions, PatchesServer } from './PatchesServer.js';
 export type {
   BranchingStoreBackend,
+  CommittedChangeIds,
   ListFieldsOptions,
   LWWStoreBackend,
   OTStoreBackend,

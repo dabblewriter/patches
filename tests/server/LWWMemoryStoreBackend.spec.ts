@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readStreamAsString } from '../../src/server/jsonReadable.js';
 import { LWWMemoryStoreBackend } from '../../src/server/LWWMemoryStoreBackend.js';
 import type { Branch, VersionMetadata } from '../../src/types.js';
@@ -178,6 +178,53 @@ describe('LWWMemoryStoreBackend', () => {
         expect(fields1).not.toBe(fields2);
         expect(fields1).toEqual(fields2);
       });
+    });
+  });
+
+  describe('change ids', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('reports nothing seen for an unknown doc or unrecorded ids', async () => {
+      expect(await store.seenChangeIds('doc1', ['c1'])).toEqual([]);
+
+      await store.saveOps('doc1', [{ op: 'replace', path: '/a', ts: 100, value: 1 }]);
+      expect(await store.seenChangeIds('doc1', ['c1'])).toEqual([]);
+    });
+
+    it('records ids passed to saveOps and reports them seen', async () => {
+      await store.saveOps('doc1', [{ op: 'replace', path: '/a', ts: 100, value: 1 }], undefined, {
+        ids: ['c1', 'c2'],
+        expireAt: Date.now() + 60_000,
+      });
+
+      expect(await store.seenChangeIds('doc1', ['c1', 'c2', 'c3'])).toEqual(['c1', 'c2']);
+    });
+
+    it('prunes ids lazily once expireAt passes', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1700000000000);
+
+      await store.saveOps('doc1', [{ op: 'replace', path: '/a', ts: 100, value: 1 }], undefined, {
+        ids: ['c1'],
+        expireAt: 1700000000000 + 1000,
+      });
+      expect(await store.seenChangeIds('doc1', ['c1'])).toEqual(['c1']);
+
+      vi.setSystemTime(1700000000000 + 2000);
+      expect(await store.seenChangeIds('doc1', ['c1'])).toEqual([]);
+    });
+
+    it('drops ids with the doc on deleteDoc', async () => {
+      await store.saveOps('doc1', [{ op: 'replace', path: '/a', ts: 100, value: 1 }], undefined, {
+        ids: ['c1'],
+        expireAt: Date.now() + 60_000,
+      });
+
+      await store.deleteDoc('doc1');
+
+      expect(await store.seenChangeIds('doc1', ['c1'])).toEqual([]);
     });
   });
 

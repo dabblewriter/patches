@@ -23,8 +23,16 @@ import { assertVersionMetadata } from './utils.js';
 /**
  * Configuration options for LWWServer.
  */
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
-export interface LWWServerOptions {}
+export interface LWWServerOptions {
+  /**
+   * How long committed change ids are retained for retry dedup, in milliseconds.
+   * Must cover offline clients that restart and retry a persisted sending change
+   * days later. Default: 30 days. Only used when the store implements seenChangeIds.
+   */
+  changeIdTTL?: number;
+}
+
+const DEFAULT_CHANGE_ID_TTL = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * Last-Write-Wins (LWW) server implementation.
@@ -68,6 +76,8 @@ export class LWWServer implements PatchesServer {
 
   readonly store: LWWStoreBackend;
 
+  private readonly _changeIdTTL: number;
+
   /** Per-doc FIFO mutex (see {@link _withDocLock}). */
   private readonly _docLocks = new Map<string, Promise<unknown>>();
 
@@ -78,8 +88,9 @@ export class LWWServer implements PatchesServer {
   /** Notifies listeners when a document is deleted. */
   public readonly onDocDeleted = signal<(docId: string, options?: DeleteDocOptions, originClientId?: string) => void>();
 
-  constructor(store: LWWStoreBackend, _options: LWWServerOptions = {}) {
+  constructor(store: LWWStoreBackend, options: LWWServerOptions = {}) {
     this.store = store;
+    this._changeIdTTL = options.changeIdTTL ?? DEFAULT_CHANGE_ID_TTL;
   }
 
   /**
@@ -174,9 +185,29 @@ export class LWWServer implements PatchesServer {
       // another client committed at exactly baseRev + 1.
       const clientRev = change.baseRev ?? (change.rev !== undefined ? Math.max(0, change.rev - 1) : undefined);
 
-      // Add timestamps to ops that don't have them
-      // Prefer the change's createdAt if available, fallback to server time
-      const newOps = changes.flatMap(c => c.ops.map(op => (op.ts ? op : { ...op, ts: c.createdAt ?? serverNow })));
+      // Retry dedup: LWW compacts ops per path and keeps no change log, so a client retrying
+      // an unacked commit would re-apply delta ops (@inc/@bit/@max/@min) and double-count.
+      // Backends that record change ids (see LWWStoreBackend.seenChangeIds) let us drop
+      // already-committed changes here; without the capability retries re-apply as before.
+      const seen = this.store.seenChangeIds
+        ? new Set(
+            await this.store.seenChangeIds(
+              docId,
+              changes.map(c => c.id)
+            )
+          )
+        : undefined;
+      const freshChanges = seen?.size ? changes.filter(c => !seen.has(c.id)) : changes;
+      const dedupedPaths = new Set(
+        seen?.size ? changes.filter(c => seen.has(c.id)).flatMap(c => c.ops.map(o => o.path)) : []
+      );
+
+      // Stamp and clamp timestamps: ops without ts get the change's createdAt (else server
+      // time), and no client-supplied ts may exceed server time — a fast-clocked client would
+      // otherwise wedge fields against all other writers.
+      const newOps = freshChanges.flatMap(c =>
+        c.ops.map(op => ({ ...op, ts: Math.min(op.ts ?? c.createdAt ?? serverNow, serverNow) }))
+      );
 
       // Load all existing ops for this doc
       const existingOps = await this.store.listOps(docId);
@@ -191,16 +222,20 @@ export class LWWServer implements PatchesServer {
       const currentRev = await this.store.getCurrentRev(docId);
       let newRev = currentRev;
 
-      // Save ops and delete paths atomically
+      // Save ops and delete paths atomically. Change ids ride in the same call — persisting
+      // them separately could ack the ops and lose the ids, re-enabling double-applied retries.
       if (opsToStore.length > 0 || pathsToDelete.length > 0) {
-        newRev = await this.store.saveOps(docId, opsToStore, pathsToDelete);
+        const changeIds = this.store.seenChangeIds
+          ? { ids: freshChanges.map(c => c.id), expireAt: serverNow + this._changeIdTTL }
+          : undefined;
+        newRev = await this.store.saveOps(docId, opsToStore, pathsToDelete, changeIds);
       }
 
       // Build catchup ops - start with correction ops from opsToReturn
       const responseOps = [...opsToReturn];
       if (clientRev !== undefined) {
         const opsSince = await this.store.listOps(docId, { sinceRev: clientRev });
-        const sentPaths = new Set(newOps.map(o => o.path));
+        const sentPaths = new Set([...newOps.map(o => o.path), ...dedupedPaths]);
 
         // Filter out ops client just sent (and their children), in commit order
         const catchupOps = sortOpsByCommitOrder(opsSince.filter(op => !isPathOrChild(op.path, sentPaths)));
@@ -215,6 +250,16 @@ export class LWWServer implements PatchesServer {
         if (!combinableOps[sentOp.op] || echoedPaths.has(sentOp.path)) continue;
         echoedPaths.add(sentOp.path);
         const stored = opsToStore.find(o => o.path === sentOp.path) ?? existingOps.find(o => o.path === sentOp.path);
+        if (stored) responseOps.push(stored);
+      }
+
+      // A deduped change was committed by a prior attempt whose ack was lost — echo the current
+      // committed ops for the paths it touched so the retrying client confirms its sending layer
+      // and converges, just like the delta echo above.
+      for (const path of dedupedPaths) {
+        if (echoedPaths.has(path)) continue;
+        echoedPaths.add(path);
+        const stored = opsToStore.find(o => o.path === path) ?? existingOps.find(o => o.path === path);
         if (stored) responseOps.push(stored);
       }
 

@@ -10,6 +10,7 @@ import type {
 import { jsonReadable } from './jsonReadable.js';
 import type {
   BranchingStoreBackend,
+  CommittedChangeIds,
   ListFieldsOptions,
   LWWStoreBackend,
   SnapshotResult,
@@ -21,6 +22,8 @@ interface DocData {
   snapshot: { state: any; rev: number } | null;
   ops: JSONPatchOp[];
   rev: number;
+  /** Committed change ids for retry dedup: id → expireAt (unix ms). */
+  changeIds: Map<string, number>;
 }
 
 interface VersionData {
@@ -52,7 +55,7 @@ export class LWWMemoryStoreBackend
   private getOrCreateDoc(docId: string): DocData {
     let doc = this.docs.get(docId);
     if (!doc) {
-      doc = { snapshot: null, ops: [], rev: 0 };
+      doc = { snapshot: null, ops: [], rev: 0, changeIds: new Map() };
       this.docs.set(docId, doc);
     }
     return doc;
@@ -81,7 +84,12 @@ export class LWWMemoryStoreBackend
 
   // === Ops ===
 
-  async saveOps(docId: string, newOps: JSONPatchOp[], pathsToDelete?: string[]): Promise<number> {
+  async saveOps(
+    docId: string,
+    newOps: JSONPatchOp[],
+    pathsToDelete?: string[],
+    changeIds?: CommittedChangeIds
+  ): Promise<number> {
     const doc = this.getOrCreateDoc(docId);
     const newRev = ++doc.rev;
 
@@ -104,7 +112,26 @@ export class LWWMemoryStoreBackend
       doc.ops.push(op);
     }
 
+    if (changeIds) {
+      for (const id of changeIds.ids) {
+        doc.changeIds.set(id, changeIds.expireAt);
+      }
+    }
+
     return newRev;
+  }
+
+  async seenChangeIds(docId: string, ids: string[]): Promise<string[]> {
+    const doc = this.docs.get(docId);
+    if (!doc) return [];
+
+    // Lazy pruning of expired ids
+    const now = Date.now();
+    for (const [id, expireAt] of doc.changeIds) {
+      if (expireAt <= now) doc.changeIds.delete(id);
+    }
+
+    return ids.filter(id => doc.changeIds.has(id));
   }
 
   async listOps(docId: string, options?: ListFieldsOptions): Promise<JSONPatchOp[]> {

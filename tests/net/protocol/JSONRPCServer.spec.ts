@@ -953,6 +953,24 @@ describe('JSONRPCServer', () => {
       expect(auth.canAccess.mock.calls[0]).toHaveLength(4);
     });
 
+    it('skips building named params when no auth provider is configured', async () => {
+      // No auth = assertAccess returns before touching params, so this must not need to
+      // build the named-params object for a method that declares them.
+      const noAuthServer = new JSONRPCServer();
+      const fake = new FakeServer();
+      noAuthServer.register(fake);
+
+      const response = (await noAuthServer.processMessage({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'commitChanges',
+        params: ['docs/1', changes],
+      })) as JsonRpcResponse;
+
+      expect(response.error).toBeUndefined();
+      expect(fake.commitChanges).toHaveBeenCalledWith('docs/1', changes);
+    });
+
     it('bundled server apis declare commitChanges params for providers', () => {
       expect(OTServer.api.commitChanges).toEqual({ access: 'write', params: ['docId', 'changes', 'options'] });
       expect(LWWServer.api.commitChanges).toEqual({ access: 'write', params: ['docId', 'changes', 'options'] });

@@ -68,6 +68,16 @@ const TERMINAL_SYNC_CODES = new Set([401, 402, 403, 404, 410]);
 // connection stays up (see `_scheduleSyncReprobe`).
 const SYNC_REPROBE_EXHAUSTED_MS = 5 * 60_000;
 const SYNC_REPROBE_TERMINAL_MS = 10 * 60_000;
+// Docs that fail together in the same syncAllKnownDocs pass (e.g. a bulk permission
+// revocation) would otherwise all schedule the exact same delay, then re-probe,
+// re-fail, and reschedule in lockstep every 5/10 minutes. Jitter downward only —
+// never later than the nominal delay, only ever equal or earlier — so callers can
+// still rely on the constants above as an upper bound.
+const SYNC_REPROBE_JITTER_RATIO = 0.2;
+
+function jitterReprobeDelay(delayMs: number): number {
+  return delayMs - Math.random() * delayMs * SYNC_REPROBE_JITTER_RATIO;
+}
 
 /**
  * Handles server connection, document subscriptions, and syncing logic between
@@ -606,6 +616,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       throw new Error('Not connected to server');
     }
 
+    // Guarantee a docStates entry exists. flushDoc is protected/subclass-callable and
+    // only checks trackedDocs above, not that _initDocSyncState already ran for this
+    // doc — without this, a flush reached before that init is a silent no-op below
+    // (_updateDocSyncState no-ops for an absent entry), so the doc looks like it never
+    // synced even though the flush succeeded. Merges into any existing entry.
+    this._initDocSyncState(docId, {});
+
     const algorithm = this._getAlgorithm(docId);
 
     try {
@@ -726,6 +743,15 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   protected async _applyServerChangesToDoc(docId: string, serverChanges: Change[]): Promise<void> {
     const doc = this.patches.getOpenDoc(docId);
     const algorithm = this._getAlgorithm(docId);
+
+    // Guarantee a docStates entry exists for a tracked doc. This is reachable from
+    // paths that don't run _initDocSyncState first — the public applyMergeChanges API
+    // and the raw onChangesCommitted push both call this directly — so without this,
+    // the committedRev update below silently no-ops for a doc whose entry hasn't been
+    // created yet. Gated on trackedDocs so a genuinely-untracked doc still gets no entry.
+    if (this.trackedDocs.has(docId)) {
+      this._initDocSyncState(docId, {});
+    }
 
     // Delegate to algorithm - it handles store updates and doc updates
     await algorithm.applyServerChanges(docId, serverChanges, doc);
@@ -1055,7 +1081,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   protected _scheduleSyncReprobe(docId: string, retryable: boolean): void {
     if (!this._isConnectedAndOnline() || !this.trackedDocs.has(docId)) return;
-    const delay = retryable ? SYNC_REPROBE_EXHAUSTED_MS : SYNC_REPROBE_TERMINAL_MS;
+    const delay = jitterReprobeDelay(retryable ? SYNC_REPROBE_EXHAUSTED_MS : SYNC_REPROBE_TERMINAL_MS);
     const existing = this._syncReprobeTimers.get(docId);
     if (existing !== undefined) globalThis.clearTimeout(existing);
     const timer = globalThis.setTimeout(() => {

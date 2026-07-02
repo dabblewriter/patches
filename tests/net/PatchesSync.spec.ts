@@ -982,6 +982,17 @@ describe('PatchesSync', () => {
 
       expect(mockPatches.applySnapshot).not.toHaveBeenCalled();
     });
+
+    it('creates a docStates entry when flushDoc is reached before _initDocSyncState ran', async () => {
+      // beforeEach only does trackedDocs.add('doc1') — no docStates entry — mirroring a
+      // subclass calling the protected flushDoc directly without going through syncDoc first.
+      expect(sync.docStates.state['doc1']).toBeUndefined();
+      mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+
+      await sync['flushDoc']('doc1');
+
+      expect(sync.docStates.state['doc1']).toBeDefined();
+    });
   });
 
   describe('_applyServerChangesToDoc method', () => {
@@ -1009,6 +1020,18 @@ describe('PatchesSync', () => {
       await sync['_applyServerChangesToDoc']('doc1', []);
 
       expect(mockAlgorithm.applyServerChanges).toHaveBeenCalledWith('doc1', [], null);
+    });
+
+    it('creates a docStates entry for a tracked doc reached before _initDocSyncState ran', async () => {
+      // doc1 is tracked (constructor seeds trackedDocs from patches.trackedDocs) but has no
+      // docStates entry yet — the shape reached via applyMergeChanges or a raw
+      // onChangesCommitted push before syncDoc/flushDoc ever initialized it.
+      expect(sync.docStates.state['doc1']).toBeUndefined();
+
+      const serverChanges: Change[] = [{ id: 'c1', rev: 6, baseRev: 5, ops: [], createdAt: 0, committedAt: 0 }];
+      await sync['_applyServerChangesToDoc']('doc1', serverChanges);
+
+      expect(sync.docStates.state['doc1']?.committedRev).toBe(6);
     });
   });
 

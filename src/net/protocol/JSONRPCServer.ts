@@ -122,7 +122,11 @@ export class JSONRPCServer {
           );
         }
         const ctx = getAuthContext();
-        await this.assertAccess(access, ctx, method, args, buildNamedParams(paramNames, args));
+        // assertAccess no-ops immediately when there's no auth provider, so skip
+        // building the named-params object (allocated on every call otherwise) in
+        // that case — it would just be discarded unused.
+        const params = this.auth ? buildNamedParams(paramNames, args) : undefined;
+        await this.assertAccess(access, ctx, method, args, params);
         return (obj as any)[method](...args);
       });
     }

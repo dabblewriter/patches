@@ -34,6 +34,15 @@ export class MissingChangesError extends Error {
  * returns a synthetic catchup change containing the full current state instead of
  * returning potentially thousands of individual historical changes.
  *
+ * A root replace supersedes pending local changes: `rebaseChanges` transforms every
+ * pending op against it, which transforms them away, so the pending queue empties. This
+ * is intentional and required for convergence. The server applies the same transform to
+ * those changes when they arrive at commit time and drops them too; keeping them alive
+ * locally would fork this replica from every other. Protecting real offline edits from
+ * an incoming snapshot is the sync layer's job, not this function's: `PatchesSync`
+ * flushes pending changes at their true baseRev before installing a server snapshot
+ * (see `_reloadDocFromServer`'s `flushPendingFirst`).
+ *
  * @param snapshot The current state of the document (the state without pending changes applied) and the pending changes.
  * @param committedChangesFromServer An array of sequential changes from the server.
  * @returns The new committed state, the new committed revision, and the new/rebased pending changes.

@@ -2,6 +2,7 @@ import { Delta } from '@dabble/delta';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { applyPatch } from '../../src/json-patch/applyPatch.js';
 import { bitmask, combineBitmasks } from '../../src/json-patch/ops/bitmask.js';
+import type { JSONPatchOpHandler } from '../../src/json-patch/types.js';
 
 describe('applyPatch', () => {
   describe('auto-create missing containers', () => {
@@ -328,6 +329,88 @@ describe('applyPatch', () => {
     ])('applies a @txt op with %s value', (_, value) => {
       const result = applyPatch({}, [{ op: '@txt', path: '/text', value: value as any }]);
       expect(result).toEqual({ text: { ops: [{ insert: 'hi\n' }] } });
+    });
+  });
+
+  describe('failed test op aborts the patch (RFC 6902)', () => {
+    it('reverts earlier ops and returns the original object identity', () => {
+      const obj = { count: 1, name: 'a' };
+      const result = applyPatch(
+        obj,
+        [
+          { op: 'replace', path: '/name', value: 'b' },
+          { op: 'test', path: '/count', value: 2 },
+          { op: 'replace', path: '/name', value: 'c' },
+        ],
+        { silent: true }
+      );
+      expect(result).toBe(obj);
+      expect(obj).toEqual({ count: 1, name: 'a' });
+    });
+
+    it('saves the failing op to opts.error', () => {
+      const opts = { silent: true } as any;
+      applyPatch({ count: 1 }, [{ op: 'test', path: '/count', value: 2 }], opts);
+      expect(opts.error).toEqual({ op: 'test', path: '/count', value: 2 });
+    });
+
+    it('continues when a test op passes', () => {
+      const result = applyPatch({ count: 1 }, [
+        { op: 'test', path: '/count', value: 1 },
+        { op: 'replace', path: '/name', value: 'b' },
+      ]);
+      expect(result).toEqual({ count: 1, name: 'b' });
+    });
+
+    it('throws on a failed test in strict mode', () => {
+      expect(() => applyPatch({ count: 1 }, [{ op: 'test', path: '/count', value: 2 }], { strict: true })).toThrow(
+        TypeError
+      );
+    });
+
+    it('skips a failed non-test op and applies the rest by default', () => {
+      const result = applyPatch(
+        { arr: [1], name: 'a' },
+        [
+          { op: 'add', path: '/arr/5', value: 'x' },
+          { op: 'replace', path: '/name', value: 'b' },
+        ],
+        { silent: true }
+      );
+      expect(result).toEqual({ arr: [1], name: 'b' });
+    });
+
+    it('rigid still aborts on non-test failures and returns the original object', () => {
+      const obj = { arr: [1], name: 'a' };
+      const result = applyPatch(
+        obj,
+        [
+          { op: 'add', path: '/arr/5', value: 'x' },
+          { op: 'replace', path: '/name', value: 'b' },
+        ],
+        { rigid: true, silent: true }
+      );
+      expect(result).toBe(obj);
+    });
+
+    it('aborts on a failed custom op with like: "test"', () => {
+      const alwaysFails: JSONPatchOpHandler = {
+        like: 'test',
+        apply: () => '[op:@fail] always fails',
+        transform: (_state, _other, ops) => ops,
+        invert: () => undefined as any,
+      };
+      const obj = { name: 'a' };
+      const result = applyPatch(
+        obj,
+        [
+          { op: 'replace', path: '/name', value: 'b' },
+          { op: '@fail', path: '/name' },
+        ],
+        { silent: true },
+        { '@fail': alwaysFails }
+      );
+      expect(result).toBe(obj);
     });
   });
 });

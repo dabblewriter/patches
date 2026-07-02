@@ -113,6 +113,8 @@ function applyChanges(state: any, changes: Change[]): any;
 
 Applies a sequence of changes to a state object. Each change's operations execute in order. Returns the new state. Fundamental to everything else.
 
+A change that fails to apply throws an `ApplyChangesError` (carrying the failing change's id, rev, and batch index, with the patch error as `cause`) — it is never silently skipped, since a skipped change would diverge that client from every other client that applied it. `PatchesSync` recovers from this on the client by reloading the authoritative snapshot from the server.
+
 ### changeBatching
 
 Three functions for handling large changes:

@@ -24,4 +24,11 @@ export interface PatchesConnection extends PatchesAPI {
 
   /** Signal emitted when a subscribed document is deleted remotely. */
   readonly onDocDeleted: Signal<(docId: string) => void>;
+
+  /**
+   * Optional signal emitted for transport-level errors that don't reject a specific
+   * request — e.g. a malformed server-pushed event the transport had to drop.
+   * PatchesSync forwards these to its own onError so they reach app telemetry.
+   */
+  readonly onError?: Signal<(error: Error) => void>;
 }

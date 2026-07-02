@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { applyCommittedChanges } from '../../../../src/algorithms/ot/client/applyCommittedChanges';
+import { ApplyChangesError } from '../../../../src/algorithms/ot/shared/applyChanges';
 import type { Change, PatchesSnapshot } from '../../../../src/types';
 
 describe('applyCommittedChanges', () => {
@@ -106,13 +107,25 @@ describe('applyCommittedChanges', () => {
     expect(result.changes).toEqual([]);
   });
 
-  it('should skip bad server changes without throwing', () => {
+  it('should throw ApplyChangesError for a bad server change instead of silently skipping it', () => {
+    // A skipped change would silently diverge this client from every other client
+    // that applied it — the error must propagate so PatchesSync can recover.
     const snapshot = createSnapshot({ arr: [1, 2, 3] }, 2, []);
     const serverChanges = [
       createChange(3, [{ op: 'add', path: '/arr/5', value: 'invalid' }]), // Invalid array index
     ];
 
-    expect(() => applyCommittedChanges(snapshot, serverChanges)).not.toThrow();
+    expect(() => applyCommittedChanges(snapshot, serverChanges)).toThrow(ApplyChangesError);
+    try {
+      applyCommittedChanges(snapshot, serverChanges);
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      const applyErr = err as ApplyChangesError;
+      expect(applyErr.changeId).toBe('change-3');
+      expect(applyErr.rev).toBe(3);
+      expect(applyErr.index).toBe(0);
+      expect(applyErr.cause).toBeInstanceOf(Error);
+    }
   });
 
   it('should handle complex rebase scenario', () => {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Patches } from '../../src/client/Patches';
 import type { AlgorithmName, TrackedDoc } from '../../src/client/PatchesStore';
 import { MissingChangesError } from '../../src/algorithms/ot/client/applyCommittedChanges';
+import { ApplyChangesError } from '../../src/algorithms/ot/shared/applyChanges';
 import { PatchesSync } from '../../src/net/PatchesSync';
 import { StatusError } from '../../src/net/error';
 import { PatchesWebSocket } from '../../src/net/websocket/PatchesWebSocket';
@@ -495,6 +496,77 @@ describe('PatchesSync', () => {
 
       expect(syncDocSpy).not.toHaveBeenCalled();
       expect(onError).toHaveBeenCalledWith(otherErr, { docId: 'doc1' });
+    });
+  });
+
+  describe('apply-failure recovery (P-1)', () => {
+    it('falls back to syncDoc when a committed change fails to apply (ApplyChangesError)', async () => {
+      // A change that fails to apply must trigger recovery — silently skipping it would
+      // diverge this client from every other client that applied it, with zero signal.
+      const applyErr = new ApplyChangesError('c-bad', 6, 0, new Error('[op:add] invalid path'));
+      vi.spyOn(sync as any, '_applyServerChangesToDoc').mockRejectedValue(applyErr);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      const onError = vi.fn();
+      sync.onError(onError);
+
+      await expect(
+        sync['_receiveCommittedChanges']('doc1', [
+          { id: 'c-bad', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 },
+        ])
+      ).resolves.toBeUndefined(); // recovered, not an unhandled rejection
+
+      expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+    });
+
+    it('syncDoc recovers from an ApplyChangesError during catch-up by reloading the authoritative snapshot', async () => {
+      sync['updateState']({ connected: true });
+      const applyErr = new ApplyChangesError('c-bad', 6, 0, new Error('bad op'));
+      mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      mockWebSocket.getChangesSince.mockResolvedValue([
+        { id: 'c-bad', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 },
+      ]);
+      mockAlgorithm.applyServerChanges.mockRejectedValue(applyErr);
+      const snapshot = { state: { content: 'authoritative' }, rev: 6 };
+      mockWebSocket.getDoc.mockResolvedValue(snapshot);
+      const onError = vi.fn();
+      sync.onError(onError);
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await sync['syncDoc']('doc1');
+
+      // Surfaced for telemetry even though recovery succeeded — a failed apply is a
+      // corruption signal, unlike a benign rev gap.
+      expect(onError).toHaveBeenCalledWith(applyErr, { docId: 'doc1' });
+      // Recovered by pulling the full authoritative snapshot (incremental catch-up
+      // would refetch the same changes and fail the same way).
+      expect(mockWebSocket.getDoc).toHaveBeenCalledWith('doc1');
+      expect(mockAlgorithm.store.saveDoc).toHaveBeenCalledWith('doc1', snapshot);
+      expect(sync.docStates.state['doc1']?.syncStatus).toBe('synced');
+      consoleSpy.mockRestore();
+    });
+
+    it('falls through to normal error handling when the snapshot reload also fails', async () => {
+      sync['updateState']({ connected: true });
+      const applyErr = new ApplyChangesError('c-bad', 6, 0, new Error('bad op'));
+      mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      mockWebSocket.getChangesSince.mockResolvedValue([
+        { id: 'c-bad', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 },
+      ]);
+      mockAlgorithm.applyServerChanges.mockRejectedValue(applyErr);
+      mockWebSocket.getDoc.mockRejectedValue(new Error('network down'));
+      const onError = vi.fn();
+      sync.onError(onError);
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await sync['syncDoc']('doc1');
+
+      // Original apply failure still surfaced; the doc lands in error state (with a
+      // scheduled transient retry) instead of crashing or silently dropping the batch.
+      expect(onError).toHaveBeenCalledWith(applyErr, { docId: 'doc1' });
+      expect(sync.docStates.state['doc1']?.syncStatus).toBe('error');
+      consoleSpy.mockRestore();
     });
   });
 

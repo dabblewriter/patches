@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { applyChanges } from '../../../../src/algorithms/ot/shared/applyChanges';
+import { applyChanges, ApplyChangesError } from '../../../../src/algorithms/ot/shared/applyChanges';
 import type { Change } from '../../../../src/types';
 import * as applyPatchModule from '../../../../src/json-patch/applyPatch';
 
@@ -150,7 +150,9 @@ describe('applyChanges', () => {
     expect(result).toBe(state3);
   });
 
-  it('should skip bad changes and log an error instead of throwing', () => {
+  it('should throw ApplyChangesError for a bad change instead of silently skipping it', () => {
+    // A skipped change would silently diverge this client from every other client
+    // that applied it — the error must propagate so callers can recover or surface it.
     const initialState = { text: 'hello' };
     const changes = [createChange(1, [{ op: 'replace', path: '/invalid', value: 'world' }])];
 
@@ -159,10 +161,36 @@ describe('applyChanges', () => {
       throw error;
     });
 
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect(() => applyChanges(initialState, changes)).not.toThrow();
-    expect(consoleSpy).toHaveBeenCalled();
-    consoleSpy.mockRestore();
+    expect(() => applyChanges(initialState, changes)).toThrow(ApplyChangesError);
+  });
+
+  it('should identify the failing change (id, rev, index) and wrap the cause', () => {
+    const state1 = { text: 'hello' };
+    const state2 = { text: 'world' };
+    const changes = [
+      createChange(1, [{ op: 'replace', path: '/text', value: 'world' }]),
+      createChange(2, [{ op: 'replace', path: '/missing', value: true }]),
+    ];
+
+    const patchError = new Error('Invalid path');
+    mockApplyPatch.mockReturnValueOnce(state2).mockImplementationOnce(() => {
+      throw patchError;
+    });
+
+    try {
+      applyChanges(state1, changes);
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ApplyChangesError);
+      const applyErr = err as ApplyChangesError;
+      expect(applyErr.changeId).toBe('change-2');
+      expect(applyErr.rev).toBe(2);
+      expect(applyErr.index).toBe(1);
+      expect(applyErr.cause).toBe(patchError);
+      expect(applyErr.message).toContain('change-2');
+      expect(applyErr.message).toContain('rev 2');
+      expect(applyErr.message).toContain('Invalid path');
+    }
   });
 
   it('should use strict mode for all patches', () => {

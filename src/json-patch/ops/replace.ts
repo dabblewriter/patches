@@ -35,7 +35,7 @@ export const replace: JSONPatchOpHandler = {
   },
 
   invert(_state, { path }, value, changedObj) {
-    if (path.endsWith('/-')) path = path.replace('-', changedObj.length);
+    if (path.endsWith('/-')) path = path.slice(0, -1) + changedObj.length;
     return value === undefined ? { op: 'remove', path } : { op: 'replace', path, value };
   },
 

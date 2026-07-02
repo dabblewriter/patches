@@ -479,6 +479,8 @@ describe('LWWServer', () => {
   });
 
   describe('commitChanges - catchup', () => {
+    // Clients mint changes with baseRev = last known rev and rev = baseRev + 1 (see
+    // LWWAlgorithm.getPendingToSend); baseRev is the catchup floor, not the optimistic rev.
     it('should include fields since client rev in response', async () => {
       mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 1000, rev: 2, value: 'Alice' });
       mockStore.ops.set('doc1:/age', { op: 'replace', path: '/age', ts: 1500, rev: 3, value: 30 });
@@ -486,7 +488,8 @@ describe('LWWServer', () => {
 
       const change: ChangeInput = {
         id: 'catchup1',
-        rev: 1, // Client has rev 1, wants catchup
+        baseRev: 1, // Client has rev 1, wants catchup
+        rev: 2,
         ops: [{ op: 'replace', path: '/status', value: 'online', ts: 2000 }],
       };
 
@@ -497,13 +500,48 @@ describe('LWWServer', () => {
       expect(result.changes[0].ops).toContainEqual(expect.objectContaining({ path: '/age' }));
     });
 
+    it('should include ops committed at exactly baseRev + 1 by another client', async () => {
+      // Another client committed /other at rev 2; this client last saw rev 1 and mints
+      // rev = baseRev + 1 = 2. Using rev as the floor would skip /other forever.
+      mockStore.ops.set('doc1:/other', { op: 'replace', path: '/other', ts: 1500, rev: 2, value: 'from-other' });
+      mockStore.revs.set('doc1', 2);
+
+      const change: ChangeInput = {
+        id: 'catchup4',
+        baseRev: 1,
+        rev: 2,
+        ops: [{ op: 'replace', path: '/mine', value: 1, ts: 2000 }],
+      };
+
+      const result = await server.commitChanges('doc1', [change]);
+
+      expect(result.changes[0].ops).toContainEqual(expect.objectContaining({ path: '/other', value: 'from-other' }));
+      expect(result.changes[0].baseRev).toBe(1);
+    });
+
+    it('should fall back to rev - 1 as the catchup floor when baseRev is absent', async () => {
+      mockStore.ops.set('doc1:/other', { op: 'replace', path: '/other', ts: 1500, rev: 2, value: 'from-other' });
+      mockStore.revs.set('doc1', 2);
+
+      const change: ChangeInput = {
+        id: 'catchup5',
+        rev: 2,
+        ops: [{ op: 'replace', path: '/mine', value: 1, ts: 2000 }],
+      };
+
+      const result = await server.commitChanges('doc1', [change]);
+
+      expect(result.changes[0].ops).toContainEqual(expect.objectContaining({ path: '/other', value: 'from-other' }));
+    });
+
     it('should filter out paths client just sent', async () => {
       mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 1000, rev: 2, value: 'Alice' });
       mockStore.revs.set('doc1', 2);
 
       const change: ChangeInput = {
         id: 'catchup2',
-        rev: 1,
+        baseRev: 1,
+        rev: 2,
         ops: [{ op: 'replace', path: '/name', value: 'Bob', ts: 2000 }],
       };
 
@@ -519,7 +557,8 @@ describe('LWWServer', () => {
 
       const change: ChangeInput = {
         id: 'catchup3',
-        rev: 1,
+        baseRev: 1,
+        rev: 2,
         ops: [{ op: 'replace', path: '/obj', value: { new: true }, ts: 2000 }],
       };
 
@@ -527,6 +566,28 @@ describe('LWWServer', () => {
 
       // /obj/child should not be in response since client sent parent
       expect(result.changes[0].ops).not.toContainEqual(expect.objectContaining({ path: '/obj/child' }));
+    });
+  });
+
+  describe('commitChanges - concurrent commits', () => {
+    it('should not lose @inc increments across concurrent commits', async () => {
+      const inc = (id: string): ChangeInput => ({
+        id,
+        ops: [{ op: '@inc', path: '/count', value: 1, ts: 1000 }],
+      });
+
+      await Promise.all([server.commitChanges('doc1', [inc('c1')]), server.commitChanges('doc1', [inc('c2')])]);
+
+      expect(mockStore.ops.get('doc1:/count')?.value).toBe(2);
+    });
+
+    it('should not let an older-ts concurrent commit overwrite a newer one', async () => {
+      const newer: ChangeInput = { id: 'newer', ops: [{ op: 'replace', path: '/name', value: 'NEWER', ts: 200 }] };
+      const older: ChangeInput = { id: 'older', ops: [{ op: 'replace', path: '/name', value: 'older', ts: 100 }] };
+
+      await Promise.all([server.commitChanges('doc1', [newer]), server.commitChanges('doc1', [older])]);
+
+      expect(mockStore.ops.get('doc1:/name')).toEqual(expect.objectContaining({ value: 'NEWER', ts: 200 }));
     });
   });
 

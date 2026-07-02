@@ -288,6 +288,39 @@ describe('consolidateFieldOp', () => {
     });
   });
 
+  describe('timestamp preservation when combining', () => {
+    // Combining must keep the newest ts of the pair — inheriting an older delta's ts would
+    // downgrade the field's winning timestamp and let stale replays overwrite newer values
+    it('should keep the existing newer timestamp when an older delta combines', () => {
+      const existing: JSONPatchOp = { op: 'replace', path: '/count', value: 10, ts: 1000 };
+      const incoming: JSONPatchOp = { op: '@inc', path: '/count', value: 1, ts: 500 };
+
+      expect(consolidateFieldOp(existing, incoming)).toEqual({ op: 'replace', path: '/count', value: 11, ts: 1000 });
+    });
+
+    it('should keep the incoming newer timestamp when it combines', () => {
+      const existing: JSONPatchOp = { op: '@inc', path: '/count', value: 1, ts: 1000 };
+      const incoming: JSONPatchOp = { op: '@inc', path: '/count', value: 2, ts: 2000 };
+
+      expect(consolidateFieldOp(existing, incoming)).toEqual({ op: '@inc', path: '/count', value: 3, ts: 2000 });
+    });
+
+    it('should keep a newer remove timestamp when an older delta resurrects the field', () => {
+      const existing: JSONPatchOp = { op: 'remove', path: '/count', ts: 1000 };
+      const incoming: JSONPatchOp = { op: '@inc', path: '/count', value: 5, ts: 500 };
+
+      expect(consolidateFieldOp(existing, incoming)).toEqual({ op: 'replace', path: '/count', value: 5, ts: 1000 });
+    });
+
+    it('should reject a stale replay after an older delta combined with a newer value', () => {
+      const existing: JSONPatchOp = { op: 'replace', path: '/count', value: 10, ts: 1000 };
+      const combined = consolidateFieldOp(existing, { op: '@inc', path: '/count', value: 1, ts: 500 })!;
+
+      // A stale write with a ts between the delta's and the original winner's must still lose
+      expect(consolidateFieldOp(combined, { op: 'replace', path: '/count', value: 3, ts: 700 })).toBeNull();
+    });
+  });
+
   describe('soft ops', () => {
     it('should not overwrite existing when incoming has explicit soft flag', () => {
       const existing: JSONPatchOp = { op: 'replace', path: '/name', value: 'Alice', ts: 1000 };

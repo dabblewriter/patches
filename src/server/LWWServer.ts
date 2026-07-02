@@ -68,6 +68,9 @@ export class LWWServer implements PatchesServer {
 
   readonly store: LWWStoreBackend;
 
+  /** Per-doc FIFO mutex (see {@link _withDocLock}). */
+  private readonly _docLocks = new Map<string, Promise<unknown>>();
+
   /** Notifies listeners whenever a batch of changes is successfully committed. */
   public readonly onChangesCommitted =
     signal<(docId: string, changes: Change[], options?: CommitChangesOptions, originClientId?: string) => void>();
@@ -157,76 +160,85 @@ export class LWWServer implements PatchesServer {
       return { changes: [] };
     }
 
-    // A batch normally carries 1 change for LWW, but flush-time batching can split an oversized
-    // change into several — process every change's ops, not just the first
-    const change = changes[0];
-    const serverNow = Date.now();
-    const clientRev = change.rev; // Client's last known rev (for catchup)
+    // Serialize per doc: this is a read-modify-write (listOps → consolidate → saveOps), so
+    // concurrent commits reading the same base would lose @inc increments and let older-ts
+    // writes overwrite newer ones. The emit stays inside the lock so broadcasts keep commit
+    // order — listeners must not call back into same-doc server methods.
+    return this._withDocLock(docId, async () => {
+      // A batch normally carries 1 change for LWW, but flush-time batching can split an oversized
+      // change into several — process every change's ops, not just the first
+      const change = changes[0];
+      const serverNow = Date.now();
+      // Catchup floor: the last rev the client actually has (baseRev). Clients mint
+      // rev = baseRev + 1 optimistically, so using change.rev would permanently skip ops
+      // another client committed at exactly baseRev + 1.
+      const clientRev = change.baseRev ?? (change.rev !== undefined ? Math.max(0, change.rev - 1) : undefined);
 
-    // Add timestamps to ops that don't have them
-    // Prefer the change's createdAt if available, fallback to server time
-    const newOps = changes.flatMap(c => c.ops.map(op => (op.ts ? op : { ...op, ts: c.createdAt ?? serverNow })));
+      // Add timestamps to ops that don't have them
+      // Prefer the change's createdAt if available, fallback to server time
+      const newOps = changes.flatMap(c => c.ops.map(op => (op.ts ? op : { ...op, ts: c.createdAt ?? serverNow })));
 
-    // Load all existing ops for this doc
-    const existingOps = await this.store.listOps(docId);
+      // Load all existing ops for this doc
+      const existingOps = await this.store.listOps(docId);
 
-    // Use the consolidateOps algorithm
-    const { opsToSave, pathsToDelete, opsToReturn } = consolidateOps(existingOps, newOps);
+      // Use the consolidateOps algorithm
+      const { opsToSave, pathsToDelete, opsToReturn } = consolidateOps(existingOps, newOps);
 
-    // Convert delta ops (@inc, @bit, etc.) to replace ops with concrete values
-    const opsToStore = convertDeltaOps(opsToSave);
+      // Convert delta ops (@inc, @bit, etc.) to replace ops with concrete values
+      const opsToStore = convertDeltaOps(opsToSave);
 
-    // Get current rev before saving (efficient - doesn't reconstruct full state)
-    const currentRev = await this.store.getCurrentRev(docId);
-    let newRev = currentRev;
+      // Get current rev before saving (efficient - doesn't reconstruct full state)
+      const currentRev = await this.store.getCurrentRev(docId);
+      let newRev = currentRev;
 
-    // Save ops and delete paths atomically
-    if (opsToStore.length > 0 || pathsToDelete.length > 0) {
-      newRev = await this.store.saveOps(docId, opsToStore, pathsToDelete);
-    }
-
-    // Build catchup ops - start with correction ops from opsToReturn
-    const responseOps = [...opsToReturn];
-    if (clientRev !== undefined) {
-      const opsSince = await this.store.listOps(docId, { sinceRev: clientRev });
-      const sentPaths = new Set(newOps.map(o => o.path));
-
-      // Filter out ops client just sent (and their children), in commit order
-      const catchupOps = sortOpsByCommitOrder(opsSince.filter(op => !isPathOrChild(op.path, sentPaths)));
-      responseOps.push(...catchupOps);
-    }
-
-    // A sent delta op (@inc/@bit/@max/@min) combined with whatever the server had — possibly a
-    // concurrent write the sender never saw — so echo the stored concrete result back for those
-    // paths. Without this the sender applies its delta to a stale base and diverges permanently.
-    const echoedPaths = new Set<string>();
-    for (const sentOp of newOps) {
-      if (!combinableOps[sentOp.op] || echoedPaths.has(sentOp.path)) continue;
-      echoedPaths.add(sentOp.path);
-      const stored = opsToStore.find(o => o.path === sentOp.path) ?? existingOps.find(o => o.path === sentOp.path);
-      if (stored) responseOps.push(stored);
-    }
-
-    // Build response using createChange
-    const responseChange = createChange(clientRev ?? 0, newRev, responseOps, {
-      id: change.id,
-      committedAt: serverNow,
-    });
-
-    // Emit notification for committed changes (if any updates were made)
-    if (opsToStore.length > 0) {
-      try {
-        const broadcastChange = createChange(currentRev, newRev, opsToStore, {
-          id: change.id,
-          committedAt: serverNow,
-        });
-        await this.onChangesCommitted.emit(docId, [broadcastChange], options, clientId);
-      } catch (error) {
-        console.error(`Failed to notify clients about committed changes for doc ${docId}:`, error);
+      // Save ops and delete paths atomically
+      if (opsToStore.length > 0 || pathsToDelete.length > 0) {
+        newRev = await this.store.saveOps(docId, opsToStore, pathsToDelete);
       }
-    }
 
-    return { changes: [responseChange] };
+      // Build catchup ops - start with correction ops from opsToReturn
+      const responseOps = [...opsToReturn];
+      if (clientRev !== undefined) {
+        const opsSince = await this.store.listOps(docId, { sinceRev: clientRev });
+        const sentPaths = new Set(newOps.map(o => o.path));
+
+        // Filter out ops client just sent (and their children), in commit order
+        const catchupOps = sortOpsByCommitOrder(opsSince.filter(op => !isPathOrChild(op.path, sentPaths)));
+        responseOps.push(...catchupOps);
+      }
+
+      // A sent delta op (@inc/@bit/@max/@min) combined with whatever the server had — possibly a
+      // concurrent write the sender never saw — so echo the stored concrete result back for those
+      // paths. Without this the sender applies its delta to a stale base and diverges permanently.
+      const echoedPaths = new Set<string>();
+      for (const sentOp of newOps) {
+        if (!combinableOps[sentOp.op] || echoedPaths.has(sentOp.path)) continue;
+        echoedPaths.add(sentOp.path);
+        const stored = opsToStore.find(o => o.path === sentOp.path) ?? existingOps.find(o => o.path === sentOp.path);
+        if (stored) responseOps.push(stored);
+      }
+
+      // Build response using createChange
+      const responseChange = createChange(clientRev ?? 0, newRev, responseOps, {
+        id: change.id,
+        committedAt: serverNow,
+      });
+
+      // Emit notification for committed changes (if any updates were made)
+      if (opsToStore.length > 0) {
+        try {
+          const broadcastChange = createChange(currentRev, newRev, opsToStore, {
+            id: change.id,
+            committedAt: serverNow,
+          });
+          await this.onChangesCommitted.emit(docId, [broadcastChange], options, clientId);
+        } catch (error) {
+          console.error(`Failed to notify clients about committed changes for doc ${docId}:`, error);
+        }
+      }
+
+      return { changes: [responseChange] };
+    });
   }
 
   /**
@@ -238,10 +250,12 @@ export class LWWServer implements PatchesServer {
    */
   async deleteDoc(docId: string, options?: DeleteDocOptions): Promise<void> {
     const clientId = getClientId();
-    const rev = await this.store.getCurrentRev(docId);
-    await createTombstoneIfSupported(this.store, docId, rev, clientId, options?.skipTombstone);
-    await this.store.deleteDoc(docId);
-    await this.onDocDeleted.emit(docId, options, clientId);
+    return this._withDocLock(docId, async () => {
+      const rev = await this.store.getCurrentRev(docId);
+      await createTombstoneIfSupported(this.store, docId, rev, clientId, options?.skipTombstone);
+      await this.store.deleteDoc(docId);
+      await this.onDocDeleted.emit(docId, options, clientId);
+    });
   }
 
   /**
@@ -326,6 +340,22 @@ export class LWWServer implements PatchesServer {
    */
   private isVersioningStore(store: LWWStoreBackend): store is LWWStoreBackend & VersioningStoreBackend {
     return 'createVersion' in store;
+  }
+
+  /**
+   * Run `fn` exclusively per `docId`: same-doc calls run one at a time, FIFO, each to
+   * completion. Mirrors LWWAlgorithm's client-side lock — the store calls are individually
+   * transactional but their composition (read → consolidate → write) is not.
+   */
+  private _withDocLock<R>(docId: string, fn: () => Promise<R>): Promise<R> {
+    const prior = this._docLocks.get(docId) ?? Promise.resolve();
+    const run = prior.then(fn, fn);
+    const tail = run.catch(() => undefined);
+    this._docLocks.set(docId, tail);
+    void tail.then(() => {
+      if (this._docLocks.get(docId) === tail) this._docLocks.delete(docId);
+    });
+    return run;
   }
 }
 

@@ -149,14 +149,14 @@ export class LWWAlgorithm implements ClientAlgorithm {
       // Apply server changes to store (preserves sendingChange and pendingOps)
       await this.store.applyServerChanges(docId, serverChanges);
 
-      // Merge server changes with pending ops only (not sending ops, which the
-      // server just committed). Sending ops are already reflected in serverChanges;
-      // including them would cause mergeServerWithLocal to shadow newer pending
-      // ops at the same path (non-delta ops like "replace" drop local values
-      // when the server touches the same path).
+      // Merge server changes with sending + pending ops so a concurrent foreign broadcast
+      // arriving mid-flight can't clobber the in-flight value in the open doc. By the time our
+      // own commit response arrives, confirmSent has already cleared the sending slot, so the
+      // server's correction ops apply unshadowed (a sending op that legitimately loses self-heals
+      // there). Pending ops come last so a newer pending op at the same path wins the merge.
       const sendingChange = await this.store.getSendingChange(docId);
       const pendingOps = await this.store.getPendingOps(docId);
-      const mergedChanges = mergeServerWithLocal(serverChanges, pendingOps);
+      const mergedChanges = mergeServerWithLocal(serverChanges, [...(sendingChange?.ops ?? []), ...pendingOps]);
 
       if (doc) {
         const hasPending = pendingOps.length > 0 || !!sendingChange;

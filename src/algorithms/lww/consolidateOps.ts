@@ -61,11 +61,14 @@ export function consolidateFieldOp(existing: JSONPatchOp, incoming: JSONPatchOp)
 
   // If incoming is combinable AND existing has same op type, combine
   if (combiner) {
+    // Combining keeps the newest ts of the pair — inheriting an older delta's ts would
+    // downgrade the field's winning timestamp and let a stale replay overwrite it
+    const ts = newestTs(existing.ts, incoming.ts);
     // A delta on a removed field starts from a fresh base, matching how clients apply a delta
     // to a missing field — folding it into the remove would swallow the delta on the server
     // while clients resurrect the field
     if (existing.op === 'remove' || existing.value === undefined) {
-      return { ...incoming, op: 'replace', value: applyDeltaToMissing(incoming) };
+      return { ...incoming, op: 'replace', value: applyDeltaToMissing(incoming), ts };
     }
     const op = existing.op === incoming.op ? incoming.op : existing.op;
     const value =
@@ -75,7 +78,7 @@ export function consolidateFieldOp(existing: JSONPatchOp, incoming: JSONPatchOp)
     if (value === existing.value) {
       return null;
     }
-    return { ...incoming, op, value };
+    return { ...incoming, op, value, ts };
   }
 
   // Soft ops never overwrite existing data
@@ -181,6 +184,15 @@ export function convertDeltaOps(ops: JSONPatchOp[]): JSONPatchOp[] {
     if (combinableOps[op.op]) return { ...op, op: 'replace', value: applyDeltaToMissing(op) };
     return { ...op, op: 'replace', value: op.value };
   });
+}
+
+/**
+ * The newest of two op timestamps, preferring whichever is defined.
+ */
+function newestTs(existingTs: number | undefined, incomingTs: number | undefined): number | undefined {
+  if (existingTs === undefined) return incomingTs;
+  if (incomingTs === undefined) return existingTs;
+  return Math.max(existingTs, incomingTs);
 }
 
 /**

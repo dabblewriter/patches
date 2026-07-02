@@ -597,6 +597,19 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         sizeCalculator: this.sizeCalculator,
       });
 
+      // Splitting an oversized change re-identifies and renumbers part of the queue. The store
+      // must hold exactly what we send: the commit echo clears pending by id, so a stored
+      // original whose pieces were sent under other ids would survive, re-apply on top of its
+      // own committed content, and duplicate it.
+      const flattened = batches.flat();
+      if (flattened.length !== pending.length) {
+        await algorithm.replacePendingChanges?.(docId, pending, flattened);
+        if (this.patches.getOpenDoc(docId)) {
+          const fullSnapshot = await algorithm.loadDoc(docId);
+          if (fullSnapshot) this.patches.applySnapshot(docId, fullSnapshot);
+        }
+      }
+
       for (const changeBatch of batches) {
         if (!this.state.connected || onlineState.isOffline) {
           throw new Error('Disconnected during flush');
@@ -608,6 +621,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // Our local state is stale (baseRev:0 on existing doc). Confirm the sent
           // changes (they were committed), then reload the full state from the server.
           await algorithm.confirmSent(docId, changeBatch);
+          // The snapshot reload below replaces committed state without touching pending, so the
+          // just-committed changes must be dropped from pending here (committed=[] drops every
+          // sent id) — otherwise they re-apply on top of the reloaded state and are re-sent
+          // past the server's dedup window, committing the same content twice.
+          await algorithm.dropResolvedPending?.(docId, changeBatch, []);
           const snapshot = await this.connection.getDoc(docId);
           await algorithm.store.saveDoc(docId, snapshot);
           this._updateDocSyncState(docId, { committedRev: snapshot.rev });

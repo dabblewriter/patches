@@ -177,6 +177,18 @@ export class OTAlgorithm implements ClientAlgorithm {
     // Pending changes remain until server commits them back.
   }
 
+  async replacePendingChanges(docId: string, oldChanges: Change[], newChanges: Change[]): Promise<void> {
+    return this._withDocLock(docId, async () => {
+      // Preserve any changes minted after oldChanges was read, renumbered after the new queue
+      const oldIds = new Set(oldChanges.map(c => c.id));
+      const current = await this.store.getPendingChanges(docId);
+      let rev = newChanges[newChanges.length - 1].rev;
+      const mintedSince = current.filter(c => !oldIds.has(c.id)).map(c => ({ ...c, rev: ++rev }));
+      // applyServerChanges with no server changes atomically replaces the pending queue
+      await this.store.applyServerChanges(docId, [], [...newChanges, ...mintedSince]);
+    });
+  }
+
   async dropResolvedPending(docId: string, sentChanges: Change[], committedChanges: Change[]): Promise<number> {
     return this._withDocLock(docId, async () => {
       // A sent change the server didn't echo back in its response was rebased away

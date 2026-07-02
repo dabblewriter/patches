@@ -793,6 +793,183 @@ describe('PatchesSync', () => {
     });
   });
 
+  describe('error-latch background re-probe', () => {
+    const REPROBE_EXHAUSTED_MS = 5 * 60_000;
+    const REPROBE_TERMINAL_MS = 10 * 60_000;
+    const pendingChanges: Change[] = [{ id: 'p1', rev: 6, baseRev: 5, ops: [], createdAt: 0, committedAt: 0 }];
+    let pendingRef: { current: Change[] | null };
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      sync['updateState']({ connected: true });
+      pendingRef = { current: pendingChanges };
+      mockAlgorithm.getPendingToSend.mockImplementation(async () => pendingRef.current);
+      // A successful commit confirms the sent changes, leaving nothing pending
+      mockAlgorithm.confirmSent.mockImplementation(async () => {
+        pendingRef.current = null;
+      });
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('schedules a 5-minute re-probe after retry exhaustion and recovers when the server does', async () => {
+      mockWebSocket.commitChanges.mockRejectedValue(new Error('commit outage'));
+
+      await sync['syncDoc']('doc1');
+      // Drain the full backoff ladder (≈181s): initial attempt + 10 retries, then exhaustion.
+      await vi.advanceTimersByTimeAsync(200_000);
+      expect(mockWebSocket.commitChanges).toHaveBeenCalledTimes(11);
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+      expect((sync as any)._syncReprobeTimers.size).toBe(1);
+
+      // The outage ends after the ladder gave up — only the re-probe can notice.
+      mockWebSocket.commitChanges.mockResolvedValue({ changes: pendingChanges });
+      await vi.advanceTimersByTimeAsync(REPROBE_EXHAUSTED_MS);
+
+      expect(mockWebSocket.commitChanges).toHaveBeenCalledTimes(12);
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+      expect((sync as any)._syncReprobeTimers.size).toBe(0);
+    });
+
+    it('schedules a 10-minute re-probe after a terminal 403 latch', async () => {
+      mockWebSocket.commitChanges.mockRejectedValue(new StatusError(403, 'Forbidden'));
+
+      await sync['syncDoc']('doc1');
+      expect(mockWebSocket.commitChanges).toHaveBeenCalledTimes(1);
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+      // Terminal codes get no fast ladder, only the slow probe
+      expect((sync as any)._syncRetryTimers.size).toBe(0);
+      expect((sync as any)._syncReprobeTimers.size).toBe(1);
+
+      // Lazier than the exhaustion probe — nothing at 5 minutes
+      await vi.advanceTimersByTimeAsync(REPROBE_EXHAUSTED_MS);
+      expect(mockWebSocket.commitChanges).toHaveBeenCalledTimes(1);
+
+      // A server-side policy fix makes the pending change valid; the probe picks it up
+      mockWebSocket.commitChanges.mockResolvedValue({ changes: pendingChanges });
+      await vi.advanceTimersByTimeAsync(REPROBE_TERMINAL_MS - REPROBE_EXHAUSTED_MS);
+      expect(mockWebSocket.commitChanges).toHaveBeenCalledTimes(2);
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+    });
+
+    it('re-latches and schedules another probe while the terminal error persists', async () => {
+      mockWebSocket.commitChanges.mockRejectedValue(new StatusError(403, 'Forbidden'));
+
+      await sync['syncDoc']('doc1');
+      await vi.advanceTimersByTimeAsync(REPROBE_TERMINAL_MS);
+      expect(mockWebSocket.commitChanges).toHaveBeenCalledTimes(2);
+      expect((sync as any)._syncReprobeTimers.size).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(REPROBE_TERMINAL_MS);
+      expect(mockWebSocket.commitChanges).toHaveBeenCalledTimes(3);
+    });
+
+    it('surfaces a persistent terminal error once, not on every background probe', async () => {
+      mockWebSocket.commitChanges.mockRejectedValue(new StatusError(403, 'Forbidden'));
+      const onError = vi.fn();
+      sync.onError(onError);
+
+      await sync['syncDoc']('doc1');
+      expect(onError).toHaveBeenCalledTimes(1);
+
+      // Two more background probes fail identically — no repeat log/emit spam.
+      await vi.advanceTimersByTimeAsync(REPROBE_TERMINAL_MS);
+      await vi.advanceTimersByTimeAsync(REPROBE_TERMINAL_MS);
+      expect(mockWebSocket.commitChanges).toHaveBeenCalledTimes(3);
+      expect(onError).toHaveBeenCalledTimes(1);
+
+      // A reconnect is a fresh session: a still-failing doc may surface once more.
+      sync.disconnect();
+      sync['updateState']({ connected: true });
+      await sync['syncDoc']('doc1');
+      expect(onError).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears the re-probe timer when the doc is untracked', async () => {
+      mockWebSocket.commitChanges.mockRejectedValue(new StatusError(403, 'Forbidden'));
+
+      await sync['syncDoc']('doc1');
+      expect((sync as any)._syncReprobeTimers.size).toBe(1);
+
+      await sync['_handleDocsUntracked'](['doc1']);
+      expect((sync as any)._syncReprobeTimers.size).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(REPROBE_TERMINAL_MS);
+      expect(mockWebSocket.commitChanges).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears re-probe timers on disconnect and does not re-arm without a sync', async () => {
+      mockWebSocket.commitChanges.mockRejectedValue(new StatusError(403, 'Forbidden'));
+
+      await sync['syncDoc']('doc1');
+      expect((sync as any)._syncReprobeTimers.size).toBe(1);
+
+      sync.disconnect();
+      expect((sync as any)._syncReprobeTimers.size).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(REPROBE_TERMINAL_MS);
+      expect(mockWebSocket.commitChanges).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears a pending re-probe when a sync succeeds first', async () => {
+      mockWebSocket.commitChanges.mockRejectedValueOnce(new StatusError(403, 'Forbidden'));
+
+      await sync['syncDoc']('doc1');
+      expect((sync as any)._syncReprobeTimers.size).toBe(1);
+
+      // e.g. a local edit re-triggers syncDoc before the probe fires
+      mockWebSocket.commitChanges.mockResolvedValue({ changes: pendingChanges });
+      await sync['syncDoc']('doc1');
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+      expect((sync as any)._syncReprobeTimers.size).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(REPROBE_TERMINAL_MS);
+      expect(mockWebSocket.commitChanges).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not schedule a re-probe when the doc has no pending changes', async () => {
+      mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+      mockWebSocket.getChangesSince.mockRejectedValue(new StatusError(403, 'Forbidden'));
+
+      await sync['syncDoc']('doc1');
+
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+      expect((sync as any)._syncReprobeTimers.size).toBe(0);
+    });
+  });
+
+  describe('docStates untrack race (no resurrection)', () => {
+    it('does not resurrect a docStates entry when an in-flight sync fails after untrack', async () => {
+      sync['updateState']({ connected: true });
+      mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      let rejectPull!: (err: Error) => void;
+      mockWebSocket.getChangesSince.mockImplementation(
+        () =>
+          new Promise((_, reject) => {
+            rejectPull = reject;
+          })
+      );
+
+      const inFlight = sync['syncDoc']('doc1');
+      await vi.waitFor(() => expect(mockWebSocket.getChangesSince).toHaveBeenCalled());
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('syncing');
+
+      await sync['_handleDocsUntracked'](['doc1']);
+      expect(sync.docStates.state['doc1']).toBeUndefined();
+
+      rejectPull(new StatusError(403, 'Forbidden'));
+      await inFlight;
+
+      // The late failure must not re-create the entry — it would be unreachable
+      // by any cleanup until the next reconnect.
+      expect(sync.docStates.state['doc1']).toBeUndefined();
+    });
+  });
+
   describe('applyMergeChanges', () => {
     const mergeChanges: Change[] = [
       { id: 'm1', rev: 6, baseRev: 5, ops: [], createdAt: 0, committedAt: 1000 },
@@ -963,6 +1140,17 @@ describe('PatchesSync', () => {
 
       expect(mockPatches.applySnapshot).not.toHaveBeenCalled();
     });
+
+    it('creates a docStates entry when flushDoc is reached before _initDocSyncState ran', async () => {
+      // beforeEach only does trackedDocs.add('doc1') — no docStates entry — mirroring a
+      // subclass calling the protected flushDoc directly without going through syncDoc first.
+      expect(sync.docStates.state['doc1']).toBeUndefined();
+      mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+
+      await sync['flushDoc']('doc1');
+
+      expect(sync.docStates.state['doc1']).toBeDefined();
+    });
   });
 
   describe('_applyServerChangesToDoc method', () => {
@@ -990,6 +1178,18 @@ describe('PatchesSync', () => {
       await sync['_applyServerChangesToDoc']('doc1', []);
 
       expect(mockAlgorithm.applyServerChanges).toHaveBeenCalledWith('doc1', [], null);
+    });
+
+    it('creates a docStates entry for a tracked doc reached before _initDocSyncState ran', async () => {
+      // doc1 is tracked (constructor seeds trackedDocs from patches.trackedDocs) but has no
+      // docStates entry yet — the shape reached via applyMergeChanges or a raw
+      // onChangesCommitted push before syncDoc/flushDoc ever initialized it.
+      expect(sync.docStates.state['doc1']).toBeUndefined();
+
+      const serverChanges: Change[] = [{ id: 'c1', rev: 6, baseRev: 5, ops: [], createdAt: 0, committedAt: 0 }];
+      await sync['_applyServerChangesToDoc']('doc1', serverChanges);
+
+      expect(sync.docStates.state['doc1']?.committedRev).toBe(6);
     });
   });
 
@@ -1264,11 +1464,11 @@ describe('PatchesSync', () => {
     });
 
     describe('_updateDocSyncState', () => {
-      it('should add a new doc entry when it does not exist and emit', async () => {
+      it('should add a new doc entry via _initDocSyncState and emit', async () => {
         const handler = vi.fn();
         sync.docStates.subscribe(handler, false);
 
-        sync['_updateDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
 
         expect(sync.docStates.state).toEqual({
           doc1: { committedRev: 0, hasPending: false, syncStatus: 'unsynced', syncError: undefined, isLoaded: false },
@@ -1276,14 +1476,24 @@ describe('PatchesSync', () => {
         await vi.waitFor(() => expect(handler).toHaveBeenCalledWith(sync.docStates.state));
       });
 
+      it('should no-op a partial update for a doc not in the map', () => {
+        const handler = vi.fn();
+        sync.docStates.subscribe(handler, false);
+
+        sync['_updateDocSyncState']('ghost', { syncStatus: 'error', syncError: new Error('late failure') });
+
+        expect(sync.docStates.state.ghost).toBeUndefined();
+        expect(handler).not.toHaveBeenCalled();
+      });
+
       it('should create new object reference on add', () => {
         const before = sync.docStates.state;
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
         expect(sync.docStates.state).not.toBe(before);
       });
 
       it('should merge updates into an existing entry and emit', async () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
 
         const handler = vi.fn();
         sync.docStates.subscribe(handler, false);
@@ -1301,7 +1511,7 @@ describe('PatchesSync', () => {
       });
 
       it('should no-op if nothing changed on existing entry', () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
 
         const handler = vi.fn();
         sync.docStates.subscribe(handler, false);
@@ -1312,7 +1522,7 @@ describe('PatchesSync', () => {
       });
 
       it('should create new object reference on update', () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
         const before = sync.docStates.state;
 
         sync['_updateDocSyncState']('doc1', { hasPending: true });
@@ -1321,7 +1531,7 @@ describe('PatchesSync', () => {
       });
 
       it('should remove a doc entry when updates is undefined and emit', async () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
 
         const handler = vi.fn();
         sync.docStates.subscribe(handler, false);
@@ -1342,7 +1552,7 @@ describe('PatchesSync', () => {
       });
 
       it('should create new object reference on remove', () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
         const before = sync.docStates.state;
 
         sync['_updateDocSyncState']('doc1', undefined);
@@ -1353,22 +1563,22 @@ describe('PatchesSync', () => {
 
     describe('isLoaded stickiness', () => {
       it('should set isLoaded true when committedRev > 0', () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
         expect(sync.docStates.state.doc1.isLoaded).toBe(true);
       });
 
       it('should set isLoaded true when hasPending is true', () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 0, hasPending: true, syncStatus: 'unsynced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 0, hasPending: true, syncStatus: 'unsynced' });
         expect(sync.docStates.state.doc1.isLoaded).toBe(true);
       });
 
       it('should set isLoaded true when syncStatus is synced', () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'synced' });
         expect(sync.docStates.state.doc1.isLoaded).toBe(true);
       });
 
       it('should set isLoaded true when syncStatus is error', () => {
-        sync['_updateDocSyncState']('doc1', {
+        sync['_initDocSyncState']('doc1', {
           committedRev: 0,
           hasPending: false,
           syncStatus: 'error',
@@ -1378,12 +1588,12 @@ describe('PatchesSync', () => {
       });
 
       it('should start isLoaded false for fresh unsynced doc', () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
         expect(sync.docStates.state.doc1.isLoaded).toBe(false);
       });
 
       it('should keep isLoaded true when syncStatus changes to syncing (reconnect)', () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'synced' });
         expect(sync.docStates.state.doc1.isLoaded).toBe(true);
 
         sync['_updateDocSyncState']('doc1', { syncStatus: 'syncing' });
@@ -1391,7 +1601,7 @@ describe('PatchesSync', () => {
       });
 
       it('should keep isLoaded true when status resets to unsynced on disconnect', () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: true, syncStatus: 'syncing' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: true, syncStatus: 'syncing' });
         expect(sync.docStates.state.doc1.isLoaded).toBe(true);
 
         sync.disconnect();
@@ -1399,19 +1609,19 @@ describe('PatchesSync', () => {
       });
 
       it('should reset isLoaded when doc is untracked and re-tracked', () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
         expect(sync.docStates.state.doc1.isLoaded).toBe(true);
 
         sync['_updateDocSyncState']('doc1', undefined);
         expect(sync.docStates.state.doc1).toBeUndefined();
 
-        sync['_updateDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
         expect(sync.docStates.state.doc1.isLoaded).toBe(false);
       });
 
       it('should preserve isLoaded true across syncAllKnownDocs reconnect', async () => {
         sync['updateState']({ connected: true });
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
         expect(sync.docStates.state.doc1.isLoaded).toBe(true);
 
         const activeDocs: TrackedDoc[] = [{ docId: 'doc1', committedRev: 5 }];
@@ -1505,7 +1715,7 @@ describe('PatchesSync', () => {
       beforeEach(() => {
         sync['updateState']({ connected: true });
         // Pre-populate synced entry so _updateDocSyncState has something to update
-        sync['_updateDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 0, hasPending: false, syncStatus: 'unsynced' });
       });
 
       it('should set status to syncing at start of syncDoc', async () => {
@@ -1559,7 +1769,7 @@ describe('PatchesSync', () => {
       beforeEach(() => {
         sync['updateState']({ connected: true });
         sync['trackedDocs'].add('doc1');
-        sync['_updateDocSyncState']('doc1', { committedRev: 3, hasPending: true, syncStatus: 'syncing' });
+        sync['_initDocSyncState']('doc1', { committedRev: 3, hasPending: true, syncStatus: 'syncing' });
       });
 
       it('should set hasPending false and status synced after successful flush', async () => {
@@ -1635,8 +1845,8 @@ describe('PatchesSync', () => {
       });
 
       it('should remove synced entries when docs are untracked', async () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
-        sync['_updateDocSyncState']('doc2', { committedRev: 3, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc2', { committedRev: 3, hasPending: false, syncStatus: 'synced' });
 
         const untrackHandler = vi.mocked(mockPatches.onUntrackDocs).mock.calls[0][0];
 
@@ -1647,7 +1857,7 @@ describe('PatchesSync', () => {
       });
 
       it('should set hasPending true on doc change', async () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
         sync['trackedDocs'].add('doc1');
 
         // Mock syncDoc to prevent actual sync
@@ -1661,7 +1871,7 @@ describe('PatchesSync', () => {
 
       it('should set hasPending true on doc change while offline', async () => {
         sync['updateState']({ connected: false });
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
         sync['trackedDocs'].add('doc1');
 
         const changeHandler = vi.mocked(mockPatches.onChange).mock.calls[0][0];
@@ -1673,7 +1883,7 @@ describe('PatchesSync', () => {
       });
 
       it('should update committedRev when server pushes committed changes', async () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
 
         const changesHandler = vi.mocked(mockWebSocket.onChangesCommitted).mock.calls[0][0];
         const serverChanges = [
@@ -1687,9 +1897,9 @@ describe('PatchesSync', () => {
       });
 
       it('should reset syncing statuses on disconnect', () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: true, syncStatus: 'syncing' });
-        sync['_updateDocSyncState']('doc2', { committedRev: 0, hasPending: false, syncStatus: 'syncing' });
-        sync['_updateDocSyncState']('doc3', { committedRev: 3, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: true, syncStatus: 'syncing' });
+        sync['_initDocSyncState']('doc2', { committedRev: 0, hasPending: false, syncStatus: 'syncing' });
+        sync['_initDocSyncState']('doc3', { committedRev: 3, hasPending: false, syncStatus: 'synced' });
 
         sync.disconnect();
 
@@ -1699,7 +1909,7 @@ describe('PatchesSync', () => {
       });
 
       it('should reset syncing statuses on connection loss', () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'syncing' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'syncing' });
 
         const connectionHandler = vi.mocked(mockWebSocket.onStateChange).mock.calls[0][0];
         connectionHandler('disconnected');
@@ -1709,7 +1919,7 @@ describe('PatchesSync', () => {
 
       it('should re-populate synced map on reconnection', async () => {
         // Initial state with some docs
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: true, syncStatus: 'syncing' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: true, syncStatus: 'syncing' });
 
         // Simulate disconnect
         const connectionHandler = vi.mocked(mockWebSocket.onStateChange).mock.calls[0][0];
@@ -1749,7 +1959,7 @@ describe('PatchesSync', () => {
       });
 
       it('should remove synced entry on remote doc deleted', async () => {
-        sync['_updateDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
+        sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
         sync['trackedDocs'].add('doc1');
         mockAlgorithm.getPendingToSend.mockResolvedValue(null);
         mockPatches.closeDoc = vi.fn().mockResolvedValue(undefined);

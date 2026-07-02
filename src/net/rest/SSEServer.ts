@@ -21,6 +21,12 @@ interface ClientState {
   nextEventId: number;
   disconnectedAt: number | null;
   expiryTimer: ReturnType<typeof globalThis.setTimeout> | null;
+  /**
+   * Number of old connections force-closed by a reconnect whose close the
+   * framework hasn't reported yet. disconnect() swallows that many calls so a
+   * lagging close of a replaced stream doesn't mark the fresh one disconnected.
+   */
+  staleCloses: number;
 }
 
 /**
@@ -122,6 +128,7 @@ export class SSEServer {
       if (client.writer) {
         client.writer.close().catch(SSEServer.noop);
         client.writer = null;
+        client.staleCloses++;
       }
       client.disconnectedAt = null;
     } else {
@@ -134,6 +141,7 @@ export class SSEServer {
         nextEventId: 1,
         disconnectedAt: null,
         expiryTimer: null,
+        staleCloses: 0,
       };
       this.clients.set(clientId, client);
     }
@@ -181,6 +189,13 @@ export class SSEServer {
   disconnect(clientId: string): void {
     const client = this.clients.get(clientId);
     if (!client) return;
+
+    // A close reported for a connection that connect() already replaced —
+    // the current connection is alive, so ignore it.
+    if (client.staleCloses > 0) {
+      client.staleCloses--;
+      return;
+    }
 
     client.writer = null;
     client.disconnectedAt = Date.now();

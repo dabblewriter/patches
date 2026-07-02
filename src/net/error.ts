@@ -28,6 +28,22 @@ export const ErrorCodes = {
 } as const;
 
 /**
+ * Error rejected by the JSON-RPC client for protocol-level errors (negative
+ * JSON-RPC codes like -32601). HTTP-style positive codes are rehydrated into
+ * {@link StatusError} instead so callers can branch on `err.code` uniformly.
+ */
+export class JSONRPCError extends Error {
+  constructor(
+    public code: number,
+    message: string,
+    public data?: any
+  ) {
+    super(message);
+    this.name = 'JSONRPCError';
+  }
+}
+
+/**
  * Error thrown when the JSON-RPC client receives a message that cannot be parsed as JSON.
  * This typically indicates a server-side error (HTTP 500, load balancer timeout, etc.)
  * that returned plain text instead of a JSON-RPC response.

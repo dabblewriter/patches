@@ -14,6 +14,13 @@ export class FetchTransport implements ClientTransport {
   ) {}
 
   async send(raw: string, extraHeaders?: Record<string, string>): Promise<void> {
+    // Scope any HTTP-level failure to the request that was sent, so it rejects
+    // that call instead of orphaning it or poisoning unrelated in-flight calls.
+    const emitError = (code: number, message: string) => {
+      const request = JSON.parse(raw) as JsonRpcRequest;
+      this.onMessage.emit(JSON.stringify(rpcError(code, message, undefined, request.id)));
+    };
+
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (this.authHeader) headers['Authorization'] = this.authHeader;
@@ -24,11 +31,14 @@ export class FetchTransport implements ClientTransport {
         headers,
         body: raw,
       });
-      this.onMessage.emit(await response.text());
+      const body = await response.text();
+      if (!response.ok) {
+        emitError(response.status, `HTTP ${response.status}: ${body.slice(0, 200)}`);
+        return;
+      }
+      this.onMessage.emit(body);
     } catch (error) {
-      // ensure the error is associated with the request that was sent
-      const message = JSON.parse(raw) as JsonRpcRequest;
-      this.onMessage.emit(JSON.stringify(rpcError(-32000, (error as Error).message, undefined, message.id)));
+      emitError(-32000, (error as Error).message);
     }
   }
 }

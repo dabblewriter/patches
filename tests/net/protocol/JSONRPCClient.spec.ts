@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { JSONRPCParseError } from '../../../src/net/error';
+import { JSONRPCError, JSONRPCParseError, StatusError } from '../../../src/net/error';
 import { JSONRPCClient } from '../../../src/net/protocol/JSONRPCClient';
+import { JSONRPCServer } from '../../../src/net/protocol/JSONRPCServer';
 import type { ClientTransport } from '../../../src/net/protocol/types';
 
 describe('JSONRPCClient', () => {
@@ -125,7 +126,10 @@ describe('JSONRPCClient', () => {
         })
       );
 
-      await expect(responsePromise).rejects.toEqual({
+      // Corrected contract: protocol errors reject with a real Error carrying code/data,
+      // not the raw JSON-RPC error object.
+      await expect(responsePromise).rejects.toBeInstanceOf(JSONRPCError);
+      await expect(responsePromise).rejects.toMatchObject({
         code: -32601,
         message: 'Method not found',
         data: { method: 'errorMethod' },
@@ -460,7 +464,8 @@ describe('JSONRPCClient', () => {
         })
       );
 
-      await expect(responsePromise).rejects.toEqual(complexError);
+      await expect(responsePromise).rejects.toBeInstanceOf(JSONRPCError);
+      await expect(responsePromise).rejects.toMatchObject(complexError);
     });
 
     it('should handle responses that have both result and error', async () => {
@@ -477,7 +482,8 @@ describe('JSONRPCClient', () => {
       );
 
       // Our implementation prioritizes error over result
-      await expect(responsePromise).rejects.toEqual({
+      await expect(responsePromise).rejects.toBeInstanceOf(JSONRPCError);
+      await expect(responsePromise).rejects.toMatchObject({
         code: -1,
         message: 'error',
       });
@@ -516,6 +522,82 @@ describe('JSONRPCClient', () => {
       expect(result2).toBe('done2');
 
       consoleSpy.mockRestore();
+    });
+  });
+
+  describe('error rehydration', () => {
+    it('should reject with StatusError for positive HTTP-style codes', async () => {
+      const responsePromise = client.call('getDoc', 'doc1');
+
+      onMessageHandler(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          error: { code: 410, message: 'DOC_DELETED: doc1', data: { deletedAt: '2026-01-01', lastRev: 5 } },
+        })
+      );
+
+      const err = await responsePromise.catch(e => e);
+      expect(err).toBeInstanceOf(StatusError);
+      expect(err.code).toBe(410);
+      expect(err.message).toBe('DOC_DELETED: doc1');
+      expect(err.data).toEqual({ deletedAt: '2026-01-01', lastRev: 5 });
+    });
+
+    it('should reject with StatusError for terminal auth codes', async () => {
+      const responsePromise = client.call('commitChanges', 'doc1');
+
+      onMessageHandler(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: 403, message: 'WRITE_FORBIDDEN' } }));
+
+      const err = await responsePromise.catch(e => e);
+      expect(err).toBeInstanceOf(StatusError);
+      expect(err.code).toBe(403);
+    });
+
+    it('should reject with JSONRPCError for negative protocol codes', async () => {
+      const responsePromise = client.call('missing');
+
+      onMessageHandler(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32601, message: 'Method not found' } }));
+
+      const err = await responsePromise.catch(e => e);
+      expect(err).toBeInstanceOf(JSONRPCError);
+      expect(err).not.toBeInstanceOf(StatusError);
+      expect(err.code).toBe(-32601);
+    });
+
+    it('should reject with JSONRPCError when the error has no code', async () => {
+      const responsePromise = client.call('weird');
+
+      onMessageHandler(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { message: 'boom' } }));
+
+      const err = await responsePromise.catch(e => e);
+      expect(err).toBeInstanceOf(JSONRPCError);
+      expect(err.code).toBe(-32000);
+      expect(err.message).toBe('boom');
+    });
+
+    it('should rehydrate a server-thrown StatusError with its data across the wire', async () => {
+      const rpcServer = new JSONRPCServer();
+      rpcServer.registerMethod('getDoc', () => {
+        throw new StatusError(410, 'DOC_DELETED: doc1', { deletedAt: '2026-01-01', lastRev: 5 });
+      });
+
+      let receive: (raw: string) => void = () => {};
+      const transport: ClientTransport = {
+        send: raw => {
+          void rpcServer.processMessage(raw).then(res => res && receive(res));
+        },
+        onMessage: handler => {
+          receive = handler;
+          return () => {};
+        },
+      };
+      const rpcClient = new JSONRPCClient(transport);
+
+      const err = await rpcClient.call('getDoc', 'doc1').catch(e => e);
+      expect(err).toBeInstanceOf(StatusError);
+      expect(err.code).toBe(410);
+      expect(err.data).toEqual({ deletedAt: '2026-01-01', lastRev: 5 });
     });
   });
 

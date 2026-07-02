@@ -256,6 +256,74 @@ describe('WebSocketTransport', () => {
     });
   });
 
+  describe('stale socket events', () => {
+    /** Connects, opens ws1, then disconnect()+connect() with ws1's close event delayed. */
+    async function reconnectWithLaggingClose(): Promise<MockWebSocket> {
+      const p1 = transport.connect();
+      const ws1 = (transport as any).ws as MockWebSocket;
+      ws1.simulateOpen();
+      await p1;
+
+      // Suppress the mock's synchronous close event to model a close that arrives late.
+      ws1.close = vi.fn();
+      transport.disconnect();
+
+      const p2 = transport.connect();
+      const ws2 = (transport as any).ws as MockWebSocket;
+      ws2.simulateOpen();
+      await p2;
+      expect(transport.state).toBe('connected');
+
+      return ws1;
+    }
+
+    it('should ignore a stale close from a replaced socket', async () => {
+      const ws1 = await reconnectWithLaggingClose();
+
+      // ws1's close event finally fires — must not affect the healthy new socket
+      ws1.simulateClose();
+
+      expect(transport.state).toBe('connected');
+      expect((transport as any).reconnectTimer).toBeNull();
+    });
+
+    it('should ignore a stale error from a replaced socket', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const ws1 = await reconnectWithLaggingClose();
+
+      ws1.simulateError();
+
+      expect(transport.state).toBe('connected');
+      consoleSpy.mockRestore();
+    });
+
+    it('should ignore messages from a replaced socket', async () => {
+      const listener = vi.fn();
+      transport.onMessage(listener);
+      const ws1 = await reconnectWithLaggingClose();
+
+      ws1.simulateMessage('stale message');
+
+      expect(listener).not.toHaveBeenCalledWith('stale message');
+    });
+
+    it('should ignore close events after disconnect()', async () => {
+      const p1 = transport.connect();
+      const ws1 = (transport as any).ws as MockWebSocket;
+      ws1.simulateOpen();
+      await p1;
+
+      ws1.close = vi.fn();
+      transport.disconnect();
+
+      // Late close after an intentional disconnect must not schedule a reconnect
+      ws1.simulateClose();
+
+      expect(transport.state).toBe('disconnected');
+      expect((transport as any).reconnectTimer).toBeNull();
+    });
+  });
+
   describe('online/offline handling', () => {
     it('should set up online/offline listeners when connecting', async () => {
       const { onlineState } = await import('../../../src/net/websocket/onlineState');

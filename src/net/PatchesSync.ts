@@ -9,7 +9,7 @@ import type { ClientAlgorithm } from '../client/ClientAlgorithm.js';
 import { Patches } from '../client/Patches.js';
 import type { AlgorithmName, TrackedDoc } from '../client/PatchesStore.js';
 import { isDocLoaded } from '../shared/utils.js';
-import type { Change, DocSyncState, DocSyncStatus } from '../types.js';
+import type { Change, DocSyncState, DocSyncStatus, PatchesSnapshot } from '../types.js';
 import { blockable, serialGate } from '../utils/concurrency.js';
 import { ErrorCodes, StatusError } from './error.js';
 import type { PatchesConnection } from './PatchesConnection.js';
@@ -618,10 +618,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     const baseRev = await algorithm.getCommittedRev(docId);
     const snapshot = await this.connection.getDoc(docId);
     let reconciled = false;
+    let committedTail: Change[] = [];
     if (algorithm.reconcilePending && snapshot.rev > baseRev && (await algorithm.hasPending(docId))) {
       // Changes past the snapshot's rev are excluded: the snapshot doesn't contain them, so
       // the normal catch-up path will deliver them and rebase pending against them itself.
-      const committedTail = (await this.connection.getChangesSince(docId, baseRev)).filter(c => c.rev <= snapshot.rev);
+      committedTail = (await this.connection.getChangesSince(docId, baseRev)).filter(c => c.rev <= snapshot.rev);
       if (committedTail.length > 0) {
         await algorithm.reconcilePending(docId, committedTail);
         reconciled = true;
@@ -643,7 +644,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // echo tracking (_inFlightOpKeys), diverging the doc from its store.
     const fullSnapshot = await algorithm.loadDoc(docId);
     if (fullSnapshot) {
-      this.patches.applySnapshot(docId, fullSnapshot);
+      // committedTail as the resolved set: the open doc's in-memory pending may still
+      // list changes reconcilePending just dropped as server-committed — without this,
+      // the pending-preserving union would re-add them and reintroduce the double-apply.
+      this._applySnapshotPreservingPending(docId, fullSnapshot, committedTail);
     }
   }
 
@@ -722,13 +726,21 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           await algorithm.confirmSent(docId, changeBatch);
           const snapshot = await this.connection.getDoc(docId);
           await algorithm.store.saveDoc(docId, snapshot);
+          // The batch WAS committed — the server transformed it onto its tip, so the
+          // snapshot just saved already contains its effects. OT's confirmSent is a
+          // no-op (the normal path clears pending via the commit echo, which never
+          // comes on this path), so drop the batch from the pending queue explicitly.
+          // Leaving it there would re-apply its ops on import (duplicating content)
+          // and re-send it on the next flush (re-committing it — the server's id
+          // de-dup window `startAfter: baseRev` no longer covers the original commit).
+          await algorithm.dropResolvedPending?.(docId, changeBatch, []);
           this._updateDocSyncState(docId, { committedRev: snapshot.rev });
           // Re-read from the algorithm's store so applySnapshot sees any pending the
           // store kept (e.g., user kept typing during the commit roundtrip). Without
           // this, doc.import() with `changes: []` wipes _pendingChanges / _inFlightOpKeys.
           const fullSnapshot = await algorithm.loadDoc(docId);
           if (fullSnapshot) {
-            this.patches.applySnapshot(docId, fullSnapshot);
+            this._applySnapshotPreservingPending(docId, fullSnapshot, changeBatch);
           }
         } else {
           // Confirm sent first so server corrections (applied next) overwrite
@@ -747,7 +759,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           const dropped = (await algorithm.dropResolvedPending?.(docId, changeBatch, committed)) ?? 0;
           if (dropped > 0 && this.patches.getOpenDoc(docId)) {
             const fullSnapshot = await algorithm.loadDoc(docId);
-            if (fullSnapshot) this.patches.applySnapshot(docId, fullSnapshot);
+            if (fullSnapshot) this._applySnapshotPreservingPending(docId, fullSnapshot, changeBatch);
           }
         }
 
@@ -809,6 +821,38 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   /** True when an error is the revision-gap thrown by applyCommittedChanges. */
   private _isMissingChangesGap(err: unknown): boolean {
     return err instanceof MissingChangesError;
+  }
+
+  /**
+   * Imports a freshly loaded store snapshot into the open doc (via Patches.applySnapshot)
+   * without wiping changes minted after the snapshot's pending set was read.
+   *
+   * `doc.import()` replaces the doc's pending queue wholesale with `snapshot.changes`.
+   * The store read (`algorithm.loadDoc`) and the local mint pipeline are not mutually
+   * serialized, so a change the user mints between the read and the import would vanish
+   * from the open doc's contents and pending queue — while still sitting in the store —
+   * silently diverging doc from store until the next full reload. Union the open doc's
+   * in-memory pending changes into the snapshot by change id before importing.
+   *
+   * `resolvedChanges` are changes known to be committed/resolved on the server (their
+   * effects are already inside `snapshot.state`) — those are never re-added, even if the
+   * doc still lists them as pending.
+   *
+   * The merge is OT-shaped; docs without a pending change queue (LWWDoc tracks pending
+   * ops in its store, not on the doc) fall through to a plain applySnapshot.
+   */
+  protected _applySnapshotPreservingPending(docId: string, snapshot: PatchesSnapshot, resolvedChanges: Change[]): void {
+    const doc = this.patches.getOpenDoc(docId) as { getPendingChanges?: () => Change[] } | null | undefined;
+    if (doc && typeof doc.getPendingChanges === 'function') {
+      const have = new Set(snapshot.changes.map(c => c.id));
+      const resolved = new Set(resolvedChanges.map(c => c.id));
+      for (const change of doc.getPendingChanges()) {
+        if (!have.has(change.id) && !resolved.has(change.id)) {
+          snapshot.changes.push(change);
+        }
+      }
+    }
+    this.patches.applySnapshot(docId, snapshot);
   }
 
   /**

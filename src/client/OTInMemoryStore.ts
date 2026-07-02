@@ -74,7 +74,10 @@ export class OTInMemoryStore implements OTClientStore {
     const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
     if (!this.docs.has(docId)) this.docs.set(docId, buf);
 
-    buf.committed.push(...serverChanges);
+    // Drop already-stored revs — duplicated deliveries (echo, re-broadcast, catchup
+    // overlapping a broadcast) would otherwise double-apply on every getDoc rebuild
+    const lastRev = buf.committed.at(-1)?.rev ?? buf.snapshot?.rev ?? 0;
+    buf.committed.push(...serverChanges.filter(change => change.rev > lastRev));
     buf.pending = [...rebasedPendingChanges];
   }
 

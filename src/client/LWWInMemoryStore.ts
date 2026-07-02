@@ -5,6 +5,11 @@ import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
 import type { LWWClientStore } from './LWWClientStore.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
+/** Sort ops in commit (rev) order, ts as tiebreak — mirrors the server's ordering. */
+function sortOpsByCommitOrder(ops: JSONPatchOp[]): JSONPatchOp[] {
+  return [...ops].sort((a, b) => (a.rev ?? 0) - (b.rev ?? 0) || (a.ts ?? 0) - (b.ts ?? 0));
+}
+
 interface LWWDocBuffers {
   snapshot?: { state: any; rev: number };
   committedFields: Map<string, JSONPatchOp>;
@@ -260,11 +265,6 @@ export class LWWInMemoryStore implements LWWClientStore {
       return;
     }
 
-    // Update committed rev
-    if (buf.sendingChange.rev > buf.committedRev) {
-      buf.committedRev = buf.sendingChange.rev;
-    }
-
     buf.sendingChange = null;
   }
 
@@ -277,14 +277,15 @@ export class LWWInMemoryStore implements LWWClientStore {
     // Store server ops, deleting child-path entries to match server saveOps behavior.
     // Without this, a parent write (e.g. replace /trash {}) leaves stale child entries
     // that re-create nested structure on doc rebuild.
-    for (const change of serverChanges) {
-      for (const op of change.ops) {
-        const childPrefix = op.path + '/';
-        for (const key of buf.committedFields.keys()) {
-          if (key.startsWith(childPrefix)) buf.committedFields.delete(key);
-        }
-        buf.committedFields.set(op.path, op);
+    // Apply in commit order — a flush response can carry corrections ahead of catchup
+    // ops (child@rev3 before parent@rev2), and an out-of-order parent write would prune
+    // the newer child value.
+    for (const op of sortOpsByCommitOrder(serverChanges.flatMap(change => change.ops))) {
+      const childPrefix = op.path + '/';
+      for (const key of buf.committedFields.keys()) {
+        if (key.startsWith(childPrefix)) buf.committedFields.delete(key);
       }
+      buf.committedFields.set(op.path, op);
     }
 
     // Note: Don't clear sendingChange here - these are changes from other clients,

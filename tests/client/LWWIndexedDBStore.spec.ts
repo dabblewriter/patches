@@ -531,7 +531,11 @@ describe('LWWIndexedDBStore', () => {
       );
     });
 
-    it('should update committed rev', async () => {
+    it('does not advance committedRev (applyServerChanges owns it using the server rev)', async () => {
+      // The sending change's rev is client-minted. On a noop commit the server head
+      // does not advance, so bumping here would make the client skip the next real
+      // revision on catchup. The server's echoed response (applied after confirm via
+      // applyServerChanges) carries the true head rev.
       const sendingStore = createMockIDBStore();
       sendingStore.data.set('"doc1"', {
         docId: 'doc1',
@@ -554,12 +558,8 @@ describe('LWWIndexedDBStore', () => {
 
       await store.confirmSendingChange('doc1');
 
-      expect(docsStore.put).toHaveBeenCalledWith(
-        expect.objectContaining({
-          docId: 'doc1',
-          committedRev: 6,
-        })
-      );
+      expect(docsStore.put).not.toHaveBeenCalled();
+      expect(docsStore.data.get('"doc1"')).toEqual({ docId: 'doc1', committedRev: 5 });
     });
 
     it('should delete sending change after confirmation', async () => {
@@ -657,38 +657,6 @@ describe('LWWIndexedDBStore', () => {
   });
 
   describe('algorithm field preservation', () => {
-    it('should include algorithm in confirmSendingChange fallback doc meta', async () => {
-      const sendingStore = createMockIDBStore();
-      sendingStore.data.set('"doc1"', {
-        docId: 'doc1',
-        change: {
-          id: 'c1',
-          rev: 6,
-          baseRev: 5,
-          ops: [],
-          createdAt: Date.now(),
-          committedAt: Date.now(),
-        },
-      });
-
-      const docsStore = createMockIDBStore();
-      // No existing doc meta — forces the fallback path
-      docsStore.get.mockResolvedValue(undefined);
-
-      mockStores.set('sendingChanges', sendingStore);
-      mockStores.set('committedOps', createMockIDBStore());
-      mockStores.set('docs', docsStore);
-
-      await store.confirmSendingChange('doc1');
-
-      expect(docsStore.put).toHaveBeenCalledWith(
-        expect.objectContaining({
-          docId: 'doc1',
-          algorithm: 'lww',
-        })
-      );
-    });
-
     it('should include algorithm in applyServerChanges fallback doc meta', async () => {
       const docsStore = createMockIDBStore();
       // No existing doc meta — forces the fallback path

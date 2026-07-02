@@ -139,6 +139,29 @@ export interface ClientAlgorithm {
    */
   dropResolvedPending?(docId: string, sentChanges: Change[], committedChanges: Change[]): Promise<number>;
 
+  /**
+   * Reconciles stored pending changes against a committed server tail WITHOUT applying that
+   * tail to local state: pending changes the server has already committed (matched by change
+   * id) are dropped, and the survivors are transformed into the tail's frame.
+   *
+   * Used by snapshot-reload recovery (`PatchesSync._reloadDocFromServer`): when a committed
+   * change fails to apply, the local committed state has diverged, so the tail can't be
+   * *applied* — the authoritative snapshot replaces local state instead — but pending must
+   * still be reconciled against it. Without this, a pending change the server already
+   * committed (e.g. a flush that succeeded on the wire but whose echo failed to apply
+   * locally) is re-applied on top of a snapshot whose state already contains it (doubled
+   * content), then re-sent with a re-stamped baseRev past the server's idempotency window —
+   * committing the same edits a second time for every collaborator.
+   *
+   * Optional — only OT needs it. LWW pending fields are keyed by path and timestamp-resolved,
+   * so re-sending an already-committed field is idempotent.
+   *
+   * @param docId Document identifier
+   * @param committedChanges The committed server tail from the pending changes' base revision
+   *   up to the reloaded snapshot's revision, in order
+   */
+  reconcilePending?(docId: string, committedChanges: Change[]): Promise<void>;
+
   // --- Store forwarding methods ---
 
   /** Registers documents for local tracking with the algorithm for this instance. */

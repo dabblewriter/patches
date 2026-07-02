@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Patches } from '../../src/client/Patches';
 import type { AlgorithmName, TrackedDoc } from '../../src/client/PatchesStore';
 import { MissingChangesError } from '../../src/algorithms/ot/client/applyCommittedChanges';
+import { ApplyChangesError } from '../../src/algorithms/ot/shared/applyChanges';
 import { PatchesSync } from '../../src/net/PatchesSync';
 import { StatusError } from '../../src/net/error';
 import { PatchesWebSocket } from '../../src/net/websocket/PatchesWebSocket';
@@ -65,6 +66,7 @@ describe('PatchesSync', () => {
       applyServerChanges: vi.fn().mockResolvedValue([]),
       confirmSent: vi.fn().mockResolvedValue(undefined),
       dropResolvedPending: vi.fn().mockResolvedValue(0),
+      reconcilePending: vi.fn().mockResolvedValue(undefined),
       getCommittedRev: vi.fn().mockResolvedValue(0),
       deleteDoc: vi.fn().mockResolvedValue(undefined),
       confirmDeleteDoc: vi.fn().mockResolvedValue(undefined),
@@ -495,6 +497,162 @@ describe('PatchesSync', () => {
 
       expect(syncDocSpy).not.toHaveBeenCalled();
       expect(onError).toHaveBeenCalledWith(otherErr, { docId: 'doc1' });
+    });
+  });
+
+  describe('apply-failure recovery (P-1)', () => {
+    it('falls back to syncDoc when a committed change fails to apply (ApplyChangesError)', async () => {
+      // A change that fails to apply must trigger recovery — silently skipping it would
+      // diverge this client from every other client that applied it, with zero signal.
+      const applyErr = new ApplyChangesError('c-bad', 6, 0, new Error('[op:add] invalid path'));
+      vi.spyOn(sync as any, '_applyServerChangesToDoc').mockRejectedValue(applyErr);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      const onError = vi.fn();
+      sync.onError(onError);
+
+      await expect(
+        sync['_receiveCommittedChanges']('doc1', [
+          { id: 'c-bad', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 },
+        ])
+      ).resolves.toBeUndefined(); // recovered, not an unhandled rejection
+
+      expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+    });
+
+    it('syncDoc recovers from an ApplyChangesError during catch-up by reloading the authoritative snapshot', async () => {
+      sync['updateState']({ connected: true });
+      const applyErr = new ApplyChangesError('c-bad', 6, 0, new Error('bad op'));
+      mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      mockWebSocket.getChangesSince.mockResolvedValue([
+        { id: 'c-bad', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 },
+      ]);
+      mockAlgorithm.applyServerChanges.mockRejectedValue(applyErr);
+      const snapshot = { state: { content: 'authoritative' }, rev: 6 };
+      mockWebSocket.getDoc.mockResolvedValue(snapshot);
+      const onError = vi.fn();
+      sync.onError(onError);
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await sync['syncDoc']('doc1');
+
+      // Surfaced for telemetry even though recovery succeeded — a failed apply is a
+      // corruption signal, unlike a benign rev gap.
+      expect(onError).toHaveBeenCalledWith(applyErr, { docId: 'doc1' });
+      // Recovered by pulling the full authoritative snapshot (incremental catch-up
+      // would refetch the same changes and fail the same way).
+      expect(mockWebSocket.getDoc).toHaveBeenCalledWith('doc1');
+      expect(mockAlgorithm.store.saveDoc).toHaveBeenCalledWith('doc1', snapshot);
+      expect(sync.docStates.state['doc1']?.syncStatus).toBe('synced');
+      consoleSpy.mockRestore();
+    });
+
+    it('falls through to normal error handling when the snapshot reload also fails', async () => {
+      sync['updateState']({ connected: true });
+      const applyErr = new ApplyChangesError('c-bad', 6, 0, new Error('bad op'));
+      mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      mockWebSocket.getChangesSince.mockResolvedValue([
+        { id: 'c-bad', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 },
+      ]);
+      mockAlgorithm.applyServerChanges.mockRejectedValue(applyErr);
+      mockWebSocket.getDoc.mockRejectedValue(new Error('network down'));
+      const onError = vi.fn();
+      sync.onError(onError);
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await sync['syncDoc']('doc1');
+
+      // Original apply failure still surfaced; the doc lands in error state (with a
+      // scheduled transient retry) instead of crashing or silently dropping the batch.
+      expect(onError).toHaveBeenCalledWith(applyErr, { docId: 'doc1' });
+      expect(sync.docStates.state['doc1']?.syncStatus).toBe('error');
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('recovery pending reconciliation (double-commit guard)', () => {
+    beforeEach(() => {
+      sync['updateState']({ connected: true });
+    });
+
+    it('reconciles just-committed pending against the tail before adopting the reloaded snapshot', async () => {
+      // The dangerous shape: the commit SUCCEEDS on the wire (server tip now includes the
+      // batch), but the echo fails to apply locally before anything persists — pending
+      // still holds the batch. The reloaded snapshot's state already contains those edits,
+      // so preserving pending verbatim would re-apply them (doubled content) and re-send
+      // them past the server's idempotency window (permanent duplication).
+      const pending: Change[] = [
+        { id: 'b1', rev: 6, baseRev: 5, ops: [{ op: 'add', path: '/a', value: 1 }], createdAt: 1, committedAt: 0 },
+      ];
+      mockAlgorithm.getPendingToSend.mockResolvedValueOnce(pending);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      const committedEcho = [{ ...pending[0], committedAt: 100 }];
+      mockWebSocket.commitChanges.mockResolvedValue({ changes: committedEcho });
+      mockAlgorithm.applyServerChanges.mockRejectedValue(new ApplyChangesError('b1', 6, 0, new Error('bad op')));
+      mockWebSocket.getDoc.mockResolvedValue({ state: { a: 1 }, rev: 6 });
+      mockWebSocket.getChangesSince.mockResolvedValue(committedEcho);
+      // Pending exists going into recovery; reconciliation clears it (all committed).
+      mockAlgorithm.hasPending.mockResolvedValueOnce(true).mockResolvedValue(false);
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await sync['syncDoc']('doc1');
+
+      // The committed tail is fetched from the pre-reload rev and pending reconciled
+      // against it — dropping the already-committed batch by id.
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledWith('doc1', 5);
+      expect(mockAlgorithm.reconcilePending).toHaveBeenCalledWith('doc1', committedEcho);
+      // Reconciliation must complete before the snapshot is adopted, so doc.import can
+      // never re-apply the committed batch on top of a state that already contains it.
+      expect(mockAlgorithm.reconcilePending.mock.invocationCallOrder[0]).toBeLessThan(
+        mockStore.saveDoc.mock.invocationCallOrder[0]
+      );
+      // Cleared pending is reflected in the doc's sync state, not left latched true.
+      expect(sync.docStates.state['doc1']?.hasPending).toBe(false);
+      expect(sync.docStates.state['doc1']?.syncStatus).toBe('synced');
+      consoleSpy.mockRestore();
+    });
+
+    it('excludes tail changes past the snapshot rev — the catch-up path rebases against those', async () => {
+      const pending: Change[] = [
+        { id: 'b1', rev: 6, baseRev: 5, ops: [{ op: 'add', path: '/a', value: 1 }], createdAt: 1, committedAt: 0 },
+      ];
+      mockAlgorithm.getPendingToSend.mockResolvedValueOnce(pending);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      const committedEcho = { ...pending[0], committedAt: 100 };
+      mockWebSocket.commitChanges.mockResolvedValue({ changes: [committedEcho] });
+      mockAlgorithm.applyServerChanges.mockRejectedValue(new ApplyChangesError('b1', 6, 0, new Error('bad op')));
+      mockWebSocket.getDoc.mockResolvedValue({ state: { a: 1 }, rev: 6 });
+      // A foreign change landed between getDoc and getChangesSince — not in the snapshot.
+      const later = { id: 'f1', rev: 7, baseRev: 6, ops: [], createdAt: 2, committedAt: 101 };
+      mockWebSocket.getChangesSince.mockResolvedValue([committedEcho, later]);
+      mockAlgorithm.hasPending.mockResolvedValueOnce(true).mockResolvedValue(false);
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await sync['syncDoc']('doc1');
+
+      expect(mockAlgorithm.reconcilePending).toHaveBeenCalledWith('doc1', [committedEcho]);
+      consoleSpy.mockRestore();
+    });
+
+    it('skips the tail fetch when recovery has nothing pending to reconcile', async () => {
+      mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      mockWebSocket.getChangesSince.mockResolvedValue([
+        { id: 'c-bad', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 },
+      ]);
+      mockAlgorithm.applyServerChanges.mockRejectedValue(new ApplyChangesError('c-bad', 6, 0, new Error('bad op')));
+      mockWebSocket.getDoc.mockResolvedValue({ state: { content: 'authoritative' }, rev: 6 });
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await sync['syncDoc']('doc1');
+
+      // Called once for the catch-up attempt; recovery doesn't refetch a tail it won't use.
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledTimes(1);
+      expect(mockAlgorithm.reconcilePending).not.toHaveBeenCalled();
+      expect(sync.docStates.state['doc1']?.syncStatus).toBe('synced');
+      consoleSpy.mockRestore();
     });
   });
 

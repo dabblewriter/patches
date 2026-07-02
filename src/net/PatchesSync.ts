@@ -1,6 +1,7 @@
 import { isEqual } from '@dabble/delta';
 import { batch, ReadonlyStoreClass, signal, store, type Store, type Unsubscriber } from 'easy-signal';
 import { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
+import { ApplyChangesError } from '../algorithms/ot/shared/applyChanges.js';
 import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/ot/shared/changeBatching.js';
 import { BaseDoc } from '../client/BaseDoc.js';
 import type { BranchClientStore } from '../client/BranchClientStore.js';
@@ -158,6 +159,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this.connection.onStateChange(this._handleConnectionChange.bind(this)),
       this.connection.onChangesCommitted(this._receiveCommittedChanges.bind(this)),
       this.connection.onDocDeleted(docId => this._handleRemoteDocDeleted(docId)),
+      // Forward transport-level errors that don't reject a specific request (e.g. a
+      // malformed server-pushed event the transport had to drop) so they reach the
+      // app's telemetry instead of vanishing.
+      ...(this.connection.onError ? [this.connection.onError(error => this.onError.emit(error))] : []),
       patches.onTrackDocs(this._handleDocsTracked.bind(this)),
       patches.onUntrackDocs(this._handleDocsUntracked.bind(this)),
       patches.onDeleteDoc(this._handleDocDeleted.bind(this)),
@@ -515,20 +520,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           }
         } else {
           // No committed rev means this is a new doc - fetch from server
-          const snapshot = await this.connection.getDoc(docId);
-          // Save via algorithm's store
-          await algorithm.store.saveDoc(docId, snapshot);
-          // Read back the actual committed rev (store may compute from changes)
-          const savedRev = await algorithm.getCommittedRev(docId);
-          this._updateDocSyncState(docId, { committedRev: savedRev });
-          // Re-read the snapshot from the algorithm's store so it includes any pending
-          // changes the store kept across saveDoc. Passing `changes: []` here would let
-          // doc.import() wipe in-memory pending state (OTDoc._pendingChanges) and LWW
-          // echo tracking (_inFlightOpKeys), diverging the doc from its store.
-          const fullSnapshot = await algorithm.loadDoc(docId);
-          if (fullSnapshot) {
-            this.patches.applySnapshot(docId, fullSnapshot);
-          }
+          await this._reloadDocFromServer(docId, algorithm);
         }
       }
       this._updateDocSyncState(docId, { syncStatus: 'synced' });
@@ -543,7 +535,34 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         await this._handleRemoteDocDeleted(docId);
         return;
       }
-      const syncError = err instanceof Error ? err : new Error(String(err));
+      // A change that failed to apply (strict patch failure) means the local committed
+      // state has diverged from the server's, or a corrupt change is in the stream.
+      // Incremental catch-up can never get past it — refetching the same changes fails
+      // the same way — so recover by pulling the authoritative snapshot. Surface the
+      // original error first: unlike a benign rev gap, a failed apply is a corruption
+      // signal telemetry must see even when recovery succeeds.
+      let failure: unknown = err;
+      if (failure instanceof ApplyChangesError) {
+        console.error(`Failed to apply changes for doc ${docId}, reloading from server:`, failure);
+        this.onError.emit(failure, { docId });
+        try {
+          await this._reloadDocFromServer(docId, algorithm);
+          this._updateDocSyncState(docId, { syncStatus: 'synced' });
+          this._clearSyncRetry(docId);
+          this._surfacedSyncErrors.delete(docId);
+          if (baseDoc) {
+            baseDoc.updateSyncStatus('synced');
+          }
+          return;
+        } catch (reloadErr) {
+          if (this._isDocDeletedError(reloadErr)) {
+            await this._handleRemoteDocDeleted(docId);
+            return;
+          }
+          failure = reloadErr; // fall through to the transient/definitive handling below
+        }
+      }
+      const syncError = failure instanceof Error ? failure : new Error(String(failure));
       this._updateDocSyncState(docId, { syncStatus: 'error', syncError });
       if (baseDoc) {
         baseDoc.updateSyncStatus('error', syncError);
@@ -555,14 +574,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // transient one we've exhausted retries on while still connected; a failure that
       // coincides with a disconnect stays quiet, since the reconnect's syncAllKnownDocs
       // re-syncs everything.
-      const retryable = this._isRetryableSyncError(err);
+      const retryable = this._isRetryableSyncError(failure);
       const willRetry = retryable && this._scheduleSyncRetry(docId);
       if (!willRetry) {
         this._clearSyncRetry(docId);
         const recoverableOnReconnect = retryable && !this._isConnectedAndOnline();
         if (!recoverableOnReconnect && !this._surfacedSyncErrors.has(docId)) {
           this._surfacedSyncErrors.add(docId);
-          console.error(`Error syncing doc ${docId}:`, err);
+          console.error(`Error syncing doc ${docId}:`, failure);
           this.onError.emit(syncError, { docId });
         }
         // Left at 'error' with pending changes while the connection is up: nothing else
@@ -574,6 +593,57 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           this._scheduleSyncReprobe(docId, retryable);
         }
       }
+    }
+  }
+
+  /**
+   * Pulls the authoritative snapshot from the server and resets local committed state to it,
+   * keeping pending/optimistic work (the store keeps pending across saveDoc; doc.import()
+   * re-applies optimistic ops). Used to hydrate a brand-new doc (no committed rev) and to
+   * recover when incremental catch-up can't proceed — a change that fails to apply (see the
+   * ApplyChangesError handling in syncDoc).
+   *
+   * Pending work is kept but NOT verbatim: it is first reconciled against the committed
+   * tail the snapshot subsumes (see `ClientAlgorithm.reconcilePending`). A pending change
+   * the server has ALREADY committed — e.g. a flush that succeeded on the wire but whose
+   * echo failed to apply locally, the exact class this recovery handles — must be dropped
+   * here, or doc.import() re-applies it on top of a state that already contains it (the
+   * user sees their edits doubled) and the next flush re-sends it with a re-stamped baseRev
+   * the server's idempotency dedupe no longer covers (permanently duplicated content for
+   * every collaborator). Survivors are transformed into the snapshot's frame — a pure op
+   * transform that never applies the tail, so it works even though applying it just failed.
+   */
+  protected async _reloadDocFromServer(docId: string, algorithm: ClientAlgorithm): Promise<void> {
+    // Read the rev the local committed state (and thus pending) sits on BEFORE overwriting it.
+    const baseRev = await algorithm.getCommittedRev(docId);
+    const snapshot = await this.connection.getDoc(docId);
+    let reconciled = false;
+    if (algorithm.reconcilePending && snapshot.rev > baseRev && (await algorithm.hasPending(docId))) {
+      // Changes past the snapshot's rev are excluded: the snapshot doesn't contain them, so
+      // the normal catch-up path will deliver them and rebase pending against them itself.
+      const committedTail = (await this.connection.getChangesSince(docId, baseRev)).filter(c => c.rev <= snapshot.rev);
+      if (committedTail.length > 0) {
+        await algorithm.reconcilePending(docId, committedTail);
+        reconciled = true;
+      }
+    }
+    // Save via algorithm's store
+    await algorithm.store.saveDoc(docId, snapshot);
+    // Read back the actual committed rev (store may compute from changes)
+    const savedRev = await algorithm.getCommittedRev(docId);
+    this._updateDocSyncState(docId, {
+      committedRev: savedRev,
+      // Reconciliation may have cleared every pending change (they were already committed);
+      // refresh the flag so the doc doesn't read as having unsynced work indefinitely.
+      ...(reconciled ? { hasPending: await algorithm.hasPending(docId) } : undefined),
+    });
+    // Re-read the snapshot from the algorithm's store so it includes any pending
+    // changes the store kept across saveDoc. Passing `changes: []` here would let
+    // doc.import() wipe in-memory pending state (OTDoc._pendingChanges) and LWW
+    // echo tracking (_inFlightOpKeys), diverging the doc from its store.
+    const fullSnapshot = await algorithm.loadDoc(docId);
+    if (fullSnapshot) {
+      this.patches.applySnapshot(docId, fullSnapshot);
     }
   }
 
@@ -713,12 +783,17 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     try {
       await this._applyServerChangesToDoc(docId, serverChanges);
     } catch (err) {
-      // A non-contiguous server change (we missed an earlier event — a transient SSE drop the
-      // browser's replay didn't fully cover) throws a MissingChangesError. Without recovery the
-      // tail is dropped and `committedRev` freezes silently, so the client stops converging while
-      // believing it is up to date. Pull the authoritative tail via syncDoc (getChangesSince),
-      // mirroring applyMergeChanges' gap fallback. Keep onError for telemetry.
-      if (this._isMissingChangesGap(err)) {
+      // Two recoverable failure classes land here. Without recovery the batch is dropped and
+      // `committedRev` freezes silently, so the client stops converging while believing it is
+      // up to date.
+      // - MissingChangesError: a non-contiguous server change (we missed an earlier event — a
+      //   transient SSE drop the browser's replay didn't fully cover). syncDoc pulls the
+      //   authoritative tail via getChangesSince, mirroring applyMergeChanges' gap fallback.
+      // - ApplyChangesError: a change in the batch failed to apply (corrupt change or diverged
+      //   local state). syncDoc's own ApplyChangesError fallback reloads the authoritative
+      //   snapshot when the refetched tail can't be applied either, and emits onError for
+      //   telemetry — a failed apply is a corruption signal, unlike a benign gap.
+      if (this._isMissingChangesGap(err) || err instanceof ApplyChangesError) {
         try {
           await this.syncDoc(docId);
           return;

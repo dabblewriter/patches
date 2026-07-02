@@ -42,6 +42,8 @@ const LIVENESS_CHECK_MS = 15_000;
 const INITIAL_RECONNECT_BACKOFF_MS = 1_000;
 /** Cap on the exponential reconnect backoff. */
 const MAX_RECONNECT_BACKOFF_MS = 30_000;
+/** Max characters of a malformed SSE payload included in the surfaced error message. */
+const MALFORMED_EVENT_SNIPPET_CHARS = 200;
 
 /**
  * Options for creating a PatchesREST instance.
@@ -84,6 +86,14 @@ export class PatchesREST implements PatchesConnection {
    * Used by `PatchesRESTSignalingTransport` to drive `WebRTCTransport`'s signaling.
    */
   readonly onSignal = signal<(raw: string) => void>();
+  /**
+   * Emits transport-level errors that don't reject a specific request — currently a
+   * malformed server-pushed SSE event (unparseable JSON or wrong shape) that had to be
+   * dropped. PatchesSync forwards these to its own onError so they reach app telemetry;
+   * a dropped `changesCommitted` event otherwise means silently missed changes until the
+   * next event opens a rev gap or a reconnect resync catches up.
+   */
+  readonly onError = signal<(error: Error) => void>();
 
   private _url: string;
   private _state: ConnectionState = 'disconnected';
@@ -214,24 +224,48 @@ export class PatchesREST implements PatchesConnection {
       };
 
       // Listen for typed server events. Every frame also bumps the liveness clock.
+      // A malformed event (unparseable JSON or wrong shape) is dropped but surfaced via
+      // onError — never silently ignored, since a dropped `changesCommitted` means this
+      // client misses committed changes with zero signal. The stream itself stays up:
+      // one bad frame doesn't invalidate the connection, and a missed changes event is
+      // recovered by the next event's rev gap (MissingChangesError → syncDoc) or a
+      // reconnect resync.
       es.addEventListener('changesCommitted', (e: MessageEvent) => {
         this._noteTraffic();
+        let parsed: { docId?: unknown; changes?: unknown; options?: CommitChangesOptions };
         try {
-          const { docId, changes, options } = JSON.parse(e.data);
-          this.onChangesCommitted.emit(docId, changes, options);
-        } catch {
-          // Malformed event, ignore
+          parsed = JSON.parse(e.data) ?? {};
+        } catch (err) {
+          this._reportMalformedEvent('changesCommitted', e.data, err);
+          return;
         }
+        const { docId, changes, options } = parsed;
+        if (typeof docId !== 'string' || !Array.isArray(changes)) {
+          this._reportMalformedEvent(
+            'changesCommitted',
+            e.data,
+            new Error('expected shape { docId: string, changes: Change[] }')
+          );
+          return;
+        }
+        this.onChangesCommitted.emit(docId, changes, options);
       });
 
       es.addEventListener('docDeleted', (e: MessageEvent) => {
         this._noteTraffic();
+        let parsed: { docId?: unknown };
         try {
-          const { docId } = JSON.parse(e.data);
-          this.onDocDeleted.emit(docId);
-        } catch {
-          // Malformed event, ignore
+          parsed = JSON.parse(e.data) ?? {};
+        } catch (err) {
+          this._reportMalformedEvent('docDeleted', e.data, err);
+          return;
         }
+        const { docId } = parsed;
+        if (typeof docId !== 'string') {
+          this._reportMalformedEvent('docDeleted', e.data, new Error('expected shape { docId: string }'));
+          return;
+        }
+        this.onDocDeleted.emit(docId);
       });
 
       es.addEventListener('signal', (e: MessageEvent) => {
@@ -420,6 +454,21 @@ export class PatchesREST implements PatchesConnection {
   /** Record that an SSE frame (event or heartbeat) just arrived, for the liveness watchdog. */
   private _noteTraffic(): void {
     this._lastEventAt = Date.now();
+  }
+
+  /**
+   * Surfaces a malformed server-pushed SSE event through onError (and the console as a
+   * fallback when nothing subscribes) with a truncated payload snippet for telemetry.
+   * The event is dropped but the connection stays usable.
+   */
+  private _reportMalformedEvent(event: string, data: unknown, cause: unknown): void {
+    const raw = typeof data === 'string' ? data : JSON.stringify(data);
+    const snippet =
+      raw && raw.length > MALFORMED_EVENT_SNIPPET_CHARS ? `${raw.slice(0, MALFORMED_EVENT_SNIPPET_CHARS)}…` : raw;
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    const error = new Error(`Malformed SSE '${event}' event (${reason}). Payload: ${snippet}`, { cause });
+    console.error(error);
+    this.onError.emit(error);
   }
 
   /** Close + null the EventSource and stop the liveness watchdog. Idempotent. */

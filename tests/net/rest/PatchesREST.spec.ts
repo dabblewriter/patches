@@ -434,6 +434,97 @@ describe('PatchesREST', () => {
     });
   });
 
+  describe('malformed SSE events (P-5)', () => {
+    let es: MockEventSource;
+    let errors: Error[];
+    let committed: any[];
+    let deleted: string[];
+    let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(async () => {
+      consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {}) as any;
+      const p = rest.connect();
+      es = MockEventSource.latest;
+      es.simulateOpen();
+      await p;
+
+      errors = [];
+      committed = [];
+      deleted = [];
+      rest.onError(err => errors.push(err));
+      rest.onChangesCommitted((docId, changes) => committed.push({ docId, changes }));
+      rest.onDocDeleted(docId => deleted.push(docId));
+    });
+
+    afterEach(() => {
+      consoleSpy.mockRestore();
+    });
+
+    it('surfaces unparseable changesCommitted JSON through onError with a payload snippet', () => {
+      es.simulateEvent('changesCommitted', 'not valid json {{{');
+
+      expect(committed).toEqual([]);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].message).toContain("Malformed SSE 'changesCommitted' event");
+      expect(errors[0].message).toContain('not valid json {{{');
+    });
+
+    it('surfaces valid-JSON-wrong-shape changesCommitted through onError', () => {
+      es.simulateEvent('changesCommitted', JSON.stringify({ docId: 42, changes: 'nope' }));
+
+      expect(committed).toEqual([]);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].message).toContain("Malformed SSE 'changesCommitted' event");
+      expect(errors[0].message).toContain('expected shape');
+    });
+
+    it('rejects a changesCommitted event whose changes is not an array', () => {
+      es.simulateEvent('changesCommitted', JSON.stringify({ docId: 'doc1', changes: { id: 'c1' } }));
+
+      expect(committed).toEqual([]);
+      expect(errors).toHaveLength(1);
+    });
+
+    it('handles a null JSON payload without crashing', () => {
+      es.simulateEvent('changesCommitted', 'null');
+
+      expect(committed).toEqual([]);
+      expect(errors).toHaveLength(1);
+    });
+
+    it('truncates a long malformed payload in the surfaced error', () => {
+      const longPayload = `{"docId": 1, "junk": "${'x'.repeat(1000)}"}`;
+      es.simulateEvent('changesCommitted', longPayload);
+
+      expect(errors).toHaveLength(1);
+      // 200-char snippet + ellipsis + fixed message framing — never the whole payload.
+      expect(errors[0].message.length).toBeLessThan(320);
+      expect(errors[0].message).toContain('…');
+    });
+
+    it('surfaces malformed docDeleted events through onError', () => {
+      es.simulateEvent('docDeleted', 'not json');
+      es.simulateEvent('docDeleted', JSON.stringify({ docId: 123 }));
+
+      expect(deleted).toEqual([]);
+      expect(errors).toHaveLength(2);
+      expect(errors[0].message).toContain("Malformed SSE 'docDeleted' event");
+    });
+
+    it('keeps the connection usable after a malformed event', () => {
+      es.simulateEvent('changesCommitted', 'garbage');
+      expect(rest.state).toBe('connected');
+
+      // A subsequent well-formed event still flows through.
+      es.simulateEvent('changesCommitted', JSON.stringify({ docId: 'doc1', changes: [{ id: 'c1', ops: [] }] }));
+      es.simulateEvent('docDeleted', JSON.stringify({ docId: 'doc2' }));
+
+      expect(committed).toEqual([{ docId: 'doc1', changes: [{ id: 'c1', ops: [] }] }]);
+      expect(deleted).toEqual(['doc2']);
+      expect(errors).toHaveLength(1);
+    });
+  });
+
   describe('sendSignal', () => {
     beforeEach(async () => {
       const p = rest.connect();

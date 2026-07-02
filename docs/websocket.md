@@ -231,6 +231,15 @@ const auth: AuthorizationProvider = {
 };
 ```
 
+The `params` argument carries the request payload as a named object for methods whose api definition declares parameter names. The bundled servers declare them for `commitChanges` (`{ docId, changes, options }`), so providers can validate the changes being committed (e.g. role-scoped write rules). To expose params for your own registered methods, use the object form in the static api:
+
+```typescript
+static api: ApiDefinition = {
+  getDoc: 'read',
+  commitChanges: { access: 'write', params: ['docId', 'changes', 'options'] },
+};
+```
+
 If you don't provide an auth provider, the default denies all access. This is intentional - you should always implement authorization for production.
 
 ### Message Processing

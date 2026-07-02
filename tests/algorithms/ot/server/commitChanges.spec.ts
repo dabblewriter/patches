@@ -425,6 +425,28 @@ describe('commitChanges', () => {
     expect(result.newChanges[0].id).toBe('new');
   });
 
+  it('should commit a change id repeated within one batch only once', async () => {
+    // A client retry/flush race can repeat the same change twice in a single incoming
+    // array. Committing both copies double-applies the ops (the second copy is never
+    // transformed against the first), corrupting every replica.
+    const duplicated = createChange('dup', 3, 2);
+    const other = createChange('other', 4, 2);
+
+    const changes = [duplicated, { ...duplicated }, other];
+
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(2);
+    vi.mocked(mockStore.listChanges)
+      .mockResolvedValueOnce([]) // First call: reverse/limit for session check
+      .mockResolvedValueOnce([]); // Second call: committed changes
+
+    const result = await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis);
+
+    expect(result.newChanges.map(c => c.id)).toEqual(['dup', 'other']);
+    expect(mockStore.saveChanges).toHaveBeenCalledTimes(1);
+    const saved = vi.mocked(mockStore.saveChanges).mock.calls[0][1] as Change[];
+    expect(saved.map(c => c.id)).toEqual(['dup', 'other']);
+  });
+
   it('should return committed changes when all incoming changes already exist', async () => {
     const existingChange = createChange('existing', 2, 1);
     const changes = [existingChange];

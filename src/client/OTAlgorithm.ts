@@ -117,7 +117,7 @@ export class OTAlgorithm implements ClientAlgorithm {
     // batch; the next server echo rebases the stored copy into agreement.
     const snapshot = await this.store.getDoc(docId);
     if (!snapshot || snapshot.changes.length === 0) return null;
-    return this._withConsistentBaseRev(snapshot.changes, snapshot.rev);
+    return this._withConsistentBaseRev(docId, snapshot.changes, snapshot.rev);
   }
 
   async applyServerChanges<T extends object>(
@@ -253,10 +253,21 @@ export class OTAlgorithm implements ClientAlgorithm {
   /**
    * Pending OT changes all sit on `committedRev`, so the queue must share `baseRev ===
    * committedRev` — the consistency the server enforces. Re-stamp any straggler a receive-vs-mint
-   * race left on a stale baseRev; lossless, and the next echo heals the stored copy.
+   * race left on a stale baseRev, and warn loudly: the re-stamp is only correct when the missed
+   * rebases were pure own-change echoes (the common case). If foreign changes landed between the
+   * straggler's stale baseRev and `committedRev`, its ops are in an unreconstructible frame and
+   * the re-stamp commits them at shifted offsets — a straggler should never exist under the
+   * per-doc lock, so any warning here points at a multi-writer store (two hubs over one database).
    */
-  private _withConsistentBaseRev(pending: Change[], committedRev: number): Change[] {
+  private _withConsistentBaseRev(docId: string, pending: Change[], committedRev: number): Change[] {
     if (pending.every(c => c.baseRev === committedRev)) return pending;
+    const stale = pending.filter(c => c.baseRev !== committedRev);
+    console.warn(
+      `[patches] Re-stamping ${stale.length} pending change(s) for ${docId} from baseRev ` +
+        `${stale.map(c => c.baseRev).join(',')} to ${committedRev}. This indicates a mint/rebase ` +
+        `race (likely two client instances over one store) and can misplace ops if foreign ` +
+        `changes landed in between.`
+    );
     return pending.map(c => (c.baseRev === committedRev ? c : { ...c, baseRev: committedRev }));
   }
 

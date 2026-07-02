@@ -184,10 +184,14 @@ export class OTAlgorithm implements ClientAlgorithm {
 
   async replacePendingChanges(docId: string, oldChanges: Change[], newChanges: Change[]): Promise<void> {
     return this._withDocLock(docId, async () => {
-      // Preserve any changes minted after oldChanges was read, renumbered after the new queue
+      // Preserve any changes minted after oldChanges was read, renumbered after the new queue.
+      // `newChanges` may be empty: splitting can collapse a pending set to nothing (e.g. an
+      // oversized @txt op whose delta carries no sendable ops breaks into zero pieces). The
+      // local edits then amount to a no-op — clear the old pending and renumber any survivors
+      // straight off the committed rev instead of reading `.rev` off an empty array.
       const oldIds = new Set(oldChanges.map(c => c.id));
       const current = await this.store.getPendingChanges(docId);
-      let rev = newChanges[newChanges.length - 1].rev;
+      let rev = newChanges.length > 0 ? newChanges[newChanges.length - 1].rev : await this.store.getCommittedRev(docId);
       const mintedSince = current.filter(c => !oldIds.has(c.id)).map(c => ({ ...c, rev: ++rev }));
       // applyServerChanges with no server changes atomically replaces the pending queue
       await this.store.applyServerChanges(docId, [], [...newChanges, ...mintedSince]);

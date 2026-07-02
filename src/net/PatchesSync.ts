@@ -821,6 +821,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           const fullSnapshot = await algorithm.loadDoc(docId);
           if (fullSnapshot) this.patches.applySnapshot(docId, fullSnapshot);
         }
+        // Splitting collapsed every change to nothing (e.g. an oversized @txt op whose delta
+        // carries no sendable ops): the local edits amount to a no-op. The queue was cleared
+        // above (changes minted since the read survive in the store), so there is nothing to
+        // put on the wire — batches would be [[]] here. Report the store's real hasPending
+        // and finish; a change minted mid-replace re-triggers sync via its own onChange.
+        if (flattened.length === 0) {
+          const stillHasPending = await algorithm.hasPending(docId);
+          this._updateDocSyncState(docId, { hasPending: stillHasPending, syncStatus: 'synced' });
+          return;
+        }
       }
 
       for (const changeBatch of batches) {

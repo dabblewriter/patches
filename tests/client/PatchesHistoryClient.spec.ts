@@ -8,6 +8,12 @@ vi.mock('../../src/algorithms/ot/shared/applyChanges', () => ({
     ...state,
     appliedChanges: changes?.length || 0,
   })),
+  // scrubTo uses the reconstruction variant — history scrubbing replays settled
+  // history and must not abort on a historically-invalid committed op.
+  applyChangesForReconstruction: vi.fn().mockImplementation((state, changes) => ({
+    ...state,
+    appliedChanges: changes?.length || 0,
+  })),
 }));
 
 vi.mock('easy-signal', async () => {
@@ -34,7 +40,7 @@ vi.mock('easy-signal', async () => {
 
 // Now import after mocking
 const { PatchesHistoryClient } = await import('../../src/client/PatchesHistoryClient');
-const { applyChanges } = await import('../../src/algorithms/ot/shared/applyChanges');
+const { applyChangesForReconstruction } = await import('../../src/algorithms/ot/shared/applyChanges');
 
 describe('PatchesHistoryClient', () => {
   let client: InstanceType<typeof PatchesHistoryClient>;
@@ -279,7 +285,7 @@ describe('PatchesHistoryClient', () => {
 
       vi.mocked(mockAPI.getVersionState).mockResolvedValue({ state: parentState, rev: 1 });
       vi.mocked(mockAPI.getVersionChanges).mockResolvedValue(changes);
-      vi.mocked(applyChanges).mockReturnValue(expectedState);
+      vi.mocked(applyChangesForReconstruction).mockReturnValue(expectedState);
 
       const stateSpy = vi.fn();
       client.historyState.subscribe(stateSpy, false);
@@ -288,7 +294,7 @@ describe('PatchesHistoryClient', () => {
 
       expect(mockAPI.getVersionState).toHaveBeenCalledWith('doc1', 'v1');
       expect(mockAPI.getVersionChanges).toHaveBeenCalledWith('doc1', 'v2');
-      expect(applyChanges).toHaveBeenCalledWith(parentState, changes.slice(0, 2));
+      expect(applyChangesForReconstruction).toHaveBeenCalledWith(parentState, changes.slice(0, 2));
       expect(client.historyState.state).toEqual(expectedState);
       expect(stateSpy).toHaveBeenCalledWith(expectedState);
     });
@@ -303,7 +309,7 @@ describe('PatchesHistoryClient', () => {
       await client.scrubTo('v2', 0);
 
       expect(mockAPI.getVersionState).toHaveBeenCalledWith('doc1', 'v1');
-      expect(applyChanges).not.toHaveBeenCalled();
+      expect(applyChangesForReconstruction).not.toHaveBeenCalled();
       expect(client.historyState.state).toEqual(parentState);
     });
 
@@ -316,7 +322,7 @@ describe('PatchesHistoryClient', () => {
 
       expect(mockAPI.getVersionState).not.toHaveBeenCalled();
       expect(mockAPI.getVersionChanges).toHaveBeenCalledWith('doc1', 'v1');
-      expect(applyChanges).toHaveBeenCalledWith(undefined, changes.slice(0, 1));
+      expect(applyChangesForReconstruction).toHaveBeenCalledWith(undefined, changes.slice(0, 1));
     });
 
     it('should update historyState store', async () => {

@@ -59,3 +59,84 @@ export function applyChanges<T>(state: T, changes: Change[]): T {
   }
   return state;
 }
+
+/** Context for a committed change skipped during historical reconstruction. */
+export interface SkippedChange {
+  /** The committed change that failed strict apply and was skipped. */
+  change: Change;
+  /** The index of the skipped change within the batch passed in. */
+  index: number;
+  /** The underlying patch error thrown by strict apply. */
+  error: unknown;
+}
+
+/**
+ * Options for {@link applyChangesForReconstruction}.
+ */
+export interface ReconstructionOptions {
+  /**
+   * Telemetry hook — called once per skipped change with full context
+   * (the change itself, its batch index, and the patch error), so affected
+   * `(docId, changeId, op path)` tuples can be enumerated for a data-repair
+   * sweep. Defaults to logging via `console.error`.
+   */
+  onSkippedChange?: (skipped: SkippedChange) => void;
+}
+
+/**
+ * Replay options threaded through committed-history replay helpers
+ * (`buildVersionState`, `getStateAtRevision`, …). Strict apply is the
+ * default; setting `reconstruction` explicitly opts a replay into
+ * {@link applyChangesForReconstruction}'s skip-and-continue semantics.
+ * See that function's doc for when this is legitimate.
+ */
+export interface ReplayOptions {
+  reconstruction?: ReconstructionOptions;
+}
+
+/**
+ * HISTORICAL-RECONSTRUCTION variant of {@link applyChanges} — a change that
+ * fails to apply is SKIPPED (with telemetry) instead of aborting the replay.
+ *
+ * This is only legitimate when replaying committed history whose effects are
+ * already settled — the committed head is the truth and the replay merely
+ * reconstructs it. Concretely:
+ *
+ * - building version state from the committed change log
+ * - computing a history-scrubbing baseline (state before/within a version)
+ *
+ * A historically-invalid op (committed long ago under lenient semantics) must
+ * not make that history permanently unreadable or block versioning forever;
+ * skipping the whole failing change reproduces exactly what pre-strict clients
+ * computed when the change was originally applied, so the reconstructed state
+ * matches the settled head.
+ *
+ * NEVER use this for live commit application or for materializing a client's
+ * current document (`applyChanges` is strict for those paths on purpose —
+ * skipping there silently diverges the client from the rest of the system;
+ * see {@link ApplyChangesError}).
+ *
+ * @param state - The initial state to apply changes to
+ * @param changes - Array of committed changes to replay
+ * @param options - Optional telemetry hook for skipped changes
+ * @returns The state after all applicable changes have been applied
+ */
+export function applyChangesForReconstruction<T>(state: T, changes: Change[], options?: ReconstructionOptions): T {
+  if (!changes.length) return state;
+  for (let i = 0; i < changes.length; i++) {
+    const change = changes[i];
+    try {
+      state = applyPatch(state, change.ops, { strict: true });
+    } catch (error) {
+      if (options?.onSkippedChange) {
+        options.onSkippedChange({ change, index: i, error });
+      } else {
+        console.error(
+          `applyChangesForReconstruction: skipping invalid committed change ${change.id} (rev ${change.rev}, index ${i} of batch):`,
+          error
+        );
+      }
+    }
+  }
+  return state;
+}

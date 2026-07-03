@@ -349,6 +349,57 @@ describe('PatchesHistoryManager', () => {
       expect(JSON.parse(text)).toEqual(parentState);
       expect(otStore.loadVersion).toHaveBeenCalledWith('doc1', 'parent-v');
     });
+
+    it('reconstructs through an invalid committed gap change instead of throwing (history viewing)', async () => {
+      // Version v1 starts at rev 3 with no parent — revs 1-2 replay as gap
+      // changes, and rev 2 carries a historically-invalid array-index op.
+      const targetVersion = { id: 'v1', startRev: 3, endRev: 3, origin: 'main' as const };
+      const gapChanges = [
+        {
+          id: 'c1',
+          rev: 1,
+          baseRev: 0,
+          ops: [{ op: 'replace', path: '', value: { children: ['a'] } }],
+          createdAt: 1,
+          committedAt: 1,
+        },
+        {
+          id: 'c2',
+          rev: 2,
+          baseRev: 1,
+          ops: [{ op: 'add', path: '/children/18', value: 'lost' }],
+          createdAt: 2,
+          committedAt: 2,
+        },
+      ];
+
+      const otStore = {
+        ...mockStore,
+        listChanges: vi.fn().mockResolvedValue(gapChanges),
+        loadVersion: vi.fn().mockImplementation((_: string, id: string) => {
+          return Promise.resolve(id === 'v1' ? targetVersion : undefined);
+        }),
+        loadVersionState: vi.fn().mockResolvedValue(undefined),
+        listVersions: vi.fn().mockResolvedValue([]),
+      } as any;
+
+      const skipped: { docId: string; changeId: string }[] = [];
+      const otHistoryManager = new PatchesHistoryManager(mockServer, otStore, {
+        onSkippedChange: (docId, s) => skipped.push({ docId, changeId: s.change.id }),
+      });
+
+      const result = await otHistoryManager.getStateBeforeVersion('doc1', 'v1');
+      const reader = result.getReader();
+      let text = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += value;
+      }
+
+      expect(JSON.parse(text)).toEqual({ children: ['a'] });
+      expect(skipped).toEqual([{ docId: 'doc1', changeId: 'c2' }]);
+    });
   });
 
   describe('integration scenarios', () => {

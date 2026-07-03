@@ -86,8 +86,13 @@ export class OTBranchManager implements BranchManager {
       // contentStartRev tells us where user content begins (init changes are below it).
       contentStartRev = metadata.contentStartRev;
     } else {
-      // Generate init changes from the source state at the branch point
-      const { state: stateAtRev } = await getStateAtRevision(this.store, docId, rev);
+      // Generate init changes from the source state at the branch point.
+      // Materializing the branch point replays settled, committed source history
+      // (reconstruction, not live apply): an invalid committed op from a
+      // lenient-era commit is skipped — matching what version builds and
+      // pre-strict clients computed for the same log — rather than making the
+      // source doc permanently un-branchable. Skips log via console.error.
+      const { state: stateAtRev } = await getStateAtRevision(this.store, docId, rev, { reconstruction: {} });
       const rootReplace = createChange(0, 1, [{ op: 'replace' as const, path: '', value: stateAtRev }], {
         createdAt: now,
         committedAt: now,

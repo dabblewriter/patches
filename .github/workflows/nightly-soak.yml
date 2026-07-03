@@ -1,0 +1,45 @@
+name: Nightly convergence soak
+
+# Deep fuzz soak beyond the per-PR seed panel (see tests/fuzz/convergence.spec.ts).
+# The seed base is derived from the date, so every night explores fresh seeds
+# while staying fully reproducible: a failure's seed + config is printed in the
+# log, and re-running is
+#   FUZZ_ALGO=<ot|lww> FUZZ_SEED=<seed> npm test -- tests/fuzz/convergence.spec.ts
+
+on:
+  schedule:
+    - cron: '14 3 * * *' # 03:14 UTC nightly
+  workflow_dispatch:
+    inputs:
+      ot_iterations:
+        description: OT soak seeds
+        default: '20000'
+      lww_iterations:
+        description: LWW soak seeds
+        default: '10000'
+      seed_base:
+        description: Seed base (default derives from the date)
+        default: ''
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Derive seed base
+        id: seeds
+        run: |
+          BASE="${{ github.event.inputs.seed_base }}"
+          if [ -z "$BASE" ]; then BASE="$(date -u +%Y%m%d)000"; fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "Seed base: $BASE"
+      - name: OT soak
+        run: FUZZ_SEED=${{ steps.seeds.outputs.base }} FUZZ_ITERATIONS=${{ github.event.inputs.ot_iterations || 20000 }} npm test -- tests/fuzz/convergence.spec.ts
+      - name: LWW soak
+        run: FUZZ_ALGO=lww FUZZ_SEED=${{ steps.seeds.outputs.base }} FUZZ_ITERATIONS=${{ github.event.inputs.lww_iterations || 10000 }} npm test -- tests/fuzz/convergence.spec.ts

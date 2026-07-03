@@ -25,6 +25,9 @@ jobs:
   soak:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,3 +46,36 @@ jobs:
         run: FUZZ_SEED=${{ steps.seeds.outputs.base }} FUZZ_ITERATIONS=${{ github.event.inputs.ot_iterations || 20000 }} npm test -- tests/fuzz/convergence.spec.ts
       - name: LWW soak
         run: FUZZ_ALGO=lww FUZZ_SEED=${{ steps.seeds.outputs.base }} FUZZ_ITERATIONS=${{ github.event.inputs.lww_iterations || 10000 }} npm test -- tests/fuzz/convergence.spec.ts
+
+      # A red scheduled run only emails the workflow's last editor — easy to
+      # miss. Surface failures as a GitHub issue instead: one open issue
+      # collects repeats, and closing it acknowledges the finding.
+      - name: Open an issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              `The nightly convergence soak failed (seed base ${new Date().toISOString().slice(0, 10).replaceAll('-', '')}000).`,
+              '',
+              `The failing seed, its derived config, the full action script, and the one-line repro are in the run log: ${runUrl}`,
+              '',
+              'Repro locally with: `FUZZ_ALGO=<ot|lww> FUZZ_SEED=<seed> npm test -- tests/fuzz/convergence.spec.ts`',
+              'Per the fuzz-suite convention, pin the finding as an `it.skip` with its seed before fixing it in a separate PR.',
+            ].join('\n');
+            const { data: issues } = await github.rest.issues.listForRepo({
+              ...context.repo,
+              state: 'open',
+              creator: 'app/github-actions',
+            });
+            const existing = issues.find(i => i.title.startsWith('Nightly soak failure'));
+            if (existing) {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: existing.number, body });
+            } else {
+              await github.rest.issues.create({
+                ...context.repo,
+                title: `Nightly soak failure — ${new Date().toISOString().slice(0, 10)}`,
+                body,
+              });
+            }

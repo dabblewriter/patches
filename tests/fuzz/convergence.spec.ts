@@ -248,9 +248,10 @@ describe('convergence fuzz — LWW panel', () => {
   // mid-flush. LWWAlgorithm.applyServerChanges now skips a batch whose rev is already
   // covered by committedRev wholesale (commit responses stay exempt, recognized by the
   // change ids confirmSent recorded: their corrections legitimately carry old revs).
-  // (Repro-era knobs pinned so the seed's action script stays byte-identical.)
+  // (Repro-era knobs pinned so the seed's action script stays byte-identical; verified to
+  // fail with the guard reverted.)
   it('FINDING-2 regression: stale broadcast after commit response is skipped (seed 102)', async () => {
-    await runLWWFuzz(102, { drainInboxBeforeFlush: false, parentOps: true });
+    await runLWWFuzz(102, { dropP: 0, drainInboxBeforeFlush: false, parentOps: true });
   }, 60_000);
 
   // FINDING-4 regression (fixed): a client's parent write (replace /counters) racing a
@@ -261,8 +262,14 @@ describe('convergence fuzz — LWW panel', () => {
   // a local parent write, and the commit response echoes the server's stored resolution
   // for every sent path (LWWDoc's echo keys ignore the server-stamped rev so those echoes
   // still register as pure echoes when nothing changed).
+  // (Repro-era knobs pinned so the seed's action script stays byte-identical. This is a
+  // LEG-level pin: it fails with the whole LWW fix stack reverted — the exact F4 shape,
+  // "c2 live doc state diverged from server" — but passes with only the F4/F6 commit
+  // reverted because the F2 stale guard happens to heal this particular script.
+  // Per-commit discrimination for F4/F6 lives in the mergeServerWithLocal.spec and
+  // LWWServer.spec unit pins.)
   it('FINDING-4 regression: open doc converges with its store after a parent/child race (seed 100)', async () => {
-    await runLWWFuzz(100, { parentOps: true });
+    await runLWWFuzz(100, { dropP: 0, drainInboxBeforeFlush: true, parentOps: true });
   }, 60_000);
 
   // FINDING-6 regression (fixed): a parent write that LOSES to a newer stored parent used
@@ -272,8 +279,10 @@ describe('convergence fuzz — LWW panel', () => {
   // prune removed it locally; with committedRev already past 26 nothing redelivered it.
   // The response now echoes the post-commit stored rows for sent paths AND their
   // surviving children, in commit order, so the correction rebuilds parent + children.
+  // (Repro-era knobs pinned so the seed's action script stays byte-identical; verified to
+  // fail without the sent-path echo commit.)
   it('FINDING-6 regression: rejected parent write keeps surviving newer children (seed 1000069)', async () => {
-    await runLWWFuzz(1000069, { parentOps: true });
+    await runLWWFuzz(1000069, { dropP: 0, drainInboxBeforeFlush: true, parentOps: true });
   }, 60_000);
 
   // FINDING-7 regression (fixed): a dropped broadcast was permanently lost once a later
@@ -282,8 +291,11 @@ describe('convergence fuzz — LWW panel', () => {
   // MissingChangesError when a batch's baseRev is ahead of committedRev; PatchesSync's
   // existing recovery (syncDoc → getChangesSince) fills the gap, and the harness mirrors
   // that in deliver(). This is the plain SSE-event-loss scenario (no reconnect).
+  // (Repro-era knobs pinned so the seed's action script stays byte-identical — this
+  // variant produces real drops and gap recoveries, and fails P1 with the guard
+  // reverted; the seed-derived knobs at HEAD produce a script with zero drops.)
   it('FINDING-7 regression: dropped broadcast triggers gap recovery (seed 104)', async () => {
-    await runLWWFuzz(104, { dropP: 0.15 });
+    await runLWWFuzz(104, { dropP: 0.15, parentOps: false, drainInboxBeforeFlush: true });
   }, 60_000);
 });
 

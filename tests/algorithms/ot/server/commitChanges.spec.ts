@@ -34,13 +34,14 @@ describe('commitChanges', () => {
       await import('../../../../src/algorithms/ot/server/handleOfflineSessionsAndBatches');
     vi.mocked(handleOfflineSessionsAndBatches).mockImplementation(async () => {});
 
-    // Mock transformIncomingChanges
+    // Mock transformIncomingChanges (mirroring the real echo semantics: a committed change
+    // matching isOwnCommitted drops its queue entry untransformed and is never committed again)
     const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
-    vi.mocked(transformIncomingChanges).mockImplementation((changes, committed, currentRev) => {
-      return changes.map((change, index) => ({
-        ...change,
-        rev: currentRev + index + 1,
-      }));
+    vi.mocked(transformIncomingChanges).mockImplementation((changes, committed, currentRev, _force, isOwnCommitted) => {
+      const echoIds = new Set(committed.filter(c => isOwnCommitted?.(c)).map(c => c.id));
+      return changes
+        .filter(change => !echoIds.has(change.id))
+        .map((change, index) => ({ ...change, rev: currentRev + index + 1 }));
     });
 
     mockStore = {
@@ -538,8 +539,15 @@ describe('commitChanges', () => {
     await commitChanges(mockStore, 'doc1', incomingChanges, sessionTimeoutMillis);
 
     const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
-    // Stateless: no state parameter, just changes, committed, currentRev, forceCommit
-    expect(transformIncomingChanges).toHaveBeenCalledWith(incomingChanges, [committedChange], 2, undefined);
+    // Stateless: no state parameter — changes, committed (echoes included), currentRev,
+    // forceCommit, and the own-echo predicate keeping the walk in lockstep with rebaseChanges
+    expect(transformIncomingChanges).toHaveBeenCalledWith(
+      incomingChanges,
+      [committedChange],
+      2,
+      undefined,
+      expect.any(Function)
+    );
   });
 
   it('should pass forceCommit option to transformIncomingChanges', async () => {
@@ -548,7 +556,7 @@ describe('commitChanges', () => {
     await commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis, { forceCommit: true });
 
     const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
-    expect(transformIncomingChanges).toHaveBeenCalledWith(changes, [], 0, true);
+    expect(transformIncomingChanges).toHaveBeenCalledWith(changes, [], 0, true, expect.any(Function));
   });
 
   it('should save transformed changes to store', async () => {

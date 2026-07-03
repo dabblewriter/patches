@@ -61,7 +61,7 @@ export const add: JSONPatchOpHandler = {
       return updateSoftWrites(thisOp.path, otherOps, thisOp.value);
     } else {
       // Remove anything that was done at this path since it is being overwritten by the add
-      return updateRemovedOps(state, thisOp.path, otherOps);
+      return updateRemovedOps(state, thisOp.path, otherOps, false, undefined, undefined, thisOp);
     }
   },
 };

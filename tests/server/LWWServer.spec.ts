@@ -534,7 +534,9 @@ describe('LWWServer', () => {
       expect(result.changes[0].ops).toContainEqual(expect.objectContaining({ path: '/other', value: 'from-other' }));
     });
 
-    it('should filter out paths client just sent', async () => {
+    it('should echo the stored resolution for paths the client just sent', async () => {
+      // The client confirms sent ops optimistically (rev-less); the echoed stored row
+      // (rev-stamped) is what lets the client's committed layer mirror the server's table.
       mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 1000, rev: 2, value: 'Alice' });
       mockStore.revs.set('doc1', 2);
 
@@ -547,11 +549,11 @@ describe('LWWServer', () => {
 
       const result = await server.commitChanges('doc1', [change]);
 
-      // /name should not be in response since client just sent it
-      expect(result.changes[0].ops).not.toContainEqual(expect.objectContaining({ path: '/name' }));
+      // The client's newer-ts write won; the response echoes the stored (committed) row.
+      expect(result.changes[0].ops).toContainEqual(expect.objectContaining({ path: '/name', value: 'Bob', rev: 3 }));
     });
 
-    it('should filter out children of paths client sent', async () => {
+    it('should not echo children of a sent parent that the winning parent pruned', async () => {
       mockStore.ops.set('doc1:/obj/child', { op: 'replace', path: '/obj/child', ts: 1000, rev: 2, value: 'x' });
       mockStore.revs.set('doc1', 2);
 
@@ -564,8 +566,39 @@ describe('LWWServer', () => {
 
       const result = await server.commitChanges('doc1', [change]);
 
-      // /obj/child should not be in response since client sent parent
+      // The committed parent write deleted /obj/child from the table, so it isn't echoed —
+      // but the stored parent itself is.
       expect(result.changes[0].ops).not.toContainEqual(expect.objectContaining({ path: '/obj/child' }));
+      expect(result.changes[0].ops).toContainEqual(
+        expect.objectContaining({ path: '/obj', value: { new: true }, rev: 3 })
+      );
+    });
+
+    it('should echo surviving newer children when a sent parent write loses', async () => {
+      // FINDING-6 shape: the client already has the child row committed, but its own
+      // parent write (older ts) loses to the stored parent. confirmSent's optimistic prune
+      // dropped the child locally, and the child's rev is behind the client's committedRev,
+      // so ONLY this echo can restore it — in commit order (parent row before child row).
+      mockStore.ops.set('doc1:/obj', { op: 'replace', path: '/obj', ts: 3000, rev: 2, value: { child: 0 } });
+      mockStore.ops.set('doc1:/obj/child', { op: 'replace', path: '/obj/child', ts: 1500, rev: 3, value: 2 });
+      mockStore.revs.set('doc1', 3);
+
+      const change: ChangeInput = {
+        id: 'catchup6',
+        baseRev: 3,
+        rev: 4,
+        ops: [{ op: 'replace', path: '/obj', value: { child: -1 }, ts: 2000 }], // older ts → loses
+      };
+
+      const result = await server.commitChanges('doc1', [change]);
+
+      const ops = result.changes[0].ops;
+      const parentIndex = ops.findIndex(op => op.path === '/obj');
+      const childIndex = ops.findIndex(op => op.path === '/obj/child');
+      expect(ops[parentIndex]).toEqual(expect.objectContaining({ value: { child: 0 }, rev: 2 }));
+      expect(ops[childIndex]).toEqual(expect.objectContaining({ value: 2, rev: 3 }));
+      // Commit order end to end: the doc applies response ops in array order.
+      expect(parentIndex).toBeLessThan(childIndex);
     });
   });
 

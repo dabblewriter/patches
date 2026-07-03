@@ -149,7 +149,11 @@ const change: ChangeInput = {
 
 8. **Build Catchup Response**
    - Returns ops the client missed since their `rev`
-   - Filters out ops the client just sent (and their children)
+   - For every path the client just sent, echoes the server's STORED resolution: the
+     surviving row for that path (the client's op if it won, the older stored row if it
+     lost) plus any surviving newer child rows, in commit order — so the client's
+     optimistic apply is confirmed or corrected either way (clients recognize unchanged
+     echoes by op content, ignoring the server-stamped `rev`)
 
 ### What Comes Out
 

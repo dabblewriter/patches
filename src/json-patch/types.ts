@@ -60,6 +60,12 @@ export type State = {
   root: Root;
   types: JSONPatchOpHandlerMap;
   cache: Set<any> | null;
+  /**
+   * Set by `transformPatch` when `otherOpsFirst` is true: `otherOps` precede `thisOps` in the
+   * authoritative order, so `thisOps` win conflicting intents at the same path (last-writer-wins)
+   * instead of the default where `otherOps` — applied after `thisOps` — win. See transformPatch.
+   */
+  otherOpsFirst?: boolean;
 };
 
 export type Runner = (state: State) => any;

@@ -1,4 +1,4 @@
-import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
+import { applyChangesForReconstruction } from '../algorithms/ot/shared/applyChanges.js';
 import { store, type Store } from 'easy-signal';
 import type { PatchesAPI } from '../net/protocol/types.js';
 import type { Change, EditableVersionMetadata, ListVersionsOptions, VersionMetadata } from '../types.js';
@@ -110,9 +110,13 @@ export class PatchesHistoryClient<T = any> {
       version?.parentId ? this.getVersionState(version.parentId) : undefined,
       this.getVersionChanges(versionId),
     ]);
-    // Apply changes up to changeIndex to the state (if needed)
+    // Apply changes up to changeIndex to the state (if needed).
+    // History scrubbing is reconstruction of settled, committed history — not a
+    // live apply — so a historically-invalid committed op (from lenient-era
+    // commits) is skipped (with console telemetry) rather than making that part
+    // of the timeline permanently unviewable.
     if (changeIndex > 0) {
-      this.historyState.state = applyChanges(state, changes.slice(0, changeIndex));
+      this.historyState.state = applyChangesForReconstruction(state, changes.slice(0, changeIndex));
     }
   }
 

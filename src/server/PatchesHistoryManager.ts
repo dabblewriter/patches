@@ -1,10 +1,24 @@
 import { getStateBeforeVersionAsStream } from '../algorithms/ot/server/buildVersionState.js';
+import type { SkippedChange } from '../algorithms/ot/shared/applyChanges.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import type { Change, EditableVersionMetadata, ListVersionsOptions, VersionMetadata } from '../types.js';
 import { jsonReadable } from './jsonReadable.js';
 import type { PatchesServer } from './PatchesServer.js';
 import type { OTStoreBackend, VersioningStoreBackend } from './types.js';
 import { assertVersionMetadata } from './utils.js';
+
+/**
+ * Options for {@link PatchesHistoryManager}.
+ */
+export interface PatchesHistoryManagerOptions {
+  /**
+   * Telemetry hook for committed changes skipped while reconstructing a
+   * history-scrubbing baseline (`getStateBeforeVersion`). Called once per
+   * skipped change with the docId and full skip context. Defaults to
+   * `console.error` logging inside `applyChangesForReconstruction`.
+   */
+  onSkippedChange?: (docId: string, skipped: SkippedChange) => void;
+}
 
 /**
  * Helps retrieve historical information (versions, changes) for a document
@@ -24,12 +38,15 @@ export class PatchesHistoryManager {
   } as const;
 
   protected readonly store: VersioningStoreBackend;
+  protected readonly options: PatchesHistoryManagerOptions;
 
   constructor(
     protected readonly patches: PatchesServer,
-    store: VersioningStoreBackend
+    store: VersioningStoreBackend,
+    options: PatchesHistoryManagerOptions = {}
   ) {
     this.store = store;
+    this.options = options;
   }
 
   /**
@@ -114,7 +131,14 @@ export class PatchesHistoryManager {
     if (!version) {
       throw new Error(`Version ${versionId} not found for doc ${docId}.`);
     }
-    return getStateBeforeVersionAsStream(otStore, docId, version);
+    // History viewing is reconstruction of settled history, not live apply: a
+    // historically-invalid committed op (from lenient-era commits) must not make
+    // the scrubbing baseline permanently unreadable. Skips are surfaced through
+    // the onSkippedChange telemetry hook (or console.error by default).
+    const { onSkippedChange } = this.options;
+    return getStateBeforeVersionAsStream(otStore, docId, version, {
+      reconstruction: onSkippedChange ? { onSkippedChange: skipped => onSkippedChange(docId, skipped) } : {},
+    });
   }
 
   /**

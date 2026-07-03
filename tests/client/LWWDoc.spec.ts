@@ -530,6 +530,39 @@ describe('LWWDoc', () => {
       expect(doc.hasPending).toBe(false);
     });
 
+    it('treats a rev-stamped commit echo as a pure echo and retires its in-flight key (opKey ignores rev)', () => {
+      // Pin for the FINDING-4 echo contract: the commit response echoes back the STORED
+      // version of each sent op — path/op/value/ts intact, but with the server's `rev`
+      // stamped on by the store. opKey strips `rev`, so the stamped echo still matches
+      // the key tracked before the send: no spurious recompute/emit mid-typing, and the
+      // in-flight key is retired instead of lingering as a false-positive echo match.
+      const callback = vi.fn();
+      doc.subscribe(callback, false);
+
+      doc.change((patch, path) => patch.replace(path.text, 'world'));
+      const localOps = (doc.onChange.emit as any).mock.calls[0][0];
+      doc.applyChanges([createChange('echo-id', 1, localOps, false)], true);
+      expect(callback).toHaveBeenCalledTimes(1);
+
+      // Server commit echo: identical content with the server-stamped rev appended.
+      const stampedOps = localOps.map((op: any) => ({ ...op, rev: 1 }));
+      const stateBefore = doc.state;
+      doc.applyChanges([createChange('echo-id', 1, stampedOps, true)], false);
+
+      // Pure echo despite the rev stamp: no emit, no state recompute.
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(doc.state).toBe(stateBefore);
+      expect(doc.committedRev).toBe(1);
+      expect(doc.hasPending).toBe(false);
+
+      // And the stamped echo RETIRED the in-flight key: replaying the same stamped
+      // content as a foreign committed change must fall through to a recompute/emit
+      // instead of being misdetected as another pure echo.
+      doc.applyChanges([createChange('foreign-replay', 2, stampedOps, true)], false);
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(doc.committedRev).toBe(2);
+    });
+
     it('handles multi-change pure-echo batches without notifying subscribers', () => {
       const callback = vi.fn();
       doc.subscribe(callback, false);

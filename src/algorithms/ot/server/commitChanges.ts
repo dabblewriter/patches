@@ -154,7 +154,19 @@ export async function commitChanges(
       // committed changes from this same batch (a resend carries the same batchId), so filter the batch out of the
       // transform set in memory rather than at the store.
       const allCommittedChanges = await store.listChanges(docId, { startAfter: baseRev });
-      const committedChanges = batchId ? allCommittedChanges.filter(c => c.batchId !== batchId) : allCommittedChanges;
+
+      // Exclude the sender's own echoes from the transform set:
+      // - changes from this same batch (a resend carries the same batchId), and
+      // - committed copies of changes this request re-sent, matched by id — a retry after a
+      //   lost response on the plain (batch-less) path. The tail of the resent queue was
+      //   minted on top of the resent head, so its frames already include the head's effects;
+      //   transforming the tail against the head's committed echo double-applies them
+      //   (array/text ops land at double-shifted offsets). The client-side mirror
+      //   (rebaseChanges) already excludes own echoes by id; this keeps the walks in lockstep.
+      const changeIds = new Set(changes.map(c => c.id));
+      const committedChanges = allCommittedChanges.filter(
+        c => !(batchId && c.batchId === batchId) && !changeIds.has(c.id)
+      );
 
       // Filter changes already committed after baseRev AND duplicates within the incoming
       // batch itself — a client retry/flush race can repeat a change id in one array, and
@@ -169,9 +181,8 @@ export async function commitChanges(
       }) as Change[];
 
       // Committed copies of changes this request re-sent (a retry after a lost ack) must be echoed back so the
-      // client can confirm them, even though same-batch changes are excluded from the transform set above.
-      const changeIds = new Set(changes.map(c => c.id));
-      const resentCommitted = batchId ? allCommittedChanges.filter(c => changeIds.has(c.id)) : [];
+      // client can confirm them, even though they are excluded from the transform set above.
+      const resentCommitted = allCommittedChanges.filter(c => changeIds.has(c.id));
       const catchupChanges = resentCommitted.length
         ? [...committedChanges, ...resentCommitted].sort((a, b) => a.rev - b.rev)
         : committedChanges;

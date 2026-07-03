@@ -198,7 +198,7 @@ interface BranchingStoreBackend {
   createBranchId?(docId: string): Promise<string> | string;
 
   // List branches for a source document
-  listBranches(docId: string): Promise<Branch[]>;
+  listBranches(docId: string, options?: ListBranchesOptions): Promise<Branch[]>;
 
   // Load a specific branch record
   loadBranch(branchId: string): Promise<Branch | null>;
@@ -206,8 +206,19 @@ interface BranchingStoreBackend {
   // Create a new branch record
   createBranch(branch: Branch): Promise<void>;
 
-  // Update branch fields (status, name, metadata)
-  updateBranch(branchId: string, updates: Partial<Pick<Branch, 'status' | 'name' | 'metadata'>>): Promise<void>;
+  // Update mutable branch fields (name, custom metadata, merge bookkeeping)
+  updateBranch(branchId: string, updates: Partial<Branch>): Promise<void>;
+
+  // Replace a branch record with a tombstone
+  deleteBranch(branchId: string): Promise<void>;
+
+  // Optional: compare-and-set update. Applies `updates` only when the record's current
+  // values match `expected` (undefined = field not set); returns false on mismatch.
+  // Merge code uses this to advance `lastMergedRev` (and pin `mergeBaseRev`) without
+  // racing concurrent merges of the same branch — implement it with your database's
+  // conditional-write primitive if multiple server instances can merge concurrently.
+  // Without it, merges fall back to non-atomic read-then-write (max-wins) semantics.
+  updateBranchIf?(branchId: string, updates: Partial<Branch>, expected: BranchPrecondition): Promise<boolean>;
 }
 ```
 

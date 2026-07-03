@@ -115,6 +115,18 @@ export interface Branch {
    */
   lastMergedRev?: number;
 
+  /**
+   * The source-document revision used as the merge base (`baseRev`) for this branch's merges.
+   * Only set by server merge code when a merge finds `branchedAtRev` *ahead* of the source's
+   * committed tip (a migrated/renumbered source doc) and has to clamp the base down to the tip.
+   * Persisting the clamped base keeps it — and therefore the server's change-id dedup window —
+   * stable across merge retries and server instances: a retry that recomputed
+   * `min(branchedAtRev, tip)` after the first attempt's own commits advanced the tip would use
+   * a higher base, and merge changes already committed below it would escape deduplication and
+   * be applied twice. Server-managed like `lastMergedRev`; client-supplied values are stripped.
+   */
+  mergeBaseRev?: number;
+
   /** The pending operation to sync to the server. Set by BranchClientStore methods. */
   pendingOp?: 'create' | 'update' | 'delete';
 

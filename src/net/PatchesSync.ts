@@ -703,10 +703,21 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       }
       let reconciled = false;
       let committedTail: Change[] = [];
-      if (algorithm.reconcilePending && snapshot.rev > baseRev && (await algorithm.hasPending(docId))) {
-        // Changes past the snapshot's rev are excluded: the snapshot doesn't contain them, so
+      // The envelope may carry a committed tail past its snapshot rev (`snapshot.rev` is the
+      // last version boundary; `snapshot.changes` extends to the server head), and saveDoc
+      // below installs ALL of it as committed. Pending must therefore be reconciled against
+      // everything actually installed — through the envelope's last change — not just through
+      // snapshot.rev: committedRev jumps to the installed head, so normal catch-up never
+      // redelivers (snapshot.rev, head] and pending minted below head would be imported on
+      // top of the head state un-rebased (strict apply throws, or ops land at stale offsets).
+      // (The protocol type is PatchesState, but servers return the full snapshot envelope —
+      // the stores make the same cast to install `changes`; older/LWW transports may omit it.)
+      const installedChanges = (snapshot as PatchesSnapshot).changes;
+      const installedRev = installedChanges?.length ? installedChanges[installedChanges.length - 1].rev : snapshot.rev;
+      if (algorithm.reconcilePending && installedRev > baseRev && (await algorithm.hasPending(docId))) {
+        // Changes past the installed head are excluded: the envelope doesn't contain them, so
         // the normal catch-up path will deliver them and rebase pending against them itself.
-        committedTail = (await this.connection.getChangesSince(docId, baseRev)).filter(c => c.rev <= snapshot.rev);
+        committedTail = (await this.connection.getChangesSince(docId, baseRev)).filter(c => c.rev <= installedRev);
         if (committedTail.length > 0) {
           await algorithm.reconcilePending(docId, committedTail);
           reconciled = true;

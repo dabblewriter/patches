@@ -37,7 +37,7 @@ export const copy: JSONPatchOpHandler = {
       return updateArrayIndexes(state, thisOp.path, otherOps, 1);
     } else {
       // Remove anything that was done at this path since it is being overwritten
-      return updateRemovedOps(state, thisOp.path, otherOps);
+      return updateRemovedOps(state, thisOp.path, otherOps, false, undefined, undefined, thisOp);
     }
   },
 };

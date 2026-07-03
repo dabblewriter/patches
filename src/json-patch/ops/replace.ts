@@ -41,7 +41,7 @@ export const replace: JSONPatchOpHandler = {
 
   transform(state, thisOp, otherOps) {
     log('Transforming ', otherOps, ' against "replace"', thisOp);
-    return updateRemovedOps(state, thisOp.path, otherOps);
+    return updateRemovedOps(state, thisOp.path, otherOps, false, undefined, undefined, thisOp);
   },
 
   compose(_state, _value1, value2) {

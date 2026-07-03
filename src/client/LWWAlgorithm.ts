@@ -1,5 +1,8 @@
 import { consolidateOps } from '../algorithms/lww/consolidateOps.js';
 import { mergeServerWithLocal } from '../algorithms/lww/mergeServerWithLocal.js';
+// MissingChangesError is algorithm-agnostic (a rev-gap signal PatchesSync recovers from via
+// getChangesSince); it lives in the OT tree for historical reasons.
+import { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
 import { createChange } from '../data/change.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change, PatchesSnapshot } from '../types.js';
@@ -28,6 +31,15 @@ export class LWWAlgorithm implements ClientAlgorithm {
 
   /** Per-doc FIFO mutex (see {@link _withDocLock}). */
   private readonly _docLocks = new Map<string, Promise<unknown>>();
+
+  /**
+   * Change ids of the batch most recently confirmed via {@link confirmSent}, per doc.
+   * The commit response that follows carries the same ids; {@link applyServerChanges}
+   * uses them to recognize the response and exempt it from the stale-batch guard —
+   * a response's corrections are authoritative even when its rev doesn't advance ours
+   * (e.g. a retried send whose every op lost to already-known newer-ts fields).
+   */
+  private readonly _expectedResponseIds = new Map<string, Set<string>>();
 
   constructor(store: LWWClientStore) {
     this.store = store;
@@ -146,8 +158,42 @@ export class LWWAlgorithm implements ClientAlgorithm {
     if (serverChanges.length === 0) return [];
 
     return this._withDocLock(docId, async () => {
+      // Cross-batch ordering guard. The server assigns increasing revs (one per commit) and
+      // committedRev = R means every committed field through rev R is already incorporated
+      // (responses carry the full catch-up window, broadcasts carry whole commits). Three
+      // cases per incoming change, walked with a cursor so multi-change batches stay ordered:
+      // - STALE (rev <= cursor with baseRev also behind): everything in it is already
+      //   reflected locally; applying it would regress newer committed fields to older
+      //   values (the field-keyed store has no cross-batch comparison). Skip it wholesale.
+      // - GAP (baseRev > cursor): we missed an earlier commit (e.g. a dropped SSE event).
+      //   Silently advancing would strand the missed ops forever — no later catch-up asks
+      //   below the advanced rev — so throw MissingChangesError; PatchesSync recovers by
+      //   pulling the tail via getChangesSince (same contract as OT).
+      // - Our own commit response (matched by the change ids confirmSent recorded) is exempt
+      //   from both: its baseRev is the rev we sent from (behind by design on a retry), and
+      //   its correction ops must apply even when they carry old revs — the server's
+      //   resolution of what we sent, not a re-delivery.
+      const committedRev = await this.store.getCommittedRev(docId);
+      const expectedIds = this._expectedResponseIds.get(docId);
+      let cursor = committedRev;
+      const effectiveChanges: Change[] = [];
+      for (const change of serverChanges) {
+        if (expectedIds?.delete(change.id)) {
+          effectiveChanges.push(change);
+          cursor = Math.max(cursor, change.rev);
+          continue;
+        }
+        if (change.rev <= cursor && change.baseRev < cursor) continue; // stale re-delivery
+        if (change.baseRev > cursor) {
+          throw new MissingChangesError(cursor + 1, change.rev, cursor);
+        }
+        effectiveChanges.push(change);
+        cursor = Math.max(cursor, change.rev);
+      }
+      if (effectiveChanges.length === 0) return [];
+
       // Apply server changes to store (preserves sendingChange and pendingOps)
-      await this.store.applyServerChanges(docId, serverChanges);
+      await this.store.applyServerChanges(docId, effectiveChanges);
 
       // Merge server changes with sending + pending ops so a concurrent foreign broadcast
       // arriving mid-flight can't clobber the in-flight value in the open doc. By the time our
@@ -156,7 +202,7 @@ export class LWWAlgorithm implements ClientAlgorithm {
       // there). Pending ops come last so a newer pending op at the same path wins the merge.
       const sendingChange = await this.store.getSendingChange(docId);
       const pendingOps = await this.store.getPendingOps(docId);
-      const mergedChanges = mergeServerWithLocal(serverChanges, [...(sendingChange?.ops ?? []), ...pendingOps]);
+      const mergedChanges = mergeServerWithLocal(effectiveChanges, [...(sendingChange?.ops ?? []), ...pendingOps]);
 
       if (doc) {
         const hasPending = pendingOps.length > 0 || !!sendingChange;
@@ -169,6 +215,10 @@ export class LWWAlgorithm implements ClientAlgorithm {
   }
 
   async confirmSent(docId: string, changes: Change[]): Promise<void> {
+    // Remember the batch's ids so the commit response that follows is recognized as such
+    // (see _expectedResponseIds). Replaced wholesale per confirm — at most one commit
+    // response is outstanding per doc, so ids from an aborted earlier flush can't pile up.
+    this._expectedResponseIds.set(docId, new Set(changes.map(c => c.id)));
     // Confirm only the ops in this batch: a sending change split across wire batches must keep
     // its unconfirmed remainder in the sending slot so a disconnect between batches resends it
     return this._withDocLock(docId, () =>
@@ -203,6 +253,7 @@ export class LWWAlgorithm implements ClientAlgorithm {
   }
 
   async untrackDocs(docIds: string[]): Promise<void> {
+    for (const docId of docIds) this._expectedResponseIds.delete(docId);
     return this.store.untrackDocs(docIds);
   }
 
@@ -215,6 +266,7 @@ export class LWWAlgorithm implements ClientAlgorithm {
   }
 
   async deleteDoc(docId: string): Promise<void> {
+    this._expectedResponseIds.delete(docId);
     return this.store.deleteDoc(docId);
   }
 

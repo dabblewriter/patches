@@ -102,18 +102,24 @@ function lwwConfigFromSeed(seed: number): LWWFuzzConfig {
     seed,
     clients: rng.intBetween(2, 4),
     actions: rng.intBetween(80, 200),
+    // FINDING-7 (fixed): dropped broadcasts are detected as a rev gap (a batch whose
+    // baseRev is ahead of committedRev throws MissingChangesError → getChangesSince
+    // recovery, mirroring OT), so drops are back in the panel mix.
     dropP: rng.pick([0, 0.05, 0.15]),
     dupP: rng.pick([0, 0.05, 0.1]),
     lostResponseP: rng.pick([0, 0.03, 0.08]),
     lostRequestP: rng.pick([0, 0.03, 0.08]),
-    drainInboxBeforeFlush: true, // FINDING-2 — un-drained ordering diverges; see below
-    parentOps: false, // FINDING-4/FINDING-6 — parent/child write races diverge; see below
+    // FINDING-2 (fixed): a stale broadcast (rev already covered by committedRev) is now
+    // skipped wholesale by LWWAlgorithm.applyServerChanges, so the un-drained ordering —
+    // a queued broadcast applied after a newer commit response, production's blockable-
+    // receive window — is safe; both orderings are fuzzed.
+    drainInboxBeforeFlush: rng.pick([true, false]),
+    // FINDING-4/FINDING-6 (fixed): the commit response now echoes the server's stored
+    // resolution for every sent path and its surviving children (and the doc merge
+    // shields subtrees under a local parent write), so parent/child write races converge
+    // and parent replaces are back in the edit mix.
+    parentOps: true,
   };
-  // FINDING-7 — a dropped broadcast is unrecoverable once a later broadcast advances
-  // committedRev past it (LWW has no gap detection); excluded from the passing panel.
-  // (Disconnect/reconnect windows still exercise missed-event recovery — committedRev
-  // does not advance while offline, so reconnect catch-up covers those.)
-  cfg.dropP = 0;
   return cfg;
 }
 
@@ -232,72 +238,51 @@ describe('convergence fuzz — LWW panel', () => {
       await runLWWFuzz(seed);
     }, 30_000);
   }
-});
 
-// ─── FINDINGS: real divergences found by this fuzzer ─────────────────────────
-//
-// Pinned repros for engine bugs the fuzzer surfaced. Each is skipped (this suite must land
-// green and engine fixes belong in their own PRs) and excluded from the passing panel via
-// the config knobs noted below. Un-skip to reproduce; the failure prints the full action
-// script.
-
-describe('convergence fuzz — findings (pinned repros, skipped)', () => {
-  // FINDING-2 (LWW, stale broadcast after commit response): a broadcast emitted at rev N can
-  // still be queued/in-flight when the same client's commit for rev N+1 returns. LWW client
-  // stores apply committed fields unconditionally per path (no rev/ts comparison across
-  // batches), so the late rev-N ops overwrite newer rev-N+1 field values, and the client's
-  // committedRev (already at N+1) means no later catch-up ever heals it (seed 102: c2 keeps
-  // a /flags/focus value the server has removed). Production hits this window because
-  // broadcasts and commit responses travel on different channels, and PatchesSync's
-  // blockable receive defers — but does not reorder — a broadcast that arrives mid-flush.
-  // Panel knob: drainInboxBeforeFlush: true. (The pinned repro also sets parentOps: true —
-  // seed 102 with drainInboxBeforeFlush: false alone converges; this seed's script only
-  // opens the stale-broadcast window on the parent/child paths.)
-  it.skip('FINDING-2: stale broadcast applied after commit response regresses LWW fields (seed 102)', async () => {
+  // FINDING-2 regression (fixed): a broadcast emitted at rev N can still be queued/in-flight
+  // when the same client's commit for rev N+1 returns; LWW client stores applied committed
+  // fields unconditionally per path, so the late rev-N ops overwrote newer rev-N+1 values
+  // and committedRev (already at N+1) meant no catch-up ever healed it. Production hits the
+  // window because broadcasts and commit responses travel on different channels, and
+  // PatchesSync's blockable receive defers — but does not reorder — a broadcast arriving
+  // mid-flush. LWWAlgorithm.applyServerChanges now skips a batch whose rev is already
+  // covered by committedRev wholesale (commit responses stay exempt, recognized by the
+  // change ids confirmSent recorded: their corrections legitimately carry old revs).
+  // (Repro-era knobs pinned so the seed's action script stays byte-identical.)
+  it('FINDING-2 regression: stale broadcast after commit response is skipped (seed 102)', async () => {
     await runLWWFuzz(102, { drainInboxBeforeFlush: false, parentOps: true });
   }, 60_000);
 
-  // FINDING-4 (LWW, open doc vs store after a parent/child conflict): client c2 writes a
-  // parent path (replace /counters) while another client's newer child write
-  // (/counters/words) is committed concurrently. The server folds the newer child value
-  // into c2's committed parent op (server and c2's STORE both converge on the folded
-  // value), but c2's OPEN DOC never applies the folded value: the commit response filters
-  // /counters as a just-sent path, and the folded op carries c2's own path+ts so the doc's
-  // echo tracking treats it as the already-applied optimistic op and skips it. The open doc
-  // then disagrees with its own store (doc counters.words=10, store/server=824 in this run)
-  // with no pending work and matching committedRev — permanent until the doc is reloaded.
-  // Panel knob: parentOps: false.
-  it.skip('FINDING-4: LWW open doc diverges from its own store after parent/child conflict (seed 100)', async () => {
+  // FINDING-4 regression (fixed): a client's parent write (replace /counters) racing a
+  // newer committed child write left the OPEN DOC disagreeing with its own store — the
+  // commit response filtered the sent path, so nothing corrected the doc after the server
+  // resolved the race (the doc had meanwhile applied the foreign child op on top of its
+  // optimistic parent). Fixed from both ends: mergeServerWithLocal shields subtrees under
+  // a local parent write, and the commit response echoes the server's stored resolution
+  // for every sent path (LWWDoc's echo keys ignore the server-stamped rev so those echoes
+  // still register as pure echoes when nothing changed).
+  it('FINDING-4 regression: open doc converges with its store after a parent/child race (seed 100)', async () => {
     await runLWWFuzz(100, { parentOps: true });
   }, 60_000);
 
-  // FINDING-6 (LWW, rejected parent write prunes a surviving child): needs NO network
-  // faults — just a parent write racing a newer child write. c1 has already received the
-  // committed child op (/counters/streak = 2, rev 26) via broadcast. c1 then flushes its
-  // own replace /counters, which LOSES to the server's newer parent (rev 25) — the commit
-  // response carries the stored parent as a correction op, but the catchup filter drops
-  // the rev-26 child ("ops the client just sent and their children"). Applying the parent
-  // correction prunes /counters/streak from c1's committed fields (parent writes delete
-  // child entries), and with committedRev already at 27 no catch-up ever redelivers rev 26:
-  // c1 permanently shows streak=0 while the server (and every other client) has streak=2.
-  // The correction path needs to echo surviving newer children along with a rejected
-  // parent, or not filter children of sent-but-rejected paths.
-  // Panel knob: parentOps: false.
-  it.skip('FINDING-6: LWW rejected parent write permanently drops a newer child value (seed 1000069)', async () => {
+  // FINDING-6 regression (fixed): a parent write that LOSES to a newer stored parent used
+  // to prune a surviving newer child row permanently — the client had /counters/streak
+  // (rev 26) committed, flushed its own replace /counters, and the response's catchup
+  // filter dropped the child as "child of a sent path" while confirmSent's optimistic
+  // prune removed it locally; with committedRev already past 26 nothing redelivered it.
+  // The response now echoes the post-commit stored rows for sent paths AND their
+  // surviving children, in commit order, so the correction rebuilds parent + children.
+  it('FINDING-6 regression: rejected parent write keeps surviving newer children (seed 1000069)', async () => {
     await runLWWFuzz(1000069, { parentOps: true });
   }, 60_000);
 
-  // FINDING-7 (LWW, dropped broadcast is permanently lost — no gap detection): c3's
-  // transport drops the rev-9 broadcast carrying `remove /flags/spellcheck`, then applies
-  // the rev-10 broadcast — the LWW client store advances committedRev to 10 with no
-  // contiguity check (OT throws MissingChangesError here and pulls the tail; LWW has no
-  // equivalent), so every later catch-up asks for changes since >= 10 and the rev-9 remove
-  // is never redelivered. c3 keeps /flags/spellcheck forever unless some client writes
-  // that exact path again. This is the plain SSE-event-loss scenario (no reconnect), and
-  // it needs either gap detection on broadcast revs or rev-floor tracking below the last
-  // contiguous rev.
-  // Panel knob: dropP forced to 0 for LWW.
-  it.skip('FINDING-7: LWW dropped broadcast permanently loses a remove (seed 104)', async () => {
+  // FINDING-7 regression (fixed): a dropped broadcast was permanently lost once a later
+  // broadcast advanced committedRev past it — LWW had no contiguity check (OT throws
+  // MissingChangesError and pulls the tail). LWWAlgorithm.applyServerChanges now throws
+  // MissingChangesError when a batch's baseRev is ahead of committedRev; PatchesSync's
+  // existing recovery (syncDoc → getChangesSince) fills the gap, and the harness mirrors
+  // that in deliver(). This is the plain SSE-event-loss scenario (no reconnect).
+  it('FINDING-7 regression: dropped broadcast triggers gap recovery (seed 104)', async () => {
     await runLWWFuzz(104, { dropP: 0.15 });
   }, 60_000);
 });

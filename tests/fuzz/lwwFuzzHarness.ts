@@ -32,19 +32,18 @@ export interface LWWFuzzConfig {
   /** Per-flush probability the commit RPC request never reaches the server. */
   lostRequestP: number;
   /**
-   * Process already-arrived broadcasts before issuing a flush. Enabled in the CI panel:
-   * without it, a queued broadcast older than the flush's commit response is applied after
-   * it, and LWW client stores overwrite committed fields with the stale ops (FINDING-2 in
-   * convergence.spec.ts) — a real window in production, where a broadcast can be in flight
-   * while the commit RPC is outstanding.
+   * Process already-arrived broadcasts before issuing a flush. Both settings are fuzzed:
+   * without draining, a queued broadcast older than the flush's commit response is applied
+   * after it — a real window in production, where a broadcast can be in flight while the
+   * commit RPC is outstanding (PatchesSync's blockable receive defers, but does not
+   * reorder, a broadcast arriving mid-flush). The engine now skips such stale batches
+   * wholesale (FINDING-2, fixed in convergence.spec.ts history).
    */
   drainInboxBeforeFlush: boolean;
   /**
-   * Include mid-run parent-path replaces (replace /counters) in the edit mix. Disabled in
-   * the CI panel: parent writes racing newer child writes expose FINDING-4 and FINDING-6
-   * (see convergence.spec.ts) — the losing side of the parent/child consolidation is not
-   * fully corrected back to the writer, so a client permanently loses the surviving child
-   * value (no network faults required).
+   * Include mid-run parent-path replaces (replace /counters) in the edit mix, exercising
+   * parent writes racing newer child writes (server-side child pruning, correction echoes,
+   * doc subtree shielding — FINDING-4/FINDING-6, fixed).
    */
   parentOps: boolean;
 }

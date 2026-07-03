@@ -85,12 +85,14 @@ function otConfigFromSeed(seed: number): OTFuzzConfig {
     lostRequestP: rng.pick([0, 0.03, 0.08]),
     maxChangesPerVersion: rng.pick([0, 10, 30, 1000]),
     sessionTimeoutMinutes: rng.pick([1, 5, 30]),
-    moveOps: false, // FINDING-1 — concurrent moves diverge; excluded from the passing panel
+    // FINDING-1 (fixed): the rebase walks' advance direction now resolves conflicting
+    // intents toward the later writer (transformPatch's `otherOpsFirst`), so concurrent
+    // moves converge and move ops are back in the panel mix.
+    moveOps: true,
   };
-  // FINDING-3 — a lost commit response followed by more local edits double-transforms the
-  // resent queue's tail; excluded from the passing panel. (The pick above still runs so the
-  // other derived values stay stable for previously-reported seeds.)
-  cfg.lostResponseP = 0;
+  // FINDING-3 (fixed): commitChanges now excludes the sender's own committed echoes (matched
+  // by id, mirroring the batchId exclusion) from the transform set, so lost commit responses
+  // are back in the panel mix.
   return cfg;
 }
 
@@ -185,6 +187,43 @@ describe('convergence fuzz — OT panel', () => {
       await runOTFuzz(seed);
     }, 30_000);
   }
+
+  // FINDING-1 regression (fixed): a client's `move` whose source path was concurrently
+  // moved/removed used to be committed pointing at a path that no longer existed, producing
+  // a committed change that failed strict apply on every replay. Root cause: the OT diamond
+  // walks advance a committed change through the local queue with the transform arguments
+  // swapped relative to real time, so each side let ITS later op win the same-path conflict
+  // and the two halves disagreed. transformPatch's `otherOpsFirst` now resolves those
+  // conflicts toward the later writer in the advance direction (same-source moves, same-path
+  // sets, and sets clobbering a move's source — which also ghost-kill the move destination).
+  it('FINDING-1 regression: concurrent move/remove converges (seed 4)', async () => {
+    await runOTFuzz(4, { moveOps: true });
+  }, 60_000);
+
+  // FINDING-3 regression (fixed): a client flushed [A], the server committed A but the
+  // response was lost; the client kept editing (B, C minted on top of pending A) and later
+  // re-flushed [A, B, C]. Without a batchId, commitChanges deduped A by id from the incoming
+  // set but left A's committed copy in the transform set, so B and C were rebased against
+  // the client's own echo of A — whose effects their frames already included — double-
+  // shifting array/text ops. The transform set now excludes committed changes matching the
+  // incoming request's change ids (mirroring the batchId exclusion), keeping the server walk
+  // in lockstep with the client's rebaseChanges. (moveOps pinned to the repro-era mix so the
+  // seed's action script stays byte-identical to the original finding.)
+  it('FINDING-3 regression: lost-response retry converges (seed 10)', async () => {
+    await runOTFuzz(10, { lostResponseP: 0.03, moveOps: false });
+  }, 60_000);
+
+  // FINDING-5 regression (fixed): the reload flow (PatchesSync._reloadDocFromServer)
+  // reconciled pending only against committed changes up to the getDoc envelope's rev — the
+  // LAST VERSION's rev — while saveDoc installed the envelope's tail through the server
+  // HEAD as committed. committedRev jumped to head, catch-up never redelivered
+  // (versionRev, head], and un-rebased pending crashed doc.import (ApplyChangesError
+  // crash-loop) or landed at stale offsets. The reconcile window now extends through the
+  // envelope's last installed change. (Repro-era knobs pinned: the seed came from a soak
+  // run with moves and lost responses excluded.)
+  it('FINDING-5 regression: reload with pending rebases against the whole installed envelope tail (seed 1000035)', async () => {
+    await runOTFuzz(1000035, { moveOps: false, lostResponseP: 0 });
+  }, 60_000);
 });
 
 describe('convergence fuzz — LWW panel', () => {
@@ -203,33 +242,6 @@ describe('convergence fuzz — LWW panel', () => {
 // script.
 
 describe('convergence fuzz — findings (pinned repros, skipped)', () => {
-  // FINDING-1 (OT, `move` ops): a client's `move` whose source path was concurrently
-  // moved/removed is committed by the stateless server transform pointing at a path that no
-  // longer exists (e.g. rev 43 in this run: move /sections/m14 -> /sections/m47 after
-  // another client already removed /sections/m14). The committed change then fails strict
-  // apply everywhere it is replayed — applyCommittedChanges on receiving clients and
-  // OTInMemoryStore.getDoc's committed-log replay throw ApplyChangesError
-  // ("[op:add] require value, but got undefined") on every rebuild, permanently wedging the
-  // doc until a version boundary happens to move past the poisoned change.
-  // Panel knob: moveOps: false.
-  it.skip('FINDING-1: concurrent move/remove commits a change that fails strict apply (seed 4)', async () => {
-    await runOTFuzz(4, { moveOps: true });
-  }, 60_000);
-
-  // FINDING-3 (OT, lost commit response): client flushes queue [A]; the server commits A but
-  // the response is lost. The client keeps editing (B, C minted on top of pending A) and
-  // later re-flushes [A, B, C] — without a batchId, commitChanges dedupes A by id from the
-  // *incoming* set but leaves the committed copy of A in the *transform* set, so B and C are
-  // rebased against the client's own echo of A (whose effects their frames already include).
-  // Array ops double-shift (seed 10 commits `remove /tags/2` when tags has 2 entries: its
-  // local remove /tags/1 was shifted by its own committed add /tags/0) and text ops land at
-  // shifted offsets. The client-side mirror (rebaseChanges) excludes own-echoes by id; the
-  // server-side walk only does so when a batchId is present.
-  // Panel knob: lostResponseP forced to 0.
-  it.skip('FINDING-3: lost-response retry double-transforms later edits (seed 10)', async () => {
-    await runOTFuzz(10, { lostResponseP: 0.03 });
-  }, 60_000);
-
   // FINDING-2 (LWW, stale broadcast after commit response): a broadcast emitted at rev N can
   // still be queued/in-flight when the same client's commit for rev N+1 returns. LWW client
   // stores apply committed fields unconditionally per path (no rev/ts comparison across
@@ -243,23 +255,6 @@ describe('convergence fuzz — findings (pinned repros, skipped)', () => {
   // opens the stale-broadcast window on the parent/child paths.)
   it.skip('FINDING-2: stale broadcast applied after commit response regresses LWW fields (seed 102)', async () => {
     await runLWWFuzz(102, { drainInboxBeforeFlush: false, parentOps: true });
-  }, 60_000);
-
-  // FINDING-5 (OT, mid-stream reload with pending): the reload flow (mirroring
-  // PatchesSync._reloadDocFromServer) reconciles pending changes only against committed
-  // changes up to the getDoc envelope's rev — the LAST VERSION's rev — assuming later
-  // changes will arrive through normal catch-up. But the envelope's `changes` tail extends
-  // to the HEAD and saveDoc installs it as committed, so committedRev jumps to head and
-  // catch-up never redelivers (versionRev, head]. Pending minted below head is never
-  // rebased against that span, and doc.import re-applies it on top of the head state:
-  // strict apply throws (ApplyChangesError inside createStateFromSnapshot — the client's
-  // reload crashes and retries into the same throw) or, for ops that still apply, lands at
-  // stale offsets. Hit 3 times across a 600-seed soak (seeds 1000035, 1000059, 1000530 —
-  // each crashes in doc.import applying a pending array op whose target another client
-  // removed); this is the only OT failure class observed with moves and lost responses
-  // excluded.
-  it.skip('FINDING-5: reload with pending skips rebasing against the envelope tail past the version rev (seed 1000035)', async () => {
-    await runOTFuzz(1000035);
   }, 60_000);
 
   // FINDING-4 (LWW, open doc vs store after a parent/child conflict): client c2 writes a

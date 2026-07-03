@@ -1,5 +1,6 @@
 import { vi } from 'vitest';
 import { applyChanges } from '../../src/algorithms/ot/shared/applyChanges.js';
+import { MissingChangesError } from '../../src/algorithms/ot/client/applyCommittedChanges.js';
 import { LWWAlgorithm } from '../../src/client/LWWAlgorithm.js';
 import { LWWInMemoryStore } from '../../src/client/LWWInMemoryStore.js';
 import type { LWWDoc } from '../../src/client/LWWDoc.js';
@@ -31,19 +32,18 @@ export interface LWWFuzzConfig {
   /** Per-flush probability the commit RPC request never reaches the server. */
   lostRequestP: number;
   /**
-   * Process already-arrived broadcasts before issuing a flush. Enabled in the CI panel:
-   * without it, a queued broadcast older than the flush's commit response is applied after
-   * it, and LWW client stores overwrite committed fields with the stale ops (FINDING-2 in
-   * convergence.spec.ts) — a real window in production, where a broadcast can be in flight
-   * while the commit RPC is outstanding.
+   * Process already-arrived broadcasts before issuing a flush. Both settings are fuzzed:
+   * without draining, a queued broadcast older than the flush's commit response is applied
+   * after it — a real window in production, where a broadcast can be in flight while the
+   * commit RPC is outstanding (PatchesSync's blockable receive defers, but does not
+   * reorder, a broadcast arriving mid-flush). The engine now skips such stale batches
+   * wholesale (FINDING-2, fixed in convergence.spec.ts history).
    */
   drainInboxBeforeFlush: boolean;
   /**
-   * Include mid-run parent-path replaces (replace /counters) in the edit mix. Disabled in
-   * the CI panel: parent writes racing newer child writes expose FINDING-4 and FINDING-6
-   * (see convergence.spec.ts) — the losing side of the parent/child consolidation is not
-   * fully corrected back to the writer, so a client permanently loses the surviving child
-   * value (no network faults required).
+   * Include mid-run parent-path replaces (replace /counters) in the edit mix, exercising
+   * parent writes racing newer child writes (server-side child pruning, correction echoes,
+   * doc subtree shielding — FINDING-4/FINDING-6, fixed).
    */
   parentOps: boolean;
 }
@@ -73,12 +73,14 @@ const FLAG_KEYS = ['spellcheck', 'autosave', 'focus', 'typewriter'];
  * LWWDoc) against a real LWWServer over the real LWWMemoryStoreBackend, joined by a
  * virtual network.
  *
- * Network model: per-client delivery stays FIFO (no cross-packet reorder) because LWW's
- * client stores apply committed fields last-write-per-path without cross-batch timestamp
- * comparison — the production transports (WebSocket, SSE) are ordered per connection, and
- * missed events are healed by reconnect catch-up, so ordered delivery is part of the
- * engine's contract. Drops, duplicate redelivery of the latest packet, disconnects, and
- * lost commit request/response legs are all fair game and are fuzzed here.
+ * Network model: per-client delivery stays FIFO (no cross-packet reorder) — the production
+ * transports (WebSocket, SSE) are ordered per connection, so ordered delivery is part of
+ * the engine's contract. Within that contract the engine now defends itself at the batch
+ * level: a stale batch (rev already covered by committedRev) is skipped wholesale, and a
+ * rev GAP (a dropped broadcast) raises MissingChangesError, which `deliver` answers with
+ * the same recovery PatchesSync uses (flush pending or pull the tail via getChangesSince).
+ * Drops, duplicate redelivery of the latest packet, disconnects, and lost commit
+ * request/response legs are all fair game and are fuzzed here.
  */
 export class LWWFuzzHarness {
   readonly backend = new LWWMemoryStoreBackend();
@@ -301,13 +303,33 @@ export class LWWFuzzHarness {
       return;
     }
 
-    await client.algorithm.applyServerChanges(DOC_ID, wire(packet.changes), client.doc);
+    await this.applyDelivery(client, packet.changes, `pkt#${packet.seq}`);
     this.tr(`deliver ${client.name}: pkt#${packet.seq} ${describeChanges(packet.changes)}`);
 
     if (faults && this.rng.chance(this.cfg.dupP)) {
       // Immediate redelivery of the same packet (e.g. an SSE replay overlap).
-      await client.algorithm.applyServerChanges(DOC_ID, wire(packet.changes), client.doc);
+      await this.applyDelivery(client, packet.changes, `pkt#${packet.seq} (dup)`);
       this.tr(`deliver ${client.name}: pkt#${packet.seq} REDELIVERED`);
+    }
+  }
+
+  /**
+   * Apply a delivered broadcast, answering a MissingChangesError (an earlier packet was
+   * dropped — the batch's baseRev is ahead of committedRev) the way PatchesSync's
+   * _receiveCommittedChanges does: re-enter syncDoc, which flushes pending if any (the
+   * commit response carries the catch-up window) or pulls the tail via getChangesSince.
+   */
+  private async applyDelivery(client: LWWFuzzClient, changes: Change[], what: string): Promise<void> {
+    try {
+      await client.algorithm.applyServerChanges(DOC_ID, wire(changes), client.doc);
+    } catch (err) {
+      if (!(err instanceof MissingChangesError)) throw err;
+      this.tr(`gap ${client.name}: ${what} ahead of committedRev — recovering`);
+      if (await client.algorithm.hasPending(DOC_ID)) {
+        await this.flush(client, false);
+      } else {
+        await this.catchup(client);
+      }
     }
   }
 

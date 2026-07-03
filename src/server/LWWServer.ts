@@ -1,5 +1,5 @@
 import { createVersionMetadata } from '../data/version.js';
-import { combinableOps, consolidateOps, convertDeltaOps } from '../algorithms/lww/consolidateOps.js';
+import { consolidateOps, convertDeltaOps } from '../algorithms/lww/consolidateOps.js';
 import { createChange } from '../data/change.js';
 import { signal } from 'easy-signal';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
@@ -232,37 +232,47 @@ export class LWWServer implements PatchesServer {
         newRev = await this.store.saveOps(docId, opsToStore, pathsToDelete, changeIds);
       }
 
-      // Build catchup ops - start with correction ops from opsToReturn
-      const responseOps = [...opsToReturn];
-      if (clientRev !== undefined) {
-        const opsSince = await this.store.listOps(docId, { sinceRev: clientRev });
-        const sentPaths = new Set([...newOps.map(o => o.path), ...dedupedPaths]);
-
-        // Filter out ops client just sent (and their children), in commit order
-        const catchupOps = sortOpsByCommitOrder(opsSince.filter(op => !isPathOrChild(op.path, sentPaths)));
-        responseOps.push(...catchupOps);
+      // Build the response: corrections, the stored resolution of every sent path, and catchup.
+      //
+      // For every path the client sent — and every stored descendant of those paths — the
+      // response must echo the SERVER's post-commit rows, not assume the client's own copy
+      // suffices. The client confirms its sent ops optimistically (confirmSent installs them
+      // as committed and prunes committed child entries); whenever the server's resolution
+      // differs, only these rev-stamped echoes can correct it:
+      // - a sent delta op (@inc/@bit/@max/@min) folded into whatever the server had —
+      //   possibly a concurrent write the sender never saw;
+      // - a sent op that LOST by LWW timestamp (the winner also lands in opsToReturn);
+      // - a sent parent write that lost to a stored parent while newer child rows survive —
+      //   the client's optimistic prune dropped those children, and without this echo no
+      //   later catch-up redelivers them (their revs are already behind the client's).
+      // Catchup (everything committed after the client's rev) is no longer filtered by sent
+      // paths either: a sent path's row in that window is the resolution, not an echo.
+      //
+      // Deduped paths count as sent: a deduped change was committed by a prior attempt whose
+      // ack was lost, so the retrying client still needs the stored resolution of those paths
+      // (and their surviving children) to confirm its sending layer and converge.
+      const sentPaths = new Set([...newOps.map(o => o.path), ...dedupedPaths]);
+      // Post-commit op table, derived from the pre-save read (exact under the doc lock):
+      // existing rows survive unless deleted or overwritten (same path or child) by this commit.
+      const pathsToDeleteSet = new Set(pathsToDelete);
+      const postOps = [
+        ...existingOps.filter(
+          op =>
+            !pathsToDeleteSet.has(op.path) &&
+            !opsToStore.some(s => op.path === s.path || op.path.startsWith(s.path + '/'))
+        ),
+        ...opsToStore,
+      ];
+      const responseOpsByPath = new Map<string, JSONPatchOp>();
+      for (const op of opsToReturn) responseOpsByPath.set(op.path, op);
+      for (const op of postOps) {
+        if (isPathOrChild(op.path, sentPaths) || (clientRev !== undefined && (op.rev ?? 0) > clientRev)) {
+          responseOpsByPath.set(op.path, op);
+        }
       }
-
-      // A sent delta op (@inc/@bit/@max/@min) combined with whatever the server had — possibly a
-      // concurrent write the sender never saw — so echo the stored concrete result back for those
-      // paths. Without this the sender applies its delta to a stale base and diverges permanently.
-      const echoedPaths = new Set<string>();
-      for (const sentOp of newOps) {
-        if (!combinableOps[sentOp.op] || echoedPaths.has(sentOp.path)) continue;
-        echoedPaths.add(sentOp.path);
-        const stored = opsToStore.find(o => o.path === sentOp.path) ?? existingOps.find(o => o.path === sentOp.path);
-        if (stored) responseOps.push(stored);
-      }
-
-      // A deduped change was committed by a prior attempt whose ack was lost — echo the current
-      // committed ops for the paths it touched so the retrying client confirms its sending layer
-      // and converges, just like the delta echo above.
-      for (const path of dedupedPaths) {
-        if (echoedPaths.has(path)) continue;
-        echoedPaths.add(path);
-        const stored = opsToStore.find(o => o.path === path) ?? existingOps.find(o => o.path === path);
-        if (stored) responseOps.push(stored);
-      }
+      // Commit order end to end: the client's open doc applies response ops in array order,
+      // so an older parent row must precede the newer child rows that survive it.
+      const responseOps = sortOpsByCommitOrder(Array.from(responseOpsByPath.values()));
 
       // Build response using createChange
       const responseChange = createChange(clientRev ?? 0, newRev, responseOps, {

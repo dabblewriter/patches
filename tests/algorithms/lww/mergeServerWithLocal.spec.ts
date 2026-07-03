@@ -125,6 +125,56 @@ describe('mergeServerWithLocal', () => {
     });
   });
 
+  describe('server ops under a local parent write', () => {
+    it('should drop a server child op shadowed by a local parent replace', () => {
+      // FINDING-4 shape: the doc applied the local parent optimistically; a foreign child
+      // op landing on top would show a value the parent already overwrote.
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/counters/words', value: 10 }])];
+      const localOps: JSONPatchOp[] = [
+        { op: 'replace', path: '/counters', value: { words: 824, streak: 0 }, ts: 1000 },
+      ];
+
+      const result = mergeServerWithLocal(serverChanges, localOps);
+
+      // The server child op is dropped; the untouched local parent still applies.
+      expect(result[0].ops).toEqual([expect.objectContaining({ path: '/counters', value: { words: 824, streak: 0 } })]);
+    });
+
+    it('should drop server ops shadowed at any ancestor depth', () => {
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/a/b/c', value: 1 }])];
+      const localOps: JSONPatchOp[] = [{ op: 'replace', path: '/a', value: {}, ts: 1000 }];
+
+      const result = mergeServerWithLocal(serverChanges, localOps);
+
+      expect(result[0].ops).toEqual([expect.objectContaining({ path: '/a' })]);
+    });
+
+    it('should not shield when the local ancestor op is a delta', () => {
+      // A combinable op writes a scalar, not a container — it cannot supersede a subtree.
+      const serverChanges: Change[] = [createChange(5, 6, [{ op: 'replace', path: '/count/sub', value: 1 }])];
+      const localOps: JSONPatchOp[] = [{ op: '@inc', path: '/count', value: 2, ts: 1000 }];
+
+      const result = mergeServerWithLocal(serverChanges, localOps);
+
+      expect(result[0].ops).toContainEqual(expect.objectContaining({ path: '/count/sub', value: 1 }));
+    });
+
+    it('should still merge exact-path matches while shielding children', () => {
+      const serverChanges: Change[] = [
+        createChange(5, 6, [
+          { op: 'replace', path: '/counters', value: { words: 1 } },
+          { op: 'replace', path: '/counters/words', value: 7 },
+        ]),
+      ];
+      const localOps: JSONPatchOp[] = [{ op: 'replace', path: '/counters', value: { words: 3 }, ts: 1000 }];
+
+      const result = mergeServerWithLocal(serverChanges, localOps);
+
+      // Exact path: local (newer pending) value preserved; child: shielded.
+      expect(result[0].ops).toEqual([expect.objectContaining({ path: '/counters', value: { words: 3 } })]);
+    });
+  });
+
   describe('multiple ops and changes', () => {
     it('should handle multiple server ops with mixed local deltas', () => {
       const serverChanges: Change[] = [

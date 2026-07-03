@@ -63,19 +63,49 @@ export const move: JSONPatchOpHandler = {
 
     // A move removes the value from one place then adds it to another, update the paths and add a marker to them so
     // they won't be altered by `updateArrayIndexes`, then remove the markers afterwards
-    otherOps = mapAndFilterOps(otherOps, otherOp => {
+    const inputOps = otherOps;
+    otherOps = mapAndFilterOps(otherOps, (otherOp, index, breakAfter) => {
       if (removed) {
         // The moved value was removed by an earlier op in this patch, so this side's state (moved then removed) now
         // matches the space these ops were written in; mark them so the array shifts below leave them untouched
-        otherOp = { ...otherOp, path: '$' + otherOp.path };
-        if (otherOp.from) otherOp.from = '$' + otherOp.from;
-        return otherOp;
+        return protectOp(otherOp);
       }
       const opLike = getTypeLike(state, otherOp);
       if (opLike === 'remove' && from === otherOp.path) {
         // Once an operation removes the moved value, the following ops should be working on the old location and not
         // not the new one. Allow the following operations (which may include add/remove) to affect the old location
         removed = true;
+      }
+      if (state.otherOpsFirst) {
+        // otherOps precede this move in the authoritative order (see transformPatch), so this move wins conflicting
+        // intents — without these two rules the two halves of the rebase diamond disagree about the winner and later
+        // local changes are transformed against an op whose effect was already superseded, committing moves whose
+        // source no longer exists (they fail strict apply everywhere they are replayed).
+        if (opLike === 'move' && otherOp.from === from) {
+          // Concurrent moves of the same source: this (later) move re-moves the value, so the earlier move's
+          // residual is nothing — drop it, and map its trailing ops onto our destination via a synthetic move
+          // (the value they were written against lives at `path` now). The results are marked so the phases below
+          // leave them untouched: their frame already accounts for the source removal, and the synthetic move
+          // accounts for the destination difference.
+          breakAfter();
+          const rest = inputOps.slice(index + 1);
+          if (otherOp.path === path) return rest.map(protectOp); // identical move — frames already agree
+          return move.transform(state, { op: 'move', from: otherOp.path, path }, rest).map(protectOp);
+        }
+        if (
+          (isAdd(state, otherOp, 'path') || otherOp.op === 'replace') &&
+          otherOp.path === from &&
+          !isArrayPath(from, state)
+        ) {
+          // An earlier set at our source: the set wins — this move consumed a value the set had already overwritten,
+          // so the mirrored direction drops this move (see updateRemovedOps). The set's residual in our frame must
+          // then also kill the ghost our move left at the destination, or ops depending on it survive incorrectly.
+          // A literal `replace` clobbers the source the same way (its mirror also drops this move) and must stay AT
+          // the source, not be redirected to the destination — but in-place @-ops (like 'replace') ride the move,
+          // and at an ARRAY INDEX an add/copy/move-in INSERTS rather than overwrites — it never clobbers the moved
+          // value, so it must fall through to the index shifting below.
+          return [protectOp({ op: 'remove', path }), otherOp];
+        }
       }
       const original = otherOp;
       otherOp = updateMovePath(state, otherOp, 'path', from, path, original);
@@ -99,7 +129,7 @@ export const move: JSONPatchOpHandler = {
       if (isArrayPath(path, state)) {
         otherOps = updateArrayIndexes(state, path, otherOps, 1);
       } else {
-        otherOps = updateRemovedOps(state, path, otherOps);
+        otherOps = updateRemovedOps(state, path, otherOps, false, undefined, undefined, thisOp);
       }
     }
 
@@ -226,6 +256,16 @@ function updateArrayPathForMove(
   const modifier = from === min ? -1 : 1;
   const newPath = prefix + (otherIndex + modifier) + path.slice(end);
   return getValue(state, otherOp, pathName, newPath);
+}
+
+/**
+ * Clone an op with `$` markers on its paths so the adjustment phases in `move.transform` leave it
+ * untouched (the markers are stripped by `removeMoveMarkers` before returning).
+ */
+function protectOp(op: JSONPatchOp): JSONPatchOp {
+  op = { ...op, path: '$' + op.path };
+  if (op.from) op.from = '$' + op.from;
+  return op;
 }
 
 /**

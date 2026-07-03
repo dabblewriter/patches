@@ -240,10 +240,18 @@ export class LWWDoc<T extends object = object> extends BaseDoc<T> {
  * value, and `ts` from LWWAlgorithm) round-trip through JSON with identical key order in
  * V8/JavaScriptCore, so JSON.stringify is sufficient as an equality fingerprint.
  *
+ * The server-stamped `rev` is excluded: the commit response echoes back the stored version
+ * of each sent op — path, op, value and ts intact, `rev` appended by the server's store —
+ * and that echo must match the key tracked before the send, both for pure-echo detection
+ * and for retiring the in-flight key when the echo lands.
+ *
  * Orphan keys (ops that were consolidated away in the algorithm's pending store before
  * being sent) remain in `_inFlightOpKeys` indefinitely. They're bounded by session
  * length and act as harmless extra positives for the echo check.
  */
 function opKey(op: JSONPatchOp): string {
-  return JSON.stringify(op);
+  if (op.rev === undefined) return JSON.stringify(op);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { rev, ...rest } = op;
+  return JSON.stringify(rest);
 }

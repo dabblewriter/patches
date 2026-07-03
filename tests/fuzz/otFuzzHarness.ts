@@ -43,10 +43,11 @@ export interface OTFuzzConfig {
   /** OTServer option — small values + time jumps force session-gap/offline versioning. */
   sessionTimeoutMinutes: number;
   /**
-   * Include `move` ops in the edit mix. Disabled in the CI panel: concurrent moves expose a
-   * known divergence (see the FINDINGS section of convergence.spec.ts) where the stateless
-   * server transform commits a move whose source no longer exists, producing a committed
-   * change that fails strict apply on every client.
+   * Include `move` ops in the edit mix. Formerly disabled in the CI panel (FINDING-1):
+   * concurrent moves diverged — the stateless server transform committed moves whose source
+   * no longer existed, producing committed changes that failed strict apply on every client.
+   * Fixed by resolving conflicts toward the later writer in the rebase walks' advance
+   * direction (transformPatch `otherOpsFirst`).
    */
   moveOps: boolean;
 }
@@ -455,8 +456,12 @@ export class OTFuzzHarness {
     const baseRev = await algorithm.getCommittedRev(DOC_ID);
     const envelope = JSON.parse(await readAll(await this.server.getDoc(DOC_ID))) as PatchesSnapshot;
 
-    if (envelope.rev > baseRev && (await algorithm.hasPending(DOC_ID))) {
-      const committedTail = wire(await this.server.getChangesSince(DOC_ID, baseRev)).filter(c => c.rev <= envelope.rev);
+    // Mirror the fixed PatchesSync: reconcile pending against everything the envelope
+    // installs as committed — through its last change (the server head), not just through
+    // envelope.rev (the last version boundary).
+    const installedRev = envelope.changes.length ? envelope.changes[envelope.changes.length - 1].rev : envelope.rev;
+    if (installedRev > baseRev && (await algorithm.hasPending(DOC_ID))) {
+      const committedTail = wire(await this.server.getChangesSince(DOC_ID, baseRev)).filter(c => c.rev <= installedRev);
       if (committedTail.length > 0) await this.reconcileTracked(client, committedTail);
     }
 

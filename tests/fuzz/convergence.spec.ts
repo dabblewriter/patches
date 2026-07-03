@@ -177,9 +177,7 @@ afterEach(() => {
 
 const OT_PANEL_SEEDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25];
 
-// Seed 101 is excluded: it deterministically hits FINDING-4 (see the findings section) —
-// it lives there as a pinned repro instead. 111 replaces it to keep the panel at 10.
-const LWW_PANEL_SEEDS = [102, 103, 104, 105, 106, 107, 108, 109, 110, 111];
+const LWW_PANEL_SEEDS = [101, 102, 103, 104, 105, 106, 107, 108, 109, 110];
 
 describe('convergence fuzz — OT panel', () => {
   for (const seed of OT_PANEL_SEEDS) {
@@ -240,7 +238,9 @@ describe('convergence fuzz — findings (pinned repros, skipped)', () => {
   // a /flags/focus value the server has removed). Production hits this window because
   // broadcasts and commit responses travel on different channels, and PatchesSync's
   // blockable receive defers — but does not reorder — a broadcast that arrives mid-flush.
-  // Panel knob: drainInboxBeforeFlush: true.
+  // Panel knob: drainInboxBeforeFlush: true. (The pinned repro also sets parentOps: true —
+  // seed 102 with drainInboxBeforeFlush: false alone converges; this seed's script only
+  // opens the stale-broadcast window on the parent/child paths.)
   it.skip('FINDING-2: stale broadcast applied after commit response regresses LWW fields (seed 102)', async () => {
     await runLWWFuzz(102, { drainInboxBeforeFlush: false, parentOps: true });
   }, 60_000);
@@ -262,18 +262,18 @@ describe('convergence fuzz — findings (pinned repros, skipped)', () => {
     await runOTFuzz(1000035);
   }, 60_000);
 
-  // FINDING-4 (LWW, open doc vs store after a parent/child conflict): client c1 writes a
+  // FINDING-4 (LWW, open doc vs store after a parent/child conflict): client c2 writes a
   // parent path (replace /counters) while another client's newer child write
   // (/counters/words) is committed concurrently. The server folds the newer child value
-  // into c1's committed parent op (server and c1's STORE both converge on the folded
-  // value), but c1's OPEN DOC never applies the folded value: the commit response filters
-  // /counters as a just-sent path, and the folded op carries c1's own path+ts so the doc's
+  // into c2's committed parent op (server and c2's STORE both converge on the folded
+  // value), but c2's OPEN DOC never applies the folded value: the commit response filters
+  // /counters as a just-sent path, and the folded op carries c2's own path+ts so the doc's
   // echo tracking treats it as the already-applied optimistic op and skips it. The open doc
-  // then disagrees with its own store (doc counters.words=3, store/server=207 in this run)
+  // then disagrees with its own store (doc counters.words=10, store/server=824 in this run)
   // with no pending work and matching committedRev — permanent until the doc is reloaded.
-  // Panel knob: parentOps: false (seed 101 is also excluded from the panel above).
-  it.skip('FINDING-4: LWW open doc diverges from its own store after parent/child conflict (seed 101)', async () => {
-    await runLWWFuzz(101, { parentOps: true });
+  // Panel knob: parentOps: false.
+  it.skip('FINDING-4: LWW open doc diverges from its own store after parent/child conflict (seed 100)', async () => {
+    await runLWWFuzz(100, { parentOps: true });
   }, 60_000);
 
   // FINDING-6 (LWW, rejected parent write prunes a surviving child): needs NO network

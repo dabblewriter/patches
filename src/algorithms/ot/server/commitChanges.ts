@@ -155,18 +155,15 @@ export async function commitChanges(
       // transform set in memory rather than at the store.
       const allCommittedChanges = await store.listChanges(docId, { startAfter: baseRev });
 
-      // Exclude the sender's own echoes from the transform set:
-      // - changes from this same batch (a resend carries the same batchId), and
-      // - committed copies of changes this request re-sent, matched by id — a retry after a
-      //   lost response on the plain (batch-less) path. The tail of the resent queue was
-      //   minted on top of the resent head, so its frames already include the head's effects;
-      //   transforming the tail against the head's committed echo double-applies them
-      //   (array/text ops land at double-shifted offsets). The client-side mirror
-      //   (rebaseChanges) already excludes own echoes by id; this keeps the walks in lockstep.
+      // The sender's own echoes — committed copies of changes this request re-sent (matched
+      // by id: a retry after a lost response on the plain path) and committed changes from
+      // this same batch (a resend carries the same batchId) — are never TRANSFORMED against:
+      // the tail of a resent queue was minted on top of the resent head, so its frames
+      // already include the head's effects; transforming the tail against the head's
+      // committed echo double-applies them (array/text ops land at double-shifted offsets).
       const changeIds = new Set(changes.map(c => c.id));
-      const committedChanges = allCommittedChanges.filter(
-        c => !(batchId && c.batchId === batchId) && !changeIds.has(c.id)
-      );
+      const isOwnCommitted = (c: Change) => (batchId ? c.batchId === batchId : false) || changeIds.has(c.id);
+      const committedChanges = allCommittedChanges.filter(c => !isOwnCommitted(c));
 
       // Filter changes already committed after baseRev AND duplicates within the incoming
       // batch itself — a client retry/flush race can repeat a change id in one array, and
@@ -221,12 +218,25 @@ export async function commitChanges(
         return { catchupChanges, newChanges: incomingChanges, docReloadRequired };
       }
 
-      // 5. Transform the incoming changes against committed changes (stateless — no state loaded)
+      // 5. Transform the incoming changes against committed changes (stateless — no state
+      //    loaded). The queue keeps resent ALREADY-COMMITTED changes (raw ops, deduped
+      //    in-request) as advance-only frame entries: rebaseChanges advances each foreign
+      //    committed change through the raw resent head before dropping the head at its
+      //    echo's rev, so a foreign commit that interleaved BEFORE the lost echo must meet
+      //    the tail in that same frame here too. transformIncomingChanges removes each echo
+      //    entry when the walk reaches it and commits only non-echo survivors.
+      const seenQueueIds = new Set<string>();
+      const queueChanges = changes.filter(c => {
+        if (seenQueueIds.has(c.id)) return false;
+        seenQueueIds.add(c.id);
+        return true;
+      }) as Change[];
       const transformedChanges = transformIncomingChanges(
-        incomingChanges,
-        committedChanges,
+        queueChanges,
+        allCommittedChanges,
         currentRev,
-        options?.forceCommit
+        options?.forceCommit,
+        isOwnCommitted
       );
 
       if (transformedChanges.length > 0) {

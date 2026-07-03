@@ -11,7 +11,7 @@ import type { AlgorithmName, TrackedDoc } from '../client/PatchesStore.js';
 import { isDocLoaded } from '../shared/utils.js';
 import type { Change, DocSyncState, DocSyncStatus, PatchesSnapshot } from '../types.js';
 import { blockable, serialGate } from '../utils/concurrency.js';
-import { ErrorCodes, StatusError } from './error.js';
+import { ErrorCodes, isAbortError, isNetworkError, NetworkError, StatusError } from './error.js';
 import type { PatchesConnection } from './PatchesConnection.js';
 import type { JSONRPCClient } from './protocol/JSONRPCClient.js';
 import type { BranchAPI, ConnectionState } from './protocol/types.js';
@@ -178,7 +178,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   private _untrackedDuringResync: Set<string> | null = null;
   /** Per-doc buffers for committed-change broadcasts landing while `_reloadDocFromServer` is in flight. */
   private _reloadBuffers = new Map<string, Change[]>();
-  /** Pending per-doc slow re-probe timers for docs latched at 'error' (see `_scheduleSyncReprobe`). */
+  /** Pending per-doc slow re-probe timers for docs the retry ladder gave up on (see `_scheduleSyncReprobe`). */
   private _syncReprobeTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
   /**
    * Docs whose current sync failure has already been surfaced (console + `onError`).
@@ -591,6 +591,22 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         }
       }
       const syncError = failure instanceof Error ? failure : new Error(String(failure));
+      // A status-less interruption is CONNECTION/environment trouble, not doc trouble.
+      // Two classes land here: a network-level failure (fetch rejected without an HTTP
+      // response, request timeout, transport with no live connection) and a cancelled
+      // request/transaction (AbortError: page/worker teardown mid-sync, IndexedDB abort
+      // under storage pressure). One unreachable server would otherwise latch every
+      // tracked doc at 'error' — and `connected` can still read true while it happens
+      // (fetches can fail while the SSE stream lives, or before the liveness watchdog
+      // notices it died). Park the doc in the same stable waiting-for-connection
+      // posture disconnect uses — never per-doc 'error' — and leave recovery with the
+      // connection-level machinery: the fast retry ladder, then the slow background
+      // re-probe, and any reconnect's syncAllKnownDocs. Genuine doc-level failures
+      // (coded 4xx/5xx, apply failures) latch below as before.
+      if (isNetworkError(failure) || isAbortError(failure)) {
+        this._deferDocToConnectionRecovery(docId, baseDoc, pending, syncError);
+        return;
+      }
       this._updateDocSyncState(docId, { syncStatus: 'error', syncError });
       if (baseDoc) {
         baseDoc.updateSyncStatus('error', syncError);
@@ -784,7 +800,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       throw new Error(`Document ${docId} is not tracked`);
     }
     if (!this.state.connected || onlineState.isOffline) {
-      throw new Error('Not connected to server');
+      throw new NetworkError('Not connected to server');
     }
 
     // Guarantee a docStates entry exists. flushDoc is protected/subclass-callable and
@@ -835,7 +851,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
       for (const changeBatch of batches) {
         if (!this.state.connected || onlineState.isOffline) {
-          throw new Error('Disconnected during flush');
+          throw new NetworkError('Disconnected during flush');
         }
 
         const { changes: committed, docReloadRequired } = await this.connection.commitChanges(docId, changeBatch);
@@ -887,8 +903,18 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         await this._handleRemoteDocDeleted(docId);
         return;
       }
-      const flushError = err instanceof Error ? err : new Error(String(err));
-      this._updateDocSyncState(docId, { syncStatus: 'error', syncError: flushError });
+      // A status-less interruption (network-level failure or aborted request) never
+      // latches per-doc 'error' — syncDoc's catch parks the doc for connection-level
+      // recovery (see the interruption comment there). Even writing 'error' momentarily
+      // here would leak the state to docStates subscribers (consumers broadcast every
+      // transition) before the park overwrites it, so park directly instead; callers
+      // that reach flushDoc outside syncDoc still get a stable (non-error) posture.
+      if (isNetworkError(err) || isAbortError(err)) {
+        this._updateDocSyncState(docId, { syncStatus: this._stableDocStatus(docId, pending) });
+      } else {
+        const flushError = err instanceof Error ? err : new Error(String(err));
+        this._updateDocSyncState(docId, { syncStatus: 'error', syncError: flushError });
+      }
       // Don't surface here — `syncDoc` (our only caller) owns the decision of whether
       // to log/emit: it stays quiet while a retry can still recover the doc, and
       // surfaces a latched failure exactly once. Emitting here too would double-report
@@ -1296,6 +1322,64 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
+   * The stable non-'error' posture for a doc — the same rule `_resetSyncingStatuses`
+   * applies on disconnect: 'synced' when the doc has local data (`hasPending` still
+   * marks any unsent work), 'unsynced' for a brand-new doc with nothing yet.
+   * `pending` (when the caller carried some) also counts as local data:
+   * docStates.hasPending can lag the store (only a completed flush refreshes it),
+   * but a failed flush proves the pending exists.
+   */
+  private _stableDocStatus(docId: string, pending?: Change[] | null): DocSyncStatus {
+    const entry = this.docStates.state[docId];
+    const hasLocalData = (pending?.length ?? 0) > 0 || !!entry?.hasPending || (entry?.committedRev ?? 0) > 0;
+    return hasLocalData ? 'synced' : 'unsynced';
+  }
+
+  /**
+   * Recovery path for a sync attempt that died from a status-less interruption — a
+   * network-level failure ({@link isNetworkError}: fetch rejected without an HTTP
+   * response, request timeout, transport with no live connection) or a cancelled
+   * request/transaction ({@link isAbortError}: page/worker teardown mid-sync,
+   * IndexedDB abort under storage pressure). Neither is a verdict on the document,
+   * so the doc is parked in the stable waiting-for-connection posture — never
+   * per-doc 'error' — and recovery stays with the existing machinery: the
+   * backed-off retry ladder while attempts remain, then the slow background
+   * re-probe. The probe is armed even with nothing pending, unlike the
+   * latched-'error' path: the connection can still read up while requests fail
+   * (SSE alive, or a half-open stream the watchdog hasn't caught yet), and then no
+   * reconnect resync is coming to re-attempt the pull — without the probe the doc
+   * would neither probe nor recover. When disconnected/offline both schedulers
+   * decline and the reconnect's `syncAllKnownDocs` owns recovery — the existing
+   * offline path.
+   *
+   * Surfacing: network-class failures stay quiet at every stage — the connection
+   * state is their user-facing signal, and one unreachable server would otherwise
+   * emit for every tracked doc. A persistent abort is different: aborts come from
+   * teardown (which kills these timers with the context) or storage pressure, so
+   * one that outlives the full ladder while connected+online is a real environment
+   * problem telemetry should hear about — exactly once, mirroring the
+   * exhausted-transient contract, still without painting the doc.
+   */
+  private _deferDocToConnectionRecovery(
+    docId: string,
+    baseDoc: BaseDoc | undefined,
+    pending: Change[] | null | undefined,
+    failure: Error
+  ): void {
+    const stable = this._stableDocStatus(docId, pending);
+    this._updateDocSyncState(docId, { syncStatus: stable });
+    baseDoc?.updateSyncStatus(stable);
+    if (this._scheduleSyncRetry(docId)) return;
+    this._clearSyncRetry(docId);
+    if (isAbortError(failure) && this._isConnectedAndOnline() && !this._surfacedSyncErrors.has(docId)) {
+      this._surfacedSyncErrors.add(docId);
+      console.error(`Aborted request persisted past retries while syncing doc ${docId}:`, failure);
+      this.onError.emit(failure, { docId });
+    }
+    this._scheduleSyncReprobe(docId, true);
+  }
+
+  /**
    * Schedule a backed-off re-sync of a doc that failed transiently, while connected.
    * Returns true if a retry was scheduled, false if it declined — either because we're
    * disconnected/offline (the reconnect's `syncAllKnownDocs` will recover the doc), or
@@ -1322,10 +1406,12 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
-   * Schedule a slow background re-probe for a doc left latched at 'error' with pending
-   * changes while the connection stayed up. Neither the fast retry ladder (exhausted)
-   * nor a reconnect will touch the doc again, so without this the only recovery is a
-   * local edit. The probe re-enters the normal `syncDoc` path with a fresh retry ladder;
+   * Schedule a slow background re-probe for a doc the fast retry ladder gave up on
+   * while the connection stayed up: a doc latched at 'error' with pending changes, or
+   * a doc parked for connection recovery after a network-class failure (see
+   * `_deferDocToConnectionRecovery`). Neither the exhausted ladder nor a reconnect
+   * will touch the doc again, so without this the only recovery is a local edit.
+   * The probe re-enters the normal `syncDoc` path with a fresh retry ladder;
    * if that fails again the ladder/probe cycle repeats. Exhausted transient failures
    * re-probe sooner than definitive rejections, which only heal via a server-side
    * policy change. One timer per doc; cleared alongside the fast retry state on

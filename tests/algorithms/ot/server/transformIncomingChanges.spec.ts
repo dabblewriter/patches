@@ -136,6 +136,68 @@ describe('transformIncomingChanges', () => {
     expect(result[1].ops).toEqual([{ op: 'replace', path: '/list/10', value: 'NEW' }]);
   });
 
+  it('D1: a committed set+move patch keeps its destination overwrite across a queue re-set', () => {
+    // base z=[1,2,3]. Committed C sets /x then moves it onto /z in the SAME patch. The queue
+    // re-sets /x (superseding the committed set) and then removes /z/2 (minted against the old
+    // 3-element /z). Dropping the superseded set AND the move from the advance frame forgot
+    // that /z was overwritten: E committed as `remove /z/2` and strict-failed on every replay
+    // ('[op:remove] invalid array index: /z/2') — a committed-poison wedge.
+    const base = { z: [1, 2, 3] };
+    const C: Change = {
+      id: 'C',
+      rev: 1,
+      baseRev: 0,
+      ops: [
+        { op: 'add', path: '/x', value: [9] },
+        { op: 'move', from: '/x', path: '/z' },
+      ],
+      createdAt: 0,
+      committedAt: 0,
+    };
+    const Q: Change = {
+      id: 'Q',
+      rev: 1,
+      baseRev: 0,
+      ops: [{ op: 'add', path: '/x', value: 5 }],
+      createdAt: 0,
+      committedAt: 0,
+    };
+    const E: Change = {
+      id: 'E',
+      rev: 2,
+      baseRev: 0,
+      ops: [{ op: 'remove', path: '/z/2' }],
+      createdAt: 0,
+      committedAt: 0,
+    };
+
+    const transformed = transformIncomingChanges([Q, E], [C], 1);
+
+    // E dies (its target array was overwritten); Q survives.
+    expect(transformed.map(c => c.id)).toEqual(['Q']);
+    // Strict apply of the full committed log must not throw and must converge on the
+    // later-writer outcome for /x with the committed overwrite of /z intact.
+    const final = applyChanges(applyChanges(base, [C]), transformed) as any;
+    expect(final).toEqual({ x: 5, z: [9] });
+  });
+
+  it('D2b: a committed array insert at a replaced index keeps shifting later queue entries', () => {
+    // base arr=[a0,a1,a2]. Committed inserts 'w' at index 1. The queue replaces index 1 (a1)
+    // and then removes index 2 (a2). Dropping the committed insert from the advance frame as a
+    // "superseded set" committed the remove un-shifted, deleting the user's own replacement.
+    const base = { arr: ['a0', 'a1', 'a2'] };
+    const C = { ...createChange(0, 1, [{ op: 'add', path: '/arr/1', value: 'w' }]), id: 'C' } as Change;
+    const Q1 = { ...createChange(0, 0, [{ op: 'replace', path: '/arr/1', value: 'q' }]), id: 'Q1' } as Change;
+    const Q2 = { ...createChange(0, 0, [{ op: 'remove', path: '/arr/2' }]), id: 'Q2' } as Change;
+
+    const transformed = transformIncomingChanges([Q1, Q2], [C], 1);
+
+    expect(transformed[0].ops).toEqual([{ op: 'replace', path: '/arr/2', value: 'q' }]);
+    expect(transformed[1].ops).toEqual([{ op: 'remove', path: '/arr/3' }]);
+    const final = applyChanges(applyChanges(base, [C]), transformed) as any;
+    expect(final.arr).toEqual(['a0', 'w', 'q']);
+  });
+
   describe('forceCommit option', () => {
     it('should preserve changes with empty ops when forceCommit is true', () => {
       const incomingChanges = [

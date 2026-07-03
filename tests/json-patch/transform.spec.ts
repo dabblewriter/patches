@@ -1545,5 +1545,130 @@ describe('transformPatch', () => {
         )
       ).toEqual([{ op: 'remove', path: '/y' }]);
     });
+
+    // D1: within-patch composition — a superseded set whose value escapes via a later move in
+    // the SAME earlier patch still overwrote the destination. Dropping both the set and the
+    // move made the walk forget the overwrite, so later queue entries written against the old
+    // destination survived and committed ops that failed strict apply (the committed-poison
+    // wedge class) or resurrected stale children.
+    it('composes a superseded set + move into a set at the move destination', () => {
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'add', path: '/x', value: 5 }],
+          [
+            { op: 'add', path: '/x', value: [9] },
+            { op: 'move', from: '/x', path: '/z' },
+          ],
+          undefined,
+          true
+        )
+      ).toEqual([{ op: 'add', path: '/z', value: [9] }]);
+    });
+
+    it('re-roots in-place edits of the superseded value onto the composed destination', () => {
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'add', path: '/x', value: 5 }],
+          [
+            { op: 'add', path: '/x', value: { a: 1 } },
+            { op: 'replace', path: '/x/a', value: 2 },
+            { op: 'move', from: '/x', path: '/z' },
+          ],
+          undefined,
+          true
+        )
+      ).toEqual([
+        { op: 'add', path: '/z', value: { a: 1 } },
+        { op: 'replace', path: '/z/a', value: 2 },
+      ]);
+    });
+
+    it('composes a superseded move-in escaping via a later move into a single move', () => {
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'add', path: '/x', value: 5 }],
+          [
+            { op: 'move', from: '/a', path: '/x' },
+            { op: 'move', from: '/x', path: '/z' },
+          ],
+          undefined,
+          true
+        )
+      ).toEqual([{ op: 'move', from: '/a', path: '/z' }]);
+    });
+
+    // D2b: at an ARRAY INDEX, add/copy/move-in INSERT rather than overwrite — an earlier
+    // committed insert at the same index as a later replace must survive the advance walk
+    // unchanged (so following queue entries keep shifting), never be dropped as a
+    // "superseded set".
+    it('keeps an earlier array insert at the same index as a later replace', () => {
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'replace', path: '/arr/1', value: 'q' }],
+          [{ op: 'add', path: '/arr/1', value: 'w' }],
+          undefined,
+          true
+        )
+      ).toEqual([{ op: 'add', path: '/arr/1', value: 'w' }]);
+      // A genuine overwrite (replace vs replace at the same index) still resolves to the later writer.
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'replace', path: '/arr/1', value: 'q' }],
+          [{ op: 'replace', path: '/arr/1', value: 'w' }],
+          undefined,
+          true
+        )
+      ).toEqual([]);
+    });
+
+    it('keeps an earlier array append (appends never overwrite)', () => {
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'add', path: '/tags/-', value: 'b' }],
+          [{ op: 'add', path: '/tags/-', value: 'a' }],
+          undefined,
+          true
+        )
+      ).toEqual([{ op: 'add', path: '/tags/-', value: 'a' }]);
+    });
+
+    // Same rule, replace flavor: a literal replace at the move source clobbers the moved
+    // value exactly like an add (its mirror also drops the move) — it must stay AT the
+    // source with the destination ghost-killed, never ride the move to the destination.
+    it('an earlier literal replace at a later move source stays at the source with a ghost-kill', () => {
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'move', from: '/y', path: '/x' }],
+          [{ op: 'replace', path: '/y', value: 2 }],
+          undefined,
+          true
+        )
+      ).toEqual([
+        { op: 'remove', path: '/x' },
+        { op: 'replace', path: '/y', value: 2 },
+      ]);
+    });
+
+    // D2m: an earlier committed insert at a later move's `from` index does not clobber the
+    // moved value (it inserts beside it) — the ghost-kill rule must not fire at array
+    // indexes; the insert falls through to the same-array shifting instead.
+    it('shifts an earlier insert at a later array move source instead of ghost-killing', () => {
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'move', from: '/tags/1', path: '/tags/0' }],
+          [{ op: 'add', path: '/tags/1', value: 'w' }],
+          undefined,
+          true
+        )
+      ).toEqual([{ op: 'add', path: '/tags/2', value: 'w' }]);
+    });
   });
 });

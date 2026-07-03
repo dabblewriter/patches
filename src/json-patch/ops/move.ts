@@ -92,10 +92,18 @@ export const move: JSONPatchOpHandler = {
           if (otherOp.path === path) return rest.map(protectOp); // identical move — frames already agree
           return move.transform(state, { op: 'move', from: otherOp.path, path }, rest).map(protectOp);
         }
-        if (isAdd(state, otherOp, 'path') && otherOp.path === from) {
+        if (
+          (isAdd(state, otherOp, 'path') || otherOp.op === 'replace') &&
+          otherOp.path === from &&
+          !isArrayPath(from, state)
+        ) {
           // An earlier set at our source: the set wins — this move consumed a value the set had already overwritten,
           // so the mirrored direction drops this move (see updateRemovedOps). The set's residual in our frame must
           // then also kill the ghost our move left at the destination, or ops depending on it survive incorrectly.
+          // A literal `replace` clobbers the source the same way (its mirror also drops this move) and must stay AT
+          // the source, not be redirected to the destination — but in-place @-ops (like 'replace') ride the move,
+          // and at an ARRAY INDEX an add/copy/move-in INSERTS rather than overwrites — it never clobbers the moved
+          // value, so it must fall through to the index shifting below.
           return [protectOp({ op: 'remove', path }), otherOp];
         }
       }

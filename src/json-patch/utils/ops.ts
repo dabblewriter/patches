@@ -13,6 +13,17 @@ export function isAdd(state: State, op: JSONPatchOp, pathName: 'from' | 'path') 
 }
 
 /**
+ * Check whether this operation unconditionally sets a whole new value at `path` (add, replace, or
+ * the destination of a copy/move) — as opposed to ops that update the existing value in place
+ * (@inc, @bit, @txt, …) or remove it.
+ */
+export function isHardSet(state: State, op: JSONPatchOp, path: string) {
+  if (op.path !== path || op.soft) return false;
+  const like = getTypeLike(state, op);
+  return like === 'add' || like === 'replace' || like === 'copy' || like === 'move';
+}
+
+/**
  * Transforms an array of ops, returning the original if there is no change, filtering out ops that are dropped.
  */
 export function mapAndFilterOps(
@@ -53,6 +64,12 @@ export function mapAndFilterOps(
 
 /**
  * Remove operations that apply to a value which was removed.
+ *
+ * `thisOp` (when provided by set-like callers — add/replace/copy/move) enables the
+ * last-writer-wins rule for `state.otherOpsFirst` transforms: when the ops being transformed
+ * precede `thisOp` in the authoritative order and both unconditionally set `thisPath`, the
+ * earlier set is superseded — it is dropped (a losing move-in leaves `remove <from>` behind,
+ * since its source value was consumed) and the walk continues so its dependents die too.
  */
 export function updateRemovedOps(
   state: State,
@@ -60,15 +77,24 @@ export function updateRemovedOps(
   otherOps: JSONPatchOp[],
   updatableObject = false,
   opOp?: string,
-  customHandler?: (op: JSONPatchOp) => any
+  customHandler?: (op: JSONPatchOp) => any,
+  thisOp?: JSONPatchOp
 ) {
   const softPrefixes = new Set();
+  const thisOpWins = !!(state.otherOpsFirst && thisOp && isHardSet(state, thisOp, thisPath));
 
   return mapAndFilterOps(otherOps, (op, index, breakAfter) => {
     const opLike = getTypeLike(state, op);
     const canMergeCustom = customHandler && opOp === op.op;
 
     if (thisPath === op.path && opLike !== 'remove' && !canMergeCustom && !op.soft) {
+      if (thisOpWins && isHardSet(state, op, thisPath)) {
+        // otherOps happened first and thisOp re-set the same path: the earlier set is
+        // superseded. A move that set this path consumed its source — export that removal so
+        // ops depending on the source stay consistent; adds/replaces/copies vanish outright.
+        // Keep walking (no break): later ops that depended on the superseded value must die.
+        return opLike === 'move' ? { op: 'remove', path: op.from! } : null;
+      }
       // Once an operation sets this value again, we can assume the following ops were working on that and not the
       // old value so they can be kept
       if (op.op !== 'test') {

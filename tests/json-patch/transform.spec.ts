@@ -1462,4 +1462,88 @@ describe('transformPatch', () => {
       ).toEqual([{ op: 'add', path: '/x', value: 1 }]);
     });
   });
+
+  describe('otherOpsFirst (rebase advance direction)', () => {
+    // The OT diamond walks in transformIncomingChanges/rebaseChanges advance an
+    // already-committed change through a local queue that commits after it. That call swaps
+    // the argument order relative to real time, so conflicting intents at the same path must
+    // resolve toward thisOps (the later writer) — the mirrors of the default direction's
+    // rules — or the two halves of the diamond disagree and later queue entries transform
+    // against ops the queue already superseded.
+
+    it('drops an earlier same-source move in favor of the later one', () => {
+      // Default direction: the other move re-moves the value from our destination. Advance
+      // direction: the earlier move's residual after the later one is nothing.
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'move', from: '/y', path: '/x' }],
+          [{ op: 'move', from: '/y', path: '/foo' }],
+          undefined,
+          true
+        )
+      ).toEqual([]);
+    });
+
+    it('redirects ops trailing a dropped same-source move onto the winning destination', () => {
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'move', from: '/y', path: '/x' }],
+          [
+            { op: 'move', from: '/y', path: '/foo' },
+            { op: 'replace', path: '/foo/name', value: 'a' },
+          ],
+          undefined,
+          true
+        )
+      ).toEqual([{ op: 'replace', path: '/x/name', value: 'a' }]);
+    });
+
+    it('an earlier set at a later move source carries a ghost-kill for the move destination', () => {
+      // The set wins the value (the move consumed a value the set had overwritten — the
+      // mirrored direction drops the move), and its residual must also remove the ghost the
+      // move left at its destination.
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'move', from: '/y', path: '/x' }],
+          [{ op: 'add', path: '/y', value: 2 }],
+          undefined,
+          true
+        )
+      ).toEqual([
+        { op: 'remove', path: '/x' },
+        { op: 'add', path: '/y', value: 2 },
+      ]);
+    });
+
+    it('drops an earlier set superseded by a later set at the same path', () => {
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'add', path: '/x', value: 1 }],
+          [{ op: 'add', path: '/x', value: 2 }],
+          undefined,
+          true
+        )
+      ).toEqual([]);
+      // Default direction keeps it: the other set lands after and overwrites.
+      expect(transformPatch(obj, [{ op: 'add', path: '/x', value: 1 }], [{ op: 'add', path: '/x', value: 2 }])).toEqual(
+        [{ op: 'add', path: '/x', value: 2 }]
+      );
+    });
+
+    it('a superseded earlier move-in leaves a remove of its source', () => {
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'add', path: '/x', value: 1 }],
+          [{ op: 'move', from: '/y', path: '/x' }],
+          undefined,
+          true
+        )
+      ).toEqual([{ op: 'remove', path: '/y' }]);
+    });
+  });
 });

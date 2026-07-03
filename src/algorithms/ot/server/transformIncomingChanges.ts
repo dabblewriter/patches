@@ -33,7 +33,10 @@ export function transformIncomingChanges(
     let committedOps = committed.ops;
     for (const entry of queue) {
       const transformed = transformPatch(null, committedOps, entry.ops);
-      committedOps = transformPatch(null, entry.ops, committedOps);
+      // Advancing the committed ops swaps the argument order relative to real time — the
+      // committed change actually precedes the queue — so `otherOpsFirst` makes conflicting
+      // intents resolve the same way in both halves of the diamond (see transformPatch).
+      committedOps = transformPatch(null, entry.ops, committedOps, undefined, true);
       entry.ops = transformed;
     }
   }

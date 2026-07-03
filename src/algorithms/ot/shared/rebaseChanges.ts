@@ -50,7 +50,10 @@ export function rebaseChanges(serverChanges: Change[], localChanges: Change[]): 
     let foreignOps = serverChange.ops;
     for (const entry of queue) {
       const transformed = transformPatch(null, foreignOps, entry.ops);
-      foreignOps = transformPatch(null, entry.ops, foreignOps);
+      // Advancing the server ops swaps the argument order relative to real time — the server
+      // change actually precedes the local queue — so `otherOpsFirst` makes conflicting
+      // intents resolve the same way in both halves of the diamond (see transformPatch).
+      foreignOps = transformPatch(null, entry.ops, foreignOps, undefined, true);
       entry.ops = transformed;
     }
   }

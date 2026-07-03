@@ -47,6 +47,20 @@ jobs:
       - name: LWW soak
         run: FUZZ_ALGO=lww FUZZ_SEED=${{ steps.seeds.outputs.base }} FUZZ_ITERATIONS=${{ github.event.inputs.lww_iterations || 10000 }} npm test -- tests/fuzz/convergence.spec.ts
 
+      # Failure-only Slack ping (#sentry-alerts). No-op until the
+      # SLACK_SOAK_WEBHOOK repo secret is set to a Slack incoming-webhook URL —
+      # the GitHub issue below is the durable record either way.
+      - name: Notify Slack on failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_SOAK_WEBHOOK }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then echo "No SLACK_SOAK_WEBHOOK secret — skipping Slack notify"; exit 0; fi
+          curl -sf -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\":red_circle: patches nightly convergence soak FAILED (seed base $(date -u +%Y%m%d)000) — failing seed + repro in the log: $RUN_URL\"}" \
+            "$SLACK_WEBHOOK_URL"
+
       # A red scheduled run only emails the workflow's last editor — easy to
       # miss. Surface failures as a GitHub issue instead: one open issue
       # collects repeats, and closing it acknowledges the finding.

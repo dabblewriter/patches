@@ -48,7 +48,7 @@ describe('Patches change queue integration', () => {
     expect(pending.map(c => c.rev)).toEqual([1, 2]); // distinct revs — no silent overwrite
   });
 
-  it('drops queued dependent changes when an earlier change fails to persist (finding #31)', async () => {
+  it('drops queued dependent changes when an earlier change is authoritatively rejected (finding #31)', async () => {
     setup();
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const errors: Error[] = [];
@@ -57,7 +57,7 @@ describe('Patches change queue integration', () => {
     });
 
     vi.spyOn(store, 'savePendingChanges').mockImplementationOnce(async () => {
-      throw new Error('transient store failure');
+      throw Object.assign(new Error('write denied'), { code: 403 });
     });
 
     const doc = await patches.openDoc<{ list?: string[]; fresh?: boolean }>('doc1');
@@ -65,7 +65,7 @@ describe('Patches change queue integration', () => {
     doc.change(patch => patch.add('/list/0', 'x')); // depends on the failed change
     await doc.flush();
 
-    expect(errors.map(e => e.message)).toEqual(['transient store failure']);
+    expect(errors.map(e => e.message)).toEqual(['write denied']);
     // The dependent change must not be persisted against a base that no longer exists.
     expect(await store.getPendingChanges('doc1')).toEqual([]);
     expect(doc.state).toEqual({}); // both rolled back

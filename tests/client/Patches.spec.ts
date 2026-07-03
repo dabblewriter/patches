@@ -503,7 +503,7 @@ describe('Patches', () => {
   });
 
   describe('change queue failure isolation (finding #31)', () => {
-    it('skips changes queued behind a failure that rolled back the optimistic queue', async () => {
+    it('skips changes queued behind an authoritative rejection that rolled back the optimistic queue', async () => {
       mockDoc.rollbackOptimistic = vi.fn();
       let capturedChangeHandler: any;
       mockDoc.onChange.mockImplementation((cb: any) => {
@@ -527,7 +527,8 @@ describe('Patches', () => {
       const second = capturedChangeHandler([{ op: 'add', path: '/a/0', value: 'x' }]); // depends on first
       await new Promise(r => setTimeout(r, 0));
 
-      rejectFirst(new Error('transient store failure'));
+      // Terminal StatusError shape — the server's definitive verdict on the change.
+      rejectFirst(Object.assign(new Error('write denied'), { code: 403 }));
       await first;
       await second;
 
@@ -535,6 +536,7 @@ describe('Patches', () => {
       expect(mockAlgorithm.handleDocChange).toHaveBeenCalledTimes(1);
       expect(mockDoc.rollbackOptimistic).toHaveBeenCalledTimes(1);
       expect(onErrorSpy).toHaveBeenCalledTimes(1);
+      expect(onErrorSpy.mock.calls[0][1]).toEqual({ docId: 'doc1', willRetry: false });
 
       // A change made after the rollback processes normally.
       await capturedChangeHandler([{ op: 'add', path: '/c', value: 3 }]);
@@ -551,14 +553,14 @@ describe('Patches', () => {
       await patches.submitDocChange('doc1', ops);
 
       expect(mockDoc._applyOptimistic).toHaveBeenCalledWith(ops);
-      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {});
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {}, expect.any(String), false);
     });
 
     it('passes undefined doc when the doc is not open', async () => {
       const ops = [{ op: 'add' as const, path: '/x', value: 1 }];
       await patches.submitDocChange('doc1', ops);
 
-      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, undefined, {});
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, undefined, {}, expect.any(String), false);
     });
 
     it('is a no-op for empty ops', async () => {
@@ -661,21 +663,56 @@ describe('Patches', () => {
       const ops = [{ op: 'add' as const, path: '/test', value: 'value' }];
       await (patches as any)._handleDocChange('doc1', ops, mockDoc, mockAlgorithm, {});
 
-      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {});
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {}, expect.any(String), false);
       expect(onChangeSpy).toHaveBeenCalledWith('doc1');
     });
 
-    it('should handle errors and emit onError', async () => {
+    it('should roll back and emit onError on an authoritative rejection', async () => {
+      mockDoc.rollbackOptimistic = vi.fn();
       const onErrorSpy = vi.fn();
       patches.onError(onErrorSpy);
 
-      const error = new Error('Algorithm failed');
+      const error = Object.assign(new Error('Algorithm rejected'), { code: 404 });
       vi.mocked(mockAlgorithm.handleDocChange).mockRejectedValue(error);
 
       const ops = [{ op: 'add' as const, path: '/test', value: 'value' }];
       await (patches as any)._handleDocChange('doc1', ops, mockDoc, mockAlgorithm, {});
 
-      expect(onErrorSpy).toHaveBeenCalledWith(error, { docId: 'doc1' });
+      expect(mockDoc.rollbackOptimistic).toHaveBeenCalledTimes(1);
+      expect(onErrorSpy).toHaveBeenCalledWith(error, { docId: 'doc1', willRetry: false });
+    });
+
+    it('should keep ops and retry (same stable id) on a transient failure', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        mockDoc.rollbackOptimistic = vi.fn();
+        mockDoc._hasOptimisticEntry = vi.fn().mockReturnValue(true);
+        const onErrorSpy = vi.fn();
+        patches.onError(onErrorSpy);
+
+        const error = new Error('Call timed out'); // no status code — ambiguous transport death
+        vi.mocked(mockAlgorithm.handleDocChange).mockRejectedValueOnce(error).mockResolvedValueOnce([]);
+
+        const ops = [{ op: 'add' as const, path: '/test', value: 'value' }];
+        const processed = (patches as any)._handleDocChange('doc1', ops, mockDoc, mockAlgorithm, {});
+        await vi.advanceTimersByTimeAsync(0);
+
+        // Failed once, nothing rolled back, error surfaced as retryable.
+        expect(mockDoc.rollbackOptimistic).not.toHaveBeenCalled();
+        expect(onErrorSpy).toHaveBeenCalledWith(error, { docId: 'doc1', willRetry: true, attempt: 0 });
+
+        await vi.advanceTimersByTimeAsync(1000); // first backoff
+        await processed;
+
+        expect(mockAlgorithm.handleDocChange).toHaveBeenCalledTimes(2);
+        const [first, second] = vi.mocked(mockAlgorithm.handleDocChange).mock.calls;
+        expect(first).toEqual(['doc1', ops, mockDoc, {}, expect.any(String), false]);
+        expect(second).toEqual(['doc1', ops, mockDoc, {}, first[4], true]); // same stable id, isRetry
+        expect(mockDoc.rollbackOptimistic).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
@@ -737,7 +774,7 @@ describe('Patches', () => {
       const ops = [{ op: 'add' as const, path: '/test', value: 'value' }];
       await capturedChangeHandler(ops);
 
-      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {});
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {}, expect.any(String), false);
     });
   });
 

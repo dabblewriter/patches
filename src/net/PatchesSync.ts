@@ -11,7 +11,7 @@ import type { AlgorithmName, TrackedDoc } from '../client/PatchesStore.js';
 import { isDocLoaded } from '../shared/utils.js';
 import type { Change, DocSyncState, DocSyncStatus, PatchesSnapshot } from '../types.js';
 import { blockable, serialGate } from '../utils/concurrency.js';
-import { ErrorCodes, isAbortError, isNetworkError, NetworkError, StatusError } from './error.js';
+import { ErrorCodes, isAbortError, isNetworkError, NetworkError, StatusError, TERMINAL_STATUS_CODES } from './error.js';
 import type { PatchesConnection } from './PatchesConnection.js';
 import type { JSONRPCClient } from './protocol/JSONRPCClient.js';
 import type { BranchAPI, ConnectionState } from './protocol/types.js';
@@ -64,7 +64,8 @@ const SYNC_RETRY_BASE_MS = 1_000;
 const SYNC_RETRY_MAX_MS = 30_000;
 const SYNC_RETRY_MAX_ATTEMPTS = 10;
 // Definitive StatusError codes — don't retry (auth, payment, permission, not-found, gone).
-const TERMINAL_SYNC_CODES = new Set([401, 402, 403, 404, 410]);
+// Shared with Patches' change-submit retry so both layers classify failures the same way.
+const TERMINAL_SYNC_CODES = TERMINAL_STATUS_CODES;
 // Slow background re-probe for a doc left at 'error' with pending changes while the
 // connection stays up (see `_scheduleSyncReprobe`).
 const SYNC_REPROBE_EXHAUSTED_MS = 5 * 60_000;

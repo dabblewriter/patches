@@ -1,11 +1,33 @@
+import { createId } from 'crypto-id';
 import { type Unsubscriber, signal } from 'easy-signal';
 import type { JSONPatchOp } from '../json-patch/types.js';
+import { isRejectionError } from '../net/error.js';
 import type { Change, PatchesSnapshot } from '../types.js';
 import { singleInvocation } from '../utils/concurrency.js';
 import type { BaseDoc } from './BaseDoc.js';
 import type { ClientAlgorithm } from './ClientAlgorithm.js';
 import type { PatchesDoc, PatchesDocOptions } from './PatchesDoc.js';
 import type { AlgorithmName } from './PatchesStore.js';
+
+/**
+ * Backoff for re-submitting a change whose mint failed transiently/ambiguously
+ * (timeout, abort, network death, store hiccup — anything that is not an
+ * authoritative rejection). Doubles per attempt from the base, capped at the max.
+ * Attempts are unbounded: the only correct terminal states for un-persisted user
+ * ops are a definitive server rejection or instance teardown — giving up and
+ * discarding them is data loss (the failure that motivated this: a wedged hub's
+ * 30s RPC timeouts erasing just-typed text that nothing had rejected).
+ */
+const CHANGE_RETRY_BASE_MS = 1_000;
+const CHANGE_RETRY_MAX_MS = 30_000;
+
+/**
+ * Length of the stable change id minted per captured change (base-62). Stable
+ * across retries so id-based idempotency layers (OTAlgorithm._findChangeById,
+ * server commit dedup) recognize a re-submission of a change whose first attempt
+ * MAY have landed, instead of committing a duplicate.
+ */
+const STABLE_CHANGE_ID_LENGTH = 12;
 
 /**
  * Options for opening a document, passed through to `patches.openDoc()`.
@@ -77,8 +99,23 @@ export class Patches {
   readonly defaultAlgorithm: AlgorithmName;
   readonly trackedDocs = new Set<string>();
 
+  /** True once close() has run; parks the change-submit retry loops. */
+  private _closed = false;
+  /**
+   * Wake functions for change-submit retry backoffs currently sleeping, so close()
+   * can cancel their timers and let the loops observe `_closed` immediately instead
+   * of firing against torn-down algorithm stores.
+   */
+  private _retryWakeups = new Set<() => void>();
+
   // Public signals
-  readonly onError = signal<(error: Error, context?: { docId?: string }) => void>();
+  /**
+   * Emitted on failures. For a failed change submit, `context.willRetry` tells
+   * consumers whether the ops were kept and will be re-submitted (transient/
+   * ambiguous failure) or were rolled back (authoritative rejection).
+   */
+  readonly onError =
+    signal<(error: Error, context?: { docId?: string; willRetry?: boolean; attempt?: number }) => void>();
   readonly onServerCommit = signal<(docId: string, changes: Change[]) => void>();
   readonly onTrackDocs = signal<(docIds: string[], algorithmName: AlgorithmName) => void>();
   readonly onUntrackDocs = signal<(docIds: string[]) => void>();
@@ -478,6 +515,14 @@ export class Patches {
    * Should be called when shutting down the client.
    */
   async close(): Promise<void> {
+    // Park the change-submit retry loops first: set the flag, then cancel every
+    // sleeping backoff so the loops wake, observe `_closed`, and exit without
+    // re-submitting against the algorithm stores we are about to close. The ops
+    // they were retrying stay applied on their (discarded) docs — teardown never
+    // rolls anything back.
+    this._closed = true;
+    for (const wake of [...this._retryWakeups]) wake();
+
     // Drain in-flight openDoc() bodies first. Without this, an open resolving after
     // close() cleared the maps would call this.docs.set against an emptied map with
     // a doc bound to closed algorithm internals. allSettled so a failed open during
@@ -553,6 +598,31 @@ export class Patches {
     return current;
   }
 
+  /**
+   * Mints/persists one captured change via the algorithm, distinguishing two
+   * failure classes:
+   *
+   * - **Authoritative rejection** (terminal StatusError — the server/store
+   *   definitively refused the change): the optimistic ops are rolled back and
+   *   the per-doc epoch is bumped so dependent changes queued behind are skipped.
+   *   Discarding is correct — the work was rejected.
+   * - **Transient/ambiguous failure** (timeout, abort, network death, store
+   *   hiccup): the write MAY have landed (or may land on a later attempt), and
+   *   nothing rejected it — discarding the ops would silently delete the user's
+   *   un-persisted work. The ops stay applied (and queued in `_optimisticOps`)
+   *   and the submit is re-issued with backoff. Every attempt carries the same
+   *   stable change id, so id-based idempotency (OTAlgorithm._findChangeById,
+   *   server commit dedup) makes the re-submission exactly-once.
+   *
+   * The retry runs inside the per-doc change queue, so later changes wait behind
+   * it in capture order — required for OT correctness (their ops assume this
+   * change's ops are already in the doc frame). While the backoff sleeps, server
+   * changes still rebase the kept ops in place (OTDoc._rebaseOptimisticOps holds
+   * the same array reference), so the eventual re-mint packages correctly-based
+   * ops. If the change is confirmed through another path while waiting (e.g. a
+   * hub broadcast of a persisted-but-timed-out change), the optimistic entry is
+   * shifted off the queue and the retry loop detects that and stops.
+   */
   private async _processDocChange<T extends object>(
     docId: string,
     ops: JSONPatchOp[],
@@ -560,19 +630,61 @@ export class Patches {
     algorithm: ClientAlgorithm,
     metadata: Record<string, any>
   ): Promise<void> {
-    try {
-      await algorithm.handleDocChange(docId, ops, doc, metadata);
-      this.onChange.emit(docId);
-    } catch (err) {
-      console.error(`Error handling doc change for ${docId}:`, err);
-      const baseDoc = doc as unknown as BaseDoc<T> | undefined;
-      if (baseDoc && typeof baseDoc.rollbackOptimistic === 'function') {
-        // Bump the epoch BEFORE rolling back so changes already queued behind this
-        // failure (whose optimistic ops the rollback just discarded) are skipped.
-        this._changeEpochs.set(docId, (this._changeEpochs.get(docId) ?? 0) + 1);
-        baseDoc.rollbackOptimistic();
+    // Minted once per captured change; stable across every retry of this submit.
+    const stableId = createId(STABLE_CHANGE_ID_LENGTH);
+    const baseDoc = doc as unknown as BaseDoc<T> | undefined;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await algorithm.handleDocChange(docId, ops, doc, metadata, stableId, attempt > 0);
+        this.onChange.emit(docId);
+        return;
+      } catch (err) {
+        if (isRejectionError(err)) {
+          console.error(`Error handling doc change for ${docId}:`, err);
+          if (baseDoc && typeof baseDoc.rollbackOptimistic === 'function') {
+            // Bump the epoch BEFORE rolling back so changes already queued behind this
+            // failure (whose optimistic ops the rollback just discarded) are skipped.
+            this._changeEpochs.set(docId, (this._changeEpochs.get(docId) ?? 0) + 1);
+            baseDoc.rollbackOptimistic();
+          }
+          this.onError.emit(err as Error, { docId, willRetry: false });
+          return;
+        }
+
+        console.warn(`Transient failure handling doc change for ${docId} (attempt ${attempt + 1}), will retry:`, err);
+        this.onError.emit(err as Error, { docId, willRetry: true, attempt });
+        await this._retryDelay(attempt);
+        // Torn down while sleeping: leave the ops in place (nothing is rolled back
+        // on teardown) and stop — the algorithm/store is closing or closed.
+        if (this._closed) return;
+        // Rebased away to a no-op while waiting — nothing left to submit.
+        if (ops.length === 0) return;
+        // Confirmed through another path while waiting (its optimistic entry was
+        // shifted by applyChanges) — re-submitting would double-apply.
+        if (baseDoc && typeof baseDoc._hasOptimisticEntry === 'function' && !baseDoc._hasOptimisticEntry(ops)) {
+          return;
+        }
       }
-      this.onError.emit(err as Error, { docId });
     }
+  }
+
+  /**
+   * Sleeps for the change-submit retry backoff (exponential, capped), registering
+   * a wakeup so close() can cancel the timer and resolve immediately.
+   */
+  private _retryDelay(attempt: number): Promise<void> {
+    // An attempt that was in flight (not sleeping) when close() ran settles after
+    // the wakeup sweep — don't let it start a fresh timer that outlives the close.
+    if (this._closed) return Promise.resolve();
+    const ms = Math.min(CHANGE_RETRY_MAX_MS, CHANGE_RETRY_BASE_MS * 2 ** attempt);
+    return new Promise<void>(resolve => {
+      const wake = () => {
+        clearTimeout(timer);
+        this._retryWakeups.delete(wake);
+        resolve();
+      };
+      const timer = setTimeout(wake, ms);
+      this._retryWakeups.add(wake);
+    });
   }
 }

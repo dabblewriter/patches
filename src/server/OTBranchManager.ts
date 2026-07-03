@@ -5,6 +5,7 @@ import { createVersionMetadata } from '../data/version.js';
 import type { Branch, Change, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
 import type { BranchManager } from './BranchManager.js';
 import {
+  advanceMergeWatermark,
   assertBranchMetadata,
   assertBranchExists,
   assertNotABranch,
@@ -86,8 +87,13 @@ export class OTBranchManager implements BranchManager {
       // contentStartRev tells us where user content begins (init changes are below it).
       contentStartRev = metadata.contentStartRev;
     } else {
-      // Generate init changes from the source state at the branch point
-      const { state: stateAtRev } = await getStateAtRevision(this.store, docId, rev);
+      // Generate init changes from the source state at the branch point.
+      // Materializing the branch point replays settled, committed source history
+      // (reconstruction, not live apply): an invalid committed op from a
+      // lenient-era commit is skipped — matching what version builds and
+      // pre-strict clients computed for the same log — rather than making the
+      // source doc permanently un-branchable. Skips log via console.error.
+      const { state: stateAtRev } = await getStateAtRevision(this.store, docId, rev, { reconstruction: {} });
       const rootReplace = createChange(0, 1, [{ op: 'replace' as const, path: '', value: stateAtRev }], {
         createdAt: now,
         committedAt: now,
@@ -145,6 +151,23 @@ export class OTBranchManager implements BranchManager {
    * All merge changes use `batchId: branchId` so that `commitChanges` never transforms
    * branch changes against each other (they share the same causal context).
    *
+   * ## Retry and concurrency safety
+   *
+   * The commit and the `lastMergedRev` update are two writes, so a crash or timeout can land
+   * between them, and nothing serializes two merges of the same branch. Safety comes from
+   * three properties rather than a transaction:
+   *
+   * 1. **Idempotent commit** — merged changes keep their original branch change ids, and the
+   *    merge base (the server's id-dedup window) is stable across attempts (see
+   *    {@link resolveMergeBase}), so a retry or concurrent merge re-sending the same changes
+   *    dedups to a no-op inside `commitChanges` instead of applying them twice.
+   * 2. **Watermark from the merged batch** — `lastMergedRev` is set to the highest branch rev
+   *    in the batch actually read and committed, never the branch tip, so an edit landing on
+   *    the branch mid-merge stays uncovered and is picked up by the next merge.
+   * 3. **Forward-only watermark** — the update is a compare-and-set when the store supports
+   *    `updateBranchIf` (see {@link advanceMergeWatermark}), so interleaved merges cannot
+   *    regress the watermark; without the capability, legacy max-wins semantics apply.
+   *
    * @param branchId - The ID of the branch document to merge.
    * @returns The server commit change(s) applied to the source document.
    * @throws Error if branch not found, already closed/merged, or merge fails.
@@ -155,25 +178,7 @@ export class OTBranchManager implements BranchManager {
     assertBranchExists(branch, branchId);
 
     const sourceDocId = branch.docId;
-    // Clamp the merge base to the source's actual current revision. A branch
-    // can carry a `branchedAtRev` that is *ahead* of the source's committed tip
-    // — e.g. a migrated/re-synced document whose change log was renumbered down
-    // under a branch record, leaving `branchedAtRev` pointing one (or more) revs
-    // past the last change that exists. Committing the branch's changes with a
-    // `baseRev` greater than the source's current rev trips `commitChanges`'
-    // "baseRev ahead of server revision" guard and the merge throws. Nothing
-    // exists between the source tip and `branchedAtRev`, so rebasing onto the
-    // real tip is correct and a no-op for healthy branches.
-    const sourceCurrentRev = await this.store.getCurrentRev(sourceDocId);
-    const branchStartRevOnSource = Math.min(branch.branchedAtRev, sourceCurrentRev);
-    if (branch.branchedAtRev > sourceCurrentRev) {
-      // The clamp only fires on a corrupted/renumbered source doc — exactly the
-      // data-integrity case worth surfacing rather than merging silently.
-      console.warn(
-        `[OTBranchManager] branch ${branchId} branchedAtRev (${branch.branchedAtRev}) is ahead of ` +
-          `source ${sourceDocId} currentRev (${sourceCurrentRev}); clamping merge base to ${branchStartRevOnSource}`
-      );
-    }
+    const branchStartRevOnSource = await this.resolveMergeBase(branch);
 
     // Get only unmerged changes: since lastMergedRev (if previously merged) or contentStartRev
     const startAfter = branch.lastMergedRev ?? (branch.contentStartRev ?? 2) - 1;
@@ -199,13 +204,20 @@ export class OTBranchManager implements BranchManager {
     // become the source's version watermark and leave real source revs un-versioned.
     const toSourceRev = (rev: number) => branchStartRevOnSource + Math.max(0, rev - startAfter);
 
-    // Note: if version creation succeeds but commit fails, orphaned versions
-    // may remain in the store. The store interface does not currently expose a
-    // deleteVersion method, so cleanup is not possible. These orphaned versions
-    // are harmless (they reference a groupId that was never fully merged).
+    // Copy versions with a deterministic identity: the source copy keeps the branch version's
+    // id (version ids are namespaced per doc, so there is no collision on the source). A
+    // retried merge — the crash window is between the commit below and the watermark update —
+    // or a concurrent merge of the same branch finds the existing copy and skips it instead of
+    // minting a duplicate. Orphaned copies from a merge whose commit then failed are harmless
+    // and are adopted by the retry the same way.
     let lastVersionId: string | undefined;
     for (const v of branchVersions) {
-      const base = {
+      const alreadyCopied = await this.store.loadVersion(sourceDocId, v.id);
+      if (alreadyCopied) {
+        lastVersionId = v.id;
+        continue;
+      }
+      const copy = {
         ...v,
         origin: 'branch' as const,
         startRev: toSourceRev(v.startRev),
@@ -213,17 +225,17 @@ export class OTBranchManager implements BranchManager {
         groupId: branchId,
         parentId: lastVersionId,
       };
-      if (base.parentId === undefined) delete base.parentId;
-      const newVersionMetadata = createVersionMetadata(base);
+      if (copy.parentId === undefined) delete copy.parentId;
       const changes = await this.store.loadVersionChanges?.(branchId, v.id);
-      await this.store.createVersion(sourceDocId, newVersionMetadata, changes);
-      lastVersionId = newVersionMetadata.id;
+      await this.store.createVersion(sourceDocId, copy, changes);
+      lastVersionId = copy.id;
     }
 
     // Re-stamp branch changes for source document context:
     // - baseRev: where the branch diverged from source (for transformation)
     // - batchId: prevents transformation against previously-merged branch changes
-    // - Original change IDs preserved for retry idempotency
+    // - Original change IDs preserved: they are the dedup identity that makes a retried or
+    //   concurrent re-send of already-committed merge changes a no-op in commitChanges.
     const changesToCommit = branchChanges.map((c, i) => ({
       ...c,
       baseRev: branchStartRevOnSource,
@@ -236,12 +248,75 @@ export class OTBranchManager implements BranchManager {
       return (await this.patchesServer.commitChanges(sourceDocId, changesToCommit)).changes;
     });
 
-    // Merge succeeded. Update lastMergedRev so next merge picks up only new changes.
-    // Max-wins: another client may have merged concurrently with a higher rev.
-    const currentBranch = await this.store.loadBranch(branchId);
-    const effectiveLastMergedRev = Math.max(lastBranchRev, currentBranch?.lastMergedRev ?? 0);
-    await this.store.updateBranch(branchId, { lastMergedRev: effectiveLastMergedRev, modifiedAt: Date.now() });
+    // Merge succeeded. Advance lastMergedRev to the last branch rev in the batch we actually
+    // merged (never the branch tip — a concurrent branch edit past our snapshot must remain
+    // mergeable). CAS-guarded against concurrent merges when the store supports it.
+    await advanceMergeWatermark(this.store, branchId, branch.lastMergedRev, lastBranchRev);
     return committedMergeChanges;
+  }
+
+  /**
+   * Resolve the source revision to use as the merge base (`baseRev`) for a branch's merges.
+   *
+   * Healthy branches merge at `branchedAtRev`. A branch can carry a `branchedAtRev` that is
+   * *ahead* of the source's committed tip — e.g. a migrated/re-synced document whose change
+   * log was renumbered down under the branch record. Committing with a `baseRev` greater than
+   * the source's current rev trips `commitChanges`' "baseRev ahead of server revision" guard,
+   * so the base is clamped to the source tip: nothing exists between the tip and
+   * `branchedAtRev`, so rebasing onto the real tip is correct.
+   *
+   * The clamped base is persisted as `mergeBaseRev` BEFORE anything is committed, and every
+   * later attempt prefers it. This is what makes merge retries idempotent on clamped
+   * branches: `commitChanges` dedups re-sent changes by id within
+   * `listChanges(startAfter: baseRev)`, and the first attempt's own commits advance the
+   * source tip past `branchedAtRev` — so a retry that recomputed `min(branchedAtRev, tip)`
+   * would use a *higher* base, and the changes already committed below it would escape
+   * deduplication and be applied twice. Pinning the base keeps the dedup window identical
+   * across retries and server instances. First writer wins via CAS when the store supports it.
+   *
+   * The healthy path (`branchedAtRev <= tip`) must also respect a pin it cannot see in its
+   * own snapshot: a concurrent merge's commits may be exactly what advanced the tip past
+   * `branchedAtRev`, so a merge whose branch snapshot predates that merge's pin would
+   * otherwise take the early return with the higher base and re-apply the committed changes.
+   * Because the pin is written before anything is committed, on a strongly consistent store
+   * any tip read that includes another merge's commits also observes its pin — so the healthy
+   * path re-loads the branch record after the tip read and prefers a freshly pinned base.
+   */
+  private async resolveMergeBase(branch: Branch): Promise<number> {
+    if (branch.mergeBaseRev != null) return branch.mergeBaseRev;
+
+    const sourceCurrentRev = await this.store.getCurrentRev(branch.docId);
+    if (branch.branchedAtRev <= sourceCurrentRev) {
+      // The tip may have been advanced by a concurrent merge that pinned a clamped base
+      // before committing; our snapshot predates the pin, so check for it fresh.
+      const fresh = await this.store.loadBranch(branch.id);
+      if (fresh?.mergeBaseRev != null) return fresh.mergeBaseRev;
+      return branch.branchedAtRev;
+    }
+
+    const clamped = sourceCurrentRev;
+    // The clamp only fires on a corrupted/renumbered source doc — exactly the
+    // data-integrity case worth surfacing rather than merging silently.
+    console.warn(
+      `[OTBranchManager] branch ${branch.id} branchedAtRev (${branch.branchedAtRev}) is ahead of ` +
+        `source ${branch.docId} currentRev (${sourceCurrentRev}); clamping merge base to ${clamped}`
+    );
+
+    if (this.store.updateBranchIf) {
+      const applied = await this.store.updateBranchIf(
+        branch.id,
+        { mergeBaseRev: clamped, modifiedAt: Date.now() },
+        { mergeBaseRev: undefined }
+      );
+      if (!applied) {
+        // A concurrent merge pinned the base first (or the record changed) — theirs wins.
+        const current = await this.store.loadBranch(branch.id);
+        if (current?.mergeBaseRev != null) return current.mergeBaseRev;
+      }
+    } else {
+      await this.store.updateBranch(branch.id, { mergeBaseRev: clamped, modifiedAt: Date.now() });
+    }
+    return clamped;
   }
 }
 

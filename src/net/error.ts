@@ -28,6 +28,56 @@ export const ErrorCodes = {
 } as const;
 
 /**
+ * Error for a request that died at the network level, without ever producing an
+ * HTTP response or status code: a fetch rejection (DNS/TCP/TLS failure or a
+ * CORS-opaque rejection — both surface as a status-less `TypeError`), a request
+ * timeout, or a transport that knew it had no live connection.
+ *
+ * The distinction matters to consumers: a {@link StatusError} is the server's
+ * verdict on ONE document, while a NetworkError says nothing about the doc it was
+ * for — it is evidence of CONNECTION trouble. PatchesSync treats it accordingly
+ * (waiting-for-connection posture + connection-level recovery) instead of latching
+ * the doc at a terminal per-doc 'error'. Custom `PatchesConnection`
+ * implementations should throw this (or an error named `NetworkError`) for their
+ * own status-less network failures to get the same handling.
+ */
+export class NetworkError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'NetworkError';
+  }
+}
+
+/**
+ * True for failures that never carried an HTTP status because the request died at
+ * the network level — see {@link NetworkError}. Matches by name as well as
+ * instance so errors from a duplicated module copy or a structured-clone boundary
+ * (which preserves only name/message/stack) classify the same, and recognizes the
+ * platform's raw timeout shape (`AbortSignal.timeout` firing mid body-read
+ * surfaces a `TimeoutError` DOMException past any transport wrapping). Cancelled
+ * requests/transactions are a sibling class — see {@link isAbortError}.
+ */
+export function isNetworkError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return err.name === 'NetworkError' || err.name === 'TimeoutError';
+}
+
+/**
+ * True for a cancelled request or storage transaction — a DOMException named
+ * `AbortError` (legacy `code` 20, `DOMException.ABORT_ERR`). Fetches abort when
+ * their context is torn down mid-flight (page navigation, app quit, worker
+ * termination) or an `AbortController` fires; IndexedDB transactions abort
+ * under storage pressure (quota, eviction, browser shutdown). Either way the
+ * error describes the *environment*, not the document or the server — so sync
+ * treats it as an interruption to recover from, never a per-doc failure to
+ * latch. Name-based (not `instanceof DOMException`) so errors that crossed a
+ * structured-clone/worker boundary still classify.
+ */
+export function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError';
+}
+
+/**
  * Error rejected by the JSON-RPC client for protocol-level errors (negative
  * JSON-RPC codes like -32601). HTTP-style positive codes are rehydrated into
  * {@link StatusError} instead so callers can branch on `err.code` uniformly.

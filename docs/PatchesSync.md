@@ -220,12 +220,14 @@ Here's exactly when each field changes:
 | `syncDoc` starts       | `syncStatus` → `'syncing'`                                                                                                           |
 | Server changes applied | `committedRev` updated to last server change's revision                                                                              |
 | `syncDoc` succeeds     | `syncStatus` → `'synced'`                                                                                                            |
-| `syncDoc` fails        | `syncStatus` → `'error'`, `syncError` set                                                                                            |
+| `syncDoc` fails        | `syncStatus` → `'error'`, `syncError` set — unless the failure was network-level (see below)                                         |
 | Local change made      | `hasPending` = `true`, `syncStatus` → `'syncing'` (if connected)                                                                     |
 | `flushDoc` succeeds    | `hasPending` updated from remaining pending, `syncStatus` → `'synced'`                                                               |
-| `flushDoc` fails       | `syncStatus` → `'error'`, `syncError` set                                                                                            |
+| `flushDoc` fails       | `syncStatus` → `'error'`, `syncError` set — unless the failure was network-level (see below)                                         |
 | Doc untracked          | Entry removed                                                                                                                        |
 | Doc remotely deleted   | Entry removed                                                                                                                        |
+
+**Status-less interruptions never latch a doc at `'error'`.** A failure with no HTTP status — the fetch rejected without a response, the request timed out, the transport had no live connection (`NetworkError`), or the request/storage transaction was cancelled (`AbortError`: page teardown mid-sync, IndexedDB abort under storage pressure; see `isNetworkError`/`isAbortError` in `net/error.ts`) — is connection/environment trouble, not a verdict on the document, and one unreachable server would otherwise latch every tracked doc at once. The doc instead returns to the same stable posture disconnect uses (`'synced'` when it has local data, `'unsynced'` for a brand-new doc; `hasPending` still marks unsent work) and recovery stays with the connection-level machinery: a backed-off retry ladder, then a slow background re-probe (scheduled even with nothing pending, since the connection may still read `connected` while fetches fail), and any reconnect's full re-sync. Network-class failures stay quiet at every stage; an abort that persists past the full ladder while connected surfaces via `onError` exactly once (a real environment problem) without painting the doc. `'error'` + `syncError` is reserved for genuine doc-level failures: coded 4xx/5xx `StatusError`s and apply failures.
 
 ### Practical Example: Per-Document Save Indicator
 

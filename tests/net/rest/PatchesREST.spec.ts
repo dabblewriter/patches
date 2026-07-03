@@ -647,6 +647,38 @@ describe('PatchesREST', () => {
         message: 'Document not found',
       });
     });
+
+    it('wraps a status-less fetch rejection in NetworkError, preserving the cause', async () => {
+      // fetch rejects without ever producing a response (DNS/TCP/TLS failure or a
+      // CORS-opaque rejection) — the browser shape is a bare TypeError.
+      const cause = new TypeError('Failed to fetch');
+      globalThis.fetch = vi.fn().mockRejectedValue(cause);
+
+      await expect(rest.getDoc('doc1')).rejects.toMatchObject({
+        name: 'NetworkError',
+        cause,
+      });
+      // The message keeps the request context and the original reason for debugging.
+      await expect(rest.getDoc('doc1')).rejects.toThrow(/GET \/docs\/doc1 .*Failed to fetch/);
+    });
+
+    it('wraps an AbortSignal timeout rejection in NetworkError', async () => {
+      globalThis.fetch = vi.fn().mockRejectedValue(new DOMException('The operation timed out.', 'TimeoutError'));
+
+      await expect(rest.commitChanges('doc1', [])).rejects.toMatchObject({ name: 'NetworkError' });
+    });
+
+    it('does not wrap a coded HTTP failure — StatusError passes through untouched', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: 'Forbidden',
+        json: () => Promise.resolve({ message: 'Forbidden' }),
+      });
+
+      // StatusError, not NetworkError (StatusError keeps the default Error name).
+      await expect(rest.getDoc('doc1')).rejects.toMatchObject({ code: 403, name: 'Error' });
+    });
   });
 
   describe('headers', () => {

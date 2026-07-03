@@ -196,6 +196,21 @@ export interface TombstoneStoreBackend {
 }
 
 /**
+ * Precondition for {@link BranchingStoreBackend.updateBranchIf}.
+ *
+ * Every key *present* on the object is compared against the branch record's current value
+ * with strict equality, where `undefined` means "the field is not set on the record".
+ * Implementations must distinguish a key set to `undefined` from an absent key (use
+ * `Object.keys(expected)` / the `in` operator, not truthiness).
+ */
+export interface BranchPrecondition {
+  /** Expected current merge watermark (`undefined` = never merged). */
+  lastMergedRev?: number | undefined;
+  /** Expected current persisted merge base (`undefined` = not set). */
+  mergeBaseRev?: number | undefined;
+}
+
+/**
  * Interface for branch storage. Standalone interface that can be composed
  * with OTStoreBackend or LWWStoreBackend as needed.
  */
@@ -221,6 +236,27 @@ export interface BranchingStoreBackend {
     branchId: string,
     updates: Partial<Omit<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'contentStartRev'>>
   ): Promise<void>;
+
+  /**
+   * Optional capability: compare-and-set update of a branch record.
+   *
+   * Atomically applies `updates` only when the branch record's current values match
+   * `expected` (see {@link BranchPrecondition} for the comparison contract). Returns `true`
+   * when the update was applied and `false` on a precondition mismatch — including when the
+   * branch record is missing or tombstoned.
+   *
+   * Backends should implement this with their native conditional-write primitive (a
+   * transaction, an ETag/revision precondition, a conditional UPDATE). Merge code uses it to
+   * advance the merge watermark (`lastMergedRev`) and to pin the merge base (`mergeBaseRev`)
+   * without racing concurrent merges of the same branch. Stores without this capability fall
+   * back to non-atomic read-then-write (max-wins) semantics, so multi-instance deployments
+   * that can merge a branch concurrently should implement it.
+   */
+  updateBranchIf?(
+    branchId: string,
+    updates: Partial<Omit<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'contentStartRev'>>,
+    expected: BranchPrecondition
+  ): Promise<boolean>;
 
   /**
    * Replaces a branch record with a tombstone containing only `id`, `docId`, `modifiedAt`,

@@ -14,7 +14,7 @@ import type {
   PatchesState,
   VersionMetadata,
 } from '../../types.js';
-import { StatusError } from '../error.js';
+import { NetworkError, StatusError } from '../error.js';
 import type { PatchesConnection } from '../PatchesConnection.js';
 import type { ConnectionState } from '../protocol/types.js';
 import { onlineState } from '../websocket/onlineState.js';
@@ -547,16 +547,28 @@ export class PatchesREST implements PatchesConnection {
     const method = init?.method ?? 'GET';
     const hasBody = init?.body !== undefined;
 
-    const response = await globalThis.fetch(`${this._url}${path}`, {
-      method,
-      credentials: 'include',
-      headers: {
-        ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
-        ...headers,
-      },
-      body: hasBody ? JSON.stringify(init!.body) : undefined,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    let response: Response;
+    try {
+      response = await globalThis.fetch(`${this._url}${path}`, {
+        method,
+        credentials: 'include',
+        headers: {
+          ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+          ...headers,
+        },
+        body: hasBody ? JSON.stringify(init!.body) : undefined,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      // The request died without an HTTP response — a DNS/TCP/TLS failure or a
+      // CORS-opaque rejection (both a status-less TypeError), or the AbortSignal
+      // timeout above firing. There is no status to classify on and the failure
+      // says nothing about the doc it was for, so type it as connection trouble:
+      // PatchesSync defers these to connection-level recovery instead of latching
+      // the doc at per-doc 'error' (see NetworkError in ../error.ts).
+      const message = err instanceof Error ? err.message : String(err);
+      throw new NetworkError(`${method} ${path} failed without a response: ${message}`, { cause: err });
+    }
 
     if (!response.ok) {
       let message = response.statusText;

@@ -115,6 +115,18 @@ Applies a sequence of changes to a state object. Each change's operations execut
 
 A change that fails to apply throws an `ApplyChangesError` (carrying the failing change's id, rev, and batch index, with the patch error as `cause`) — it is never silently skipped, since a skipped change would diverge that client from every other client that applied it. `PatchesSync` recovers from this on the client by reloading the authoritative snapshot from the server. Before adopting the snapshot, pending changes are reconciled against the committed tail it subsumes (`rebaseChanges` — a pure op transform, safe even when the local committed state is corrupt): a pending change the server already committed is dropped rather than re-applied on top of a state that already contains it and re-sent as a duplicate.
 
+### applyChangesForReconstruction
+
+```typescript
+function applyChangesForReconstruction(state: any, changes: Change[], options?: ReconstructionOptions): any;
+```
+
+The historical-reconstruction variant of `applyChanges`: a change that fails to apply is **skipped** (reported through `options.onSkippedChange`, or `console.error` by default) instead of aborting the replay.
+
+Only legitimate when replaying committed history whose effects are already settled — the committed head is the truth and the replay merely reconstructs it: building version state from the committed change log (`buildVersionState`), computing history-scrubbing baselines (`PatchesHistoryManager.getStateBeforeVersion`, `PatchesHistoryClient.scrubTo`), and materializing a branch point (`OTBranchManager.createBranch`). A historically-invalid op (committed under lenient pre-strict semantics — the server never applies ops at commit time, so the log can contain them) must not make that history permanently unreadable or block versioning forever; skipping the whole failing change reproduces exactly what pre-strict clients computed when the change was originally applied.
+
+Never use it for live commit application or for materializing a client's current document — those paths stay strict so divergence is loud (see above). Server-side replay helpers (`buildVersionState`, `getBaseStateBeforeVersion`, `getStateBeforeVersionAsStream`, `getStateAtRevision`) accept an optional `ReplayOptions` argument whose `reconstruction` field opts a replay into this mode explicitly; they default to strict.
+
 ### changeBatching
 
 Three functions for handling large changes:

@@ -11,11 +11,42 @@ vi.mock('../../../../src/algorithms/ot/shared/applyChanges');
 describe('getStateAtRevision', () => {
   const mockGetSnapshotAtRevision = vi.mocked(getSnapshotAtRevisionModule.getSnapshotAtRevision);
   const mockApplyChanges = vi.mocked(applyChangesModule.applyChanges);
+  const mockApplyChangesForReconstruction = vi.mocked(applyChangesModule.applyChangesForReconstruction);
   let mockStore: OTStoreBackend;
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockStore = {} as any;
+  });
+
+  it('uses strict applyChanges by default and reconstruction only when explicitly opted in', async () => {
+    const versionState = { text: 'hello' };
+    const changes = [
+      {
+        id: 'c1',
+        rev: 2,
+        baseRev: 1,
+        createdAt: 1000,
+        committedAt: 1000,
+        ops: [{ op: 'replace', path: '/text', value: 'world' }],
+      },
+    ];
+    mockGetSnapshotAtRevision.mockResolvedValue({ state: versionState, rev: 1, changes });
+    mockApplyChanges.mockReturnValue({ text: 'world' });
+    mockApplyChangesForReconstruction.mockReturnValue({ text: 'world' });
+
+    await getStateAtRevision(mockStore, 'doc1', 2);
+    expect(mockApplyChanges).toHaveBeenCalledWith(versionState, changes);
+    expect(mockApplyChangesForReconstruction).not.toHaveBeenCalled();
+
+    vi.clearAllMocks();
+    mockGetSnapshotAtRevision.mockResolvedValue({ state: versionState, rev: 1, changes });
+    mockApplyChangesForReconstruction.mockReturnValue({ text: 'world' });
+
+    const reconstruction = { onSkippedChange: vi.fn() };
+    await getStateAtRevision(mockStore, 'doc1', 2, { reconstruction });
+    expect(mockApplyChangesForReconstruction).toHaveBeenCalledWith(versionState, changes, reconstruction);
+    expect(mockApplyChanges).not.toHaveBeenCalled();
   });
 
   it('should return state at specific revision', async () => {

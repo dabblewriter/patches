@@ -990,6 +990,157 @@ describe('PatchesSync', () => {
     });
   });
 
+  describe('aborted requests (DOMException AbortError, code 20)', () => {
+    // The class behind Sentry's `sync_doc_error_latched: … (20)` issues: fetches abort
+    // when the page/worker is torn down mid-sync (app quit, navigation, update reload)
+    // and IndexedDB transactions abort under storage pressure. Neither says anything
+    // about the doc or the server, so the doc must never latch per-doc 'error' (the
+    // amber-indicator + latch-telemetry state) — pending data is safe locally and the
+    // retry ladder / reprobe / reconnect machinery finishes the job.
+    const FIRST_RETRY_MS = 1000;
+    const REPROBE_EXHAUSTED_MS = 5 * 60_000;
+    const pendingChanges: Change[] = [{ id: 'p1', rev: 6, baseRev: 5, ops: [], createdAt: 0, committedAt: 0 }];
+
+    const fetchAbort = () => new DOMException('The user aborted a request.', 'AbortError');
+    const idbAbort = () => new DOMException('The transaction was aborted.', 'AbortError');
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      sync['updateState']({ connected: true });
+      mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('does not latch an aborted pull as a doc error and recovers via the retry ladder', async () => {
+      const errors: Error[] = [];
+      sync.onError((err: Error) => errors.push(err));
+      mockWebSocket.getChangesSince.mockRejectedValueOnce(fetchAbort()).mockResolvedValue([]);
+
+      await sync['syncDoc']('doc1');
+
+      expect(sync.docStates.state['doc1'].syncStatus).not.toBe('error');
+      expect(sync.docStates.state['doc1'].syncError).toBeUndefined();
+      expect(errors).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(FIRST_RETRY_MS);
+
+      expect(mockWebSocket.getChangesSince).toHaveBeenCalledTimes(2);
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+      expect(errors).toHaveLength(0);
+    });
+
+    it('never paints a transient per-doc error into the docStates stream on an aborted flush', async () => {
+      // The consuming hub broadcasts EVERY docStates transition to its tabs, where a
+      // momentary 'error' fires latch telemetry and the amber indicator — so not even
+      // an intermediate transition may show 'error'.
+      const seenStatuses: string[] = [];
+      sync.docStates.subscribe(states => {
+        const status = states['doc1']?.syncStatus;
+        if (status) seenStatuses.push(status);
+      });
+      const pendingRef = { current: pendingChanges as Change[] | null };
+      mockAlgorithm.getPendingToSend.mockImplementation(async () => pendingRef.current);
+      mockAlgorithm.confirmSent.mockImplementation(async () => {
+        pendingRef.current = null;
+      });
+      mockWebSocket.commitChanges.mockRejectedValueOnce(fetchAbort()).mockResolvedValue({ changes: pendingChanges });
+
+      await sync['syncDoc']('doc1');
+
+      // Pending survived the abort untouched — nothing was confirmed away.
+      expect(mockAlgorithm.confirmSent).not.toHaveBeenCalled();
+      expect(seenStatuses).not.toContain('error');
+      // Stable status while interrupted: local data exists, so 'synced' (same rule as
+      // the disconnect reset), with the retry ladder armed to finish the flush.
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+
+      await vi.advanceTimersByTimeAsync(FIRST_RETRY_MS);
+
+      expect(mockAlgorithm.confirmSent).toHaveBeenCalledTimes(1);
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+      expect(seenStatuses).not.toContain('error');
+    });
+
+    it('treats an aborted IndexedDB read like an aborted request (storage abort, same DOMException)', async () => {
+      const errors: Error[] = [];
+      sync.onError((err: Error) => errors.push(err));
+      mockAlgorithm.getPendingToSend.mockRejectedValueOnce(idbAbort()).mockResolvedValue(null);
+
+      await sync['syncDoc']('doc1');
+
+      expect(sync.docStates.state['doc1'].syncStatus).not.toBe('error');
+      expect(errors).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(FIRST_RETRY_MS);
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+    });
+
+    it('leaves a brand-new empty doc as unsynced when its first pull aborts', async () => {
+      mockAlgorithm.getCommittedRev.mockResolvedValue(0);
+      mockWebSocket.getDoc.mockRejectedValue(fetchAbort());
+
+      await sync['syncDoc']('doc1');
+
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('unsynced');
+      expect(sync.docStates.state['doc1'].syncError).toBeUndefined();
+    });
+
+    it('stays quiet with nothing armed when the abort coincides with teardown/disconnect', async () => {
+      const errors: Error[] = [];
+      sync.onError((err: Error) => errors.push(err));
+      mockWebSocket.getChangesSince.mockImplementation(async () => {
+        // The same teardown that aborted the fetch also dropped the connection.
+        sync['updateState']({ connected: false });
+        throw fetchAbort();
+      });
+
+      await sync['syncDoc']('doc1');
+
+      expect(sync.docStates.state['doc1'].syncStatus).not.toBe('error');
+      expect(errors).toHaveLength(0);
+      expect((sync as any)._syncRetryTimers.size).toBe(0);
+      expect((sync as any)._syncReprobeTimers.size).toBe(0);
+    });
+
+    it('bounds retries on persistent aborts, surfaces once, keeps reprobing — never latches', async () => {
+      const errors: Error[] = [];
+      sync.onError((err: Error) => errors.push(err));
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const pendingRef = { current: pendingChanges as Change[] | null };
+      mockAlgorithm.getPendingToSend.mockImplementation(async () => pendingRef.current);
+      mockAlgorithm.confirmSent.mockImplementation(async () => {
+        pendingRef.current = null;
+      });
+      mockWebSocket.commitChanges.mockRejectedValue(fetchAbort());
+
+      await sync['syncDoc']('doc1');
+      // Drain the full backoff ladder (≈181s): initial attempt + 10 retries, then exhaustion.
+      await vi.advanceTimersByTimeAsync(200_000);
+
+      expect(mockWebSocket.commitChanges).toHaveBeenCalledTimes(11);
+      // A persistent abort while connected+online is a real environment problem
+      // (storage pressure, wedged network stack): telemetry hears about it once…
+      expect(errors).toHaveLength(1);
+      expect(errors[0].name).toBe('AbortError');
+      // …but the doc still never latches, and the slow reprobe keeps working the pending.
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+      expect((sync as any)._syncReprobeTimers.size).toBe(1);
+
+      mockWebSocket.commitChanges.mockResolvedValue({ changes: pendingChanges });
+      await vi.advanceTimersByTimeAsync(REPROBE_EXHAUSTED_MS);
+
+      expect(mockAlgorithm.confirmSent).toHaveBeenCalledTimes(1);
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+      expect((sync as any)._syncReprobeTimers.size).toBe(0);
+      expect(errors).toHaveLength(1);
+      consoleSpy.mockRestore();
+    });
+  });
+
   describe('docStates untrack race (no resurrection)', () => {
     it('does not resurrect a docStates entry when an in-flight sync fails after untrack', async () => {
       sync['updateState']({ connected: true });

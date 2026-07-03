@@ -11,7 +11,7 @@ import type { AlgorithmName, TrackedDoc } from '../client/PatchesStore.js';
 import { isDocLoaded } from '../shared/utils.js';
 import type { Change, DocSyncState, DocSyncStatus, PatchesSnapshot } from '../types.js';
 import { blockable, serialGate } from '../utils/concurrency.js';
-import { ErrorCodes, StatusError } from './error.js';
+import { ErrorCodes, isAbortError, StatusError } from './error.js';
 import type { PatchesConnection } from './PatchesConnection.js';
 import type { JSONRPCClient } from './protocol/JSONRPCClient.js';
 import type { BranchAPI, ConnectionState } from './protocol/types.js';
@@ -591,6 +591,19 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         }
       }
       const syncError = failure instanceof Error ? failure : new Error(String(failure));
+      // A cancelled request/transaction (AbortError — DOMException code 20) is
+      // environment trouble, not a doc failure: fetches abort when the page/worker is
+      // torn down mid-sync (app quit, navigation, update reload) and IndexedDB
+      // transactions abort under storage pressure. The doc and its pending changes are
+      // untouched — pending is only cleared by confirmSent after a successful commit —
+      // so latching per-doc 'error' here only painted the amber unsynced indicator and
+      // fired latch telemetry for every quit-mid-sync (sync_doc_error_latched "(20)").
+      // Restore the stable status and lean on the retry ladder / reprobe / reconnect to
+      // finish the job if this context survives the abort.
+      if (isAbortError(failure)) {
+        this._handleSyncAborted(docId, baseDoc, pending, syncError);
+        return;
+      }
       this._updateDocSyncState(docId, { syncStatus: 'error', syncError });
       if (baseDoc) {
         baseDoc.updateSyncStatus('error', syncError);
@@ -621,6 +634,47 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           this._scheduleSyncReprobe(docId, retryable);
         }
       }
+    }
+  }
+
+  /**
+   * Recovery path for a sync attempt whose request or storage transaction was aborted
+   * (see {@link isAbortError}). Restores the doc's stable status with the same rule as
+   * the disconnect reset (`_resetSyncingStatuses`): pending or committed data means
+   * 'synced' (the data is safe locally and re-flushes on the next attempt), a brand-new
+   * empty doc stays 'unsynced'. Never latches 'error'.
+   *
+   * Recovery is then delegated to the existing machinery: the backed-off retry ladder
+   * while connected (a teardown abort leaves a timer that simply dies with the context),
+   * the slow reprobe once the ladder is exhausted and pending changes still need the
+   * server, and otherwise the reconnect's `syncAllKnownDocs`. Aborts that persist past
+   * the ladder while connected+online are a real environment problem (storage pressure,
+   * a wedged network stack) — surface those via onError exactly once, mirroring the
+   * exhausted-transient contract, but still without painting the doc.
+   */
+  protected _handleSyncAborted(
+    docId: string,
+    baseDoc: BaseDoc | undefined,
+    pending: Change[] | null | undefined,
+    error: Error
+  ): void {
+    const state = this.docStates.state[docId];
+    // Same rule as the disconnect reset, plus the pending changes this very attempt was
+    // carrying — docStates.hasPending can lag the store (it is only refreshed by a
+    // completed flush), but an aborted flush proves the pending exists.
+    const hasLocalData = (pending?.length ?? 0) > 0 || !!state?.hasPending || (state?.committedRev ?? 0) > 0;
+    const stableStatus: DocSyncStatus = hasLocalData ? 'synced' : 'unsynced';
+    this._updateDocSyncState(docId, { syncStatus: stableStatus });
+    baseDoc?.updateSyncStatus(stableStatus);
+    if (this._scheduleSyncRetry(docId)) return;
+    this._clearSyncRetry(docId);
+    if (this._isConnectedAndOnline() && !this._surfacedSyncErrors.has(docId)) {
+      this._surfacedSyncErrors.add(docId);
+      console.error(`Aborted request persisted past retries while syncing doc ${docId}:`, error);
+      this.onError.emit(error, { docId });
+    }
+    if (pending?.length) {
+      this._scheduleSyncReprobe(docId, true);
     }
   }
 
@@ -888,7 +942,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         return;
       }
       const flushError = err instanceof Error ? err : new Error(String(err));
-      this._updateDocSyncState(docId, { syncStatus: 'error', syncError: flushError });
+      // An aborted request must not paint even a transient per-doc 'error' — every
+      // docStates transition is observable (consumers broadcast them), and syncDoc's
+      // abort handling restores the stable status rather than latching. Everything
+      // else latches here as before.
+      if (!isAbortError(err)) {
+        this._updateDocSyncState(docId, { syncStatus: 'error', syncError: flushError });
+      }
       // Don't surface here — `syncDoc` (our only caller) owns the decision of whether
       // to log/emit: it stays quiet while a retry can still recover the doc, and
       // surfaces a latched failure exactly once. Emitting here too would double-report

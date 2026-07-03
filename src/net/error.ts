@@ -28,6 +28,21 @@ export const ErrorCodes = {
 } as const;
 
 /**
+ * True for a cancelled request or storage transaction — a DOMException named
+ * `AbortError` (legacy `code` 20, `DOMException.ABORT_ERR`). Fetches abort when
+ * their context is torn down mid-flight (page navigation, app quit, worker
+ * termination) or an `AbortController` fires; IndexedDB transactions abort
+ * under storage pressure (quota, eviction, browser shutdown). Either way the
+ * error describes the *environment*, not the document or the server — so sync
+ * treats it as an interruption to recover from, never a per-doc failure to
+ * latch. Name-based (not `instanceof DOMException`) so errors that crossed a
+ * structured-clone/worker boundary still classify.
+ */
+export function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError';
+}
+
+/**
  * Error rejected by the JSON-RPC client for protocol-level errors (negative
  * JSON-RPC codes like -32601). HTTP-style positive codes are rehydrated into
  * {@link StatusError} instead so callers can branch on `err.code` uniformly.

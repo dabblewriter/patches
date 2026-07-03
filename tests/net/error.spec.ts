@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { StatusError } from '../../src/net/error';
+import { isAbortError, StatusError } from '../../src/net/error';
 
 describe('StatusError', () => {
   describe('constructor', () => {
@@ -199,5 +199,34 @@ describe('StatusError', () => {
       expect(handleError(new StatusError(500, 'Server Error'))).toBe('Server Error');
       expect(handleError(new StatusError(200, 'OK'))).toBe('Unknown');
     });
+  });
+});
+
+describe('isAbortError', () => {
+  it('matches an aborted fetch (DOMException AbortError — legacy code 20)', () => {
+    // Browsers expose legacy `code` 20 (DOMException.ABORT_ERR) on AbortError — the
+    // "(20)" that appears in downstream telemetry. Classification is name-based, so it
+    // works even in environments (like this test DOM) that omit the legacy code.
+    expect(isAbortError(new DOMException('The user aborted a request.', 'AbortError'))).toBe(true);
+  });
+
+  it('matches an aborted IndexedDB transaction', () => {
+    expect(isAbortError(new DOMException('The transaction was aborted.', 'AbortError'))).toBe(true);
+  });
+
+  it('matches a name-preserving copy that crossed a worker boundary', () => {
+    // Structured clone / cross-boundary rehydration can yield a plain Error that
+    // kept only name/message — classification must not require DOMException.
+    const crossed = new Error('The user aborted a request.');
+    crossed.name = 'AbortError';
+    expect(isAbortError(crossed)).toBe(true);
+  });
+
+  it('does not match timeouts, HTTP statuses, or ordinary errors', () => {
+    expect(isAbortError(new DOMException('signal timed out', 'TimeoutError'))).toBe(false);
+    expect(isAbortError(new StatusError(403, 'Forbidden'))).toBe(false);
+    expect(isAbortError(new Error('network blip'))).toBe(false);
+    expect(isAbortError('AbortError')).toBe(false);
+    expect(isAbortError(undefined)).toBe(false);
   });
 });

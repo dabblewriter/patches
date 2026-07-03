@@ -128,6 +128,25 @@ describe('applyCommittedChanges', () => {
     }
   });
 
+  it('drops pending changes when a root-replace catchup supersedes them', () => {
+    // Intended semantics, not a bug: a root replace transforms every pending op away,
+    // mirroring the transform the server applies to those same changes at commit time.
+    // Keeping them alive locally would fork this replica from every other. Real offline
+    // edits are protected a layer up: PatchesSync flushes pending at their true baseRev
+    // before installing a server snapshot (_reloadDocFromServer's flushPendingFirst).
+    const pendingChange = createChange(3, [{ op: 'add', path: '/local', value: true }]);
+    pendingChange.id = 'local-change-1';
+    const snapshot = createSnapshot({ text: 'hello' }, 2, [pendingChange]);
+    const serverChanges = [createChange(10, [{ op: 'replace', path: '', value: { text: 'fresh' } }])];
+    serverChanges[0].id = 'server-change-1';
+
+    const result = applyCommittedChanges(snapshot, serverChanges);
+
+    expect(result.state).toEqual({ text: 'fresh' });
+    expect(result.rev).toBe(10);
+    expect(result.changes).toEqual([]);
+  });
+
   it('should handle complex rebase scenario', () => {
     const pendingChange1 = createChange(3, [{ op: 'add', path: '/local1', value: 'a' }]);
     const pendingChange2 = createChange(4, [{ op: 'add', path: '/local2', value: 'b' }]);

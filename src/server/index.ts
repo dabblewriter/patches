@@ -58,6 +58,7 @@ export type { GetDocOptions, PatchesServer } from './PatchesServer.js';
 export type {
   BranchingStoreBackend,
   BranchPrecondition,
+  CommittedChangeIds,
   ListFieldsOptions,
   LWWStoreBackend,
   OTStoreBackend,

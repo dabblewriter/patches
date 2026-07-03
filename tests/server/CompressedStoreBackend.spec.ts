@@ -165,9 +165,10 @@ describe('CompressedStoreBackend', () => {
   });
 
   describe('createVersion', () => {
-    it('should compress changes when creating version', async () => {
+    it('passes changes through uncompressed so the store can build version state', async () => {
       const backend = new CompressedStoreBackend(mockStore, base64Compressor);
-      const changes = [createChange('c1', 1, [{ op: 'add', path: '/test', value: 'data' }])];
+      const ops = [{ op: 'add', path: '/test', value: 'data' }];
+      const changes = [createChange('c1', 1, ops)];
       const metadata: VersionMetadata = {
         id: 'v1',
         endRev: 1,
@@ -179,14 +180,14 @@ describe('CompressedStoreBackend', () => {
 
       await backend.createVersion('doc1', metadata, changes);
 
-      expect(mockStore.createVersion).toHaveBeenCalled();
-      const savedVersionChange = savedVersionChanges[0];
-      expect(base64Compressor.isCompressed(savedVersionChange.changes[0].ops)).toBe(true);
+      expect(mockStore.createVersion).toHaveBeenCalledWith('doc1', metadata, changes);
+      expect(savedVersionChanges[0].changes[0].ops).toEqual(ops);
+      expect(Array.isArray(savedVersionChanges[0].changes[0].ops)).toBe(true);
     });
   });
 
   describe('loadVersionChanges', () => {
-    it('should decompress changes when loading version', async () => {
+    it('decompresses legacy versions stored compressed by earlier releases', async () => {
       const backend = new CompressedStoreBackend(mockStore, base64Compressor);
       const originalOps = [{ op: 'add', path: '/v', value: 'version-data' }];
 
@@ -202,6 +203,17 @@ describe('CompressedStoreBackend', () => {
       const result = await backend.loadVersionChanges('doc1', 'v1');
 
       expect(result[0].ops).toEqual(originalOps);
+    });
+
+    it('passes uncompressed version changes through untouched', async () => {
+      const backend = new CompressedStoreBackend(mockStore, base64Compressor);
+      const ops = [{ op: 'add', path: '/v', value: 'version-data' }];
+
+      savedVersionChanges.push({ changes: [createChange('c1', 1, ops)] });
+
+      const result = await backend.loadVersionChanges('doc1', 'v1');
+
+      expect(result[0].ops).toEqual(ops);
     });
   });
 
@@ -241,6 +253,54 @@ describe('CompressedStoreBackend', () => {
       await backend.deleteDoc('doc1');
 
       expect(mockStore.deleteDoc).toHaveBeenCalledWith('doc1');
+    });
+  });
+
+  describe('branch pass-through operations', () => {
+    const branch = {
+      id: 'b1',
+      docId: 'doc1',
+      branchedAtRev: 3,
+      createdAt: 1,
+      modifiedAt: 1,
+      contentStartRev: 2,
+    };
+
+    it('forwards branch methods to the underlying store', async () => {
+      const branchStore = {
+        ...mockStore,
+        listBranches: vi.fn().mockResolvedValue([branch]),
+        loadBranch: vi.fn().mockResolvedValue(branch),
+        createBranch: vi.fn(),
+        updateBranch: vi.fn(),
+        deleteBranch: vi.fn(),
+      };
+      const backend = new CompressedStoreBackend(branchStore, base64Compressor);
+
+      expect(await backend.listBranches('doc1', { since: 5 })).toEqual([branch]);
+      expect(branchStore.listBranches).toHaveBeenCalledWith('doc1', { since: 5 });
+
+      expect(await backend.loadBranch('b1')).toEqual(branch);
+      expect(branchStore.loadBranch).toHaveBeenCalledWith('b1');
+
+      await backend.createBranch(branch);
+      expect(branchStore.createBranch).toHaveBeenCalledWith(branch);
+
+      await backend.updateBranch('b1', { lastMergedRev: 4 });
+      expect(branchStore.updateBranch).toHaveBeenCalledWith('b1', { lastMergedRev: 4 });
+
+      await backend.deleteBranch('b1');
+      expect(branchStore.deleteBranch).toHaveBeenCalledWith('b1');
+    });
+
+    it('only exposes createBranchId when the underlying store defines it', async () => {
+      const withoutIdGen = new CompressedStoreBackend(mockStore, base64Compressor);
+      expect(withoutIdGen.createBranchId).toBeUndefined();
+
+      const createBranchId = vi.fn().mockReturnValue('generated-id');
+      const withIdGen = new CompressedStoreBackend({ ...mockStore, createBranchId }, base64Compressor);
+      expect(await withIdGen.createBranchId!('doc1')).toBe('generated-id');
+      expect(createBranchId).toHaveBeenCalledWith('doc1');
     });
   });
 

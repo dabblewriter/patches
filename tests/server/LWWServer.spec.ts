@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JSONPatchOp } from '../../src/json-patch/types';
 import { clearAuthContext, setAuthContext } from '../../src/net/serverContext';
 import { jsonReadable, readStreamAsString } from '../../src/server/jsonReadable';
+import { LWWMemoryStoreBackend } from '../../src/server/LWWMemoryStoreBackend';
 import { LWWServer } from '../../src/server/LWWServer';
 import type { LWWStoreBackend, ListFieldsOptions, VersioningStoreBackend } from '../../src/server/types';
 import type { ChangeInput, EditableVersionMetadata } from '../../src/types';
@@ -136,8 +137,8 @@ describe('LWWServer', () => {
       expect(server.store).toBe(mockStore);
     });
 
-    it('should create server with custom snapshotInterval', () => {
-      const server = new LWWServer(mockStore, { snapshotInterval: 100 });
+    it('should create server with custom changeIdTTL', () => {
+      const server = new LWWServer(mockStore, { changeIdTTL: 1000 });
       expect(server).toBeDefined();
     });
 
@@ -963,6 +964,136 @@ describe('LWWServer', () => {
 
       expect(mockStore.ops.get('doc1:/a')).toEqual(expect.objectContaining({ value: 1 }));
       expect(mockStore.ops.get('doc1:/b')).toEqual(expect.objectContaining({ value: 2 }));
+    });
+  });
+
+  describe('commitChanges - timestamp clamping', () => {
+    const T = 1700000000000;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('clamps a future-dated op ts to server time', async () => {
+      await server.commitChanges('doc1', [
+        { id: 'future1', ops: [{ op: 'replace', path: '/name', value: 'Fast', ts: T + 60_000 }] },
+      ]);
+
+      expect(mockStore.ops.get('doc1:/name')?.ts).toBe(T);
+    });
+
+    it('clamps a future-dated createdAt fallback to server time', async () => {
+      await server.commitChanges('doc1', [
+        { id: 'future2', createdAt: T + 60_000, ops: [{ op: 'replace', path: '/name', value: 'Fast' }] },
+      ]);
+
+      expect(mockStore.ops.get('doc1:/name')?.ts).toBe(T);
+    });
+
+    it('lets a later normal write from another client win over a clamped future-dated write', async () => {
+      await server.commitChanges('doc1', [
+        { id: 'future3', ops: [{ op: 'replace', path: '/name', value: 'Fast clock', ts: T + 60_000 }] },
+      ]);
+
+      vi.setSystemTime(T + 5000);
+      await server.commitChanges('doc1', [
+        { id: 'normal1', ops: [{ op: 'replace', path: '/name', value: 'Normal clock', ts: T + 5000 }] },
+      ]);
+
+      expect(mockStore.ops.get('doc1:/name')).toEqual(expect.objectContaining({ value: 'Normal clock', ts: T + 5000 }));
+    });
+
+    it('breaks equal-clamp ties by the existing tie rule (incoming wins)', async () => {
+      await server.commitChanges('doc1', [
+        { id: 'tie1', ops: [{ op: 'replace', path: '/name', value: 'First', ts: T + 60_000 }] },
+      ]);
+      await server.commitChanges('doc1', [
+        { id: 'tie2', ops: [{ op: 'replace', path: '/name', value: 'Second', ts: T + 90_000 }] },
+      ]);
+
+      expect(mockStore.ops.get('doc1:/name')).toEqual(expect.objectContaining({ value: 'Second', ts: T }));
+    });
+  });
+
+  describe('commitChanges - change id idempotency', () => {
+    let backend: LWWMemoryStoreBackend;
+
+    const inc = (id = 'retry1'): ChangeInput => ({
+      id,
+      rev: 1,
+      ops: [{ op: '@inc', path: '/count', value: 5, ts: 1000 }],
+    });
+
+    beforeEach(() => {
+      backend = new LWWMemoryStoreBackend();
+      server = new LWWServer(backend);
+    });
+
+    it('does not double-apply a retried @inc after a lost ack', async () => {
+      await server.commitChanges('doc1', [inc()]);
+      const retry = await server.commitChanges('doc1', [inc()]);
+
+      const ops = backend.getDocData('doc1')?.ops ?? [];
+      expect(ops).toContainEqual(expect.objectContaining({ path: '/count', op: 'replace', value: 5 }));
+      // The retry response still echoes the committed op so the client converges
+      expect(retry.changes).toHaveLength(1);
+      expect(retry.changes[0].ops).toContainEqual(expect.objectContaining({ path: '/count', op: 'replace', value: 5 }));
+    });
+
+    it('does not re-broadcast a fully deduped retry', async () => {
+      const emitSpy = vi.spyOn(server.onChangesCommitted, 'emit').mockResolvedValue();
+
+      await server.commitChanges('doc1', [inc()]);
+      await server.commitChanges('doc1', [inc()]);
+
+      expect(emitSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('applies fresh changes in a batch alongside deduped ones', async () => {
+      await server.commitChanges('doc1', [inc()]);
+
+      const fresh: ChangeInput = {
+        id: 'fresh1',
+        rev: 1,
+        ops: [{ op: 'replace', path: '/other', value: 'new', ts: 2000 }],
+      };
+      await server.commitChanges('doc1', [inc(), fresh]);
+
+      const ops = backend.getDocData('doc1')?.ops ?? [];
+      expect(ops).toContainEqual(expect.objectContaining({ path: '/count', value: 5 }));
+      expect(ops).toContainEqual(expect.objectContaining({ path: '/other', value: 'new' }));
+    });
+
+    it('expires change ids after the TTL, re-enabling the retry', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1700000000000);
+      try {
+        server = new LWWServer(backend, { changeIdTTL: 1000 });
+
+        await server.commitChanges('doc1', [inc()]);
+        vi.setSystemTime(1700000000000 + 2000);
+        await server.commitChanges('doc1', [inc()]);
+
+        // Past the TTL the id is gone, so the retry re-applies (the documented limit)
+        const ops = backend.getDocData('doc1')?.ops ?? [];
+        expect(ops).toContainEqual(expect.objectContaining({ path: '/count', value: 10 }));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps old behavior when the backend does not implement seenChangeIds', async () => {
+      server = new LWWServer(mockStore);
+
+      await server.commitChanges('doc1', [inc()]);
+      await server.commitChanges('doc1', [inc()]);
+
+      expect(mockStore.ops.get('doc1:/count')?.value).toBe(10);
     });
   });
 });

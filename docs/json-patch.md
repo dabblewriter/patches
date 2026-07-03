@@ -227,17 +227,29 @@ const patch = [
 // Immutable application - original unchanged
 const newDoc = applyPatch(doc, patch);
 // Result: { name: 'Updated', count: 8 }
-
-// Error handling
-try {
-  const result = applyPatch(doc, patch);
-} catch (err) {
-  console.error('Patch failed:', err.message);
-  console.log('Failed at operation index:', err.index);
-}
 ```
 
 `applyPatch` creates a new document. The original stays untouched. This immutability is fundamental to how Patches handles state - see [Patches](Patches.md) for the bigger picture.
+
+### Failure Handling
+
+What happens when an op fails depends on the op and the options. The exact contract:
+
+- **Default (no options)**: a failed `test` op (or any custom op with `like: 'test'`) aborts the whole patch and returns the original object, per RFC 6902. Earlier ops in the patch are discarded with it. Any other failed op is logged and skipped; the rest of the patch still applies.
+- **`strict: true`**: the first failed op of any kind throws a `TypeError`. This is what the OT replay paths use.
+- **`rigid: true`**: the first failed op of any kind aborts the patch and returns the original object, without throwing.
+- **`partial: true`**: changes what an abort returns. Instead of the original object, you get the state as of the last successful op.
+- **`silent: true`**: suppresses the `console.error` logging for failed ops.
+
+On any abort (failed test, or any failure under `rigid`), the failing op is saved to `opts.error`:
+
+```typescript
+const opts = { silent: true };
+const result = applyPatch(doc, patch, opts);
+if (opts.error) {
+  console.log('Patch aborted at:', opts.error);
+}
+```
 
 ## Supported Operations
 

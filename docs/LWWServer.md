@@ -10,6 +10,7 @@ The central authority for your [LWW](last-write-wins.md) system.
 - [When to Use LWW vs OT](#when-to-use-lww-vs-ot)
 - [Initialization](#initialization)
 - [Core Method: `commitChanges()`](#core-method-commitchanges)
+- [Retries and Idempotency](#retries-and-idempotency)
 - [Server-Side Changes with `change()`](#server-side-changes-with-change)
 - [State Retrieval](#state-retrieval)
 - [Document Lifecycle](#document-lifecycle)
@@ -34,12 +35,13 @@ Key differences from [OTServer](OTServer.md):
 
 What `LWWServer` does:
 
-1. **Timestamp Authority:** Assigns timestamps to operations that don't have them
-2. **Field Storage:** Keeps track of field values and their timestamps
-3. **LWW Resolution:** Uses the [`consolidateOps`](algorithms.md#consolidateops) algorithm to determine winners
-4. **Delta Operations:** Converts special ops like `@inc` and `@bit` to concrete values
-5. **Automatic Compaction:** Creates snapshots every N revisions to keep storage efficient
-6. **Catchup Support:** Returns ops the client missed since their last known revision
+1. **Timestamp Authority:** Assigns timestamps to operations that don't have them, and clamps every client timestamp to at most server time
+2. **Retry Dedup:** Drops changes it already committed, when the store records change ids (see [Retries and Idempotency](#retries-and-idempotency))
+3. **Field Storage:** Keeps track of field values and their timestamps
+4. **LWW Resolution:** Uses the [`consolidateOps`](algorithms.md#consolidateops) algorithm to determine winners
+5. **Delta Operations:** Converts special ops like `@inc` and `@bit` to concrete values
+6. **Automatic Compaction:** Creates snapshots every N revisions to keep storage efficient
+7. **Catchup Support:** Returns ops the client missed since their last known revision
 
 ## When to Use LWW vs OT
 
@@ -80,9 +82,10 @@ const server = new LWWServer(store, options);
 
 ### Configuration Options
 
-| Option             | Type     | Default | Description                                                                                                |
-| ------------------ | -------- | ------- | ---------------------------------------------------------------------------------------------------------- |
-| `snapshotInterval` | `number` | `200`   | Number of revisions between automatic snapshots. Lower values = more storage, faster state reconstruction. |
+| Option             | Type     | Default | Description                                                                                                                                                                                                                  |
+| ------------------ | -------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `snapshotInterval` | `number` | `200`   | Number of revisions between automatic snapshots. Lower values = more storage, faster state reconstruction.                                                                                                                   |
+| `changeIdTTL`      | `number` | 30 days | How long committed change ids are retained for retry dedup, in ms. Only used when the store implements `seenChangeIds()`. Keep it long enough to cover offline clients that restart and retry a persisted change days later. |
 
 ## Core Method: `commitChanges()`
 
@@ -117,37 +120,43 @@ const change: ChangeInput = {
 
 ### What Happens Inside
 
-1. **Timestamp Assignment**
-   - Ops without timestamps get the current server time (`Date.now()`)
-   - This ensures all ops have a consistent timestamp basis
+1. **Retry Dedup** (only when the store implements `seenChangeIds()`)
+   - Changes whose ids the store already committed are dropped instead of re-applied
+   - The response still echoes the committed ops for the paths they touched, so a retrying client converges
+   - See [Retries and Idempotency](#retries-and-idempotency)
 
-2. **Load Existing Ops**
+2. **Timestamp Assignment and Clamping**
+   - Ops without timestamps get the change's `createdAt`, falling back to server time
+   - Every timestamp is clamped to at most server time. A client with a fast clock can't stamp a value ten minutes into the future and wedge that field against every other writer
+
+3. **Load Existing Ops**
    - Fetches all current field values from storage via `listOps()`
 
-3. **Consolidate Using LWW Rules**
+4. **Consolidate Using LWW Rules**
    - Uses the [`consolidateOps`](algorithms.md#consolidateops) algorithm
    - For each incoming op, compares timestamps with existing values
    - Later timestamp wins. On ties, incoming wins.
    - Special handling for combinable ops (`@inc`, `@bit`, `@max`, `@min`)
 
-4. **Parent Hierarchy Validation**
+5. **Parent Hierarchy Validation**
    - If you try to set `/user/name` but `/user` is a primitive, returns a correction op
    - Prevents invalid hierarchies (you can't have children under a string)
 
-5. **Convert Delta Ops**
+6. **Convert Delta Ops**
    - `@inc` ops become `replace` with computed sum
    - `@bit` ops become `replace` with combined bitmask
    - `@max`/`@min` ops become `replace` with the winning value
 
-6. **Save Winning Ops**
+7. **Save Winning Ops**
    - Persists ops that won the timestamp comparison
+   - Records the fresh change ids in the same `saveOps()` call, so ids and ops commit or fail together
    - Deletes child paths when parent is overwritten
 
-7. **Compact if Needed**
+8. **Compact if Needed**
    - Every `snapshotInterval` revisions, saves a snapshot
    - Keeps state reconstruction fast
 
-8. **Build Catchup Response**
+9. **Build Catchup Response**
    - Returns ops the client missed since their `rev`
    - For every path the client just sent, echoes the server's STORED resolution: the
      surviving row for that path (the client's op if it won, the older stored row if it
@@ -204,6 +213,27 @@ These ops always combine regardless of timestamp:
 ```
 
 For more on these operations, see the [algorithms documentation](algorithms.md#lww-algorithms).
+
+## Retries and Idempotency
+
+LWW compacts ops per path and keeps no change log. Great for storage. Terrible for retries.
+
+Here's the failure: a client commits a change, the server applies it, and the ack gets lost (network drop, server restart, laptop lid). The client retries the same change. [OT](OTServer.md) shrugs this off because its change log retains ids and the duplicate is recognized. LWW has no such log. For `replace` ops the replay is harmless. For delta ops (`@inc`, `@bit`, `@max`, `@min`) it double-counts: increment a counter by 5, retry, and you've incremented by 10.
+
+The fix is a short-term memory of committed change ids. When the store implements `seenChangeIds()`, `commitChanges()`:
+
+1. Asks the store which incoming change ids it already committed
+2. Drops those changes instead of re-applying them
+3. Echoes the currently committed ops for the paths they touched, so the retrying client confirms its sending layer and converges on the server's value
+4. Records the ids of fresh changes in the same `saveOps()` call that persists their ops
+
+Step 4's atomicity is not optional. If ids were persisted in a separate call, a crash between the two could ack the ops but lose the ids, silently re-enabling the double-apply on the next retry.
+
+Ids are retained for `changeIdTTL` (default 30 days). That sounds long, and it should be: an offline client can persist a sending change, sit closed for a week, then restart and retry it. Expiry is the backend's job. The server passes `expireAt` alongside every batch of ids so implementations can use a database TTL index or prune lazily.
+
+One caveat: ids are only recorded when `saveOps()` runs. A change whose ops all lose the timestamp comparison stores nothing and records nothing. That's fine: replaying it just loses again.
+
+If your store does not implement `seenChangeIds()`, nothing changes: no dedup, and retried delta ops re-apply exactly as before.
 
 ## Server-Side Changes with `change()`
 
@@ -363,11 +393,21 @@ interface LWWStoreBackend extends ServerStoreBackend {
   // List ops, optionally filtered
   listOps(docId: string, options?: ListFieldsOptions): Promise<JSONPatchOp[]>;
 
-  // Save ops and atomically increment revision
-  saveOps(docId: string, ops: JSONPatchOp[], pathsToDelete?: string[]): Promise<number>;
+  // Save ops and atomically increment revision; changeIds (when given) must
+  // persist in the same transaction as the ops
+  saveOps(docId: string, ops: JSONPatchOp[], pathsToDelete?: string[], changeIds?: CommittedChangeIds): Promise<number>;
+
+  // Optional: which of these change ids were committed and have not expired?
+  // Implementing this enables retry dedup (see Retries and Idempotency)
+  seenChangeIds?(docId: string, ids: string[]): Promise<string[]>;
 
   // Delete document and all data (from ServerStoreBackend)
   deleteDoc(docId: string): Promise<void>;
+}
+
+interface CommittedChangeIds {
+  ids: string[];
+  expireAt: number; // Unix ms after which the ids may be discarded (TTL index hint)
 }
 ```
 
@@ -393,6 +433,7 @@ This is the most critical method to get right. Your implementation must:
 2. **Set `rev`** on all saved ops to the new revision
 3. **Delete child paths** when saving a parent (e.g., saving `/obj` deletes `/obj/name`)
 4. **Delete paths in `pathsToDelete`** atomically with saving ops
+5. **Persist `changeIds.ids`** (when provided) in the same transaction as the ops. A separate write can ack the ops and lose the ids, silently re-enabling double-applied retries.
 
 If you can't do all of this atomically, you risk inconsistent state.
 

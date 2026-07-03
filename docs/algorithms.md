@@ -152,6 +152,8 @@ function decompressFromUint8Array(compressed: Uint8Array): string | null;
 
 Used internally for compressing large payloads. The Base64 variants work well for storage; Uint8Array variants for binary protocols.
 
+On the server, `CompressedStoreBackend` uses these to compress the change-row log only (`saveChanges`/`listChanges`). Version changes and branch metadata pass through uncompressed: the inner store builds version state by applying those changes, and versions live in blob/JSON storage without row-size limits. `loadVersionChanges` still decompresses on read for versions stored compressed by earlier releases.
+
 ### rebaseChanges
 
 ```typescript

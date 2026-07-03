@@ -110,11 +110,15 @@ class MemoryOTBranchStore implements OTStoreBackend, BranchingStoreBackend {
   }
 
   async loadBranch(branchId: string): Promise<Branch | null> {
-    return this.branches.get(branchId) ?? null;
+    // Copy — real backends deserialize an independent snapshot per read. Returning the live
+    // record would let stale-snapshot interleavings self-heal via shared mutation, hiding
+    // exactly the concurrency races these tests exist to model.
+    const branch = this.branches.get(branchId);
+    return branch ? { ...branch } : null;
   }
 
   async createBranch(branch: Branch): Promise<void> {
-    this.branches.set(branch.id, branch);
+    this.branches.set(branch.id, { ...branch });
   }
 
   async updateBranch(branchId: string, updates: Partial<Branch>): Promise<void> {
@@ -481,6 +485,69 @@ describe('OTBranchManager integration', () => {
       // a dedup window that no longer contains the committed copies at revs 4–5, letting
       // e1/e2 commit a second time. The pinned base keeps the window stable.
       await manager.mergeBranch('b1');
+
+      expect(await changeIds(store, 'doc1')).toEqual(['s1', 's2', 's3', 'e1', 'e2']);
+      expect((await store.loadBranch('b1'))!.lastMergedRev).toBe(3);
+      const { state } = await coldLoad(server, 'doc1');
+      expect(state).toEqual({ src1: 1, src2: 2, src3: 3, edit1: 1, edit2: 2 });
+      warnSpy.mockRestore();
+    });
+
+    it('dedups concurrent merges of a clamped branch when one reads the tip after the other commits', async () => {
+      const { store, server, manager } = setup();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      // Migrated doc: source renumbered down to rev 3, branch record still claims
+      // branchedAtRev 5 (ahead of the tip).
+      await server.commitChanges('doc1', [rootChange('s1', { src1: 1 })]);
+      await server.commitChanges('doc1', [change('s2', 1, '/src2', 2)]);
+      await server.commitChanges('doc1', [change('s3', 2, '/src3', 3)]);
+      const now = Date.now();
+      await store.createBranch({
+        id: 'b1',
+        docId: 'doc1',
+        branchedAtRev: 5,
+        contentStartRev: 2,
+        createdAt: now,
+        modifiedAt: now,
+      });
+      await store.saveChanges('b1', [
+        { ...rootChange('i1', { src1: 1, src2: 2, src3: 3 }), createdAt: now, committedAt: now } as Change,
+      ]);
+      await server.commitChanges('b1', [change('e1', 1, '/edit1', 1)]);
+      await server.commitChanges('b1', [change('e2', 2, '/edit2', 2)]);
+
+      // Park merge B inside its source-tip read: B's branch snapshot predates any pin, and
+      // the read completes only after merge A has pinned the clamped base and committed.
+      let parkB!: () => void;
+      const bParked = new Promise<void>(resolve => (parkB = resolve));
+      let releaseB!: () => void;
+      const bReleased = new Promise<void>(resolve => (releaseB = resolve));
+      const originalGetCurrentRev = store.getCurrentRev.bind(store);
+      let intercept = true;
+      store.getCurrentRev = async docId => {
+        if (intercept && docId === 'doc1') {
+          intercept = false;
+          parkB();
+          await bReleased;
+        }
+        return originalGetCurrentRev(docId);
+      };
+
+      const mergeB = manager.mergeBranch('b1');
+      await bParked;
+
+      // Merge A runs to completion: clamps and pins the base (3), commits e1/e2 at revs 4–5.
+      await manager.mergeBranch('b1');
+      expect((await store.loadBranch('b1'))!.mergeBaseRev).toBe(3);
+      expect(await changeIds(store, 'doc1')).toEqual(['s1', 's2', 's3', 'e1', 'e2']);
+
+      // B resumes: its tip read (5) includes A's own merge commits, so branchedAtRev (5) <=
+      // tip and the healthy early-return off the stale snapshot would resolve base 5 — a
+      // dedup window that misses the copies at revs 4–5, committing e1/e2 a second time.
+      // B must observe A's pin (written before A committed anything) and reuse base 3.
+      releaseB();
+      await mergeB;
 
       expect(await changeIds(store, 'doc1')).toEqual(['s1', 's2', 's3', 'e1', 'e2']);
       expect((await store.loadBranch('b1'))!.lastMergedRev).toBe(3);

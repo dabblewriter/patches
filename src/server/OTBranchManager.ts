@@ -272,14 +272,27 @@ export class OTBranchManager implements BranchManager {
    * source tip past `branchedAtRev` — so a retry that recomputed `min(branchedAtRev, tip)`
    * would use a *higher* base, and the changes already committed below it would escape
    * deduplication and be applied twice. Pinning the base keeps the dedup window identical
-   * across retries and server instances. First writer wins via CAS when the store supports
-   * it, so two concurrent merges reading different tips cannot disagree on the base.
+   * across retries and server instances. First writer wins via CAS when the store supports it.
+   *
+   * The healthy path (`branchedAtRev <= tip`) must also respect a pin it cannot see in its
+   * own snapshot: a concurrent merge's commits may be exactly what advanced the tip past
+   * `branchedAtRev`, so a merge whose branch snapshot predates that merge's pin would
+   * otherwise take the early return with the higher base and re-apply the committed changes.
+   * Because the pin is written before anything is committed, on a strongly consistent store
+   * any tip read that includes another merge's commits also observes its pin — so the healthy
+   * path re-loads the branch record after the tip read and prefers a freshly pinned base.
    */
   private async resolveMergeBase(branch: Branch): Promise<number> {
     if (branch.mergeBaseRev != null) return branch.mergeBaseRev;
 
     const sourceCurrentRev = await this.store.getCurrentRev(branch.docId);
-    if (branch.branchedAtRev <= sourceCurrentRev) return branch.branchedAtRev;
+    if (branch.branchedAtRev <= sourceCurrentRev) {
+      // The tip may have been advanced by a concurrent merge that pinned a clamped base
+      // before committing; our snapshot predates the pin, so check for it fresh.
+      const fresh = await this.store.loadBranch(branch.id);
+      if (fresh?.mergeBaseRev != null) return fresh.mergeBaseRev;
+      return branch.branchedAtRev;
+    }
 
     const clamped = sourceCurrentRev;
     // The clamp only fires on a corrupted/renumbered source doc — exactly the

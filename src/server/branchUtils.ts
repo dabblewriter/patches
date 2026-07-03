@@ -1,6 +1,7 @@
 import { createId } from 'crypto-id';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import type { Branch, CreateBranchMetadata, EditableBranchMetadata } from '../types.js';
+import type { BranchingStoreBackend } from './types.js';
 
 /**
  * Standard API definition for branch managers.
@@ -42,15 +43,23 @@ export function assertBranchMetadata(metadata?: EditableBranchMetadata) {
 }
 
 /**
- * Drops the merge watermark from client-supplied branch metadata. Only server merge code
- * may set `lastMergedRev` — clients sync whole branch records (PatchesSync), so a stale
- * value arrives on ordinary metadata updates and must be ignored rather than rejected:
- * honoring it would rewind or advance the merge cursor, re-merging or skipping changes.
+ * Server-managed merge bookkeeping fields that clients must never set. `lastMergedRev` is the
+ * merge watermark; `mergeBaseRev` pins the merge base (and with it the server's change-id
+ * dedup window) for branches whose `branchedAtRev` was found ahead of the source tip.
  */
-export function stripMergeWatermark(metadata: EditableBranchMetadata): EditableBranchMetadata {
-  if (!('lastMergedRev' in metadata)) return metadata;
+const serverManagedMergeFields = ['lastMergedRev', 'mergeBaseRev'] as const;
+
+/**
+ * Drops server-managed merge bookkeeping from client-supplied branch metadata. Only server
+ * merge code may set `lastMergedRev`/`mergeBaseRev` — clients sync whole branch records
+ * (PatchesSync), so stale values arrive on ordinary metadata updates and must be ignored
+ * rather than rejected: honoring them would rewind or advance the merge cursor (re-merging or
+ * skipping changes) or shift the merge base's dedup window (re-applying merged changes).
+ */
+export function stripMergeWatermark<T extends Record<string, any>>(metadata: T): T {
+  if (!serverManagedMergeFields.some(field => field in metadata)) return metadata;
   const safe = { ...metadata };
-  delete safe.lastMergedRev;
+  for (const field of serverManagedMergeFields) delete safe[field];
   return safe;
 }
 
@@ -89,7 +98,10 @@ export function createBranchRecord(
 ): Branch {
   const now = Date.now();
   return {
-    ...metadata,
+    // Server-managed merge bookkeeping cannot be seeded at create time: a forged
+    // lastMergedRev would skip changes on the first merge, and a forged mergeBaseRev
+    // would shift the merge's dedup window and re-apply already-merged changes.
+    ...(metadata && stripMergeWatermark(metadata)),
     id: branchDocId,
     docId: sourceDocId,
     branchedAtRev,
@@ -156,4 +168,60 @@ export async function wrapMergeCommit<T>(
     console.error(`Failed to merge branch ${branchId} into ${sourceDocId}:`, error);
     throw new Error(`Merge failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
+}
+
+/** Bound on watermark CAS retries — only contended by concurrent merges of the same branch. */
+const MAX_WATERMARK_CAS_RETRIES = 5;
+
+/**
+ * Advance a branch's merge watermark (`lastMergedRev`) to `mergedThroughRev` — the highest
+ * branch rev included in the merge batch that was just committed — after a successful merge.
+ *
+ * With a CAS-capable store (`updateBranchIf`), the watermark only ever moves forward: the
+ * write is conditioned on the value observed when the merge began, and on a mismatch (a
+ * concurrent merge advanced it first) the record is re-read and the write retried — or
+ * skipped entirely when the concurrent merge already covered this batch. This closes the
+ * read-modify-write race where two interleaved merges could each read a stale watermark and
+ * the slower writer regress it, causing the next merge to re-scan (and re-copy versions for)
+ * already-merged branch revisions.
+ *
+ * Stores without the capability keep the legacy non-atomic max-wins read-then-write.
+ *
+ * Never called with a watermark computed from the branch tip — only from the batch actually
+ * read and committed — so a branch edit landing during the merge stays uncovered and is
+ * picked up by the next merge.
+ */
+export async function advanceMergeWatermark(
+  store: BranchingStoreBackend,
+  branchId: string,
+  expectedLastMergedRev: number | undefined,
+  mergedThroughRev: number
+): Promise<void> {
+  if (!store.updateBranchIf) {
+    // Legacy semantics: non-atomic read-then-write, max-wins against concurrent merges.
+    const current = await store.loadBranch(branchId);
+    const effective = Math.max(mergedThroughRev, current?.lastMergedRev ?? 0);
+    await store.updateBranch(branchId, { lastMergedRev: effective, modifiedAt: Date.now() });
+    return;
+  }
+
+  let expected = expectedLastMergedRev;
+  for (let attempt = 0; attempt < MAX_WATERMARK_CAS_RETRIES; attempt++) {
+    // A concurrent merge already covered this batch — its watermark stands.
+    if (expected !== undefined && expected >= mergedThroughRev) return;
+    const applied = await store.updateBranchIf(
+      branchId,
+      { lastMergedRev: mergedThroughRev, modifiedAt: Date.now() },
+      { lastMergedRev: expected }
+    );
+    if (applied) return;
+    const current = await store.loadBranch(branchId);
+    // Branch deleted mid-merge — nothing to advance; the tombstone stands.
+    if (!current || current.deleted) return;
+    expected = current.lastMergedRev;
+  }
+  // Practically unreachable: each failed CAS means another merge advanced the watermark, and
+  // it only moves forward. Throwing is safe — the commit itself is idempotent, so a caller
+  // retrying the whole merge dedups to a no-op and re-attempts only this write.
+  throw new Error(`Failed to advance merge watermark for branch ${branchId} after concurrent merges.`);
 }

@@ -93,6 +93,7 @@ interface Branch {
   createdAt: number; // Unix timestamp (milliseconds)
   name?: string; // Human-readable name
   lastMergedRev?: number; // Branch rev through which changes were last merged
+  mergeBaseRev?: number; // Pinned merge base (only set when branchedAtRev was ahead of the source tip)
   deleted?: true; // Tombstone marker for incremental sync
 }
 ```
@@ -156,6 +157,18 @@ When Alice merges her branch:
 Why `batchId`? All changes in a branch are created in the context of each other. Change 500 knows about change 5, even across multiple merges. Using the branch ID as the batch ID ensures they're never transformed against each other.
 
 Why preserve original changes instead of flattening? Idempotency. If changes are flattened into a new change with a new ID, a retry after a failed acknowledgment would create a duplicate with a different ID — the server can't detect it as a duplicate, and the document gets corrupted. Preserving original IDs means the server's ID-based deduplication catches retries automatically. This also enables offline merge: two clients merging the same branch produce identical change IDs, so deduplication prevents corruption.
+
+### Merge Retry and Concurrency Safety
+
+The merge commit and the `lastMergedRev` update are separate writes, so a crash or timeout can land between them, and nothing serializes two merges of the same branch. Instead of a transaction, merges rely on three properties:
+
+1. **Idempotent commit.** Merged changes keep their original branch change ids, and the merge base — which defines the server's `listChanges(startAfter: baseRev)` dedup window — is stable across attempts. For a branch whose `branchedAtRev` is ahead of the source tip (a migrated/renumbered doc), the clamped base is pinned on the branch record as `mergeBaseRev` _before_ anything is committed; recomputing `min(branchedAtRev, tip)` on retry would use a higher base once the first attempt's own commits advanced the tip, and the already-committed copies below it would escape deduplication and apply twice.
+2. **Watermark from the merged batch.** `lastMergedRev` is set to the highest branch rev in the batch actually read and committed — never the branch tip — so an edit landing on the branch mid-merge stays uncovered and is picked up by the next merge.
+3. **Forward-only watermark.** When the store implements the optional `updateBranchIf` compare-and-set capability, the watermark update is conditioned on the value observed at merge start; a losing CAS re-reads and reconciles (skipping the write when a concurrent merge already covered the batch) instead of blindly overwriting. Stores without the capability keep non-atomic max-wins semantics.
+
+Copied versions get the same treatment: the source copy keeps the branch version's id (version ids are namespaced per doc), so a retried or concurrent merge detects an existing copy and skips it instead of duplicating it.
+
+`lastMergedRev` and `mergeBaseRev` are server-managed: values arriving in client-supplied metadata (whole branch records sync through `PatchesSync`) are silently stripped on both create and update.
 
 ### LWW Merge Approach
 

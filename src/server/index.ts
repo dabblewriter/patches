@@ -36,12 +36,14 @@ export { RevConflictError } from './RevConflictError.js';
 
 // Utilities
 export {
+  advanceMergeWatermark,
   assertBranchMetadata,
   assertBranchExists,
   assertNotABranch,
   branchManagerApi,
   createBranchRecord,
   generateBranchId,
+  stripMergeWatermark,
   wrapMergeCommit,
   type BranchIdGenerator,
   type BranchLoader,
@@ -55,6 +57,7 @@ export type { DeleteDocOptions } from '../types.js';
 export type { GetDocOptions, PatchesServer } from './PatchesServer.js';
 export type {
   BranchingStoreBackend,
+  BranchPrecondition,
   ListFieldsOptions,
   LWWStoreBackend,
   OTStoreBackend,

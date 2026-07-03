@@ -1,5 +1,8 @@
 import { consolidateOps } from '../algorithms/lww/consolidateOps.js';
 import { mergeServerWithLocal } from '../algorithms/lww/mergeServerWithLocal.js';
+// MissingChangesError is algorithm-agnostic (a rev-gap signal PatchesSync recovers from via
+// getChangesSince); it lives in the OT tree for historical reasons.
+import { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
 import { createChange } from '../data/change.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change, PatchesSnapshot } from '../types.js';
@@ -157,14 +160,19 @@ export class LWWAlgorithm implements ClientAlgorithm {
     return this._withDocLock(docId, async () => {
       // Cross-batch ordering guard. The server assigns increasing revs (one per commit) and
       // committedRev = R means every committed field through rev R is already incorporated
-      // (responses carry the full catch-up window, broadcasts carry whole commits).
-      // A STALE change (rev <= cursor with baseRev also behind) is already reflected
-      // locally; applying it would regress newer committed fields to older values (the
-      // field-keyed store has no cross-batch comparison), so skip it wholesale. Our own
-      // commit response (matched by the change ids confirmSent recorded) is exempt: its
-      // baseRev is the rev we sent from (behind by design on a retry), and its correction
-      // ops must apply even when they carry old revs — the server's resolution of what we
-      // sent, not a re-delivery.
+      // (responses carry the full catch-up window, broadcasts carry whole commits). Three
+      // cases per incoming change, walked with a cursor so multi-change batches stay ordered:
+      // - STALE (rev <= cursor with baseRev also behind): everything in it is already
+      //   reflected locally; applying it would regress newer committed fields to older
+      //   values (the field-keyed store has no cross-batch comparison). Skip it wholesale.
+      // - GAP (baseRev > cursor): we missed an earlier commit (e.g. a dropped SSE event).
+      //   Silently advancing would strand the missed ops forever — no later catch-up asks
+      //   below the advanced rev — so throw MissingChangesError; PatchesSync recovers by
+      //   pulling the tail via getChangesSince (same contract as OT).
+      // - Our own commit response (matched by the change ids confirmSent recorded) is exempt
+      //   from both: its baseRev is the rev we sent from (behind by design on a retry), and
+      //   its correction ops must apply even when they carry old revs — the server's
+      //   resolution of what we sent, not a re-delivery.
       const committedRev = await this.store.getCommittedRev(docId);
       const expectedIds = this._expectedResponseIds.get(docId);
       let cursor = committedRev;
@@ -176,6 +184,9 @@ export class LWWAlgorithm implements ClientAlgorithm {
           continue;
         }
         if (change.rev <= cursor && change.baseRev < cursor) continue; // stale re-delivery
+        if (change.baseRev > cursor) {
+          throw new MissingChangesError(cursor + 1, change.rev, cursor);
+        }
         effectiveChanges.push(change);
         cursor = Math.max(cursor, change.rev);
       }

@@ -1,5 +1,6 @@
 import { vi } from 'vitest';
 import { applyChanges } from '../../src/algorithms/ot/shared/applyChanges.js';
+import { MissingChangesError } from '../../src/algorithms/ot/client/applyCommittedChanges.js';
 import { LWWAlgorithm } from '../../src/client/LWWAlgorithm.js';
 import { LWWInMemoryStore } from '../../src/client/LWWInMemoryStore.js';
 import type { LWWDoc } from '../../src/client/LWWDoc.js';
@@ -73,12 +74,14 @@ const FLAG_KEYS = ['spellcheck', 'autosave', 'focus', 'typewriter'];
  * LWWDoc) against a real LWWServer over the real LWWMemoryStoreBackend, joined by a
  * virtual network.
  *
- * Network model: per-client delivery stays FIFO (no cross-packet reorder) because LWW's
- * client stores apply committed fields last-write-per-path without cross-batch timestamp
- * comparison — the production transports (WebSocket, SSE) are ordered per connection, and
- * missed events are healed by reconnect catch-up, so ordered delivery is part of the
- * engine's contract. Drops, duplicate redelivery of the latest packet, disconnects, and
- * lost commit request/response legs are all fair game and are fuzzed here.
+ * Network model: per-client delivery stays FIFO (no cross-packet reorder) — the production
+ * transports (WebSocket, SSE) are ordered per connection, so ordered delivery is part of
+ * the engine's contract. Within that contract the engine now defends itself at the batch
+ * level: a stale batch (rev already covered by committedRev) is skipped wholesale, and a
+ * rev GAP (a dropped broadcast) raises MissingChangesError, which `deliver` answers with
+ * the same recovery PatchesSync uses (flush pending or pull the tail via getChangesSince).
+ * Drops, duplicate redelivery of the latest packet, disconnects, and lost commit
+ * request/response legs are all fair game and are fuzzed here.
  */
 export class LWWFuzzHarness {
   readonly backend = new LWWMemoryStoreBackend();
@@ -301,13 +304,33 @@ export class LWWFuzzHarness {
       return;
     }
 
-    await client.algorithm.applyServerChanges(DOC_ID, wire(packet.changes), client.doc);
+    await this.applyDelivery(client, packet.changes, `pkt#${packet.seq}`);
     this.tr(`deliver ${client.name}: pkt#${packet.seq} ${describeChanges(packet.changes)}`);
 
     if (faults && this.rng.chance(this.cfg.dupP)) {
       // Immediate redelivery of the same packet (e.g. an SSE replay overlap).
-      await client.algorithm.applyServerChanges(DOC_ID, wire(packet.changes), client.doc);
+      await this.applyDelivery(client, packet.changes, `pkt#${packet.seq} (dup)`);
       this.tr(`deliver ${client.name}: pkt#${packet.seq} REDELIVERED`);
+    }
+  }
+
+  /**
+   * Apply a delivered broadcast, answering a MissingChangesError (an earlier packet was
+   * dropped — the batch's baseRev is ahead of committedRev) the way PatchesSync's
+   * _receiveCommittedChanges does: re-enter syncDoc, which flushes pending if any (the
+   * commit response carries the catch-up window) or pulls the tail via getChangesSince.
+   */
+  private async applyDelivery(client: LWWFuzzClient, changes: Change[], what: string): Promise<void> {
+    try {
+      await client.algorithm.applyServerChanges(DOC_ID, wire(changes), client.doc);
+    } catch (err) {
+      if (!(err instanceof MissingChangesError)) throw err;
+      this.tr(`gap ${client.name}: ${what} ahead of committedRev — recovering`);
+      if (await client.algorithm.hasPending(DOC_ID)) {
+        await this.flush(client, false);
+      } else {
+        await this.catchup(client);
+      }
     }
   }
 

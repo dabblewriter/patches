@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { MissingChangesError } from '../../src/algorithms/ot/client/applyCommittedChanges';
 import { LWWAlgorithm } from '../../src/client/LWWAlgorithm';
 import { LWWInMemoryStore } from '../../src/client/LWWInMemoryStore';
 import { createChange } from '../../src/data/change';
@@ -6,10 +7,12 @@ import type { JSONPatchOp } from '../../src/json-patch/types';
 import type { Change } from '../../src/types';
 
 /**
- * Cross-batch ordering guards in LWWAlgorithm.applyServerChanges (fuzz FINDING-2):
+ * Cross-batch ordering guards in LWWAlgorithm.applyServerChanges (fuzz FINDING-2/FINDING-7):
  * - a STALE batch (rev already covered by committedRev) is skipped wholesale, so a broadcast
  *   that was queued/in-flight when a newer commit response applied can't regress fields;
- * - the client's own commit response (ids recorded by confirmSent) is exempt:
+ * - a GAP (batch baseRev ahead of committedRev — a dropped broadcast) throws
+ *   MissingChangesError so PatchesSync pulls the tail instead of silently advancing past it;
+ * - the client's own commit response (ids recorded by confirmSent) is exempt from both:
  *   its corrections legitimately carry revs at or behind the client's committedRev.
  */
 describe('LWWAlgorithm applyServerChanges guards', () => {
@@ -53,6 +56,27 @@ describe('LWWAlgorithm applyServerChanges guards', () => {
     expect(applied).toEqual([]);
     expect(await docState(algorithm)).toEqual({ a: 'new' });
     expect(await algorithm.getCommittedRev(DOC)).toBe(2);
+  });
+
+  it('throws MissingChangesError when a batch arrives ahead of committedRev', async () => {
+    const { algorithm } = setup();
+    await algorithm.applyServerChanges(
+      DOC,
+      [committed(0, 1, [{ op: 'replace', path: '/a', value: 1, ts: 1, rev: 1 }])],
+      undefined
+    );
+
+    // The rev-2 broadcast was dropped by the transport; rev 3 arrives with baseRev 2.
+    await expect(
+      algorithm.applyServerChanges(
+        DOC,
+        [committed(2, 3, [{ op: 'replace', path: '/b', value: 3, ts: 3, rev: 3 }])],
+        undefined
+      )
+    ).rejects.toBeInstanceOf(MissingChangesError);
+
+    // Nothing advanced — recovery (getChangesSince committedRev) can still fill the gap.
+    expect(await algorithm.getCommittedRev(DOC)).toBe(1);
   });
 
   it('applies a commit response carrying old-rev corrections after confirmSent', async () => {

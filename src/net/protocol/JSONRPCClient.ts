@@ -1,5 +1,5 @@
 import { signal, type Signal, type SignalSubscriber, type Unsubscriber } from 'easy-signal';
-import { JSONRPCError, JSONRPCParseError, StatusError } from '../error.js';
+import { JSONRPCError, JSONRPCParseError, NetworkError, StatusError } from '../error.js';
 import type { ClientTransport, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from './types.js';
 
 /**
@@ -37,7 +37,9 @@ export class JSONRPCClient {
     if ('onStateChange' in transport && typeof (transport as any).onStateChange === 'function') {
       (transport as any).onStateChange((state: string) => {
         if (state === 'disconnected' || state === 'error') {
-          this.rejectAllPending(new Error('Transport disconnected'));
+          // NetworkError: the request never got a response because the connection
+          // dropped — connection trouble, not a verdict on the request's doc.
+          this.rejectAllPending(new NetworkError('Transport disconnected'));
         }
       });
     }

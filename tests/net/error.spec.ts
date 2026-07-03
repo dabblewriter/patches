@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { StatusError } from '../../src/net/error';
+import { isAbortError, isNetworkError, NetworkError, StatusError } from '../../src/net/error';
 
 describe('StatusError', () => {
   describe('constructor', () => {
@@ -171,6 +171,73 @@ describe('StatusError', () => {
       expect(error.code).toBe(451);
       expect(error.message).toBe('Unavailable For Legal Reasons');
       expect(Object.hasOwnProperty.call(error, 'code')).toBe(true);
+    });
+  });
+
+  describe('NetworkError and isNetworkError', () => {
+    it('creates a named error with a preserved cause', () => {
+      const cause = new TypeError('Failed to fetch');
+      const error = new NetworkError('GET /docs/doc1 failed without a response: Failed to fetch', { cause });
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toBeInstanceOf(NetworkError);
+      expect(error.name).toBe('NetworkError');
+      expect(error.cause).toBe(cause);
+    });
+
+    it('classifies NetworkError instances as network errors', () => {
+      expect(isNetworkError(new NetworkError('Transport disconnected'))).toBe(true);
+    });
+
+    it('classifies by name so errors surviving a structured-clone boundary still match', () => {
+      // Structured clone / cross-realm copies keep only name/message/stack.
+      const rehydrated = new Error('fetch failed');
+      rehydrated.name = 'NetworkError';
+      expect(isNetworkError(rehydrated)).toBe(true);
+    });
+
+    it('classifies the raw timeout shape that escapes transport wrapping', () => {
+      expect(isNetworkError(new DOMException('The operation timed out.', 'TimeoutError'))).toBe(true);
+    });
+
+    it('does not classify coded, generic, aborted, or non-error failures as network errors', () => {
+      expect(isNetworkError(new StatusError(403, 'Forbidden'))).toBe(false);
+      expect(isNetworkError(new StatusError(500, 'Internal Server Error'))).toBe(false);
+      expect(isNetworkError(new Error('some transient failure'))).toBe(false);
+      expect(isNetworkError(new TypeError('x is not a function'))).toBe(false);
+      // Cancellations are a sibling class with their own predicate (isAbortError).
+      expect(isNetworkError(new DOMException('The user aborted a request.', 'AbortError'))).toBe(false);
+      expect(isNetworkError('Failed to fetch')).toBe(false);
+      expect(isNetworkError(undefined)).toBe(false);
+    });
+  });
+
+  describe('isAbortError', () => {
+    it('matches an aborted fetch (DOMException AbortError — legacy code 20)', () => {
+      // Browsers expose legacy `code` 20 (DOMException.ABORT_ERR) on AbortError — the
+      // "(20)" that appears in downstream telemetry. Classification is name-based, so it
+      // works even in environments (like this test DOM) that omit the legacy code.
+      expect(isAbortError(new DOMException('The user aborted a request.', 'AbortError'))).toBe(true);
+    });
+
+    it('matches an aborted IndexedDB transaction', () => {
+      expect(isAbortError(new DOMException('The transaction was aborted.', 'AbortError'))).toBe(true);
+    });
+
+    it('matches a name-preserving copy that crossed a worker boundary', () => {
+      // Structured clone / cross-boundary rehydration can yield a plain Error that
+      // kept only name/message — classification must not require DOMException.
+      const crossed = new Error('The user aborted a request.');
+      crossed.name = 'AbortError';
+      expect(isAbortError(crossed)).toBe(true);
+    });
+
+    it('does not match timeouts, HTTP statuses, or ordinary errors', () => {
+      expect(isAbortError(new DOMException('signal timed out', 'TimeoutError'))).toBe(false);
+      expect(isAbortError(new StatusError(403, 'Forbidden'))).toBe(false);
+      expect(isAbortError(new Error('network blip'))).toBe(false);
+      expect(isAbortError('AbortError')).toBe(false);
+      expect(isAbortError(undefined)).toBe(false);
     });
   });
 

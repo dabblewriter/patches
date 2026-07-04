@@ -2,7 +2,7 @@ import type { JSONPatchOp, JSONPatchOpHandler, State } from '../types.js';
 import { getOpData } from '../utils/getOpData.js';
 import { getTypeLike } from '../utils/getType.js';
 import { log } from '../utils/log.js';
-import { isAdd, mapAndFilterOps, updateRemovedOps } from '../utils/ops.js';
+import { isAdd, isHardSet, mapAndFilterOps, updateRemovedOps } from '../utils/ops.js';
 import { getArrayPrefixAndIndex, getIndexAndEnd, isArrayPath } from '../utils/paths.js';
 import { getValue, pluckWithShallowCopy } from '../utils/pluck.js';
 import { toArrayIndex } from '../utils/toArrayIndex.js';
@@ -61,6 +61,15 @@ export const move: JSONPatchOpHandler = {
       3a. But, ops that were translated to the new path shouldn't get adjusted up or down by these adjustments
     */
 
+    // otherOpsFirst: otherOps precede this move in the authoritative order (see transformPatch).
+    // "This move wins" is only correct when the MIRROR half of the diamond lets this move
+    // survive — a queue move dies in the mirror whenever an earlier committed op consumed or
+    // clobbered its source (a same-source move, or a hard set at the source or an ancestor of
+    // it). When that happens the committed side's effects must survive this direction too, or
+    // the two halves disagree and later queue entries are transformed against a frame that never
+    // existed, committing ops that fail strict apply everywhere they replay (DAB-601).
+    const mirrorKiller = state.otherOpsFirst ? findMirrorKiller(state, otherOps, from) : undefined;
+
     // A move removes the value from one place then adds it to another, update the paths and add a marker to them so
     // they won't be altered by `updateArrayIndexes`, then remove the markers afterwards
     const inputOps = otherOps;
@@ -76,36 +85,42 @@ export const move: JSONPatchOpHandler = {
         // not the new one. Allow the following operations (which may include add/remove) to affect the old location
         removed = true;
       }
-      if (state.otherOpsFirst) {
-        // otherOps precede this move in the authoritative order (see transformPatch), so this move wins conflicting
-        // intents — without these two rules the two halves of the rebase diamond disagree about the winner and later
-        // local changes are transformed against an op whose effect was already superseded, committing moves whose
-        // source no longer exists (they fail strict apply everywhere they are replayed).
-        if (opLike === 'move' && otherOp.from === from) {
-          // Concurrent moves of the same source: this (later) move re-moves the value, so the earlier move's
-          // residual is nothing — drop it, and map its trailing ops onto our destination via a synthetic move
-          // (the value they were written against lives at `path` now). The results are marked so the phases below
-          // leave them untouched: their frame already accounts for the source removal, and the synthetic move
-          // accounts for the destination difference.
-          breakAfter();
-          const rest = inputOps.slice(index + 1);
-          if (otherOp.path === path) return rest.map(protectOp); // identical move — frames already agree
-          return move.transform(state, { op: 'move', from: otherOp.path, path }, rest).map(protectOp);
+      if (state.otherOpsFirst && opLike === 'move' && otherOp.from === from && !mirrorKiller) {
+        // Concurrent moves of the same source where the queue move SURVIVES the mirror (the
+        // mirror follows it through this committed move and nothing in the committed tail kills
+        // it): the queue (later) move wins the value's final home. Drop the committed move and
+        // map its trailing ops onto our destination via a synthetic move — the value they were
+        // written against lives at `path` now. The results are marked so the phases below leave
+        // them untouched.
+        breakAfter();
+        const rest = inputOps.slice(index + 1);
+        if (otherOp.path === path) return rest.map(protectOp); // identical move — frames already agree
+        return move.transform(state, { op: 'move', from: otherOp.path, path }, rest).map(protectOp);
+      }
+      if (mirrorKiller?.op === otherOp) {
+        if (mirrorKiller.kind === 'move') {
+          // Concurrent moves of the same source: the mirror drops THIS (queue) move — the value
+          // had already moved away when the committed change landed — so the committed move must
+          // survive this direction too. In this frame the value lives at the queue move's
+          // destination, so redirect the committed move to pull from there; its own destination
+          // (array insertion included) is preserved, keeping later queue entries in the frame
+          // the mirror actually committed. Identical destinations mean the frames already agree
+          // for this value: drop the move and keep the committed tail untouched.
+          if (otherOp.path === path) {
+            breakAfter();
+            return inputOps.slice(index + 1).map(protectOp);
+          }
+          return protectOp({ ...otherOp, from: path });
         }
-        if (
-          (isAdd(state, otherOp, 'path') || otherOp.op === 'replace') &&
-          otherOp.path === from &&
-          !isArrayPath(from, state)
-        ) {
-          // An earlier set at our source: the set wins — this move consumed a value the set had already overwritten,
-          // so the mirrored direction drops this move (see updateRemovedOps). The set's residual in our frame must
-          // then also kill the ghost our move left at the destination, or ops depending on it survive incorrectly.
-          // A literal `replace` clobbers the source the same way (its mirror also drops this move) and must stay AT
-          // the source, not be redirected to the destination — but in-place @-ops (like 'replace') ride the move,
-          // and at an ARRAY INDEX an add/copy/move-in INSERTS rather than overwrites — it never clobbers the moved
-          // value, so it must fall through to the index shifting below.
-          return [protectOp({ op: 'remove', path }), otherOp];
-        }
+        // A committed hard set at our source (or an ancestor of it): the set wins — this move
+        // consumed a value the set had already overwritten, so the mirrored direction drops this
+        // move (see updateRemovedOps). The set's residual in our frame must then also kill the
+        // ghost our move left at the destination, or ops depending on it survive incorrectly.
+        // The set itself stays AT its own path — a literal `replace` clobbers the source and must
+        // not be redirected to the destination, while at an ARRAY INDEX an add/copy/move-in
+        // INSERTS rather than overwrites (it never clobbers the moved value), so those are
+        // excluded from killer detection and fall through to the index shifting below.
+        return [protectOp({ op: 'remove', path }), otherOp];
       }
       const original = otherOp;
       otherOp = updateMovePath(state, otherOp, 'path', from, path, original);
@@ -129,7 +144,18 @@ export const move: JSONPatchOpHandler = {
       if (isArrayPath(path, state)) {
         otherOps = updateArrayIndexes(state, path, otherOps, 1);
       } else {
-        otherOps = updateRemovedOps(state, path, otherOps, false, undefined, undefined, thisOp);
+        // A mirror-killed move has no claim on its destination: suppress the otherOpsFirst
+        // "this op wins" resolution in updateRemovedOps so committed sets/move-ins at the
+        // destination survive (the ghost they would have superseded is already killed above).
+        otherOps = updateRemovedOps(
+          state,
+          path,
+          otherOps,
+          false,
+          undefined,
+          undefined,
+          mirrorKiller ? undefined : thisOp
+        );
       }
     }
 
@@ -256,6 +282,65 @@ function updateArrayPathForMove(
   const modifier = from === min ? -1 : 1;
   const newPath = prefix + (otherIndex + modifier) + path.slice(end);
   return getValue(state, otherOp, pathName, newPath);
+}
+
+interface MirrorKiller {
+  op: JSONPatchOp;
+  kind: 'move' | 'set';
+}
+
+/**
+ * In `otherOpsFirst` mode, decide whether the MIRROR half of the diamond drops the move being
+ * transformed against (a queue move with source `from`).
+ *
+ * The mirror transforms the queue move against the committed ops in order: a committed
+ * same-source move makes it FOLLOW the value to the committed destination (the queue's re-move
+ * still wins from there), and it only dies when some committed op clobbers wherever the value
+ * currently lives — a hard set at that path or an ancestor of it, or a remove covering it. This
+ * scan simulates exactly that walk. When the move dies after being followed through a
+ * same-source move, the killer reported is that MOVE (the committed side owns the value, so the
+ * advance must keep the committed move, redirected to pull from the queue's destination); when
+ * it dies on a set/remove before any follow, the killer is that op (the advance keeps it and
+ * kills the ghost the dead queue move left at its destination). No killer means the queue move
+ * survives the mirror and genuinely wins as the later writer.
+ *
+ * Array-index adds/copies/move-ins are INSERTS — they shift, never clobber — so they are not
+ * killers (`isHardSet` excludes them); a literal `replace` overwrites even at an array index.
+ * Exact-path set detection keeps parity with the pre-DAB-601 rule (array-path sources excluded)
+ * so in-place @-ops continue to ride the move. An exact remove of the un-followed source is not
+ * a killer here: the plain translation path already follows it to the destination, which kills
+ * the ghost naturally.
+ */
+function findMirrorKiller(state: State, otherOps: JSONPatchOp[], from: string): MirrorKiller | undefined {
+  let src = from;
+  let followedMove: JSONPatchOp | undefined;
+  for (const op of otherOps) {
+    const opLike = getTypeLike(state, op);
+    if (opLike === 'move' && op.from === src) {
+      followedMove = followedMove ?? op;
+      src = op.path;
+      continue;
+    }
+    const exactKill =
+      op.path === src &&
+      !op.soft &&
+      (src === from
+        ? // Pre-follow: parity with the pre-DAB-601 exact-source rule — array-path sources are
+          // excluded wholesale so in-place @-ops and index inserts ride the move.
+          (isAdd(state, op, 'path') || op.op === 'replace') && !isArrayPath(src, state)
+        : // Post-follow: the mirror's exact-from kill (a set consuming a move's source) applies a
+          // literal replace even at an array index — it overwrites the element — while
+          // add/copy/move-in at an index insert and never clobber.
+          op.op === 'replace' || (isAdd(state, op, 'path') && !isArrayPath(src, state)));
+    const kills =
+      exactKill ||
+      (op.path && src.startsWith(op.path + '/') && isHardSet(state, op, op.path)) ||
+      (opLike === 'remove' && (src.startsWith(op.path + '/') || (op.path === src && src !== from)));
+    if (kills) {
+      return followedMove ? { op: followedMove, kind: 'move' } : { op, kind: 'set' };
+    }
+  }
+  return undefined;
 }
 
 /**

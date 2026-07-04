@@ -230,6 +230,12 @@ export class LWWServer implements PatchesServer {
           ? { ids: freshChanges.map(c => c.id), expireAt: serverNow + this._changeIdTTL }
           : undefined;
         newRev = await this.store.saveOps(docId, opsToStore, pathsToDelete, changeIds);
+        // Stamp the committed rev ourselves: the response/broadcast blocks below (and their
+        // commit-order sorting) read op.rev from these objects. The memory backend HAPPENED to
+        // mutate the caller's ops when storing them, which masked this — a contract-compliant
+        // copying backend (any SQL/HTTP store) leaves them rev-less and the response echo
+        // breaks (DAB-601). Backends stamp their own stored rows; we stamp our own copies.
+        for (const op of opsToStore) op.rev = newRev;
       }
 
       // Build the response: corrections, the stored resolution of every sent path, and catchup.

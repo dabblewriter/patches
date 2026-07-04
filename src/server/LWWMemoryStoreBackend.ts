@@ -101,15 +101,14 @@ export class LWWMemoryStoreBackend
     }
 
     for (const op of newOps) {
-      // Set the rev on the op
-      op.rev = newRev;
-
       // Delete the existing op at this path and any children atomically
       const childPrefix = op.path + '/';
       doc.ops = doc.ops.filter(existing => existing.path !== op.path && !existing.path.startsWith(childPrefix));
 
-      // Add the new op
-      doc.ops.push(op);
+      // Store a rev-stamped copy — never mutate the caller's ops. LWWServer stamps its own
+      // copies after this call; a backend leaking mutations into its input masks missing
+      // stamping in contract-compliant copying backends (DAB-601).
+      doc.ops.push({ ...op, rev: newRev });
     }
 
     if (changeIds) {

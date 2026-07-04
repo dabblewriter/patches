@@ -2,7 +2,7 @@ import { createId } from 'crypto-id';
 import { type Unsubscriber, signal } from 'easy-signal';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import { isRejectionError } from '../net/error.js';
-import type { Change, PatchesSnapshot } from '../types.js';
+import type { Change, PatchesSnapshot, QuarantinedChange } from '../types.js';
 import { singleInvocation } from '../utils/concurrency.js';
 import type { BaseDoc } from './BaseDoc.js';
 import type { ClientAlgorithm } from './ClientAlgorithm.js';
@@ -122,6 +122,12 @@ export class Patches {
   readonly onDeleteDoc = signal<(docId: string) => void>();
   /** Emitted when a doc has pending changes ready to send */
   readonly onChange = signal<(docId: string) => void>();
+  /**
+   * Emitted when a pending change is ejected into quarantine, and for persisted entries
+   * on their doc's first sync attempt each session (so a restart can't strand one
+   * un-surfaced). At-least-once: consumers should key on docId + changeId.
+   */
+  readonly onChangeQuarantined = signal<(docId: string, quarantined: QuarantinedChange) => void>();
 
   constructor(opts: PatchesOptions) {
     this.options = opts;
@@ -511,6 +517,50 @@ export class Patches {
   }
 
   /**
+   * Ejects a pending change into quarantine so the rest of the doc's pending work can
+   * sync past it: the app-consent path for a rejection PatchesSync could not corroborate
+   * locally (the latched sync error carries `data.changeId`; the app asks the user, then
+   * calls this). Content stays recoverable via {@link listQuarantinedChanges} until
+   * discarded. Call it while the doc's sync is latched at 'error'; ejecting during an
+   * in-flight flush can race the server accepting the change.
+   *
+   * @returns The quarantined entry, or null when nothing matched (already committed,
+   *   already ejected, or an algorithm without ejection support).
+   */
+  async ejectPendingChange(
+    docId: string,
+    changeId: string,
+    reason = 'app-requested'
+  ): Promise<QuarantinedChange | null> {
+    const algorithm = await this._resolveAlgorithmForDoc(docId);
+    if (!algorithm.ejectPendingChange) return null;
+    const quarantined = await algorithm.ejectPendingChange(docId, changeId, reason, this.getOpenDoc(docId));
+    if (quarantined) {
+      this.onChangeQuarantined.emit(docId, quarantined);
+      // Nudge sync to flush the surviving pending work.
+      this.onChange.emit(docId);
+    }
+    return quarantined;
+  }
+
+  /** Lists quarantined changes for one doc, or across all algorithms when docId is omitted. */
+  async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
+    if (docId !== undefined) {
+      const algorithm = await this._resolveAlgorithmForDoc(docId);
+      return (await algorithm.listQuarantinedChanges?.(docId)) ?? [];
+    }
+    const algorithms = Object.values(this.algorithms) as ClientAlgorithm[];
+    const lists = await Promise.all(algorithms.map(a => a.listQuarantinedChanges?.() ?? []));
+    return lists.flat();
+  }
+
+  /** Permanently removes a quarantined change. The app's decision, never automatic. */
+  async discardQuarantinedChange(docId: string, changeId: string): Promise<void> {
+    const algorithm = await this._resolveAlgorithmForDoc(docId);
+    await algorithm.discardQuarantinedChange?.(docId, changeId);
+  }
+
+  /**
    * Closes all open documents and cleans up listeners and store connections.
    * Should be called when shutting down the client.
    */
@@ -543,6 +593,7 @@ export class Patches {
     await Promise.all(Object.values(this.algorithms).map(s => s?.close()));
 
     this.onChange.clear();
+    this.onChangeQuarantined.clear();
     this.onDeleteDoc.clear();
     this.onUntrackDocs.clear();
     this.onTrackDocs.clear();

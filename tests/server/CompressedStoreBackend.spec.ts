@@ -277,19 +277,19 @@ describe('CompressedStoreBackend', () => {
       };
       const backend = new CompressedStoreBackend(branchStore, base64Compressor);
 
-      expect(await backend.listBranches('doc1', { since: 5 })).toEqual([branch]);
+      expect(await backend.listBranches!('doc1', { since: 5 })).toEqual([branch]);
       expect(branchStore.listBranches).toHaveBeenCalledWith('doc1', { since: 5 });
 
-      expect(await backend.loadBranch('b1')).toEqual(branch);
+      expect(await backend.loadBranch!('b1')).toEqual(branch);
       expect(branchStore.loadBranch).toHaveBeenCalledWith('b1');
 
-      await backend.createBranch(branch);
+      await backend.createBranch!(branch);
       expect(branchStore.createBranch).toHaveBeenCalledWith(branch);
 
-      await backend.updateBranch('b1', { lastMergedRev: 4 });
+      await backend.updateBranch!('b1', { lastMergedRev: 4 });
       expect(branchStore.updateBranch).toHaveBeenCalledWith('b1', { lastMergedRev: 4 });
 
-      await backend.deleteBranch('b1');
+      await backend.deleteBranch!('b1');
       expect(branchStore.deleteBranch).toHaveBeenCalledWith('b1');
     });
 
@@ -346,5 +346,47 @@ describe('CompressedStoreBackend', () => {
 
       expect(loaded[0].ops).toEqual(complexOps);
     });
+  });
+});
+
+describe('CompressedStoreBackend — branching capability mirrors the inner store (DAB-601)', () => {
+  const otOnlyStore = {
+    getCurrentRev: vi.fn().mockResolvedValue(0),
+    saveChanges: vi.fn(),
+    listChanges: vi.fn().mockResolvedValue([]),
+    createVersion: vi.fn(),
+    loadVersionChanges: vi.fn(),
+    updateVersion: vi.fn(),
+    listVersions: vi.fn().mockResolvedValue([]),
+    loadVersion: vi.fn(),
+    loadVersionState: vi.fn(),
+    deleteDoc: vi.fn(),
+  } as any;
+
+  it('defines no branching methods over a non-branching store (no fabricated success)', () => {
+    const backend = new CompressedStoreBackend(otOnlyStore, base64Compressor);
+    expect(backend.createBranch).toBeUndefined();
+    expect(backend.listBranches).toBeUndefined();
+    expect(backend.loadBranch).toBeUndefined();
+    expect(backend.updateBranch).toBeUndefined();
+    expect(backend.deleteBranch).toBeUndefined();
+  });
+
+  it('binds and delegates branching methods when the inner store implements them', async () => {
+    const branch = { id: 'b1', docId: 'doc1', branchedAtRev: 1, createdAt: 1, contentStartRev: 1 } as any;
+    const branchingStore = {
+      ...otOnlyStore,
+      listBranches: vi.fn().mockResolvedValue([branch]),
+      loadBranch: vi.fn().mockResolvedValue(branch),
+      createBranch: vi.fn().mockResolvedValue(undefined),
+      updateBranch: vi.fn().mockResolvedValue(undefined),
+      deleteBranch: vi.fn().mockResolvedValue(undefined),
+    };
+    const backend = new CompressedStoreBackend(branchingStore, base64Compressor);
+
+    await backend.createBranch!(branch);
+    expect(branchingStore.createBranch).toHaveBeenCalledWith(branch);
+    await expect(backend.listBranches!('doc1')).resolves.toEqual([branch]);
+    await expect(backend.loadBranch!('b1')).resolves.toBe(branch);
   });
 });

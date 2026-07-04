@@ -1,3 +1,4 @@
+import { StatusError } from '../../../net/error.js';
 import type { CommitResult } from '../../../server/PatchesServer.js';
 import { RevConflictError } from '../../../server/RevConflictError.js';
 import type { OTStoreBackend } from '../../../server/types.js';
@@ -68,12 +69,14 @@ export async function commitChanges(
   let docReloadRequired: true | undefined;
   if (changes[0].baseRev === 0 && initialRev > 0 && !batchedContinuation) {
     // Prevent stale clients from wiping existing data with a root creation op anywhere in the batch
-    const hasRootOp = changes.some(c => c.ops.some(op => op.path === ''));
-    if (hasRootOp) {
-      throw new Error(
+    const rootOpChange = changes.find(c => c.ops.some(op => op.path === ''));
+    if (rootOpChange) {
+      throw new StatusError(
+        400,
         `Document ${docId} already exists (rev ${initialRev}). ` +
           `Cannot apply root-level replace (path: '') with baseRev 0 - this would overwrite the existing document. ` +
-          `Load the existing document first, or use nested paths instead of replacing at root.`
+          `Load the existing document first, or use nested paths instead of replacing at root.`,
+        { changeId: rootOpChange.id, scope: 'change' }
       );
     }
     docReloadRequired = true;
@@ -89,7 +92,9 @@ export async function commitChanges(
   changes.forEach(c => {
     if (c.baseRev == null) c.baseRev = baseRev;
     else if (c.baseRev !== baseRev && !options?.historicalImport) {
-      throw new Error(`Client changes must have consistent baseRev in all changes for doc ${docId}.`);
+      throw new StatusError(400, `Client changes must have consistent baseRev in all changes for doc ${docId}.`, {
+        scope: 'doc',
+      });
     }
     if (c.rev == null) c.rev = rev++;
     else rev = c.rev + 1;
@@ -103,8 +108,10 @@ export async function commitChanges(
 
   // Basic validation
   if (baseRev > initialRev) {
-    throw new Error(
-      `Client baseRev (${baseRev}) is ahead of server revision (${initialRev}) for doc ${docId}. Client needs to reload the document.`
+    throw new StatusError(
+      409,
+      `Client baseRev (${baseRev}) is ahead of server revision (${initialRev}) for doc ${docId}. Client needs to reload the document.`,
+      { scope: 'doc' }
     );
   }
 
@@ -162,14 +169,23 @@ export async function commitChanges(
       // already include the head's effects; transforming the tail against the head's
       // committed echo double-applies them (array/text ops land at double-shifted offsets).
       const changeIds = new Set(changes.map(c => c.id));
-      const isOwnCommitted = (c: Change) => (batchId ? c.batchId === batchId : false) || changeIds.has(c.id);
+      // Origin awareness: id/batch matching alone can be fooled by a FOREIGN committed change
+      // with a colliding id — excluding it from the transform set commits the rest of the batch
+      // in the wrong frame, and echoing it back confirms a change the sender never made. When
+      // both sides carry a connection identity (stamped by OTServer since DAB-601), an echo must
+      // also match on it; either side missing falls back to id-only matching (pre-stamp rows).
+      const senderClientId = changes.find(c => c.clientId)?.clientId;
+      const sameOrigin = (c: Change) => !senderClientId || !c.clientId || c.clientId === senderClientId;
+      const isOwnCommitted = (c: Change) =>
+        sameOrigin(c) && ((batchId ? c.batchId === batchId : false) || changeIds.has(c.id));
       const committedChanges = allCommittedChanges.filter(c => !isOwnCommitted(c));
 
       // Filter changes already committed after baseRev AND duplicates within the incoming
       // batch itself — a client retry/flush race can repeat a change id in one array, and
       // committing it twice double-applies its ops (the second copy is never transformed
-      // against the first).
-      const committedIds = new Set(allCommittedChanges.map(c => c.id));
+      // against the first). Only same-origin committed copies count: a foreign colliding id
+      // must not swallow the sender's distinct change.
+      const committedIds = new Set(allCommittedChanges.filter(sameOrigin).map(c => c.id));
       const seenIncomingIds = new Set<string>();
       const incomingChanges = changes.filter(c => {
         if (committedIds.has(c.id) || seenIncomingIds.has(c.id)) return false;
@@ -179,7 +195,7 @@ export async function commitChanges(
 
       // Committed copies of changes this request re-sent (a retry after a lost ack) must be echoed back so the
       // client can confirm them, even though they are excluded from the transform set above.
-      const resentCommitted = allCommittedChanges.filter(c => changeIds.has(c.id));
+      const resentCommitted = allCommittedChanges.filter(c => sameOrigin(c) && changeIds.has(c.id));
       const catchupChanges = resentCommitted.length
         ? [...committedChanges, ...resentCommitted].sort((a, b) => a.rev - b.rev)
         : committedChanges;

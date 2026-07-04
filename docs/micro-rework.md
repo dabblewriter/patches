@@ -6,7 +6,7 @@ Status: **design approved, not started**. Micro is currently unused in productio
 
 A deep review verified 12 bugs in `src/micro/` (3 critical), each independently confirmed with a runnable repro. They are not 12 separate accidents. They cluster around four missing pieces of design:
 
-1. **No change identity.** Commits and broadcasts carry no change id, so nobody can tell "my own echo" from "someone else's change," and retries can't be deduped.
+1. **Incomplete change identity.** Changes DO carry an id, and the server already dedups retries against a TTL'd id log (`server.ts` `hasChange`) — do not rebuild that. The actual gaps are narrower: broadcasts omit the id (so a client can't tell "my own echo" from "someone else's change"), and a dedup hit returns `{ rev, fields: {} }` — EMPTY fields — so a retried commit never receives the committed resolution of what it sent and the confirm path starves.
 2. **No resync story.** There is no gap detection, no reconnect catch-up, and compaction breaks the one transform path that exists.
 3. **No durability contract.** The in-flight (sending) layer lives only in memory, and several failure paths silently discard persisted edits.
 4. **No concurrency contract on the server.** The fallback commit path is a read-modify-write with no serialization, documented as "safe for single-server deployments." It isn't.
@@ -26,9 +26,16 @@ Every change below exists to serve one of these four.
 
 ### 1. Change identity end to end
 
-- Every flush mints a `changeId` (crypto-id), persisted with the sending layer.
-- `POST /docs/:id/changes` carries `{ changeId, rev, fields }`. The commit result and the WS broadcast both carry it back.
-- The server keeps recently committed change ids per doc with a TTL, using the same mechanism specced for LWWServer (see `docs/last-write-wins.md` idempotency section). A retried commit whose id was seen returns the current committed fields for the touched paths, without re-applying. This is what makes `+` and `~` retry-safe; they are not idempotent ops on their own.
+- Changes already mint an id and the server already keeps a TTL'd committed-id log
+  (`server.ts` `hasChange` / `changeLogEntry`) — keep both; do not build a second id log.
+- What's missing on the SERVER: a dedup hit currently returns `{ rev, fields: {} }`. It must
+  instead return the current committed fields for the retried change's touched paths, without
+  re-applying — that resolution is what makes `+` and `~` retry-safe; they are not idempotent
+  ops on their own, and an empty-fields reply starves the confirm path.
+- What's missing on the WIRE: the WS broadcast must carry the change id back (the commit
+  result already identifies itself by being the HTTP response).
+- The id must be persisted with the sending layer (see section 4) so a restarted client
+  re-sends the SAME id.
 - `MicroDoc.applyRemote` drops any message whose `changeId` matches its own in-flight send (that is a confirm, handled by the confirm path) and any message with `rev <= this.rev` (stale echo). Fixes #43.
 
 ### 2. Confirm and echo flow
@@ -55,7 +62,14 @@ On `open()`, if the incremental fetch fails, **keep pending ops**. Non-text ops 
 ### 4. Durability
 
 - `_idbSave` persists `consolidateOps(sending ?? {}, pending)` plus the `sendingId`, not just confirmed + pending. A restarted client re-sends the same `changeId`; the server's id dedup makes that safe.
-- Save on every `update()` (via `_onUpdate`), after `_flush()` moves ops into sending, and after `_failSend` rolls them back. Today the only save is after a successful confirm, which is exactly when durability no longer matters. Fixes #44.
+- The actual defect (get the diagnosis right or the regression test pins the wrong thing):
+  `_doFlush` DOES already save right after `_flush()` — but `_idbSave` writes only
+  `doc.confirmed` + `doc.pending`, and `_flush()` has just moved the flushed ops OUT of
+  pending into the sending layer, which `_idbSave` omits entirely. So the post-flush save
+  actively persists a state where the in-flight ops exist NOWHERE — a crash before the
+  confirm loses them even though a save ran. Persisting the sending layer (previous bullet)
+  is the fix; adding saves on `update()` and `_failSend` closes the remaining windows.
+  Fixes #44.
 
 ### 5. Server commit atomicity
 

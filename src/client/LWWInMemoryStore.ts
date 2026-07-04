@@ -1,7 +1,7 @@
 import { createChange } from '../data/change.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
-import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
+import type { Change, PatchesSnapshot, PatchesState, QuarantinedChange } from '../types.js';
 import type { LWWClientStore } from './LWWClientStore.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
@@ -31,6 +31,8 @@ interface LWWDocBuffers {
  */
 export class LWWInMemoryStore implements LWWClientStore {
   private docs: Map<string, LWWDocBuffers> = new Map();
+  // Kept outside the per-doc buffers so untracking (cache eviction) preserves quarantine.
+  private quarantined: Map<string, Map<string, QuarantinedChange>> = new Map();
 
   // ─── Document Operations ─────────────────────────────────────────────────
 
@@ -152,6 +154,7 @@ export class LWWInMemoryStore implements LWWClientStore {
     buf.committedFields.clear();
     buf.pendingOps.clear();
     buf.sendingChange = null;
+    this.quarantined.delete(docId);
   }
 
   /**
@@ -166,6 +169,7 @@ export class LWWInMemoryStore implements LWWClientStore {
    */
   async close(): Promise<void> {
     this.docs.clear();
+    this.quarantined.clear();
   }
 
   // ─── LWWClientStore Methods ─────────────────────────────────────────────
@@ -296,6 +300,58 @@ export class LWWInMemoryStore implements LWWClientStore {
     if (lastRev !== undefined && lastRev > buf.committedRev) {
       buf.committedRev = lastRev;
     }
+  }
+
+  /**
+   * Rebuild the committed-only state (snapshot + committed fields), the base for the
+   * local strict-apply probe corroborating a server rejection of the sending change.
+   */
+  async getCommittedState(docId: string): Promise<PatchesState> {
+    const buf = this.docs.get(docId);
+    if (!buf) return { state: {}, rev: 0 };
+    let state = buf.snapshot?.state ? { ...buf.snapshot.state } : {};
+    const committedOps = Array.from(buf.committedFields.values());
+    if (committedOps.length > 0) {
+      state = applyPatch(state, committedOps, { partial: true });
+    }
+    return { state, rev: buf.committedRev };
+  }
+
+  /**
+   * Atomically move the sending change into quarantine, preserving pendingOps.
+   */
+  async quarantineSendingChange(docId: string, changeId: string, reason: string): Promise<QuarantinedChange | null> {
+    const buf = this.docs.get(docId);
+    if (!buf?.sendingChange || buf.sendingChange.id !== changeId) return null;
+    const quarantined: QuarantinedChange = {
+      docId,
+      changeId,
+      change: buf.sendingChange,
+      reason,
+      quarantinedAt: Date.now(),
+    };
+    let docQuarantine = this.quarantined.get(docId);
+    if (!docQuarantine) this.quarantined.set(docId, (docQuarantine = new Map()));
+    docQuarantine.set(changeId, quarantined);
+    buf.sendingChange = null;
+    return quarantined;
+  }
+
+  /**
+   * List quarantined changes for one doc, or all docs when docId is omitted.
+   */
+  async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
+    if (docId !== undefined) {
+      return Array.from(this.quarantined.get(docId)?.values() ?? []);
+    }
+    return Array.from(this.quarantined.values()).flatMap(entries => Array.from(entries.values()));
+  }
+
+  /**
+   * Permanently remove a quarantined change.
+   */
+  async discardQuarantinedChange(docId: string, changeId: string): Promise<void> {
+    this.quarantined.get(docId)?.delete(changeId);
   }
 
   // ─── Helper Methods ──────────────────────────────────────────────────────

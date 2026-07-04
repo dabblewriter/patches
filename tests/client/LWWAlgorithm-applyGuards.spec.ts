@@ -134,4 +134,29 @@ describe('LWWAlgorithm applyServerChanges guards', () => {
     expect(applied).toEqual([]);
     expect((await docState(algorithm)).a).toBe('base');
   });
+
+  it("applies the commit response even after the server's own-broadcast echo carried the same id (DAB-601)", async () => {
+    const { algorithm } = setup();
+    await algorithm.applyServerChanges(
+      DOC,
+      [committed(0, 3, [{ op: 'replace', path: '/a', value: 'base', ts: 1, rev: 3 }])],
+      undefined
+    );
+    await algorithm.handleDocChange(DOC, [{ op: 'replace', path: '/a', value: 'mine' }], undefined, {});
+    const [sending] = (await algorithm.getPendingToSend(DOC))!;
+    await algorithm.confirmSent(DOC, [sending]);
+
+    // A server that echoes commits back to the origin delivers the same change id twice:
+    // broadcast first, then the commit response. The broadcast must not consume the
+    // exemption — the response's corrections are stale-shaped (rev <= cursor) and would
+    // otherwise skip, silently losing the server's resolution of what we sent.
+    const broadcast = committed(3, 4, [{ op: 'replace', path: '/a', value: 'mine', ts: 5, rev: 4 }], sending.id);
+    await algorithm.applyServerChanges(DOC, [broadcast], undefined);
+
+    const response = committed(3, 4, [{ op: 'replace', path: '/a', value: 'server-won', ts: 9, rev: 4 }], sending.id);
+    const applied = await algorithm.applyServerChanges(DOC, [response], undefined);
+
+    expect(applied).toHaveLength(1);
+    expect((await docState(algorithm)).a).toBe('server-won');
+  });
 });

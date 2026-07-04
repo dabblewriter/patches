@@ -125,6 +125,12 @@ export class OTServer implements PatchesServer {
     options?: CommitChangesOptions
   ): Promise<{ changes: Change[]; docReloadRequired?: true }> {
     const clientId = getClientId();
+    // Stamp the sender's connection identity onto the changes so committed rows carry their
+    // origin: the commit path's own-echo detection matches by change id / batch id, and without
+    // origin awareness a foreign committed change with a colliding id is silently excluded from
+    // the transform set — the rest of the batch then commits in the wrong frame (DAB-601).
+    // Absent on changes committed before this stamp existed; matching falls back to id-only.
+    if (clientId) changes = changes.map(c => (c.clientId === clientId ? c : { ...c, clientId }));
     return this._withDocLock(docId, async () => {
       const { catchupChanges, newChanges, docReloadRequired } = await commitChanges(
         this.store,

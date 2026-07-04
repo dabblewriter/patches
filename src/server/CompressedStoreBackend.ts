@@ -40,17 +40,45 @@ interface StoredChange extends Omit<Change, 'ops'> {
  * import { base64Compressor } from '@dabble/patches/compression';
  * const backend = new CompressedStoreBackend(myStore, base64Compressor);
  */
-export class CompressedStoreBackend
+export class CompressedStoreBackend<S extends CompressibleStore = CompressibleStore>
   implements OTStoreBackend, Partial<TombstoneStoreBackend>, Partial<BranchingStoreBackend>
 {
   /** Present only when the inner store defines it, so ID generation falls back correctly. */
   createBranchId?: (docId: string) => Promise<string> | string;
 
+  // Branching methods exist on the wrapper ONLY when the inner store implements them (bound in
+  // the constructor). Defining them unconditionally made the wrapper silently advertise
+  // branching over a non-branching store: `createBranch` fabricated success, the branch
+  // metadata evaporated, and `mergeBranch` later threw on the missing record (DAB-601).
+  // Consumers feature-detect by presence, exactly as they would on the inner store — and the
+  // TYPES follow the inner store too: wrapping a branching store yields required methods (so
+  // e.g. OTBranchManager accepts the wrapper directly), wrapping a non-branching store yields
+  // `undefined`.
+  listBranches: S extends BranchingStoreBackend
+    ? (docId: string, options?: ListBranchesOptions) => Promise<Branch[]>
+    : undefined;
+  loadBranch: S extends BranchingStoreBackend ? (branchId: string) => Promise<Branch | null> : undefined;
+  createBranch: S extends BranchingStoreBackend ? (branch: Branch) => Promise<void> : undefined;
+  updateBranch: S extends BranchingStoreBackend
+    ? (
+        branchId: string,
+        updates: Partial<Omit<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'contentStartRev'>>
+      ) => Promise<void>
+    : undefined;
+  deleteBranch: S extends BranchingStoreBackend ? (branchId: string) => Promise<void> : undefined;
+
   constructor(
-    private readonly store: CompressibleStore,
+    private readonly store: S,
     private readonly compressor: OpsCompressor
   ) {
     if (store.createBranchId) this.createBranchId = store.createBranchId.bind(store);
+    // Conditional-typed properties can't be assigned generically without help — the runtime
+    // presence check IS the S-extends-BranchingStoreBackend distinction the types encode.
+    this.listBranches = (store.listBranches ? store.listBranches.bind(store) : undefined) as this['listBranches'];
+    this.loadBranch = (store.loadBranch ? store.loadBranch.bind(store) : undefined) as this['loadBranch'];
+    this.createBranch = (store.createBranch ? store.createBranch.bind(store) : undefined) as this['createBranch'];
+    this.updateBranch = (store.updateBranch ? store.updateBranch.bind(store) : undefined) as this['updateBranch'];
+    this.deleteBranch = (store.deleteBranch ? store.deleteBranch.bind(store) : undefined) as this['deleteBranch'];
   }
 
   /**
@@ -140,28 +168,5 @@ export class CompressedStoreBackend
 
   async removeTombstone(docId: string): Promise<void> {
     return this.store.removeTombstone?.(docId);
-  }
-
-  async listBranches(docId: string, options?: ListBranchesOptions): Promise<Branch[]> {
-    return (await this.store.listBranches?.(docId, options)) ?? [];
-  }
-
-  async loadBranch(branchId: string): Promise<Branch | null> {
-    return (await this.store.loadBranch?.(branchId)) ?? null;
-  }
-
-  async createBranch(branch: Branch): Promise<void> {
-    return this.store.createBranch?.(branch);
-  }
-
-  async updateBranch(
-    branchId: string,
-    updates: Partial<Omit<Branch, 'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'contentStartRev'>>
-  ): Promise<void> {
-    return this.store.updateBranch?.(branchId, updates);
-  }
-
-  async deleteBranch(branchId: string): Promise<void> {
-    return this.store.deleteBranch?.(branchId);
   }
 }

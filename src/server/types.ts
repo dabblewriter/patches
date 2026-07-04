@@ -151,7 +151,10 @@ export interface LWWStoreBackend extends ServerStoreBackend {
    *
    * Implementation requirements:
    * - Atomically increment the document revision
-   * - Set the rev on all saved fields to the new revision
+   * - Set the rev on all saved fields to the new revision — on the STORED rows only.
+   *   Implementations must NOT rely on (or be relied on for) mutating the input `ops`:
+   *   `LWWServer` stamps its own copies with the returned rev after this call, so copying
+   *   backends (SQL/HTTP) are fully contract-compliant leaving the input untouched
    * - Delete children atomically when saving a parent (e.g., saving /obj deletes /obj/name)
    * - Delete paths in pathsToDelete atomically with saving ops
    * - Persist changeIds.ids in the same transaction as the ops (see below) — recording

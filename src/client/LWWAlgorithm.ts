@@ -178,7 +178,13 @@ export class LWWAlgorithm implements ClientAlgorithm {
       let cursor = committedRev;
       const effectiveChanges: Change[] = [];
       for (const change of serverChanges) {
-        if (expectedIds?.delete(change.id)) {
+        // Non-destructive match: a server that echoes commits back to the origin client
+        // delivers the SAME id twice — once as a broadcast, once as the commit response. A
+        // destructive first-match let the broadcast consume the exemption, and the response's
+        // correction ops (the server's resolution of what we sent) then stale-skipped
+        // (DAB-601). The set is replaced wholesale by the next confirmSent, so tolerating the
+        // duplicate is safe; re-applying an echo is idempotent for the field-keyed store.
+        if (expectedIds?.has(change.id)) {
           effectiveChanges.push(change);
           cursor = Math.max(cursor, change.rev);
           continue;

@@ -89,6 +89,14 @@ function otConfigFromSeed(seed: number): OTFuzzConfig {
     // intents toward the later writer (transformPatch's `otherOpsFirst`), so concurrent
     // moves converge and move ops are back in the panel mix.
     moveOps: true,
+    // DAB-601: richer edit mix (compound move+array changes, copies, nested containers) —
+    // a CONSTANT, not an rng.pick: drawing here would shift the config-derivation sequence
+    // and change every existing seed's derived knobs. OFF until the class it exposes is
+    // fixed: ~6% of rich-mix seeds commit a compound change whose move source a concurrent
+    // commit consumed (surfacing as "[op:add] require value" from move.apply's pluck) — the
+    // FINDING-1 family reached through multi-op changes. See OT_RICH_PANEL_SEEDS for the CI
+    // coverage that stays on, and the NEW-FINDING skip for the repro.
+    richOps: false,
   };
   // FINDING-3 (fixed): commitChanges now excludes the sender's own committed echoes (matched
   // by id, mirroring the batchId exclusion) from the transform set, so lost commit responses
@@ -187,12 +195,34 @@ const OT_PANEL_SEEDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1
 
 const LWW_PANEL_SEEDS = [101, 102, 103, 104, 105, 106, 107, 108, 109, 110];
 
+// Rich-mix CI coverage (DAB-601): screened-green seeds run the extended edit mix (compound
+// move+array changes, copy ops, nested containers) so the new kinds stay exercised while
+// `richOps` is off in derived configs (see otConfigFromSeed).
+const OT_RICH_PANEL_SEEDS = [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 1000008, 1000009];
+
 describe('convergence fuzz — OT panel', () => {
   for (const seed of OT_PANEL_SEEDS) {
     it(`converges (seed ${seed})`, async () => {
       await runOTFuzz(seed);
     }, 30_000);
   }
+
+  for (const seed of OT_RICH_PANEL_SEEDS) {
+    it(`converges with the rich edit mix (seed ${seed})`, async () => {
+      await runOTFuzz(seed, { richOps: true });
+    }, 30_000);
+  }
+
+  // NEW-FINDING (DAB-601 harness extension, day one): with the rich mix on, ~6% of soak
+  // seeds commit a compound change whose `move` source a concurrent commit already consumed.
+  // Strict replay fails inside move.apply — the plucked source is undefined and surfaces as
+  // "[op:add] require value, but got undefined" from the move's internal add. PRE-EXISTING
+  // (reproduces with the DAB-601 src fixes stashed); the single-op mix could never mint the
+  // shape. Pinned per the suite convention (found bugs are pinned, not fixed, in the PR that
+  // changes the fuzzer). More repro seeds: 1000017, 1000021, 1000025 (+56 more per 1000).
+  it.skip('NEW-FINDING: compound move with consumed source commits and wedges strict replay (seed 10, rich mix)', async () => {
+    await runOTFuzz(10, { richOps: true });
+  }, 30_000);
 
   // FINDING-1 regression (fixed): a client's `move` whose source path was concurrently
   // moved/removed used to be committed pointing at a path that no longer existed, producing
@@ -203,7 +233,7 @@ describe('convergence fuzz — OT panel', () => {
   // conflicts toward the later writer in the advance direction (same-source moves, same-path
   // sets, and sets clobbering a move's source — which also ghost-kill the move destination).
   it('FINDING-1 regression: concurrent move/remove converges (seed 4)', async () => {
-    await runOTFuzz(4, { moveOps: true });
+    await runOTFuzz(4, { moveOps: true, richOps: false });
   }, 60_000);
 
   // FINDING-3 regression (fixed): a client flushed [A], the server committed A but the
@@ -216,7 +246,7 @@ describe('convergence fuzz — OT panel', () => {
   // in lockstep with the client's rebaseChanges. (moveOps pinned to the repro-era mix so the
   // seed's action script stays byte-identical to the original finding.)
   it('FINDING-3 regression: lost-response retry converges (seed 10)', async () => {
-    await runOTFuzz(10, { lostResponseP: 0.03, moveOps: false });
+    await runOTFuzz(10, { lostResponseP: 0.03, moveOps: false, richOps: false });
   }, 60_000);
 
   // FINDING-5 regression (fixed): the reload flow (PatchesSync._reloadDocFromServer)
@@ -228,7 +258,7 @@ describe('convergence fuzz — OT panel', () => {
   // envelope's last installed change. (Repro-era knobs pinned: the seed came from a soak
   // run with moves and lost responses excluded.)
   it('FINDING-5 regression: reload with pending rebases against the whole installed envelope tail (seed 1000035)', async () => {
-    await runOTFuzz(1000035, { moveOps: false, lostResponseP: 0 });
+    await runOTFuzz(1000035, { moveOps: false, lostResponseP: 0, richOps: false });
   }, 60_000);
 });
 

@@ -18,7 +18,7 @@ export interface FuzzDoc {
   count?: number;
   /** Delta text document, edited via `@txt` ops. */
   text?: { insert?: string | object; retain?: number; delete?: number }[] | { ops?: any[] };
-  sections?: Record<string, { name?: string; words?: number }>;
+  sections?: Record<string, { name?: string; words?: number; meta?: { pins?: string[]; info?: Record<string, any> } }>;
   tags?: string[];
 }
 
@@ -50,6 +50,15 @@ export interface OTFuzzConfig {
    * direction (transformPatch `otherOpsFirst`).
    */
   moveOps: boolean;
+  /**
+   * Include the richer edit mix (DAB-601 coverage gap): multi-op changes combining a move
+   * with array/child ops, `copy` ops with in-change edits of the copy, and nested containers
+   * with container-then-child edits. Every DAB-601 wedge lived in multi-op committed
+   * changes, which the original single-op mix could never mint. Pinned OFF by repro-era
+   * regression tests so their seeds' action scripts stay byte-identical (the disabled kinds
+   * contribute zero weight, which leaves existing seeds' RNG bucket boundaries untouched).
+   */
+  richOps: boolean;
 }
 
 interface Packet {
@@ -249,7 +258,19 @@ export class OTFuzzHarness {
 
   private async edit(client: FuzzClient): Promise<void> {
     const state = client.doc.state;
-    const kind = this.rng.weighted([40, 12, 8, 18, 12, this.cfg.moveOps ? 5 : 0, 5]);
+    const rich = this.cfg.richOps;
+    const kind = this.rng.weighted([
+      40,
+      12,
+      8,
+      18,
+      12,
+      this.cfg.moveOps ? 5 : 0,
+      5,
+      rich ? 6 : 0,
+      rich ? 4 : 0,
+      rich ? 5 : 0,
+    ]);
     const word = this.rng.pick(WORDS);
     switch (kind) {
       case 0: {
@@ -333,6 +354,114 @@ export class OTFuzzHarness {
           },
           'multi-op replace /title + /count'
         );
+      }
+      case 7: {
+        // Compound structural change: a move PLUS an array/child op in ONE change — the
+        // multi-op committed shape every DAB-601 wedge lived in (the single-op mix could
+        // never mint it, so the diamond's advance rules went unexercised).
+        const keys = Object.keys(state.sections ?? {});
+        const tags = state.tags ?? [];
+        if (keys.length > 0 && tags.length > 0 && this.rng.chance(0.6)) {
+          const from = this.rng.pick(keys);
+          const to = `c${this.rng.int(50)}`;
+          const i = this.rng.int(tags.length);
+          if (from === to || (state.sections && to in state.sections)) {
+            return this.mint(
+              client,
+              patch => patch.replace('/count', this.rng.int(1000)),
+              'compound collision fallback'
+            );
+          }
+          return this.mint(
+            client,
+            patch => {
+              patch.move(`/sections/${from}`, `/sections/${to}`);
+              patch.add(`/tags/${i}`, `${word}-${this.rng.int(30)}`);
+            },
+            `compound move /sections/${from}->${to} + insert /tags/${i}`
+          );
+        }
+        if (tags.length >= 2) {
+          const from = this.rng.int(tags.length);
+          const to = this.rng.int(tags.length);
+          const k = keys.length ? this.rng.pick(keys) : undefined;
+          return this.mint(
+            client,
+            patch => {
+              patch.move(`/tags/${from}`, `/tags/${to}`);
+              if (k) patch.replace(`/sections/${k}/words`, this.rng.int(500));
+              else patch.replace('/count', this.rng.int(1000));
+            },
+            `compound move /tags/${from}->${to} + edit`
+          );
+        }
+        return this.mint(client, patch => patch.replace('/count', this.rng.int(1000)), 'compound fallback');
+      }
+      case 8: {
+        // Copy ops, including an in-change edit of the copy destination (the copied value
+        // and its children are new container state minted mid-patch).
+        const keys = Object.keys(state.sections ?? {});
+        if (keys.length === 0) {
+          return this.mint(
+            client,
+            patch => patch.add(`/sections/s${this.rng.int(50)}`, { name: word, words: 0 }),
+            'copy fallback: add section'
+          );
+        }
+        const from = this.rng.pick(keys);
+        const to = `k${this.rng.int(50)}`;
+        if (from === to || (state.sections && to in state.sections)) {
+          return this.mint(client, patch => patch.replace('/title', word), 'copy collision fallback');
+        }
+        const editCopy = this.rng.chance(0.6);
+        return this.mint(
+          client,
+          patch => {
+            patch.copy(`/sections/${from}`, `/sections/${to}`);
+            if (editCopy) patch.replace(`/sections/${to}/name`, `${word}-copy`);
+          },
+          `copy /sections/${from}->${to}${editCopy ? ' + edit copy' : ''}`
+        );
+      }
+      case 9: {
+        // Nested containers: seed a container under a section (optionally setting a child in
+        // the SAME change — container-then-child-edit within one patch), then later edits
+        // target the nested children across changes.
+        const keys = Object.keys(state.sections ?? {});
+        if (keys.length === 0) {
+          return this.mint(
+            client,
+            patch => patch.add(`/sections/n${this.rng.int(50)}`, { name: word, words: 0 }),
+            'nested fallback: add section'
+          );
+        }
+        const k = this.rng.pick(keys);
+        const meta = (state.sections as any)?.[k]?.meta;
+        if (!meta) {
+          const withChild = this.rng.chance(0.5);
+          return this.mint(
+            client,
+            patch => {
+              patch.add(`/sections/${k}/meta`, { pins: [], info: {} });
+              if (withChild) patch.add(`/sections/${k}/meta/pins/-`, word);
+            },
+            `add /sections/${k}/meta${withChild ? ' + child pin' : ''}`
+          );
+        }
+        const op = this.rng.weighted([35, meta.pins?.length ? 25 : 0, 25, 15]);
+        if (op === 0)
+          return this.mint(client, patch => patch.add(`/sections/${k}/meta/pins/-`, word), `pin /sections/${k}`);
+        if (op === 1) {
+          const i = this.rng.int(meta.pins.length);
+          return this.mint(client, patch => patch.remove(`/sections/${k}/meta/pins/${i}`), `unpin /sections/${k}/${i}`);
+        }
+        if (op === 2)
+          return this.mint(
+            client,
+            patch => patch.replace(`/sections/${k}/meta/info/note`, `${word} ${this.rng.int(100)}`),
+            `note /sections/${k}`
+          );
+        return this.mint(client, patch => patch.remove(`/sections/${k}/meta`), `remove /sections/${k}/meta`);
       }
     }
   }

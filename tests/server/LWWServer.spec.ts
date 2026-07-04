@@ -1097,3 +1097,29 @@ describe('LWWServer', () => {
     });
   });
 });
+
+describe('LWWServer — response ops are rev-stamped by the server (DAB-601)', () => {
+  it('stamps the committed rev itself so a copying backend still yields sortable response ops', async () => {
+    // A contract-compliant backend that never mutates the caller's ops (as any SQL/HTTP
+    // store would behave). Before DAB-601 the response relied on the memory backend
+    // leaking rev stamps into the input, and a copying backend broke commit-order sorting.
+    const copying = new LWWMemoryStoreBackend();
+    const inner = copying.saveOps.bind(copying);
+    copying.saveOps = (docId, ops, pathsToDelete, changeIds) =>
+      inner(
+        docId,
+        ops.map(op => ({ ...op })),
+        pathsToDelete,
+        changeIds
+      );
+    const server = new LWWServer(copying);
+
+    const result = await server.commitChanges('doc-rev-stamp', [
+      { id: 'c1', rev: 1, ops: [{ op: 'replace', path: '/a', value: 1, ts: 5 }] },
+    ]);
+
+    const echoed = result.changes[0].ops.filter(op => op.path === '/a');
+    expect(echoed).not.toHaveLength(0);
+    for (const op of echoed) expect(op.rev).toBe(1);
+  });
+});

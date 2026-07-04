@@ -114,3 +114,61 @@ describe('commitChanges — lost echo with an interleaved foreign commit', () =>
     expect(headState(backend).tags).toEqual(['a', 'f', 'x', 'z']);
   });
 });
+
+describe('commitChanges — own-echo matching is origin-aware (DAB-601)', () => {
+  it('a foreign committed change with a colliding id is still transformed against', async () => {
+    const backend = new OTFuzzBackend();
+    await seed(backend, { tags: ['x', 'y'] }); // rev 1
+
+    // A foreign client committed a change whose id collides with one this sender will use.
+    await commitChanges(
+      backend,
+      DOC,
+      [{ ...change('X', 1, [{ op: 'add', path: '/tags/0', value: 'f' }]), clientId: 'client-foreign' }],
+      sessionTimeoutMillis
+    ); // rev 2 — tags: ['f', 'x', 'y']
+
+    // A DIFFERENT client sends a batch reusing id X plus a tail change minted in its own
+    // frame (tags without the foreign insert). Matching echoes by id alone excluded the
+    // foreign change from the transform set AND swallowed the sender's X as already
+    // committed — the tail then committed unshifted, deleting 'x' instead of 'y'.
+    const result = await commitChanges(
+      backend,
+      DOC,
+      [
+        { ...change('X', 1, [{ op: 'replace', path: '/a', value: 1 }]), clientId: 'client-me' },
+        { ...change('B', 1, [{ op: 'remove', path: '/tags/1' }]), clientId: 'client-me' },
+      ],
+      sessionTimeoutMillis
+    );
+
+    expect(result.newChanges).toHaveLength(2); // the sender's X is a distinct change, not an echo
+    const state = headState(backend);
+    expect(state.tags).toEqual(['f', 'x']); // B removed 'y' (shifted), not 'x'
+    expect(state.a).toBe(1);
+  });
+
+  it('falls back to id-only matching when committed rows carry no origin (pre-stamp history)', async () => {
+    const backend = new OTFuzzBackend();
+    await seed(backend, { tags: ['x', 'y'] }); // rev 1
+
+    // The sender's own earlier commit, persisted before origin stamping existed (no clientId).
+    await commitChanges(backend, DOC, [change('A', 1, [{ op: 'remove', path: '/tags/1' }])], sessionTimeoutMillis); // rev 2
+
+    // The response was lost; the client re-flushes A (now stamped) with a tail change.
+    const result = await commitChanges(
+      backend,
+      DOC,
+      [
+        { ...change('A', 1, [{ op: 'remove', path: '/tags/1' }]), clientId: 'client-me' },
+        { ...change('B', 1, [{ op: 'replace', path: '/tags/0', value: 'z' }]), clientId: 'client-me' },
+      ],
+      sessionTimeoutMillis
+    );
+
+    // A recognized as the sender's own echo (id fallback): echoed for confirmation, not recommitted.
+    expect(result.newChanges.map(c => c.id)).toEqual(['B']);
+    expect(result.catchupChanges.some(c => c.id === 'A')).toBe(true);
+    expect(headState(backend).tags).toEqual(['z']);
+  });
+});

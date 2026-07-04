@@ -19,3 +19,6 @@ export type * from './PatchesStore.js';
 export type * from './OTClientStore.js';
 export type * from './LWWClientStore.js';
 export type * from './ClientAlgorithm.js';
+// Sync-recovery errors, exported so consumers can `instanceof` instead of matching by name
+export { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
+export { ApplyChangesError } from '../algorithms/ot/shared/applyChanges.js';

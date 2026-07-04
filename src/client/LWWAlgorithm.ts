@@ -4,8 +4,9 @@ import { mergeServerWithLocal } from '../algorithms/lww/mergeServerWithLocal.js'
 // getChangesSince); it lives in the OT tree for historical reasons.
 import { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
 import { createChange } from '../data/change.js';
+import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
-import type { Change, PatchesSnapshot } from '../types.js';
+import type { Change, PatchesSnapshot, QuarantinedChange } from '../types.js';
 import type { ClientAlgorithm } from './ClientAlgorithm.js';
 import type { LWWClientStore } from './LWWClientStore.js';
 import { LWWDoc } from './LWWDoc.js';
@@ -227,6 +228,62 @@ export class LWWAlgorithm implements ClientAlgorithm {
         changes.flatMap(c => c.ops)
       )
     );
+  }
+
+  /**
+   * Local strict-apply probe corroborating a server rejection of the sending change:
+   * true when the named change applies cleanly against the committed-only state (or when
+   * no pending change matches the id — nothing to corroborate). The only pending identity
+   * the server can name is the sending change's id; pendingOps have no ids.
+   */
+  async verifyPendingChange(docId: string, changeId: string): Promise<boolean> {
+    return this._withDocLock(docId, async () => {
+      const sending = await this.store.getSendingChange(docId);
+      if (!sending || sending.id !== changeId) return true;
+      const { state } = await this.store.getCommittedState(docId);
+      try {
+        applyPatch(state, sending.ops, { strict: true, silent: true });
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /**
+   * Eject the sending change into quarantine and rebuild the open doc without it.
+   * The quarantine write and the sending-slot clear are one store transaction; pendingOps
+   * minted after the sending change was captured survive untouched and flush next.
+   */
+  async ejectPendingChange(
+    docId: string,
+    changeId: string,
+    reason: string,
+    doc?: PatchesDoc<any>
+  ): Promise<QuarantinedChange | null> {
+    const quarantined = await this._withDocLock(docId, () =>
+      this.store.quarantineSendingChange(docId, changeId, reason)
+    );
+    if (!quarantined) return null;
+    // The commit that triggered ejection was rejected, so no response is coming for it.
+    this._expectedResponseIds.delete(docId);
+    // The ejected ops are baked into the open doc's base state (applied at mint time);
+    // import() rebuilds it from the store, which no longer holds them. Patches'
+    // applySnapshot can't be used here — its rev guard is strictly `>` and ejection
+    // doesn't advance the committed rev.
+    if (doc) {
+      const snapshot = await this.loadDoc(docId);
+      (doc as LWWDoc).import(snapshot ?? { state: {}, rev: 0, changes: [] });
+    }
+    return quarantined;
+  }
+
+  async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
+    return this.store.listQuarantinedChanges(docId);
+  }
+
+  async discardQuarantinedChange(docId: string, changeId: string): Promise<void> {
+    return this.store.discardQuarantinedChange(docId, changeId);
   }
 
   // --- Store forwarding methods ---

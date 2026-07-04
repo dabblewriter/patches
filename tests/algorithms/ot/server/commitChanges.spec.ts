@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { commitChanges } from '../../../../src/algorithms/ot/server/commitChanges';
+import { StatusError } from '../../../../src/net/error';
 import { RevConflictError } from '../../../../src/server/RevConflictError';
 import type { OTStoreBackend } from '../../../../src/server/types';
 import type { Change } from '../../../../src/types';
@@ -125,6 +126,38 @@ describe('commitChanges', () => {
     await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis)).rejects.toThrow(
       /Document doc1 already exists.*Cannot apply root-level replace.*would overwrite the existing document/
     );
+  });
+
+  it('rejects as StatusError with data naming the culprit change (or the doc) so clients can eject/quarantine', async () => {
+    // Root-op guard: change-intrinsic — data names the offending change.
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(1);
+    const rootChange = createChange('culprit', 1, 0);
+    rootChange.ops = [{ op: 'add', path: '', value: {} }];
+    const rootErr = await commitChanges(mockStore, 'doc1', [rootChange], sessionTimeoutMillis).catch(e => e);
+    expect(rootErr).toBeInstanceOf(StatusError);
+    expect(rootErr.code).toBe(400);
+    expect(rootErr.data).toEqual({ changeId: 'culprit', scope: 'change' });
+
+    // Inconsistent baseRev: batch-shape problem — doc-scoped, no culprit named.
+    // (currentRev 0 so the baseRev:0-on-existing-doc rebase branch doesn't normalize them first.)
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(0);
+    const inconsistentErr = await commitChanges(
+      mockStore,
+      'doc1',
+      [createChange('1', 1, 0), createChange('2', 2, 1)],
+      sessionTimeoutMillis
+    ).catch(e => e);
+    expect(inconsistentErr).toBeInstanceOf(StatusError);
+    expect(inconsistentErr.code).toBe(400);
+    expect(inconsistentErr.data).toEqual({ scope: 'doc' });
+
+    // baseRev ahead of server: stale client state — doc-scoped.
+    const aheadErr = await commitChanges(mockStore, 'doc1', [createChange('1', 1, 5)], sessionTimeoutMillis).catch(
+      e => e
+    );
+    expect(aheadErr).toBeInstanceOf(StatusError);
+    expect(aheadErr.code).toBe(409);
+    expect(aheadErr.data).toEqual({ scope: 'doc' });
   });
 
   it('should allow root creation when part of initial batch', async () => {

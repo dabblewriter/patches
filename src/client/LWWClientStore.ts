@@ -1,5 +1,5 @@
 import type { JSONPatchOp } from '../json-patch/types.js';
-import type { Change } from '../types.js';
+import type { Change, PatchesState, QuarantinedChange } from '../types.js';
 import type { PatchesStore } from './PatchesStore.js';
 
 /**
@@ -75,4 +75,29 @@ export interface LWWClientStore extends PatchesStore {
    * @param serverChanges Changes from the server
    */
   applyServerChanges(docId: string, serverChanges: Change[]): Promise<void>;
+
+  /**
+   * Rebuild the committed-only state (snapshot + committed ops, no sending/pending layers).
+   * Used as the base for the local strict-apply probe that corroborates a server's
+   * rejection of the sending change before it is ejected (see
+   * `ClientAlgorithm.verifyPendingChange`).
+   */
+  getCommittedState(docId: string): Promise<PatchesState>;
+
+  /**
+   * Atomically move the sending change into quarantine, preserving pendingOps (unlike
+   * `saveSendingChange`, which clears them). The quarantine write and the sending-slot
+   * clear must be one transaction — a crash between them must not drop the change
+   * silently.
+   *
+   * @returns The quarantined entry, or null when the slot is empty or holds a
+   *   different change id (nothing is mutated in that case).
+   */
+  quarantineSendingChange(docId: string, changeId: string, reason: string): Promise<QuarantinedChange | null>;
+
+  /** List quarantined changes — for one doc, or all docs when docId is omitted. */
+  listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]>;
+
+  /** Permanently remove a quarantined change. The app's (user's) decision — never automatic. */
+  discardQuarantinedChange(docId: string, changeId: string): Promise<void>;
 }

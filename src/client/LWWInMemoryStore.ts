@@ -1,7 +1,7 @@
 import { createChange } from '../data/change.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
-import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
+import type { Change, PatchesSnapshot, PatchesState, QuarantinedChange } from '../types.js';
 import type { LWWClientStore } from './LWWClientStore.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
@@ -15,6 +15,7 @@ interface LWWDocBuffers {
   committedFields: Map<string, JSONPatchOp>;
   pendingOps: Map<string, JSONPatchOp>;
   sendingChange: Change | null;
+  quarantined: Map<string, QuarantinedChange>;
   committedRev: number;
   deleted?: true;
 }
@@ -115,6 +116,7 @@ export class LWWInMemoryStore implements LWWClientStore {
       committedFields,
       pendingOps: existing?.pendingOps ?? new Map(),
       sendingChange: existing?.sendingChange ?? null,
+      quarantined: existing?.quarantined ?? new Map(),
       committedRev: docState.rev,
     });
   }
@@ -152,6 +154,7 @@ export class LWWInMemoryStore implements LWWClientStore {
     buf.committedFields.clear();
     buf.pendingOps.clear();
     buf.sendingChange = null;
+    buf.quarantined.clear();
   }
 
   /**
@@ -298,6 +301,56 @@ export class LWWInMemoryStore implements LWWClientStore {
     }
   }
 
+  /**
+   * Rebuild the committed-only state (snapshot + committed fields), the base for the
+   * local strict-apply probe corroborating a server rejection of the sending change.
+   */
+  async getCommittedState(docId: string): Promise<PatchesState> {
+    const buf = this.docs.get(docId);
+    if (!buf) return { state: {}, rev: 0 };
+    let state = buf.snapshot?.state ? { ...buf.snapshot.state } : {};
+    const committedOps = Array.from(buf.committedFields.values());
+    if (committedOps.length > 0) {
+      state = applyPatch(state, committedOps, { partial: true });
+    }
+    return { state, rev: buf.committedRev };
+  }
+
+  /**
+   * Atomically move the sending change into quarantine, preserving pendingOps.
+   */
+  async quarantineSendingChange(docId: string, changeId: string, reason: string): Promise<QuarantinedChange | null> {
+    const buf = this.docs.get(docId);
+    if (!buf?.sendingChange || buf.sendingChange.id !== changeId) return null;
+    const quarantined: QuarantinedChange = {
+      docId,
+      changeId,
+      change: buf.sendingChange,
+      reason,
+      quarantinedAt: Date.now(),
+    };
+    buf.quarantined.set(changeId, quarantined);
+    buf.sendingChange = null;
+    return quarantined;
+  }
+
+  /**
+   * List quarantined changes for one doc, or all docs when docId is omitted.
+   */
+  async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
+    if (docId !== undefined) {
+      return Array.from(this.docs.get(docId)?.quarantined.values() ?? []);
+    }
+    return Array.from(this.docs.values()).flatMap(buf => Array.from(buf.quarantined.values()));
+  }
+
+  /**
+   * Permanently remove a quarantined change.
+   */
+  async discardQuarantinedChange(docId: string, changeId: string): Promise<void> {
+    this.docs.get(docId)?.quarantined.delete(changeId);
+  }
+
   // ─── Helper Methods ──────────────────────────────────────────────────────
 
   private getOrCreateBuffer(docId: string): LWWDocBuffers {
@@ -307,6 +360,7 @@ export class LWWInMemoryStore implements LWWClientStore {
         committedFields: new Map(),
         pendingOps: new Map(),
         sendingChange: null,
+        quarantined: new Map(),
         committedRev: 0,
       };
       this.docs.set(docId, buf);

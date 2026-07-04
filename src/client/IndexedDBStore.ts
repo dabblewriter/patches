@@ -47,7 +47,7 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
   protected dbName?: string;
   protected dbPromise: Deferred<IDBDatabase>;
   protected external: boolean;
-  protected requiredStores = new Set(['docs', 'snapshots', 'branches']);
+  protected requiredStores = new Set(['docs', 'snapshots', 'branches', 'quarantinedChanges']);
 
   /**
    * Signal emitted during database upgrade, allowing algorithm-specific stores
@@ -85,7 +85,8 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
   }
 
   /**
-   * Creates shared object stores (docs, snapshots, branches) during database upgrade.
+   * Creates shared object stores (docs, snapshots, branches, quarantinedChanges) during
+   * database upgrade.
    */
   static upgradeSharedStores(db: IDBDatabase, transaction: IDBTransaction): void {
     if (!db.objectStoreNames.contains('docs')) {
@@ -104,6 +105,9 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
       if (!branchStore.indexNames.contains('_pending')) {
         branchStore.createIndex('_pending', '_pending', { unique: false });
       }
+    }
+    if (!db.objectStoreNames.contains('quarantinedChanges')) {
+      db.createObjectStore('quarantinedChanges', { keyPath: ['docId', 'changeId'] });
     }
   }
 

@@ -60,6 +60,24 @@ export interface PatchesSnapshot<T = any> extends PatchesState<T> {
 }
 
 /**
+ * A pending change removed from the outgoing queue after the server terminally rejected
+ * it, preserved so the app can surface its content back to the user. Quarantined changes
+ * are never dropped automatically — disposal is the app's (user's) decision via
+ * `Patches.discardQuarantinedChange`.
+ */
+export interface QuarantinedChange {
+  docId: string;
+  /** The rejected change's id — together with docId, the quarantine key. */
+  changeId: string;
+  /** The rejected change, ops intact (for a partially-confirmed change, the unconfirmed remainder). */
+  change: Change;
+  /** Why it was quarantined — typically the server's rejection message. */
+  reason: string;
+  /** Unix ms timestamp when the change was quarantined. */
+  quarantinedAt: number;
+}
+
+/**
  * Sync status for a document, used by both PatchesDoc and DocSyncState.
  * - `'unsynced'` — not yet synced (initial state, or disconnected)
  * - `'syncing'`  — actively syncing with the server

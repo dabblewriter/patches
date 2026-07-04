@@ -1,5 +1,5 @@
 import type { JSONPatchOp } from '../json-patch/types.js';
-import type { Change, PatchesSnapshot } from '../types.js';
+import type { Change, PatchesSnapshot, QuarantinedChange } from '../types.js';
 import type { PatchesDoc } from './PatchesDoc.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
@@ -176,6 +176,46 @@ export interface ClientAlgorithm {
    *   up to the reloaded snapshot's revision, in order
    */
   reconcilePending?(docId: string, committedChanges: Change[]): Promise<void>;
+
+  /**
+   * Local strict-apply probe for a pending change the server rejected: does the named
+   * change apply cleanly against the committed-only local state? Poison-pill ejection
+   * treats the server's `data.changeId` as a suspicion, not a verdict — a change is
+   * auto-ejected only when this probe ALSO fails, so a server attribution bug can never
+   * silently remove content that is locally intact. Returns true when the change applies
+   * cleanly or when no pending change matches the id (nothing to corroborate).
+   *
+   * Optional — only LWW implements it today (v1 ships LWW-only ejection).
+   */
+  verifyPendingChange?(docId: string, changeId: string): Promise<boolean>;
+
+  /**
+   * Remove the named pending change from the outgoing queue and quarantine it (atomically
+   * — a crash between the two must not drop the change silently), then bring the open doc
+   * (if provided) back in line with the store. The quarantined change is preserved until
+   * the app discards it; it is never resent.
+   *
+   * - LWW: the only server-addressable pending identity is the single in-flight sending
+   *   change, so ejection clears the sending slot (pendingOps minted since capture
+   *   survive untouched). No rebasing — LWW pending is path-keyed.
+   * - OT: not implemented in v1 (the OT server transforms rather than rejects, so there
+   *   is no live emitter of change-scoped OT rejections; the invert+rebase ladder waits
+   *   for telemetry to prove a trigger exists).
+   *
+   * @returns The quarantined entry, or null when docId/changeId don't match a pending change.
+   */
+  ejectPendingChange?(
+    docId: string,
+    changeId: string,
+    reason: string,
+    doc?: PatchesDoc<any>
+  ): Promise<QuarantinedChange | null>;
+
+  /** Lists quarantined changes for one doc, or all docs when docId is omitted. */
+  listQuarantinedChanges?(docId?: string): Promise<QuarantinedChange[]>;
+
+  /** Permanently removes a quarantined change. The app's (user's) decision — never automatic. */
+  discardQuarantinedChange?(docId: string, changeId: string): Promise<void>;
 
   // --- Store forwarding methods ---
 

@@ -225,18 +225,14 @@ export class OTAlgorithm implements ClientAlgorithm {
       // (which is why the snapshot-reload recovery calling this exists at all).
       const rebased = rebaseChanges(committedChanges, pending);
 
-      // Replace pending without touching committed history. Drop must come first: the
-      // rebased changes keep their original ids, so saving them before dropping would let
-      // the id-matched delete remove the rebased copies too. The crash window between the
-      // two store calls loses at most the pending tail — recoverable and bounded — whereas
-      // keeping an already-committed pending change doubles content permanently.
-      await this.store.dropPendingChanges(
-        docId,
-        pending.map(c => c.id)
-      );
-      if (rebased.length > 0) {
-        await this.store.savePendingChanges(docId, rebased);
-      }
+      // Replace pending ATOMICALLY (applyServerChanges with no server changes swaps the
+      // pending queue in one store transaction, same as replacePendingChanges). The previous
+      // drop-then-save pair had a failure window between the two store calls that discarded
+      // the ENTIRE rebased pending set — un-persisted user work nothing had rejected. Written
+      // off as "recoverable and bounded"; substrate fault injection proved otherwise on its
+      // first soak (P3 silent-loss, seed 1000126: an IDB-abort-shaped failure on the save leg
+      // after the drop leg committed).
+      await this.store.applyServerChanges(docId, [], rebased);
     });
   }
 

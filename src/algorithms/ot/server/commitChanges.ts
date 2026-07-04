@@ -1,3 +1,4 @@
+import { StatusError } from '../../../net/error.js';
 import type { CommitResult } from '../../../server/PatchesServer.js';
 import { RevConflictError } from '../../../server/RevConflictError.js';
 import type { OTStoreBackend } from '../../../server/types.js';
@@ -68,12 +69,14 @@ export async function commitChanges(
   let docReloadRequired: true | undefined;
   if (changes[0].baseRev === 0 && initialRev > 0 && !batchedContinuation) {
     // Prevent stale clients from wiping existing data with a root creation op anywhere in the batch
-    const hasRootOp = changes.some(c => c.ops.some(op => op.path === ''));
-    if (hasRootOp) {
-      throw new Error(
+    const rootOpChange = changes.find(c => c.ops.some(op => op.path === ''));
+    if (rootOpChange) {
+      throw new StatusError(
+        400,
         `Document ${docId} already exists (rev ${initialRev}). ` +
           `Cannot apply root-level replace (path: '') with baseRev 0 - this would overwrite the existing document. ` +
-          `Load the existing document first, or use nested paths instead of replacing at root.`
+          `Load the existing document first, or use nested paths instead of replacing at root.`,
+        { changeId: rootOpChange.id, scope: 'change' }
       );
     }
     docReloadRequired = true;
@@ -89,7 +92,9 @@ export async function commitChanges(
   changes.forEach(c => {
     if (c.baseRev == null) c.baseRev = baseRev;
     else if (c.baseRev !== baseRev && !options?.historicalImport) {
-      throw new Error(`Client changes must have consistent baseRev in all changes for doc ${docId}.`);
+      throw new StatusError(400, `Client changes must have consistent baseRev in all changes for doc ${docId}.`, {
+        scope: 'doc',
+      });
     }
     if (c.rev == null) c.rev = rev++;
     else rev = c.rev + 1;
@@ -103,8 +108,10 @@ export async function commitChanges(
 
   // Basic validation
   if (baseRev > initialRev) {
-    throw new Error(
-      `Client baseRev (${baseRev}) is ahead of server revision (${initialRev}) for doc ${docId}. Client needs to reload the document.`
+    throw new StatusError(
+      409,
+      `Client baseRev (${baseRev}) is ahead of server revision (${initialRev}) for doc ${docId}. Client needs to reload the document.`,
+      { scope: 'doc' }
     );
   }
 

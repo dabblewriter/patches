@@ -47,7 +47,7 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
   protected dbName?: string;
   protected dbPromise: Deferred<IDBDatabase>;
   protected external: boolean;
-  protected requiredStores = new Set(['docs', 'snapshots', 'branches']);
+  protected requiredStores = new Set(['docs', 'snapshots', 'branches', 'quarantinedChanges']);
 
   /**
    * Signal emitted during database upgrade, allowing algorithm-specific stores
@@ -63,6 +63,15 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
       this.external = true;
       Promise.resolve(dbOrName).then(
         db => {
+          // We can't self-heal an external database (the host owns its version), so warn
+          // loudly instead of failing later with an opaque NotFoundError.
+          const missing = [...this.requiredStores].filter(name => !db.objectStoreNames.contains(name));
+          if (missing.length) {
+            console.error(
+              `External database "${db.name}" is missing object stores: ${missing.join(', ')}. ` +
+                `Bump the database version so upgradePatchesDB runs and creates them.`
+            );
+          }
           this.db = db;
           this.dbPromise.resolve(db);
         },
@@ -85,7 +94,8 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
   }
 
   /**
-   * Creates shared object stores (docs, snapshots, branches) during database upgrade.
+   * Creates shared object stores (docs, snapshots, branches, quarantinedChanges) during
+   * database upgrade.
    */
   static upgradeSharedStores(db: IDBDatabase, transaction: IDBTransaction): void {
     if (!db.objectStoreNames.contains('docs')) {
@@ -104,6 +114,9 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
       if (!branchStore.indexNames.contains('_pending')) {
         branchStore.createIndex('_pending', '_pending', { unique: false });
       }
+    }
+    if (!db.objectStoreNames.contains('quarantinedChanges')) {
+      db.createObjectStore('quarantinedChanges', { keyPath: ['docId', 'changeId'] });
     }
   }
 
@@ -223,6 +236,11 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     const tx = new IDBTransactionWrapper(db.transaction(storeNames, mode));
     const stores = storeNames.map(name => tx.getStore(name));
     return [tx, ...stores];
+  }
+
+  /** Whether the open database contains the named object store (it may not on an external-mode database the host hasn't upgraded). */
+  async hasStore(name: string): Promise<boolean> {
+    return (await this.getDB()).objectStoreNames.contains(name);
   }
 
   // ─── Algorithm-Specific Methods ──────────────────────────────────────────

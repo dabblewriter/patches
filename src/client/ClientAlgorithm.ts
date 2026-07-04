@@ -1,5 +1,5 @@
 import type { JSONPatchOp } from '../json-patch/types.js';
-import type { Change, PatchesSnapshot } from '../types.js';
+import type { Change, PatchesSnapshot, QuarantinedChange } from '../types.js';
 import type { PatchesDoc } from './PatchesDoc.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
 
@@ -176,6 +176,34 @@ export interface ClientAlgorithm {
    *   up to the reloaded snapshot's revision, in order
    */
   reconcilePending?(docId: string, committedChanges: Change[]): Promise<void>;
+
+  /**
+   * Local strict-apply probe corroborating a server rejection of a pending change: does
+   * the named change apply cleanly against the committed-only local state? Returns true
+   * when it applies cleanly or when no pending change matches the id. Optional; only LWW
+   * implements it today (see docs/quarantine.md).
+   */
+  verifyPendingChange?(docId: string, changeId: string): Promise<boolean>;
+
+  /**
+   * Atomically move the named pending change from the outgoing queue into quarantine,
+   * then bring the open doc (if provided) back in line with the store. Optional; only
+   * LWW implements it today (see docs/quarantine.md).
+   *
+   * @returns The quarantined entry, or null when docId/changeId don't match a pending change.
+   */
+  ejectPendingChange?(
+    docId: string,
+    changeId: string,
+    reason: string,
+    doc?: PatchesDoc<any>
+  ): Promise<QuarantinedChange | null>;
+
+  /** Lists quarantined changes for one doc, or all docs when docId is omitted. */
+  listQuarantinedChanges?(docId?: string): Promise<QuarantinedChange[]>;
+
+  /** Permanently removes a quarantined change. The app's decision, never automatic. */
+  discardQuarantinedChange?(docId: string, changeId: string): Promise<void>;
 
   // --- Store forwarding methods ---
 

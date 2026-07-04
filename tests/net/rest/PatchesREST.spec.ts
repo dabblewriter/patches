@@ -648,6 +648,21 @@ describe('PatchesREST', () => {
       });
     });
 
+    it('rehydrates the error body `data` onto StatusError (the poison-pill ejection wire contract)', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: () => Promise.resolve({ message: 'rejected', data: { changeId: 'culprit', scope: 'change' } }),
+      });
+
+      await expect(rest.commitChanges('doc1', [{ id: 'culprit', ops: [] } as any])).rejects.toMatchObject({
+        code: 422,
+        message: 'rejected',
+        data: { changeId: 'culprit', scope: 'change' },
+      });
+    });
+
     it('wraps a status-less fetch rejection in NetworkError, preserving the cause', async () => {
       // fetch rejects without ever producing a response (DNS/TCP/TLS failure or a
       // CORS-opaque rejection) — the browser shape is a bare TypeError.

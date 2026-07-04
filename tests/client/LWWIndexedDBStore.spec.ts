@@ -143,6 +143,7 @@ describe('LWWIndexedDBStore', () => {
     });
 
     // Mock other delegated methods
+    (store as any).db.hasStore = vi.fn().mockResolvedValue(true);
     (store as any).db.close = vi.fn().mockResolvedValue(undefined);
     (store as any).db.deleteDB = vi.fn().mockResolvedValue(undefined);
     (store as any).db.setName = vi.fn();

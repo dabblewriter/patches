@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OTAlgorithm } from '../../src/client/OTAlgorithm';
 import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
 import { createChange } from '../../src/data/change';
@@ -94,5 +94,53 @@ describe('OTAlgorithm.reconcilePending', () => {
 
     expect(await store.getPendingChanges('doc1')).toEqual([]);
     expect(await algorithm.hasPending('doc1')).toBe(false);
+  });
+});
+
+/**
+ * The pending replacement must be ATOMIC. reconcilePending previously dropped the old
+ * queue and saved the rebased one as TWO store calls; a failure between them (an aborted
+ * IndexedDB transaction on the save leg after the drop leg committed) discarded the entire
+ * rebased pending set — un-persisted user work nothing had rejected. Found by substrate
+ * fault injection on its first soak (P3 silent-loss, fuzz seed 1000126).
+ */
+describe('OTAlgorithm.reconcilePending — atomic replacement', () => {
+  it("replaces pending through the store's single atomic pending-swap, never drop-then-save", async () => {
+    const store = new OTInMemoryStore();
+    const algorithm = new OTAlgorithm(store);
+    await store.trackDocs(['doc1']);
+    const pending = createChange(5, 6, [{ op: 'add', path: '/list/2', value: 'mine' }]);
+    await store.savePendingChanges('doc1', [pending]);
+    const dropSpy = vi.spyOn(store, 'dropPendingChanges');
+    const saveSpy = vi.spyOn(store, 'savePendingChanges');
+    const atomicSpy = vi.spyOn(store, 'applyServerChanges');
+
+    const foreign = createChange(5, 6, [{ op: 'add', path: '/list/0', value: 'theirs' }]);
+    await algorithm.reconcilePending('doc1', [{ ...foreign, committedAt: 100 }]);
+
+    expect(dropSpy).not.toHaveBeenCalled();
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(atomicSpy).toHaveBeenCalledTimes(1);
+    expect(atomicSpy).toHaveBeenCalledWith('doc1', [], expect.any(Array));
+    expect((await store.getPendingChanges('doc1'))[0].ops).toEqual([{ op: 'add', path: '/list/3', value: 'mine' }]);
+  });
+
+  it('a store failure leaves the old pending intact for a retry — never a torn half-replacement', async () => {
+    const store = new OTInMemoryStore();
+    const algorithm = new OTAlgorithm(store);
+    await store.trackDocs(['doc1']);
+    const pending = createChange(5, 6, [{ op: 'add', path: '/list/2', value: 'mine' }]);
+    await store.savePendingChanges('doc1', [pending]);
+    // Fail the way an aborted IndexedDB transaction does: reject without mutating.
+    vi.spyOn(store, 'applyServerChanges').mockRejectedValueOnce(new Error('injected substrate fault'));
+
+    const foreign = createChange(5, 6, [{ op: 'add', path: '/list/0', value: 'theirs' }]);
+    await expect(algorithm.reconcilePending('doc1', [{ ...foreign, committedAt: 100 }])).rejects.toThrow(
+      'injected substrate fault'
+    );
+
+    // The queue is exactly what it was — the caller can retry reconciliation. The old
+    // drop-then-save shape lost everything here.
+    expect(await store.getPendingChanges('doc1')).toEqual([pending]);
   });
 });

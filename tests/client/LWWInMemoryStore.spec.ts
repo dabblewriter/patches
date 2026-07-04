@@ -714,24 +714,27 @@ describe('LWWInMemoryStore', () => {
       const ops: JSONPatchOp[] = [{ op: 'replace', path: '/flags/autosave', value: true, ts: 100 }];
       await store.saveSendingChange('doc1', createChange('mine', 7, 6, ops));
 
-      await store.confirmSendingChange('doc1', ops);
+      const corrections = await store.confirmSendingChange('doc1', ops);
 
       // The remove (newer) survives in committed state even though the correction echo
-      // never arrives; the sending slot still clears.
+      // never arrives; the sending slot still clears; the winning row is surfaced as a
+      // local correction so the caller can roll the open doc back too.
       expect((await store.getCommittedState('doc1')).state).toEqual({});
       expect(await store.getSendingChange('doc1')).toBeNull();
+      expect(corrections).toEqual([expect.objectContaining({ op: 'remove', path: '/flags/autosave', ts: 200 })]);
     });
 
-    it('promotes a sent op that wins by timestamp', async () => {
+    it('promotes a sent op that wins by timestamp (no corrections)', async () => {
       await store.applyServerChanges('doc1', [
         createChange('foreign', 6, 5, [{ op: 'remove', path: '/flags/autosave', ts: 200 }]),
       ]);
       const ops: JSONPatchOp[] = [{ op: 'replace', path: '/flags/autosave', value: true, ts: 300 }];
       await store.saveSendingChange('doc1', createChange('mine', 7, 6, ops));
 
-      await store.confirmSendingChange('doc1', ops);
+      const corrections = await store.confirmSendingChange('doc1', ops);
 
       expect((await store.getCommittedState('doc1')).state).toEqual({ flags: { autosave: true } });
+      expect(corrections).toEqual([]);
     });
 
     it('a losing parent write does not prune the newer committed children it lost to', async () => {
@@ -756,10 +759,12 @@ describe('LWWInMemoryStore', () => {
       const ops: JSONPatchOp[] = [{ op: '@inc', path: '/count', value: 3, ts: 100 }];
       await store.saveSendingChange('doc1', createChange('mine', 7, 6, ops));
 
-      await store.confirmSendingChange('doc1', ops);
+      const corrections = await store.confirmSendingChange('doc1', ops);
 
-      // Same fold the server performs: apply the delta to the stored value.
+      // Same fold the server performs: apply the delta to the stored value. The folded
+      // row is surfaced as a correction so the open doc shows the folded value too.
       expect((await store.getCommittedState('doc1')).state).toEqual({ count: 8 });
+      expect(corrections).toEqual([expect.objectContaining({ path: '/count', value: 8 })]);
     });
   });
 

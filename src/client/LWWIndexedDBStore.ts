@@ -406,7 +406,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
    * after) overwrite any stale ops for fields the server won via LWW.
    */
   @blockable
-  async confirmSendingChange(docId: string, ops?: JSONPatchOp[]): Promise<void> {
+  async confirmSendingChange(docId: string, ops?: JSONPatchOp[]): Promise<JSONPatchOp[]> {
     const [tx, sendingChanges, committedOps] = await this.db.transaction(
       ['sendingChanges', 'committedOps'],
       'readwrite'
@@ -415,13 +415,14 @@ export class LWWIndexedDBStore implements LWWClientStore {
     const sending = await sendingChanges.get<SendingChange>(docId);
     if (!sending) {
       await tx.complete();
-      return;
+      return [];
     }
 
     const confirmedPaths = ops && new Set(ops.map(op => op.path));
     const confirmed = confirmedPaths
       ? sending.change.ops.filter(op => confirmedPaths.has(op.path))
       : sending.change.ops;
+    const corrections: JSONPatchOp[] = [];
 
     // Move ops to committed, deleting child-path ops to match server saveOps behavior.
     // Without this, a parent write (e.g. replace /trash {}) would leave stale child ops
@@ -439,7 +440,13 @@ export class LWWIndexedDBStore implements LWWClientStore {
       confirmed.map(async op => {
         const existing = await committedOps.get<CommittedOp>([docId, op.path]);
         const resolved = existing ? consolidateFieldOp(existing, op) : op;
-        if (!resolved) return; // committed row is newer \u2014 the server resolves the same way
+        if (!resolved) {
+          // Committed row is newer \u2014 the server resolves the same way. The doc's optimistic
+          // value for this path is stale; surface the winning row as a local correction.
+          corrections.push(existing!);
+          return;
+        }
+        if (resolved !== op) corrections.push(resolved); // delta fold \u2014 the doc needs the folded value
         await committedOps.delete([docId, op.path + '/'], [docId, op.path + '/\uffff']);
         await committedOps.put<CommittedOp>({ ...resolved, docId });
       })
@@ -451,11 +458,12 @@ export class LWWIndexedDBStore implements LWWClientStore {
     if (remaining.length > 0) {
       await sendingChanges.put<SendingChange>({ docId, change: { ...sending.change, ops: remaining } });
       await tx.complete();
-      return;
+      return corrections;
     }
 
     await sendingChanges.delete(docId);
     await tx.complete();
+    return corrections;
   }
 
   /**

@@ -221,13 +221,18 @@ export class LWWAlgorithm implements ClientAlgorithm {
     });
   }
 
-  async confirmSent(docId: string, changes: Change[]): Promise<void> {
+  async confirmSent(docId: string, changes: Change[]): Promise<JSONPatchOp[]> {
     // Remember the batch's ids so the commit response that follows is recognized as such
     // (see _expectedResponseIds). Replaced wholesale per confirm — at most one commit
     // response is outstanding per doc, so ids from an aborted earlier flush can't pile up.
     this._expectedResponseIds.set(docId, new Set(changes.map(c => c.id)));
     // Confirm only the ops in this batch: a sending change split across wire batches must keep
-    // its unconfirmed remainder in the sending slot so a disconnect between batches resends it
+    // its unconfirmed remainder in the sending slot so a disconnect between batches resends it.
+    // Returns the store's LOCAL corrections (sent ops that lost to a newer committed row, or
+    // folded deltas): a non-empty result means the open doc's optimistic values for those
+    // paths are stale and the caller must re-sync the doc from the store — without waiting on
+    // the commit response, whose apply is a separate transaction that may never land (the
+    // ack-persist crash window).
     return this._withDocLock(docId, () =>
       this.store.confirmSendingChange(
         docId,

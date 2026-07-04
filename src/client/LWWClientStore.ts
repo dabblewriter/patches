@@ -60,13 +60,20 @@ export interface LWWClientStore extends PatchesStore {
   /**
    * Clear sendingChange after server ack, move ops to committed.
    *
+   * Promotion into committed state is LWW-guarded per path (the same rule the server's
+   * consolidation applies): a sent op that loses to a newer committed row is not promoted,
+   * and a delta op folds into the stored value. Returns those locally-resolved rows — the
+   * corrections — so the caller can roll the open doc's optimistic values back without
+   * depending on the commit response's echo (whose apply is a separate transaction that
+   * may never land). Empty when every sent op won verbatim.
+   *
    * @param docId Document identifier
    * @param ops When the sending change was split across wire batches, the ops the server just
    *   confirmed. Only these move to committed; the sending slot is kept until all its ops are
    *   confirmed, so a disconnect between batches leaves the remainder to be resent. Omitted =
    *   confirm the whole sending change.
    */
-  confirmSendingChange(docId: string, ops?: JSONPatchOp[]): Promise<void>;
+  confirmSendingChange(docId: string, ops?: JSONPatchOp[]): Promise<JSONPatchOp[]>;
 
   /**
    * Apply server changes using LWW timestamp resolution.

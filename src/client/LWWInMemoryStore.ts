@@ -242,14 +242,15 @@ export class LWWInMemoryStore implements LWWClientStore {
    * Call this BEFORE applyServerChanges so that server corrections (which run
    * after) overwrite any stale ops for fields the server won via LWW.
    */
-  async confirmSendingChange(docId: string, ops?: JSONPatchOp[]): Promise<void> {
+  async confirmSendingChange(docId: string, ops?: JSONPatchOp[]): Promise<JSONPatchOp[]> {
     const buf = this.docs.get(docId);
-    if (!buf?.sendingChange) return;
+    if (!buf?.sendingChange) return [];
 
     const confirmedPaths = ops && new Set(ops.map(op => op.path));
     const confirmed = confirmedPaths
       ? buf.sendingChange.ops.filter(op => confirmedPaths.has(op.path))
       : buf.sendingChange.ops;
+    const corrections: JSONPatchOp[] = [];
 
     // Move ops to committed fields, deleting child-path entries to match server
     // saveOps behavior. Without this, a parent write (e.g. replace /trash {}) leaves
@@ -266,7 +267,13 @@ export class LWWInMemoryStore implements LWWClientStore {
     for (const op of confirmed) {
       const existing = buf.committedFields.get(op.path);
       const resolved = existing ? consolidateFieldOp(existing, op) : op;
-      if (!resolved) continue; // committed row is newer — the server resolves the same way
+      if (!resolved) {
+        // Committed row is newer — the server resolves the same way. The doc's optimistic
+        // value for this path is stale; surface the winning row as a local correction.
+        corrections.push(existing!);
+        continue;
+      }
+      if (resolved !== op) corrections.push(resolved); // delta fold — the doc needs the folded value
       const childPrefix = op.path + '/';
       for (const key of buf.committedFields.keys()) {
         if (key.startsWith(childPrefix)) buf.committedFields.delete(key);
@@ -279,10 +286,11 @@ export class LWWInMemoryStore implements LWWClientStore {
     const remaining = confirmedPaths ? buf.sendingChange.ops.filter(op => !confirmedPaths.has(op.path)) : [];
     if (remaining.length > 0) {
       buf.sendingChange = { ...buf.sendingChange, ops: remaining };
-      return;
+      return corrections;
     }
 
     buf.sendingChange = null;
+    return corrections;
   }
 
   /**

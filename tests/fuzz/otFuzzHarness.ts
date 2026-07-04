@@ -530,6 +530,7 @@ export class OTFuzzHarness {
 
     this.broadcastBuffer = [];
     let result;
+    this.tr(`flush ${client.name}: SENDING ${pending.map(c => `${c.id}@base${c.baseRev}/rev${c.rev}`).join(' ')}`);
     try {
       result = await this.server.commitChanges(DOC_ID, wire(pending));
     } catch (err) {
@@ -821,7 +822,12 @@ export class OTFuzzHarness {
     const counts = new Map<string, number>();
     for (const change of log) counts.set(change.id, (counts.get(change.id) ?? 0) + 1);
     for (const [id, count] of counts) {
-      if (count > 1) throw new Error(`P3 violated: change ${id} appears ${count} times in the server log`);
+      if (count > 1) {
+        const copies = log
+          .filter(c => c.id === id)
+          .map(c => `rev=${c.rev} baseRev=${c.baseRev} clientId=${(c as any).clientId} ops=${JSON.stringify(c.ops)}`);
+        throw new Error(`P3 violated: change ${id} appears ${count} times in the server log\n  ${copies.join('\n  ')}`);
+      }
     }
     for (const client of this.clients) {
       for (const id of client.minted) {

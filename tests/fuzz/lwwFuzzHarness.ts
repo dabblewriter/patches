@@ -345,9 +345,16 @@ export class LWWFuzzHarness {
     }
 
     // Mirror PatchesSync.flushDoc for LWW: confirm sent first, then apply the response so
-    // server corrections are the last writer for corrected fields.
+    // server corrections are the last writer for corrected fields. When the confirm's
+    // guarded promotion resolved sent ops against newer committed rows, flushDoc re-syncs
+    // the open doc from the store BEFORE the response apply (which may fault) — mirror
+    // that so a lost response can't strand the doc on its optimistic value.
     try {
-      await client.algorithm.confirmSent(DOC_ID, pending);
+      const localCorrections = (await client.algorithm.confirmSent(DOC_ID, pending)) ?? [];
+      if (localCorrections.length > 0) {
+        const full = await client.algorithm.loadDoc(DOC_ID);
+        if (full) client.doc.import(full as PatchesSnapshot<LWWFuzzDoc>);
+      }
       await client.algorithm.applyServerChanges(DOC_ID, wire(result.changes), client.doc);
     } catch (err) {
       if (isInjectedFault(err)) {

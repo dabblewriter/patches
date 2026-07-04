@@ -132,6 +132,11 @@ function lwwConfigFromSeed(seed: number): LWWFuzzConfig {
     // shields subtrees under a local parent write), so parent/child write races converge
     // and parent replaces are back in the edit mix.
     parentOps: true,
+    // Phase 3 substrate faults (see faultInjection.ts) — CONSTANTS, same reasoning as the
+    // OT knobs: a draw here would shift every existing seed's derived knobs. Off in
+    // derived configs; exercised by the fault panel below and the FUZZ_FAULTS=1 soak.
+    clientStoreFailP: 0,
+    serverBackendFailP: 0,
   };
   return cfg;
 }
@@ -199,6 +204,15 @@ afterEach(() => {
 const OT_PANEL_SEEDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25];
 
 const LWW_PANEL_SEEDS = [101, 102, 103, 104, 105, 106, 107, 108, 109, 110];
+
+// Substrate-fault CI coverage for LWW (Phase 3, same shape as OT_FAULT_PANEL_SEEDS):
+// screened-green seeds run with store/backend fault injection armed. The first 300 fault
+// seeds (1000000-1000299) all passed on day one — the change-id dedup and correction-echo
+// machinery held — but the wider screen found the stale-skipped-correction class pinned
+// below, so the panel seeds keep the healthy paths exercised while that class is fixed.
+const LWW_FAULT_PANEL_SEEDS = [
+  1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 1000008, 1000009,
+];
 
 // Substrate-fault CI coverage (Phase 3): screened-green seeds run with store/backend fault
 // injection armed (see faultInjection.ts) so the fault paths stay exercised while faults are
@@ -311,6 +325,29 @@ describe('convergence fuzz — LWW panel', () => {
     }, 30_000);
   }
 
+  for (const seed of LWW_FAULT_PANEL_SEEDS) {
+    it(`converges under substrate faults (seed ${seed})`, async () => {
+      await runLWWFuzz(seed, { clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
+    }, 30_000);
+  }
+
+  // NEW-FINDING (LWW fault soak, ~3/1000 seeds): SILENT committed-state divergence — one
+  // client permanently keeps a value the server's LWW resolution rejected. The chain:
+  // (1) a client sits on an OLD unsent op while a NEWER foreign write to the same path
+  // arrives and applies (faults widen this window by delaying flushes, but nothing here
+  // requires them in principle); (2) the eventual flush's confirmSent promotes the sent
+  // ops into committedFields optimistically, relying on the response's correction ops to
+  // overwrite the fields the server resolved differently; (3) the correction arrives as a
+  // re-echo of the foreign change the client ALREADY applied, so the cross-batch ordering
+  // guard stale-skips it — the expectedIds exemption covers only the client's own change
+  // ids. The losing local value is baked into committed state; committedRev is at head, so
+  // no catch-up ever heals it. Divergence shapes seen: resurrected removed flag (1000374),
+  // stale fontSize (1000422), stale flag value (1000910).
+  // Repro: FUZZ_ALGO=lww FUZZ_FAULTS=1 FUZZ_SEED=1000374 FUZZ_ITERATIONS=1 npm test -- tests/fuzz/convergence.spec.ts
+  it.skip('NEW-FINDING: stale-skipped correction bakes a losing local value into committed state (seed 1000374, faults)', async () => {
+    await runLWWFuzz(1000374, { clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
+  }, 30_000);
+
   // FINDING-2 regression (fixed): a broadcast emitted at rev N can still be queued/in-flight
   // when the same client's commit for rev N+1 returns; LWW client stores applied committed
   // fields unconditionally per path, so the late rev-N ops overwrote newer rev-N+1 values
@@ -385,10 +422,9 @@ describe.runIf(FUZZ_SEED !== undefined && FUZZ_ITERATIONS === 0)('convergence fu
   }, 60_000);
 });
 
-// FUZZ_FAULTS=1 runs the soak with substrate faults armed (OT only for now — the LWW
-// harness gets the same treatment in a follow-up). Rates are deliberately low: a fault
-// on ~1 in 25 substrate calls perturbs plenty of flushes/applies per run without
-// starving the scenario of successful traffic.
+// FUZZ_FAULTS=1 runs the soak with substrate faults armed (both harnesses). Rates are
+// deliberately low: a fault on ~1 in 25 substrate calls perturbs plenty of
+// flushes/applies per run without starving the scenario of successful traffic.
 const FUZZ_FAULTS = process.env.FUZZ_FAULTS === '1';
 const FAULT_OVERRIDES = { clientStoreFailP: 0.04, serverBackendFailP: 0.04 };
 
@@ -397,7 +433,7 @@ describe.runIf(FUZZ_ITERATIONS > 0)('convergence fuzz — soak', () => {
   for (let i = 0; i < FUZZ_ITERATIONS; i++) {
     const seed = base + i;
     it(`soak ${FUZZ_ALGO} seed ${seed}${FUZZ_FAULTS ? ' (faults)' : ''}`, async () => {
-      if (FUZZ_ALGO === 'lww') await runLWWFuzz(seed);
+      if (FUZZ_ALGO === 'lww') await runLWWFuzz(seed, FUZZ_FAULTS ? FAULT_OVERRIDES : {});
       else await runOTFuzz(seed, FUZZ_FAULTS ? FAULT_OVERRIDES : {});
     }, 60_000);
   }

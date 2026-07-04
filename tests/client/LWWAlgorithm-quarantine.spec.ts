@@ -144,21 +144,20 @@ describe('LWWAlgorithm quarantine', () => {
       expect(await algorithm.listQuarantinedChanges(DOC)).toEqual([]);
     });
 
-    it('clears quarantine on untrackDocs and deleteDoc', async () => {
-      {
-        const { store, algorithm } = await setup();
-        const sending = await capture(algorithm, [{ op: 'replace', path: '/title', value: 'y' }]);
-        await algorithm.ejectPendingChange(DOC, sending.id, 'rejected');
-        await algorithm.untrackDocs([DOC]);
-        expect(await store.listQuarantinedChanges()).toEqual([]);
-      }
-      {
-        const { store, algorithm } = await setup();
-        const sending = await capture(algorithm, [{ op: 'replace', path: '/title', value: 'y' }]);
-        await algorithm.ejectPendingChange(DOC, sending.id, 'rejected');
-        await algorithm.deleteDoc(DOC);
-        expect(await store.listQuarantinedChanges()).toEqual([]);
-      }
+    it('preserves quarantine across untrackDocs (cache eviction is not a discard decision)', async () => {
+      const { store, algorithm } = await setup();
+      const sending = await capture(algorithm, [{ op: 'replace', path: '/title', value: 'y' }]);
+      await algorithm.ejectPendingChange(DOC, sending.id, 'rejected');
+      await algorithm.untrackDocs([DOC]);
+      expect((await store.listQuarantinedChanges()).map(q => q.changeId)).toEqual([sending.id]);
+    });
+
+    it('clears quarantine on deleteDoc', async () => {
+      const { store, algorithm } = await setup();
+      const sending = await capture(algorithm, [{ op: 'replace', path: '/title', value: 'y' }]);
+      await algorithm.ejectPendingChange(DOC, sending.id, 'rejected');
+      await algorithm.deleteDoc(DOC);
+      expect(await store.listQuarantinedChanges()).toEqual([]);
     });
   });
 

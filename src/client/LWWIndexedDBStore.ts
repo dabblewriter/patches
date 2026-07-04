@@ -245,8 +245,13 @@ export class LWWIndexedDBStore implements LWWClientStore {
    */
   @blockable
   async deleteDoc(docId: string): Promise<void> {
-    const [tx, snapshots, committedOps, pendingOps, sendingChanges, quarantined, docsStore] = await this.db.transaction(
-      ['snapshots', 'committedOps', 'pendingOps', 'sendingChanges', 'quarantinedChanges', 'docs'],
+    // quarantinedChanges may be absent on an external-mode database whose host hasn't
+    // bumped its version yet; deletion must keep working there.
+    const withQuarantine = await this.db.hasStore('quarantinedChanges');
+    const storeNames = ['snapshots', 'committedOps', 'pendingOps', 'sendingChanges', 'docs'];
+    if (withQuarantine) storeNames.push('quarantinedChanges');
+    const [tx, snapshots, committedOps, pendingOps, sendingChanges, docsStore, quarantined] = await this.db.transaction(
+      storeNames,
       'readwrite'
     );
 
@@ -258,18 +263,20 @@ export class LWWIndexedDBStore implements LWWClientStore {
       this.deleteFieldsForDoc(committedOps, docId),
       this.deleteFieldsForDoc(pendingOps, docId),
       sendingChanges.delete(docId),
-      quarantined.delete([docId, ''], [docId, '￿']),
+      ...(quarantined ? [quarantined.delete([docId, ''], [docId, '￿'])] : []),
     ]);
 
     await tx.complete();
   }
 
   /**
-   * Untracks documents by removing all their data.
+   * Untracks documents by removing all their data. Quarantined changes are preserved:
+   * untracking is local cache management, not the discard decision quarantine reserves
+   * for the app (see `discardQuarantinedChange`).
    */
   async untrackDocs(docIds: string[]): Promise<void> {
-    const [tx, docsStore, snapshots, committedOps, pendingOps, sendingChanges, quarantined] = await this.db.transaction(
-      ['docs', 'snapshots', 'committedOps', 'pendingOps', 'sendingChanges', 'quarantinedChanges'],
+    const [tx, docsStore, snapshots, committedOps, pendingOps, sendingChanges] = await this.db.transaction(
+      ['docs', 'snapshots', 'committedOps', 'pendingOps', 'sendingChanges'],
       'readwrite'
     );
 
@@ -281,7 +288,6 @@ export class LWWIndexedDBStore implements LWWClientStore {
           this.deleteFieldsForDoc(committedOps, docId),
           this.deleteFieldsForDoc(pendingOps, docId),
           sendingChanges.delete(docId),
-          quarantined.delete([docId, ''], [docId, '￿']),
         ])
       )
     );
@@ -506,8 +512,8 @@ export class LWWIndexedDBStore implements LWWClientStore {
 
   /**
    * Atomically move the sending change into quarantine, preserving pendingOps (unlike
-   * saveSendingChange, which clears them). One transaction — a crash between the
-   * quarantine write and the sending-slot clear must not drop the change silently.
+   * saveSendingChange, which clears them). One transaction; a crash between the
+   * quarantine write and the sending-slot clear must not drop the change.
    */
   @blockable
   async quarantineSendingChange(docId: string, changeId: string, reason: string): Promise<QuarantinedChange | null> {
@@ -539,6 +545,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
    * List quarantined changes for one doc, or all docs when docId is omitted.
    */
   async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
+    if (!(await this.db.hasStore('quarantinedChanges'))) return [];
     const [tx, quarantined] = await this.db.transaction(['quarantinedChanges'], 'readonly');
     const entries =
       docId !== undefined

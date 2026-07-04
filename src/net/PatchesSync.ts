@@ -65,10 +65,8 @@ const SYNC_RETRY_MAX_MS = 30_000;
 const SYNC_RETRY_MAX_ATTEMPTS = 10;
 // Definitive StatusError codes — don't retry (auth, payment, permission, not-found, gone).
 const TERMINAL_SYNC_CODES = new Set([401, 402, 403, 404, 410]);
-// Circuit breaker for poison-pill ejection: at most this many auto-ejections per doc per
-// session. A systematic server rejection that mis-attributes change after change would
-// otherwise serially drain a doc's entire offline queue into quarantine; past the cap the
-// doc latches at 'error' like any other definitive failure (see `_tryEjectPoisonChange`).
+// Circuit breaker: max auto-ejections per doc per session, so a systematically
+// mis-attributing server can't serially drain an offline queue into quarantine.
 const MAX_DOC_EJECTIONS = 3;
 // Slow background re-probe for a doc left at 'error' with pending changes while the
 // connection stays up (see `_scheduleSyncReprobe`).
@@ -534,6 +532,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     const doc = this.patches.getOpenDoc(docId);
     const algorithm = this._getAlgorithm(docId);
+    // On the doc's first sync attempt this session, regardless of outcome, so a doc that
+    // latches at 'error' can't strand a persisted quarantined change un-surfaced.
+    this._resurfaceQuarantined(docId, algorithm);
 
     // Cast to BaseDoc for internal updateSyncStatus method (not on the PatchesDoc interface)
     const baseDoc = doc as BaseDoc | undefined;
@@ -563,7 +564,6 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this._updateDocSyncState(docId, { syncStatus: 'synced' });
       this._clearSyncRetry(docId);
       this._surfacedSyncErrors.delete(docId);
-      this._resurfaceQuarantined(docId, algorithm);
       if (baseDoc) {
         baseDoc.updateSyncStatus('synced');
       }
@@ -617,9 +617,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         this._deferDocToConnectionRecovery(docId, baseDoc, pending, syncError);
         return;
       }
-      // A per-change rejection naming a culprit the local strict-apply probe corroborates
-      // as broken is recovered by ejecting that change into quarantine — the rest of the
-      // queue syncs past it instead of latching behind it forever.
+      // A rejection naming a corroborated poison change recovers by ejecting it into
+      // quarantine so the rest of the queue can sync past it.
       if (await this._tryEjectPoisonChange(docId, algorithm, failure)) return;
       this._updateDocSyncState(docId, { syncStatus: 'error', syncError });
       if (baseDoc) {
@@ -1343,24 +1342,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
-   * Poison-pill ejection for a commit rejection that names a specific pending change:
-   * a 4xx StatusError carrying `data: { changeId, scope: 'change' }` ("this change is
-   * the problem; a different change would pass"). Rejections without that shape —
-   * including `scope: 'doc'` (the doc/history is the problem, e.g. corrupt committed
-   * history) and data-less errors — fall through to the normal latch/retry handling.
-   *
-   * The server's attribution is a suspicion, not a verdict: the change is ejected only
-   * when the local strict-apply probe (`verifyPendingChange`) ALSO fails, so a server
-   * attribution bug can never silently remove content that is locally intact. A named
-   * change that applies cleanly locally stays put; the doc latches with the error (which
-   * carries `data.changeId`) and the app decides — surface-and-ask via
-   * `Patches.ejectPendingChange`.
-   *
-   * On ejection: the change is quarantined (atomically with its removal), the retry
-   * ladder/reprobe/surfaced-error state is cleared, `Patches.onChangeQuarantined` fires,
-   * and sync re-enters to flush the surviving pending work. Returns true when the doc
-   * was recovered this way. Never throws — a failure inside the ejection machinery falls
-   * back to the ordinary error latch rather than compounding the original failure.
+   * Eject the pending change a 4xx rejection names via `data: { changeId, scope: 'change' }`,
+   * when the local strict-apply probe corroborates the server's attribution (see
+   * docs/quarantine.md for the full contract and safety gates). Returns true when the doc
+   * recovered this way; never throws, since an ejection failure falls back to the ordinary
+   * error latch.
    */
   private async _tryEjectPoisonChange(docId: string, algorithm: ClientAlgorithm, failure: unknown): Promise<boolean> {
     try {
@@ -1382,16 +1368,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this._clearSyncRetry(docId);
       this._surfacedSyncErrors.delete(docId);
       console.warn(`Ejected unsyncable change ${data.changeId} from doc ${docId} into quarantine:`, failure);
-      if (this._quarantineResurfaced.has(docId)) {
-        this.patches.onChangeQuarantined.emit(docId, quarantined);
-      } else {
-        // First surfacing for this doc this session: emit the persisted entries (which now
-        // include the fresh one) so an older quarantined change from a prior session isn't
-        // stranded behind it, and so the fresh entry isn't double-emitted by a later resurface.
-        this._quarantineResurfaced.add(docId);
-        const entries = (await algorithm.listQuarantinedChanges?.(docId)) ?? [quarantined];
-        for (const entry of entries) this.patches.onChangeQuarantined.emit(docId, entry);
-      }
+      // Persisted entries were already re-surfaced at syncDoc entry; emit just the fresh one.
+      this.patches.onChangeQuarantined.emit(docId, quarantined);
       // Re-enter sync for the surviving pending work. We are inside syncDoc's serialGate
       // run, so this queues exactly one follow-up after the current run returns.
       void this.syncDoc(docId);
@@ -1403,10 +1381,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
-   * Re-emit persisted quarantine entries through `Patches.onChangeQuarantined` the first
-   * time a doc syncs each session, so a restart can't strand a quarantined change
-   * un-surfaced (the signal is the app's only push-based hook). Fire-and-forget: a store
-   * read failure here must not fail the sync that triggered it.
+   * Emit persisted quarantine entries on a doc's first sync attempt each session so a
+   * restart can't strand them un-surfaced. Fire-and-forget: a store read failure here
+   * must not fail the sync that triggered it.
    */
   private _resurfaceQuarantined(docId: string, algorithm: ClientAlgorithm): void {
     if (this._quarantineResurfaced.has(docId) || !algorithm.listQuarantinedChanges) return;

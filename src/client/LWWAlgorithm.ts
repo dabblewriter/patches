@@ -231,10 +231,8 @@ export class LWWAlgorithm implements ClientAlgorithm {
   }
 
   /**
-   * Local strict-apply probe corroborating a server rejection of the sending change:
-   * true when the named change applies cleanly against the committed-only state (or when
-   * no pending change matches the id — nothing to corroborate). The only pending identity
-   * the server can name is the sending change's id; pendingOps have no ids.
+   * Local strict-apply probe against committed-only state. The only pending identity the
+   * server can name is the sending change's id; pendingOps have no ids.
    */
   async verifyPendingChange(docId: string, changeId: string): Promise<boolean> {
     return this._withDocLock(docId, async () => {
@@ -251,9 +249,8 @@ export class LWWAlgorithm implements ClientAlgorithm {
   }
 
   /**
-   * Eject the sending change into quarantine and rebuild the open doc without it.
-   * The quarantine write and the sending-slot clear are one store transaction; pendingOps
-   * minted after the sending change was captured survive untouched and flush next.
+   * Eject the sending change into quarantine (one store transaction) and rebuild the
+   * open doc without it; pendingOps minted since capture survive and flush next.
    */
   async ejectPendingChange(
     docId: string,
@@ -267,10 +264,9 @@ export class LWWAlgorithm implements ClientAlgorithm {
     if (!quarantined) return null;
     // The commit that triggered ejection was rejected, so no response is coming for it.
     this._expectedResponseIds.delete(docId);
-    // The ejected ops are baked into the open doc's base state (applied at mint time);
-    // import() rebuilds it from the store, which no longer holds them. Patches'
-    // applySnapshot can't be used here — its rev guard is strictly `>` and ejection
-    // doesn't advance the committed rev.
+    // import() rebuilds the open doc from the store (which no longer holds the ejected
+    // ops); applySnapshot won't work here because ejection doesn't advance the committed
+    // rev past its strictly-greater guard.
     if (doc) {
       const snapshot = await this.loadDoc(docId);
       (doc as LWWDoc).import(snapshot ?? { state: {}, rev: 0, changes: [] });

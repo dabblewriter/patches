@@ -186,6 +186,23 @@ describe('PatchesSync poison-pill ejection', () => {
     expect(ctx.quarantineEvents).toHaveLength(1);
   });
 
+  it('re-surfaces persisted entries even when the first sync attempt latches at error', async () => {
+    // Session 2 opens on a doc that immediately fails definitively (data-less 403); the
+    // change quarantined in session 1 must still surface.
+    const ctx = await setup({ commitChanges: rejectingCommit(403) });
+    sync = ctx.sync;
+    await ctx.algorithm.handleDocChange(DOC, CLEAN_OPS, undefined, {});
+    const [old] = (await ctx.algorithm.getPendingToSend(DOC))!;
+    await ctx.store.quarantineSendingChange(DOC, old.id, 'previous session');
+    await ctx.algorithm.handleDocChange(DOC, CLEAN_OPS, undefined, {});
+
+    await (sync as any).syncDoc(DOC);
+
+    await vi.waitFor(() => expect(ctx.quarantineEvents).toHaveLength(1));
+    expect(ctx.quarantineEvents[0].entry.reason).toBe('previous session');
+    expect(sync.docStates.state[DOC].syncStatus).toBe('error');
+  });
+
   it('Patches.ejectPendingChange is the app-consent path: quarantines without corroboration and nudges sync', async () => {
     const ctx = await setup();
     sync = ctx.sync;
@@ -201,9 +218,15 @@ describe('PatchesSync poison-pill ejection', () => {
     expect(await ctx.store.getSendingChange(DOC)).toBeNull();
     expect(changeEvents).toEqual([DOC]);
 
+    // The nudged sync is the doc's first attempt this session, so its resurface may
+    // re-deliver the entry (at-least-once; consumers key on docId + changeId).
+    await vi.waitFor(() => expect(sync!.docStates.state[DOC].syncStatus).toBe('synced'));
+    expect(new Set(ctx.quarantineEvents.map(e => e.entry.changeId))).toEqual(new Set([sending.id]));
+
     // Unknown id: null, nothing emitted.
+    const emitted = ctx.quarantineEvents.length;
     expect(await ctx.patches.ejectPendingChange(DOC, 'nope', 'user confirmed')).toBeNull();
-    expect(ctx.quarantineEvents).toHaveLength(1);
+    expect(ctx.quarantineEvents).toHaveLength(emitted);
 
     await ctx.patches.discardQuarantinedChange(DOC, sending.id);
     expect(await ctx.patches.listQuarantinedChanges(DOC)).toEqual([]);

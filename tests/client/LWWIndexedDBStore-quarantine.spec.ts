@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { IndexedDBStore } from '../../src/client/IndexedDBStore';
 import { LWWIndexedDBStore } from '../../src/client/LWWIndexedDBStore';
 import { createChange } from '../../src/data/change';
 import type { Change } from '../../src/types';
@@ -71,7 +72,7 @@ describe('LWWIndexedDBStore quarantine (real store over fake-indexeddb)', () => 
     expect((await store.listQuarantinedChanges()).map(q => q.changeId)).toEqual(['ch2']);
   });
 
-  it('clears quarantine rows on deleteDoc and untrackDocs', async () => {
+  it('clears quarantine rows on deleteDoc but preserves them across untrackDocs', async () => {
     const change = await seed();
     await store.quarantineSendingChange(docId, change.id, 'rejected');
     await store.deleteDoc(docId);
@@ -82,7 +83,7 @@ describe('LWWIndexedDBStore quarantine (real store over fake-indexeddb)', () => 
     await store.saveSendingChange('doc2', change2);
     await store.quarantineSendingChange('doc2', change2.id, 'rejected');
     await store.untrackDocs(['doc2']);
-    expect(await store.listQuarantinedChanges('doc2')).toEqual([]);
+    expect((await store.listQuarantinedChanges('doc2')).map(q => q.changeId)).toEqual(['ch2']);
   });
 
   it('getCommittedState rebuilds snapshot + committed ops without sending/pending layers', async () => {
@@ -95,5 +96,40 @@ describe('LWWIndexedDBStore quarantine (real store over fake-indexeddb)', () => 
       state: { title: 'x', status: 'live' },
       rev: 2,
     });
+  });
+
+  it('keeps working against an external-mode DB missing quarantinedChanges (host not yet upgraded)', async () => {
+    // A pre-quarantine database the host owns: every store except quarantinedChanges.
+    const rawDb = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(`lww-quarantine-external-${dbSeq++}`, 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        db.createObjectStore('docs', { keyPath: 'docId' }).createIndex('algorithm', 'algorithm', { unique: false });
+        db.createObjectStore('snapshots', { keyPath: 'docId' });
+        const branchStore = db.createObjectStore('branches', { keyPath: 'id' });
+        branchStore.createIndex('_docId', '_docId', { unique: false });
+        branchStore.createIndex('_pending', '_pending', { unique: false });
+        db.createObjectStore('committedOps', { keyPath: ['docId', 'path'] });
+        db.createObjectStore('pendingOps', { keyPath: ['docId', 'path'] });
+        db.createObjectStore('sendingChanges', { keyPath: 'docId' });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const external = new LWWIndexedDBStore(new IndexedDBStore(rawDb));
+
+    await external.trackDocs([docId]);
+    await external.saveDoc(docId, { state: { title: 'x' }, rev: 1 });
+    await external.saveSendingChange(docId, sendingChange());
+
+    // Previously-working operations keep working; quarantine is inert, not explosive.
+    expect(await external.listQuarantinedChanges(docId)).toEqual([]);
+    await external.deleteDoc(docId);
+    expect(await external.listDocs()).toEqual([]);
+    await external.untrackDocs([docId]);
+    // The missing store was reported loudly at open.
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('quarantinedChanges'));
+    consoleSpy.mockRestore();
   });
 });

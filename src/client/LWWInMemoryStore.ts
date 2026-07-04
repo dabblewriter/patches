@@ -15,7 +15,6 @@ interface LWWDocBuffers {
   committedFields: Map<string, JSONPatchOp>;
   pendingOps: Map<string, JSONPatchOp>;
   sendingChange: Change | null;
-  quarantined: Map<string, QuarantinedChange>;
   committedRev: number;
   deleted?: true;
 }
@@ -32,6 +31,8 @@ interface LWWDocBuffers {
  */
 export class LWWInMemoryStore implements LWWClientStore {
   private docs: Map<string, LWWDocBuffers> = new Map();
+  // Kept outside the per-doc buffers so untracking (cache eviction) preserves quarantine.
+  private quarantined: Map<string, Map<string, QuarantinedChange>> = new Map();
 
   // ─── Document Operations ─────────────────────────────────────────────────
 
@@ -116,7 +117,6 @@ export class LWWInMemoryStore implements LWWClientStore {
       committedFields,
       pendingOps: existing?.pendingOps ?? new Map(),
       sendingChange: existing?.sendingChange ?? null,
-      quarantined: existing?.quarantined ?? new Map(),
       committedRev: docState.rev,
     });
   }
@@ -154,7 +154,7 @@ export class LWWInMemoryStore implements LWWClientStore {
     buf.committedFields.clear();
     buf.pendingOps.clear();
     buf.sendingChange = null;
-    buf.quarantined.clear();
+    this.quarantined.delete(docId);
   }
 
   /**
@@ -169,6 +169,7 @@ export class LWWInMemoryStore implements LWWClientStore {
    */
   async close(): Promise<void> {
     this.docs.clear();
+    this.quarantined.clear();
   }
 
   // ─── LWWClientStore Methods ─────────────────────────────────────────────
@@ -329,7 +330,9 @@ export class LWWInMemoryStore implements LWWClientStore {
       reason,
       quarantinedAt: Date.now(),
     };
-    buf.quarantined.set(changeId, quarantined);
+    let docQuarantine = this.quarantined.get(docId);
+    if (!docQuarantine) this.quarantined.set(docId, (docQuarantine = new Map()));
+    docQuarantine.set(changeId, quarantined);
     buf.sendingChange = null;
     return quarantined;
   }
@@ -339,16 +342,16 @@ export class LWWInMemoryStore implements LWWClientStore {
    */
   async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
     if (docId !== undefined) {
-      return Array.from(this.docs.get(docId)?.quarantined.values() ?? []);
+      return Array.from(this.quarantined.get(docId)?.values() ?? []);
     }
-    return Array.from(this.docs.values()).flatMap(buf => Array.from(buf.quarantined.values()));
+    return Array.from(this.quarantined.values()).flatMap(entries => Array.from(entries.values()));
   }
 
   /**
    * Permanently remove a quarantined change.
    */
   async discardQuarantinedChange(docId: string, changeId: string): Promise<void> {
-    this.docs.get(docId)?.quarantined.delete(changeId);
+    this.quarantined.get(docId)?.delete(changeId);
   }
 
   // ─── Helper Methods ──────────────────────────────────────────────────────
@@ -360,7 +363,6 @@ export class LWWInMemoryStore implements LWWClientStore {
         committedFields: new Map(),
         pendingOps: new Map(),
         sendingChange: null,
-        quarantined: new Map(),
         committedRev: 0,
       };
       this.docs.set(docId, buf);

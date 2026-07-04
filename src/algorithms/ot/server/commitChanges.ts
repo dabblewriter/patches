@@ -68,9 +68,7 @@ export async function commitChanges(
   // The caller signals docReloadRequired so the client knows to call getDoc.
   let docReloadRequired: true | undefined;
   if (changes[0].baseRev === 0 && initialRev > 0 && !batchedContinuation) {
-    // Prevent stale clients from wiping existing data with a root creation op anywhere in the batch.
-    // StatusError (not a plain Error) so the JSON-RPC serializer forwards structured data instead of
-    // the server stack; data names the offending change so clients can eject/quarantine it.
+    // Prevent stale clients from wiping existing data with a root creation op anywhere in the batch
     const rootOpChange = changes.find(c => c.ops.some(op => op.path === ''));
     if (rootOpChange) {
       throw new StatusError(

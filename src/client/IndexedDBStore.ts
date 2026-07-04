@@ -63,6 +63,15 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
       this.external = true;
       Promise.resolve(dbOrName).then(
         db => {
+          // We can't self-heal an external database (the host owns its version), so warn
+          // loudly instead of failing later with an opaque NotFoundError.
+          const missing = [...this.requiredStores].filter(name => !db.objectStoreNames.contains(name));
+          if (missing.length) {
+            console.error(
+              `External database "${db.name}" is missing object stores: ${missing.join(', ')}. ` +
+                `Bump the database version so upgradePatchesDB runs and creates them.`
+            );
+          }
           this.db = db;
           this.dbPromise.resolve(db);
         },
@@ -227,6 +236,11 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     const tx = new IDBTransactionWrapper(db.transaction(storeNames, mode));
     const stores = storeNames.map(name => tx.getStore(name));
     return [tx, ...stores];
+  }
+
+  /** Whether the open database contains the named object store (it may not on an external-mode database the host hasn't upgraded). */
+  async hasStore(name: string): Promise<boolean> {
+    return (await this.getDB()).objectStoreNames.contains(name);
   }
 
   // ─── Algorithm-Specific Methods ──────────────────────────────────────────

@@ -585,6 +585,45 @@ describe('LWWIndexedDBStore', () => {
 
       expect(sendingStore.delete).toHaveBeenCalledWith('doc1');
     });
+
+    it('does not let an older sent op overwrite a newer committed row (LWW-guarded promotion)', async () => {
+      // The ack-persist crash window: the response's correction ops may never apply, so
+      // promotion itself must respect the per-path LWW rule (fuzz seed 1000374).
+      const sendingStore = createMockIDBStore();
+      sendingStore.data.set('"doc1"', {
+        docId: 'doc1',
+        change: {
+          id: 'c1',
+          rev: 7,
+          baseRev: 6,
+          ops: [{ op: 'replace', path: '/flags/autosave', value: true, ts: 100 }],
+          createdAt: 100,
+          committedAt: 0,
+        },
+      });
+
+      const committedStore = createMockIDBStore();
+      committedStore.data.set(JSON.stringify(['doc1', '/flags/autosave']), {
+        docId: 'doc1',
+        op: 'remove',
+        path: '/flags/autosave',
+        ts: 200,
+        rev: 6,
+      });
+
+      mockStores.set('sendingChanges', sendingStore);
+      mockStores.set('committedOps', committedStore);
+      mockStores.set('docs', createMockIDBStore());
+
+      await store.confirmSendingChange('doc1');
+
+      // The newer committed remove survives; the losing op is not promoted; the slot clears.
+      expect(committedStore.put).not.toHaveBeenCalled();
+      expect(committedStore.data.get(JSON.stringify(['doc1', '/flags/autosave']))).toEqual(
+        expect.objectContaining({ op: 'remove', ts: 200 })
+      );
+      expect(sendingStore.delete).toHaveBeenCalledWith('doc1');
+    });
   });
 
   describe('applyServerChanges', () => {

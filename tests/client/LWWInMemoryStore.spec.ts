@@ -694,6 +694,75 @@ describe('LWWInMemoryStore', () => {
     });
   });
 
+  /**
+   * confirmSendingChange promotes sent ops into committed fields through the SAME per-path
+   * LWW rule the server applies (consolidateFieldOp). The unguarded promotion relied on the
+   * commit response's correction ops (applied right after, in a separate store transaction)
+   * to repair fields the server resolved differently — and when that apply died (the
+   * ack-persist crash window), the losing value was baked into committed state with
+   * committedRev already past the winner's rev, where no catch-up ever redelivers it.
+   * Silent, permanent divergence. Found by LWW substrate fault injection (fuzz seed
+   * 1000374: a removed flag resurrected; 1000422/1000910: stale replaced values).
+   */
+  describe('confirmSendingChange — LWW-guarded promotion', () => {
+    it('does not let an older sent op overwrite a newer committed row (seed-1000374 shape)', async () => {
+      // The newer foreign remove is already committed locally...
+      await store.applyServerChanges('doc1', [
+        createChange('foreign', 6, 5, [{ op: 'remove', path: '/flags/autosave', ts: 200 }]),
+      ]);
+      // ...while an OLDER local write to the same path flushes.
+      const ops: JSONPatchOp[] = [{ op: 'replace', path: '/flags/autosave', value: true, ts: 100 }];
+      await store.saveSendingChange('doc1', createChange('mine', 7, 6, ops));
+
+      await store.confirmSendingChange('doc1', ops);
+
+      // The remove (newer) survives in committed state even though the correction echo
+      // never arrives; the sending slot still clears.
+      expect((await store.getCommittedState('doc1')).state).toEqual({});
+      expect(await store.getSendingChange('doc1')).toBeNull();
+    });
+
+    it('promotes a sent op that wins by timestamp', async () => {
+      await store.applyServerChanges('doc1', [
+        createChange('foreign', 6, 5, [{ op: 'remove', path: '/flags/autosave', ts: 200 }]),
+      ]);
+      const ops: JSONPatchOp[] = [{ op: 'replace', path: '/flags/autosave', value: true, ts: 300 }];
+      await store.saveSendingChange('doc1', createChange('mine', 7, 6, ops));
+
+      await store.confirmSendingChange('doc1', ops);
+
+      expect((await store.getCommittedState('doc1')).state).toEqual({ flags: { autosave: true } });
+    });
+
+    it('a losing parent write does not prune the newer committed children it lost to', async () => {
+      await store.applyServerChanges('doc1', [
+        createChange('foreign', 6, 5, [
+          { op: 'replace', path: '/counters', value: {}, ts: 200 },
+          { op: 'replace', path: '/counters/words', value: 42, ts: 300 },
+        ]),
+      ]);
+      const ops: JSONPatchOp[] = [{ op: 'replace', path: '/counters', value: { words: 0 }, ts: 150 }];
+      await store.saveSendingChange('doc1', createChange('mine', 7, 6, ops));
+
+      await store.confirmSendingChange('doc1', ops);
+
+      expect((await store.getCommittedState('doc1')).state).toEqual({ counters: { words: 42 } });
+    });
+
+    it('folds a sent delta op into the committed row instead of storing the raw delta', async () => {
+      await store.applyServerChanges('doc1', [
+        createChange('foreign', 6, 5, [{ op: 'replace', path: '/count', value: 5, ts: 200 }]),
+      ]);
+      const ops: JSONPatchOp[] = [{ op: '@inc', path: '/count', value: 3, ts: 100 }];
+      await store.saveSendingChange('doc1', createChange('mine', 7, 6, ops));
+
+      await store.confirmSendingChange('doc1', ops);
+
+      // Same fold the server performs: apply the delta to the stored value.
+      expect((await store.getCommittedState('doc1')).state).toEqual({ count: 8 });
+    });
+  });
+
   describe('partial confirmSendingChange', () => {
     it('keeps unconfirmed ops in the sending slot until every batch is confirmed', async () => {
       const ops: JSONPatchOp[] = [

@@ -1,3 +1,4 @@
+import { consolidateFieldOp } from '../algorithms/lww/consolidateOps.js';
 import { createChange } from '../data/change.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
@@ -425,10 +426,22 @@ export class LWWIndexedDBStore implements LWWClientStore {
     // Move ops to committed, deleting child-path ops to match server saveOps behavior.
     // Without this, a parent write (e.g. replace /trash {}) would leave stale child ops
     // (e.g. /trash/collectionId/name) that re-create nested structure on doc rebuild.
+    //
+    // Promotion is LWW-guarded through the SAME per-path rule the server applies
+    // (consolidateFieldOp): a sent op that loses to a newer committed row must not be
+    // promoted, and must not prune that row's children. The unguarded put() relied on
+    // the commit response's correction ops (applied right after) to repair the fields
+    // the server resolved differently \u2014 but the response apply is a separate IDB
+    // transaction, and if it dies (the ack-persist crash window) the losing value is
+    // baked into committed state with committedRev already past the winner's rev, where
+    // no catch-up ever redelivers it. Silent, permanent divergence (fuzz seed 1000374).
     await Promise.all(
       confirmed.map(async op => {
+        const existing = await committedOps.get<CommittedOp>([docId, op.path]);
+        const resolved = existing ? consolidateFieldOp(existing, op) : op;
+        if (!resolved) return; // committed row is newer \u2014 the server resolves the same way
         await committedOps.delete([docId, op.path + '/'], [docId, op.path + '/\uffff']);
-        await committedOps.put<CommittedOp>({ ...op, docId });
+        await committedOps.put<CommittedOp>({ ...resolved, docId });
       })
     );
 

@@ -224,7 +224,17 @@ patches.onError((error, context) => {
   console.error(`Error in document ${context?.docId}:`, error);
   showErrorNotification('Something went wrong. Retrying...');
 });
+```
 
+For a failed change submit, `context.willRetry` distinguishes the two failure classes:
+
+- `willRetry: true` — the failure was transient or ambiguous (timeout, abort, network death,
+  store hiccup). The user's ops are **kept applied** and re-submitted with backoff under the
+  same stable change id (id-based dedup makes the retry idempotent). Show a "retrying" state.
+- `willRetry: false` — the server/store authoritatively rejected the change (terminal
+  `StatusError`: 401/402/403/404/410). The optimistic ops were rolled back; surface the error.
+
+```typescript
 // When any document has pending changes ready to send
 patches.onChange(docId => {
   console.log(`Document ${docId} has pending changes`);

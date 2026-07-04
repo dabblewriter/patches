@@ -28,6 +28,31 @@ export const ErrorCodes = {
 } as const;
 
 /**
+ * StatusError codes that are a definitive, authoritative verdict on a submission —
+ * auth (401), payment (402), permission (403), not-found (404), gone (410). A
+ * failure carrying one of these will not succeed by retrying; every other failure
+ * (timeout, abort, network-level death, 5xx, plain Error) is transient or
+ * *ambiguous* — the server may have processed the request even though the caller
+ * never saw the response.
+ */
+export const TERMINAL_STATUS_CODES: ReadonlySet<number> = new Set([401, 402, 403, 404, 410]);
+
+/**
+ * True when a failure is an authoritative rejection ({@link TERMINAL_STATUS_CODES}):
+ * the server (or store layer) definitively refused the work, so retrying is
+ * pointless and discarding the work it carried is correct. Matches any Error
+ * carrying a numeric `code` — not just live {@link StatusError} instances — so an
+ * error rehydrated across an RPC/worker boundary that preserved `code` classifies
+ * the same. Everything else (timeouts, aborts, network failures, plain Errors)
+ * must be treated as transient/ambiguous: the request MAY have been processed.
+ */
+export function isRejectionError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'number' && TERMINAL_STATUS_CODES.has(code);
+}
+
+/**
  * Error for a request that died at the network level, without ever producing an
  * HTTP response or status code: a fetch rejection (DNS/TCP/TLS failure or a
  * CORS-opaque rejection — both surface as a status-less `TypeError`), a request

@@ -111,13 +111,30 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
 
   /**
    * Rolls back all outstanding optimistic applies and recomputes state from
-   * confirmed state only. Called by Patches._handleDocChange when the
-   * algorithm rejects ops. Any remaining in-flight changes will apply
-   * normally via the fallback path in applyChanges().
+   * confirmed state only. DESTRUCTIVE: the un-persisted ops are discarded, so
+   * Patches only calls this for an authoritative rejection (a terminal
+   * StatusError — the server/store definitively refused the change). A
+   * transient or ambiguous failure (timeout, abort, network death — where the
+   * write MAY have landed or may land on retry) must NOT roll back; Patches
+   * keeps the ops applied and re-submits them instead. Any remaining in-flight
+   * changes will apply normally via the fallback path in applyChanges().
    */
   rollbackOptimistic(): void {
     this._optimisticOps = [];
     this._recomputeState();
+  }
+
+  /**
+   * Internal: whether this exact ops array (matched by identity — change() and
+   * _applyOptimistic() queue the same array reference they emit) is still
+   * awaiting confirmation in the optimistic FIFO queue. Patches' change-submit
+   * retry loop uses this to detect that a change whose submit failed
+   * ambiguously was confirmed through another path while the retry backoff was
+   * pending (e.g. a hub broadcast of the persisted change shifted the entry via
+   * applyChanges) — re-submitting then would double-apply the ops.
+   */
+  _hasOptimisticEntry(ops: JSONPatchOp[]): boolean {
+    return this._optimisticOps.includes(ops);
   }
 
   /**

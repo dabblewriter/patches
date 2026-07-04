@@ -98,14 +98,18 @@ describe('OTAlgorithm.reconcilePending', () => {
 });
 
 /**
- * The pending replacement must be ATOMIC. reconcilePending previously dropped the old
- * queue and saved the rebased one as TWO store calls; a failure between them (an aborted
- * IndexedDB transaction on the save leg after the drop leg committed) discarded the entire
- * rebased pending set — un-persisted user work nothing had rejected. Found by substrate
- * fault injection on its first soak (P3 silent-loss, fuzz seed 1000126).
+ * The whole reconciliation must be ATOMIC — one store transaction carrying BOTH the
+ * committed tail and the rebased pending queue. Each seam this call has ever had was a
+ * real, fuzz-found failure window:
+ * - drop-then-save for the pending swap discarded the entire rebased set when the save
+ *   leg failed after the drop leg committed (P3 silent-loss, fuzz seed 1000126);
+ * - swapping pending WITHOUT installing the tail (leaving that to the caller's later
+ *   saveDoc) left the store torn when that save failed — pending renumbered onto the
+ *   tail's frame while committedRev lagged, mints numbering off the stale frame, and a
+ *   frame-skewed resend committing the same change twice (P3 duplicate, seed 1000319).
  */
 describe('OTAlgorithm.reconcilePending — atomic replacement', () => {
-  it("replaces pending through the store's single atomic pending-swap, never drop-then-save", async () => {
+  it('installs the committed tail and the rebased pending in one store call, never drop-then-save', async () => {
     const store = new OTInMemoryStore();
     const algorithm = new OTAlgorithm(store);
     await store.trackDocs(['doc1']);
@@ -115,14 +119,38 @@ describe('OTAlgorithm.reconcilePending — atomic replacement', () => {
     const saveSpy = vi.spyOn(store, 'savePendingChanges');
     const atomicSpy = vi.spyOn(store, 'applyServerChanges');
 
-    const foreign = createChange(5, 6, [{ op: 'add', path: '/list/0', value: 'theirs' }]);
-    await algorithm.reconcilePending('doc1', [{ ...foreign, committedAt: 100 }]);
+    const foreign = { ...createChange(5, 6, [{ op: 'add', path: '/list/0', value: 'theirs' }]), committedAt: 100 };
+    await algorithm.reconcilePending('doc1', [foreign]);
 
     expect(dropSpy).not.toHaveBeenCalled();
     expect(saveSpy).not.toHaveBeenCalled();
     expect(atomicSpy).toHaveBeenCalledTimes(1);
-    expect(atomicSpy).toHaveBeenCalledWith('doc1', [], expect.any(Array));
+    expect(atomicSpy).toHaveBeenCalledWith('doc1', [foreign], expect.any(Array));
     expect((await store.getPendingChanges('doc1'))[0].ops).toEqual([{ op: 'add', path: '/list/3', value: 'mine' }]);
+  });
+
+  it('leaves the store self-consistent even if the caller dies right after it (no torn frame)', async () => {
+    const store = new OTInMemoryStore();
+    const algorithm = new OTAlgorithm(store);
+    await store.trackDocs(['doc1']);
+    const pending = createChange(5, 6, [{ op: 'add', path: '/a', value: 1 }]);
+    await store.savePendingChanges('doc1', [pending]);
+
+    // Reconcile against a two-change foreign tail — and then STOP, as if the reload's
+    // subsequent saveDoc never ran (crash, aborted IDB transaction).
+    const foreign6 = { ...createChange(5, 6, [{ op: 'add', path: '/b', value: 2 }]), committedAt: 100 };
+    const foreign7 = { ...createChange(6, 7, [{ op: 'add', path: '/c', value: 3 }]), committedAt: 101 };
+    await algorithm.reconcilePending('doc1', [foreign6, foreign7]);
+
+    // The tail is installed and pending sits on its tip: committedRev and the pending
+    // frame agree. The old shape left pending on rev 7 with committedRev still 5 — a
+    // torn store that skewed every later rev-based decision (mint numbering, the doc
+    // merge, the server's dedup window).
+    expect(await store.getCommittedRev('doc1')).toBe(7);
+    const remaining = await store.getPendingChanges('doc1');
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].baseRev).toBe(7);
+    expect(remaining[0].rev).toBe(8);
   });
 
   it('a store failure leaves the old pending intact for a retry — never a torn half-replacement', async () => {
@@ -142,5 +170,51 @@ describe('OTAlgorithm.reconcilePending — atomic replacement', () => {
     // The queue is exactly what it was — the caller can retry reconciliation. The old
     // drop-then-save shape lost everything here.
     expect(await store.getPendingChanges('doc1')).toEqual([pending]);
+  });
+});
+
+/**
+ * applyServerChanges merges an open doc's in-memory pending into the store snapshot
+ * before rebasing. That merge previously used `rev > latestRev` as the identity test —
+ * rev as identity. When the doc's frame drifts from the store's (a torn reload renumbers
+ * the store queue while the open doc still holds the old frame), the doc's copies of
+ * changes ALREADY in the store pass the rev test and re-enter the queue: the same change
+ * id pending twice, eventually committed twice once its rebased baseRev moves past the
+ * server's dedup window (P3 duplicate, fuzz seed 1000319).
+ */
+describe('OTAlgorithm.applyServerChanges — doc/store pending merge', () => {
+  it('never re-injects a change id the store pending already holds (frame-skewed doc)', async () => {
+    const store = new OTInMemoryStore();
+    const algorithm = new OTAlgorithm(store);
+    await store.trackDocs(['doc1']);
+    await store.applyServerChanges(
+      'doc1',
+      [{ ...createChange(0, 1, [{ op: 'add', path: '/x', value: 0 }]), committedAt: 50 }],
+      []
+    );
+
+    // The store queue as a torn reload leaves it: survivors renumbered onto a future
+    // frame (revs 5-6), then a mint numbered off the stale frame appended after them
+    // (rev 3) — non-monotonic, so `latestRev` (last element) sits BELOW the survivors.
+    const p1 = createChange(4, 5, [{ op: 'add', path: '/a', value: 1 }]);
+    const p2 = createChange(4, 6, [{ op: 'add', path: '/b', value: 2 }]);
+    const mint = createChange(1, 3, [{ op: 'add', path: '/c', value: 3 }]);
+    await store.savePendingChanges('doc1', [p1, p2, mint]);
+
+    // The open doc still holds p1/p2 — same ids, revs above latestRev(3). The old
+    // rev-only filter re-injected both.
+    const doc = {
+      getPendingChanges: () => [{ ...p1 }, { ...p2 }],
+      committedRev: 1,
+      applyChanges: () => {},
+      import: () => {},
+    };
+
+    const foreign = { ...createChange(1, 2, [{ op: 'add', path: '/f', value: 9 }]), committedAt: 100 };
+    await algorithm.applyServerChanges('doc1', [foreign], doc as any);
+
+    const ids = (await store.getPendingChanges('doc1')).map(c => c.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual(expect.arrayContaining([p1.id, p2.id, mint.id]));
   });
 });

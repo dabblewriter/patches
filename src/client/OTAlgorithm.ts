@@ -142,12 +142,20 @@ export class OTAlgorithm implements ClientAlgorithm {
         return [];
       }
 
-      // If doc is open, add any in-memory pending changes not yet in store
+      // If doc is open, add any in-memory pending changes not yet in store. Identity is
+      // the change ID — the rev comparison alone re-injects id-duplicates whenever the
+      // doc's frame has drifted from the store's (a torn reload renumbers the store queue
+      // while the open doc still holds the old frame), and a duplicated pending change
+      // eventually commits twice once its rebased baseRev moves past the server's dedup
+      // window (P3 duplicate, fuzz seed 1000319). The rev guard stays as the ordering
+      // filter: a stale lower-frame copy of a change the store rebased away must not
+      // resurrect either.
       if (doc) {
         const otDoc = doc as OTDoc<T>;
         const inMemoryPending = otDoc.getPendingChanges();
         const latestRev = currentSnapshot.changes[currentSnapshot.changes.length - 1]?.rev ?? currentSnapshot.rev;
-        const newChanges = inMemoryPending.filter(change => change.rev > latestRev);
+        const storedIds = new Set(currentSnapshot.changes.map(change => change.id));
+        const newChanges = inMemoryPending.filter(change => change.rev > latestRev && !storedIds.has(change.id));
         currentSnapshot.changes.push(...newChanges);
       }
 
@@ -225,14 +233,20 @@ export class OTAlgorithm implements ClientAlgorithm {
       // (which is why the snapshot-reload recovery calling this exists at all).
       const rebased = rebaseChanges(committedChanges, pending);
 
-      // Replace pending ATOMICALLY (applyServerChanges with no server changes swaps the
-      // pending queue in one store transaction, same as replacePendingChanges). The previous
-      // drop-then-save pair had a failure window between the two store calls that discarded
-      // the ENTIRE rebased pending set — un-persisted user work nothing had rejected. Written
-      // off as "recoverable and bounded"; substrate fault injection proved otherwise on its
-      // first soak (P3 silent-loss, seed 1000126: an IDB-abort-shaped failure on the save leg
-      // after the drop leg committed).
-      await this.store.applyServerChanges(docId, [], rebased);
+      // Install the reconciled tail AND swap the pending queue in ONE store transaction.
+      // Both halves of this call were once separate steps, and each seam was a real bug:
+      // - drop-then-save for the pending swap discarded the ENTIRE rebased set when the
+      //   save leg failed after the drop leg committed (P3 silent-loss, fuzz seed 1000126);
+      // - swapping pending WITHOUT installing the tail (leaving that to the caller's
+      //   later saveDoc) left the store torn when that save failed: pending renumbered
+      //   onto the tail's frame while committedRev lagged behind it. Mints then numbered
+      //   off the stale frame (a non-monotonic queue) and the doc/store frame skew made
+      //   a resend sail past the server's baseRev-scoped id dedup — the same change
+      //   committed twice (P3 duplicate, fuzz seed 1000319).
+      // The store contract makes this pairing native: applyServerChanges appends the
+      // committed changes and replaces pending atomically. The caller's subsequent
+      // saveDoc merely compacts what is then already-consistent state.
+      await this.store.applyServerChanges(docId, committedChanges, rebased);
     });
   }
 

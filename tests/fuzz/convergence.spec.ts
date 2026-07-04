@@ -203,11 +203,15 @@ const LWW_PANEL_SEEDS = [101, 102, 103, 104, 105, 106, 107, 108, 109, 110];
 // Substrate-fault CI coverage (Phase 3): screened-green seeds run with store/backend fault
 // injection armed (see faultInjection.ts) so the fault paths stay exercised while faults are
 // off in derived configs. NEW-FINDING (day one of fault injection, pinned per the suite
-// convention): under faults, seed 1000319 commits one change TWICE (P3 duplicate) — a
-// resend after a post-commit store fault slips past the server's id dedup in some
-// interleaving. May be engine or harness-model; the follow-up ticket investigates. The
-// drop-then-save reconcile loss the same soak found (seeds 1000126/1000212/1000228/1000275)
-// is FIXED (atomic pending replacement) and those seeds now run green in this panel.
+// convention): under faults, seed 1000319 committed one change TWICE (P3 duplicate). Root
+// cause (engine, two compounding client defects, fixed in fix/torn-reload-frame-skew):
+// reconcilePending swapped pending onto the tail's frame while the caller's later saveDoc
+// installed the tail — a fault between them tore the store (pending frame ahead of
+// committedRev), and applyServerChanges' rev-based doc/store pending merge then re-injected
+// id-duplicates whose rebased resend sailed past the server's baseRev-scoped dedup. Unskip
+// the 1000319 pin (and move it into this panel) once that fix merges. The drop-then-save
+// reconcile loss the same soak found (seeds 1000126/1000212/1000228/1000275) is FIXED
+// (atomic pending replacement) and those seeds now run green in this panel.
 // Repro: FUZZ_FAULTS=1 FUZZ_SEED=1000319 FUZZ_ITERATIONS=1 npm test -- tests/fuzz/convergence.spec.ts
 const OT_FAULT_PANEL_SEEDS = [1000000, 1000001, 1000002, 1000126, 1000212, 1000228, 1000275, 1000003, 1000004, 1000005];
 
@@ -237,6 +241,18 @@ describe('convergence fuzz — OT panel', () => {
 
   it.skip('NEW-FINDING: duplicate commit after a post-commit store fault resend (seed 1000319, faults)', async () => {
     await runOTFuzz(1000319, { clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
+  }, 30_000);
+
+  // NEW-FINDING (post-torn-reload-fix soak): the transform-layer consumed-source class is
+  // reachable WITHOUT the rich mix — a chain of plain single-op `move` changes inside one
+  // offline batch (session-timeout path), transformed against concurrent commits, produces a
+  // committed move whose source an earlier leg consumed. Fails strict apply on delivery as
+  // "[op:add] require value, but got undefined" — the same family as the seed-10 compound
+  // pin above, via a different mint shape, so fixing the compound case must cover chained
+  // batches too. Repro: FUZZ_FAULTS=1 FUZZ_SEED=1000393 FUZZ_ITERATIONS=1 (faults only
+  // shape the interleaving; the poison commit itself is the server transform's).
+  it.skip('NEW-FINDING: chained offline-batch moves commit a consumed-source move (seed 1000393, faults)', async () => {
+    await runOTFuzz(1000393, { clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
   }, 30_000);
 
   // NEW-FINDING (DAB-601 harness extension, day one): with the rich mix on, ~6% of soak

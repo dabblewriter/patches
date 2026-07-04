@@ -8,6 +8,7 @@ import type { OTDoc } from '../../src/client/OTDoc.js';
 import type { JSONPatch } from '../../src/json-patch/JSONPatch.js';
 import { OTServer } from '../../src/server/OTServer.js';
 import type { Change, PatchesSnapshot, PatchesState } from '../../src/types.js';
+import { createFaultInjector, isInjectedFault, withInjectedFaults, type FaultInjector } from './faultInjection.js';
 import { OTFuzzBackend } from './otFuzzBackend.js';
 import type { PRNG } from './prng.js';
 import { describeChanges, readAll, stableStringify, wire } from './support.js';
@@ -59,6 +60,21 @@ export interface OTFuzzConfig {
    * contribute zero weight, which leaves existing seeds' RNG bucket boundaries untouched).
    */
   richOps: boolean;
+  /**
+   * Substrate faults (Phase 3, see faultInjection.ts): per-call probability that a client
+   * store WRITE (saveDoc/savePendingChanges/applyServerChanges/dropPendingChanges) rejects
+   * before mutating — modeling an IndexedDB transaction abort. The harness mirrors
+   * production handling at each site (#85 keep-and-retry at mint, resend-later at flush,
+   * gap-resync after a failed broadcast apply). 0 disables (stores left unwrapped, so
+   * existing seeds are byte-identical).
+   */
+  clientStoreFailP: number;
+  /**
+   * Per-call probability that a server backend call (saveChanges/listChanges/getCurrentRev)
+   * rejects before mutating — modeling Firestore transaction aborts/contention (the gRPC-10
+   * class). Surfaces to clients as a failed commit/read; the retry path is a later flush.
+   */
+  serverBackendFailP: number;
 }
 
 interface Packet {
@@ -123,6 +139,7 @@ export class OTFuzzHarness {
   readonly clients: FuzzClient[] = [];
   readonly trace: string[] = [];
 
+  private readonly faults: FaultInjector;
   private now = BASE_TIME;
   private packetSeq = 0;
   private broadcastBuffer: Change[][] = [];
@@ -131,7 +148,18 @@ export class OTFuzzHarness {
     private rng: PRNG,
     private cfg: OTFuzzConfig
   ) {
-    this.server = new OTServer(this.backend, {
+    // Substrate faults draw from their own PRNG (see faultInjection.ts) and start
+    // inactive: bootstrap runs fault-free, run() arms them, quiesce disarms them.
+    this.faults = createFaultInjector(cfg.seed);
+    this.faults.active = false;
+    const serverBackend = withInjectedFaults(
+      this.backend,
+      ['saveChanges', 'listChanges', 'getCurrentRev'],
+      this.faults,
+      cfg.serverBackendFailP,
+      method => this.tr(`FAULT server backend ${method} (injected)`)
+    );
+    this.server = new OTServer(serverBackend, {
       maxChangesPerVersion: cfg.maxChangesPerVersion,
       sessionTimeoutMinutes: cfg.sessionTimeoutMinutes,
     });
@@ -141,7 +169,13 @@ export class OTFuzzHarness {
     vi.setSystemTime(this.now);
 
     for (let i = 0; i < cfg.clients; i++) {
-      const store = new OTInMemoryStore();
+      const store = withInjectedFaults(
+        new OTInMemoryStore(),
+        ['saveDoc', 'savePendingChanges', 'applyServerChanges', 'dropPendingChanges'],
+        this.faults,
+        cfg.clientStoreFailP,
+        method => this.tr(`FAULT c${i} store ${method} (injected)`)
+      );
       const algorithm = new OTAlgorithm(store);
       const snapshot: PatchesSnapshot<FuzzDoc> = { state: {} as FuzzDoc, rev: 0, changes: [] };
       const doc = algorithm.createDoc<FuzzDoc>(DOC_ID, snapshot) as OTDoc<FuzzDoc>;
@@ -162,6 +196,7 @@ export class OTFuzzHarness {
 
   async run(): Promise<void> {
     await this.bootstrap();
+    this.faults.active = true;
     for (let i = 0; i < this.cfg.actions; i++) {
       this.advance(this.rng.intBetween(50, 2000));
       await this.step();
@@ -251,7 +286,19 @@ export class OTFuzzHarness {
     client.doc.change(patch => mutate(patch));
     unsubscribe();
     if (ops.length === 0) return;
-    const changes = await client.algorithm.handleDocChange(DOC_ID, ops, client.doc, {});
+    // Mirror Patches._processDocChange (#85): a store fault at the mint path keeps the
+    // optimistic ops and re-submits — nothing rejected the work, discarding it is data loss.
+    // The fault fails before any write, so the retry re-mints from a clean slate.
+    let changes;
+    for (;;) {
+      try {
+        changes = await client.algorithm.handleDocChange(DOC_ID, ops, client.doc, {});
+        break;
+      } catch (err) {
+        if (!isInjectedFault(err)) throw err;
+        this.tr(`edit ${client.name}: mint STORE FAULT — kept ops, retrying (#85)`);
+      }
+    }
     for (const change of changes) client.minted.add(change.id);
     this.tr(`edit ${client.name}: ${desc}`);
   }
@@ -482,7 +529,20 @@ export class OTFuzzHarness {
     }
 
     this.broadcastBuffer = [];
-    const result = await this.server.commitChanges(DOC_ID, wire(pending));
+    let result;
+    this.tr(`flush ${client.name}: SENDING ${pending.map(c => `${c.id}@base${c.baseRev}/rev${c.rev}`).join(' ')}`);
+    try {
+      result = await this.server.commitChanges(DOC_ID, wire(pending));
+    } catch (err) {
+      this.broadcastBuffer = [];
+      if (isInjectedFault(err)) {
+        // Mirror PatchesSync's retry ladder: a transient server/backend failure leaves the
+        // changes pending; a later flush re-sends them (id-dedup keeps that exactly-once).
+        this.tr(`flush ${client.name}: SERVER FAULT (injected) — pending kept for a later flush`);
+        return true;
+      }
+      throw err;
+    }
     for (const batch of this.broadcastBuffer) this.fanOut(batch, client);
     this.broadcastBuffer = [];
 
@@ -498,15 +558,26 @@ export class OTFuzzHarness {
     }
 
     const resp = wire(result.changes);
-    await client.algorithm.confirmSent(DOC_ID, pending);
-    await this.applyServerTracked(client, resp);
+    try {
+      await client.algorithm.confirmSent(DOC_ID, pending);
+      await this.applyServerTracked(client, resp);
 
-    // Mirror flushDoc's dropResolvedPending: sent changes the server didn't echo back were
-    // rebased away to no-ops — record them as legitimately eliminated.
-    const respIds = new Set(resp.map(c => c.id));
-    const droppedByServer = pending.filter(c => !respIds.has(c.id));
-    await client.algorithm.dropResolvedPending(DOC_ID, pending, resp);
-    for (const change of droppedByServer) client.eliminated.add(change.id);
+      // Mirror flushDoc's dropResolvedPending: sent changes the server didn't echo back were
+      // rebased away to no-ops — record them as legitimately eliminated.
+      const respIds = new Set(resp.map(c => c.id));
+      const droppedByServer = pending.filter(c => !respIds.has(c.id));
+      await client.algorithm.dropResolvedPending(DOC_ID, pending, resp);
+      for (const change of droppedByServer) client.eliminated.add(change.id);
+    } catch (err) {
+      if (isInjectedFault(err)) {
+        // The server committed but the client-side bookkeeping died mid-way (the crash
+        // window between ack and persist). The change stays pending locally; the next
+        // flush re-sends it and the server's id dedup answers with the committed echo.
+        this.tr(`flush ${client.name}: STORE FAULT after commit (injected) — resend will hit id dedup`);
+        return true;
+      }
+      throw err;
+    }
 
     this.tr(`flush ${client.name}: sent ${pending.length}, response ${describeChanges(resp)}`);
     return true;
@@ -542,14 +613,27 @@ export class OTFuzzHarness {
       await this.applyServerTracked(client, wire(packet.changes));
       this.tr(`deliver ${client.name}: pkt#${packet.seq} ${describeChanges(packet.changes)}`);
     } catch (err) {
+      if (isInjectedFault(err)) {
+        // The store rejected the apply before mutating: committedRev did not advance, so the
+        // next delivery trips the gap guard and getChangesSince redelivers — same shape as a
+        // dropped packet, recovered by the machinery the drop knob already exercises.
+        this.tr(`deliver ${client.name}: pkt#${packet.seq} STORE FAULT on apply (injected) — gap recovery later`);
+        return;
+      }
       if (err instanceof MissingChangesError) {
         // Mirror PatchesSync gap recovery: pull the authoritative tail.
-        const committedRev = await client.algorithm.getCommittedRev(DOC_ID);
-        const tail = wire(await this.server.getChangesSince(DOC_ID, committedRev));
-        if (tail.length > 0) await this.applyServerTracked(client, tail);
-        this.tr(
-          `deliver ${client.name}: pkt#${packet.seq} GAP -> resync since ${committedRev} (${tail.length} changes)`
-        );
+        try {
+          const committedRev = await client.algorithm.getCommittedRev(DOC_ID);
+          const tail = wire(await this.server.getChangesSince(DOC_ID, committedRev));
+          if (tail.length > 0) await this.applyServerTracked(client, tail);
+          this.tr(
+            `deliver ${client.name}: pkt#${packet.seq} GAP -> resync since ${committedRev} (${tail.length} changes)`
+          );
+        } catch (resyncErr) {
+          if (!isInjectedFault(resyncErr)) throw resyncErr;
+          // Resync itself hit a fault — abandoned; a later delivery/catch-up retries.
+          this.tr(`deliver ${client.name}: pkt#${packet.seq} GAP resync STORE/SERVER FAULT (injected) — retry later`);
+        }
         return;
       }
       throw err;
@@ -570,17 +654,35 @@ export class OTFuzzHarness {
     if (pending && pending.length > 0) {
       await this.flush(client, faults);
     } else {
-      const committedRev = await client.algorithm.getCommittedRev(DOC_ID);
-      const tail = wire(await this.server.getChangesSince(DOC_ID, committedRev));
-      if (tail.length > 0) {
-        await this.applyServerTracked(client, tail);
-        this.tr(`catchup ${client.name}: since ${committedRev} (${tail.length} changes)`);
+      try {
+        const committedRev = await client.algorithm.getCommittedRev(DOC_ID);
+        const tail = wire(await this.server.getChangesSince(DOC_ID, committedRev));
+        if (tail.length > 0) {
+          await this.applyServerTracked(client, tail);
+          this.tr(`catchup ${client.name}: since ${committedRev} (${tail.length} changes)`);
+        }
+      } catch (err) {
+        if (!isInjectedFault(err)) throw err;
+        // Catch-up died on a fault — the client stays behind; the gap machinery or the
+        // final quiesce catch-up (faults off) closes it.
+        this.tr(`catchup ${client.name}: FAULT (injected) — remaining behind, retry later`);
       }
     }
   }
 
   /** Mid-stream doc reload, mirroring PatchesSync._reloadDocFromServer. */
   private async reload(client: FuzzClient): Promise<void> {
+    try {
+      await this.reloadInner(client);
+    } catch (err) {
+      if (!isInjectedFault(err)) throw err;
+      // Each reload step is its own store transaction in production too; a failed step
+      // leaves prior steps durable and the reload is simply retried later.
+      this.tr(`reload ${client.name}: ABORTED on injected fault — retried on a later reload`);
+    }
+  }
+
+  private async reloadInner(client: FuzzClient): Promise<void> {
     const algorithm = client.algorithm;
     const baseRev = await algorithm.getCommittedRev(DOC_ID);
     const envelope = JSON.parse(await readAll(await this.server.getDoc(DOC_ID))) as PatchesSnapshot;
@@ -631,6 +733,7 @@ export class OTFuzzHarness {
 
   /** Reconnect everyone, deliver everything, flush everything — fault-free — until stable. */
   private async quiesce(): Promise<void> {
+    this.faults.active = false; // runs must always drain — faults only perturb the action phase
     this.tr('--- quiesce ---');
     for (const client of this.clients) {
       if (!client.connected) await this.reconnect(client, false);
@@ -719,7 +822,12 @@ export class OTFuzzHarness {
     const counts = new Map<string, number>();
     for (const change of log) counts.set(change.id, (counts.get(change.id) ?? 0) + 1);
     for (const [id, count] of counts) {
-      if (count > 1) throw new Error(`P3 violated: change ${id} appears ${count} times in the server log`);
+      if (count > 1) {
+        const copies = log
+          .filter(c => c.id === id)
+          .map(c => `rev=${c.rev} baseRev=${c.baseRev} clientId=${(c as any).clientId} ops=${JSON.stringify(c.ops)}`);
+        throw new Error(`P3 violated: change ${id} appears ${count} times in the server log\n  ${copies.join('\n  ')}`);
+      }
     }
     for (const client of this.clients) {
       for (const id of client.minted) {

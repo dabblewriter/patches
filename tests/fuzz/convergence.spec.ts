@@ -97,6 +97,11 @@ function otConfigFromSeed(seed: number): OTFuzzConfig {
     // FINDING-1 family reached through multi-op changes. See OT_RICH_PANEL_SEEDS for the CI
     // coverage that stays on, and the NEW-FINDING skip for the repro.
     richOps: false,
+    // Phase 3 substrate faults (see faultInjection.ts) — CONSTANTS for the same reason as
+    // richOps: a draw here would shift every existing seed's derived knobs. Off in derived
+    // configs; exercised by the fault panel below and the FUZZ_FAULTS=1 soak modifier.
+    clientStoreFailP: 0,
+    serverBackendFailP: 0,
   };
   // FINDING-3 (fixed): commitChanges now excludes the sender's own committed echoes (matched
   // by id, mirroring the batchId exclusion) from the transform set, so lost commit responses
@@ -195,6 +200,21 @@ const OT_PANEL_SEEDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1
 
 const LWW_PANEL_SEEDS = [101, 102, 103, 104, 105, 106, 107, 108, 109, 110];
 
+// Substrate-fault CI coverage (Phase 3): screened-green seeds run with store/backend fault
+// injection armed (see faultInjection.ts) so the fault paths stay exercised while faults are
+// off in derived configs. NEW-FINDING (day one of fault injection, pinned per the suite
+// convention): under faults, seed 1000319 committed one change TWICE (P3 duplicate). Root
+// cause (engine, two compounding client defects, fixed in fix/torn-reload-frame-skew):
+// reconcilePending swapped pending onto the tail's frame while the caller's later saveDoc
+// installed the tail — a fault between them tore the store (pending frame ahead of
+// committedRev), and applyServerChanges' rev-based doc/store pending merge then re-injected
+// id-duplicates whose rebased resend sailed past the server's baseRev-scoped dedup. Unskip
+// the 1000319 pin (and move it into this panel) once that fix merges. The drop-then-save
+// reconcile loss the same soak found (seeds 1000126/1000212/1000228/1000275) is FIXED
+// (atomic pending replacement) and those seeds now run green in this panel.
+// Repro: FUZZ_FAULTS=1 FUZZ_SEED=1000319 FUZZ_ITERATIONS=1 npm test -- tests/fuzz/convergence.spec.ts
+const OT_FAULT_PANEL_SEEDS = [1000000, 1000001, 1000002, 1000126, 1000212, 1000228, 1000275, 1000003, 1000004, 1000005];
+
 // Rich-mix CI coverage (DAB-601): screened-green seeds run the extended edit mix (compound
 // move+array changes, copy ops, nested containers) so the new kinds stay exercised while
 // `richOps` is off in derived configs (see otConfigFromSeed).
@@ -212,6 +232,28 @@ describe('convergence fuzz — OT panel', () => {
       await runOTFuzz(seed, { richOps: true });
     }, 30_000);
   }
+
+  for (const seed of OT_FAULT_PANEL_SEEDS) {
+    it(`converges under substrate faults (seed ${seed})`, async () => {
+      await runOTFuzz(seed, { clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
+    }, 30_000);
+  }
+
+  it.skip('NEW-FINDING: duplicate commit after a post-commit store fault resend (seed 1000319, faults)', async () => {
+    await runOTFuzz(1000319, { clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
+  }, 30_000);
+
+  // NEW-FINDING (post-torn-reload-fix soak): the transform-layer consumed-source class is
+  // reachable WITHOUT the rich mix — a chain of plain single-op `move` changes inside one
+  // offline batch (session-timeout path), transformed against concurrent commits, produces a
+  // committed move whose source an earlier leg consumed. Fails strict apply on delivery as
+  // "[op:add] require value, but got undefined" — the same family as the seed-10 compound
+  // pin above, via a different mint shape, so fixing the compound case must cover chained
+  // batches too. Repro: FUZZ_FAULTS=1 FUZZ_SEED=1000393 FUZZ_ITERATIONS=1 (faults only
+  // shape the interleaving; the poison commit itself is the server transform's).
+  it.skip('NEW-FINDING: chained offline-batch moves commit a consumed-source move (seed 1000393, faults)', async () => {
+    await runOTFuzz(1000393, { clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
+  }, 30_000);
 
   // NEW-FINDING (DAB-601 harness extension, day one): with the rich mix on, ~6% of soak
   // seeds commit a compound change whose `move` source a concurrent commit already consumed.
@@ -343,13 +385,20 @@ describe.runIf(FUZZ_SEED !== undefined && FUZZ_ITERATIONS === 0)('convergence fu
   }, 60_000);
 });
 
+// FUZZ_FAULTS=1 runs the soak with substrate faults armed (OT only for now — the LWW
+// harness gets the same treatment in a follow-up). Rates are deliberately low: a fault
+// on ~1 in 25 substrate calls perturbs plenty of flushes/applies per run without
+// starving the scenario of successful traffic.
+const FUZZ_FAULTS = process.env.FUZZ_FAULTS === '1';
+const FAULT_OVERRIDES = { clientStoreFailP: 0.04, serverBackendFailP: 0.04 };
+
 describe.runIf(FUZZ_ITERATIONS > 0)('convergence fuzz — soak', () => {
   const base = FUZZ_SEED ?? 1_000_000;
   for (let i = 0; i < FUZZ_ITERATIONS; i++) {
     const seed = base + i;
-    it(`soak ${FUZZ_ALGO} seed ${seed}`, async () => {
+    it(`soak ${FUZZ_ALGO} seed ${seed}${FUZZ_FAULTS ? ' (faults)' : ''}`, async () => {
       if (FUZZ_ALGO === 'lww') await runLWWFuzz(seed);
-      else await runOTFuzz(seed);
+      else await runOTFuzz(seed, FUZZ_FAULTS ? FAULT_OVERRIDES : {});
     }, 60_000);
   }
 });

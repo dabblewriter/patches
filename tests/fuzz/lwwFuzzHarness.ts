@@ -8,6 +8,7 @@ import type { JSONPatch } from '../../src/json-patch/JSONPatch.js';
 import { LWWMemoryStoreBackend } from '../../src/server/LWWMemoryStoreBackend.js';
 import { LWWServer } from '../../src/server/LWWServer.js';
 import type { Change, PatchesSnapshot } from '../../src/types.js';
+import { createFaultInjector, isInjectedFault, withInjectedFaults, type FaultInjector } from './faultInjection.js';
 import type { PRNG } from './prng.js';
 import { describeChanges, readAll, stableStringify, wire } from './support.js';
 
@@ -46,6 +47,19 @@ export interface LWWFuzzConfig {
    * doc subtree shielding — FINDING-4/FINDING-6, fixed).
    */
   parentOps: boolean;
+  /**
+   * Per-call probability a client store write (savePendingOps, saveSendingChange,
+   * applyServerChanges, confirmSendingChange) rejects before mutating — the IndexedDB
+   * transaction-abort shape (see faultInjection.ts). 0 disables (byte-identical runs).
+   */
+  clientStoreFailP: number;
+  /**
+   * Per-call probability a server backend method (saveOps, listOps, getCurrentRev,
+   * seenChangeIds) rejects before mutating — the Firestore contention/abort shape. The
+   * post-commit resend this forces is the change-id dedup path (the seenChangeIds TOCTOU
+   * class pup guards with its in-transaction marker read).
+   */
+  serverBackendFailP: number;
 }
 
 interface Packet {
@@ -88,6 +102,7 @@ export class LWWFuzzHarness {
   readonly clients: LWWFuzzClient[] = [];
   readonly trace: string[] = [];
 
+  private readonly faults: FaultInjector;
   private now = BASE_TIME;
   private packetSeq = 0;
   private broadcastBuffer: Change[][] = [];
@@ -96,14 +111,31 @@ export class LWWFuzzHarness {
     private rng: PRNG,
     private cfg: LWWFuzzConfig
   ) {
-    this.server = new LWWServer(this.backend);
+    // Substrate faults draw from their own PRNG (see faultInjection.ts) and start
+    // inactive: bootstrap runs fault-free, run() arms them, quiesce disarms them.
+    this.faults = createFaultInjector(cfg.seed);
+    this.faults.active = false;
+    const serverBackend = withInjectedFaults(
+      this.backend,
+      ['saveOps', 'listOps', 'getCurrentRev', 'seenChangeIds'],
+      this.faults,
+      cfg.serverBackendFailP,
+      method => this.tr(`FAULT server backend ${method} (injected)`)
+    );
+    this.server = new LWWServer(serverBackend);
     this.server.onChangesCommitted((_docId, changes) => {
       this.broadcastBuffer.push(wire(changes));
     });
     vi.setSystemTime(this.now);
 
     for (let i = 0; i < cfg.clients; i++) {
-      const store = new LWWInMemoryStore();
+      const store = withInjectedFaults(
+        new LWWInMemoryStore(),
+        ['savePendingOps', 'saveSendingChange', 'applyServerChanges', 'confirmSendingChange'],
+        this.faults,
+        cfg.clientStoreFailP,
+        method => this.tr(`FAULT c${i} store ${method} (injected)`)
+      );
       const algorithm = new LWWAlgorithm(store);
       const doc = algorithm.createDoc<LWWFuzzDoc>(DOC_ID, {
         state: {} as LWWFuzzDoc,
@@ -116,6 +148,7 @@ export class LWWFuzzHarness {
 
   async run(): Promise<void> {
     await this.bootstrap();
+    this.faults.active = true;
     for (let i = 0; i < this.cfg.actions; i++) {
       this.advance(this.rng.intBetween(50, 2000));
       await this.step();
@@ -203,7 +236,18 @@ export class LWWFuzzHarness {
     client.doc.change(patch => mutate(patch));
     unsubscribe();
     if (ops.length === 0) return;
-    await client.algorithm.handleDocChange(DOC_ID, ops, client.doc, {});
+    // Mirror Patches._processDocChange (#85): a store fault at the mint path keeps the
+    // optimistic ops and re-submits — nothing rejected the work, discarding it is data loss.
+    // The fault fails before any write, so the retry re-mints from a clean slate.
+    for (;;) {
+      try {
+        await client.algorithm.handleDocChange(DOC_ID, ops, client.doc, {});
+        break;
+      } catch (err) {
+        if (!isInjectedFault(err)) throw err;
+        this.tr(`edit ${client.name}: mint STORE FAULT — kept ops, retrying (#85)`);
+      }
+    }
     this.tr(`edit ${client.name}: ${desc}`);
   }
 
@@ -258,7 +302,16 @@ export class LWWFuzzHarness {
       // the drainInboxBeforeFlush doc — the un-drained ordering exposes FINDING-2).
       while (client.inbox.length > 0) await this.deliver(client, false);
     }
-    const pending = await client.algorithm.getPendingToSend(DOC_ID);
+    let pending;
+    try {
+      pending = await client.algorithm.getPendingToSend(DOC_ID);
+    } catch (err) {
+      if (!isInjectedFault(err)) throw err;
+      // saveSendingChange died moving pending ops into the sending slot — nothing left the
+      // device; the ops are still pending and a later flush repeats the move.
+      this.tr(`flush ${client.name}: STORE FAULT moving pending to sending — retried on a later flush`);
+      return true;
+    }
     if (!pending || pending.length === 0) return false;
 
     if (faults && this.rng.chance(this.cfg.lostRequestP)) {
@@ -267,7 +320,20 @@ export class LWWFuzzHarness {
     }
 
     this.broadcastBuffer = [];
-    const result = await this.server.commitChanges(DOC_ID, wire(pending));
+    let result;
+    try {
+      result = await this.server.commitChanges(DOC_ID, wire(pending));
+    } catch (err) {
+      this.broadcastBuffer = [];
+      if (isInjectedFault(err)) {
+        // Mirror PatchesSync's retry ladder: a transient server/backend failure leaves the
+        // change in the sending slot; the next flush re-sends the SAME change id, which is
+        // exactly the change-id dedup path (the seenChangeIds TOCTOU class).
+        this.tr(`flush ${client.name}: SERVER FAULT (injected) — sending kept for a later flush`);
+        return true;
+      }
+      throw err;
+    }
     for (const batch of this.broadcastBuffer) this.fanOut(batch, client);
     this.broadcastBuffer = [];
 
@@ -279,9 +345,29 @@ export class LWWFuzzHarness {
     }
 
     // Mirror PatchesSync.flushDoc for LWW: confirm sent first, then apply the response so
-    // server corrections are the last writer for corrected fields.
-    await client.algorithm.confirmSent(DOC_ID, pending);
-    await client.algorithm.applyServerChanges(DOC_ID, wire(result.changes), client.doc);
+    // server corrections are the last writer for corrected fields. When the confirm's
+    // guarded promotion resolved sent ops against newer committed rows, flushDoc re-syncs
+    // the open doc from the store BEFORE the response apply (which may fault) — mirror
+    // that so a lost response can't strand the doc on its optimistic value.
+    try {
+      const localCorrections = (await client.algorithm.confirmSent(DOC_ID, pending)) ?? [];
+      if (localCorrections.length > 0) {
+        const full = await client.algorithm.loadDoc(DOC_ID);
+        if (full) client.doc.import(full as PatchesSnapshot<LWWFuzzDoc>);
+      }
+      await client.algorithm.applyServerChanges(DOC_ID, wire(result.changes), client.doc);
+    } catch (err) {
+      if (isInjectedFault(err)) {
+        // The server committed but the client-side bookkeeping died mid-way (the crash
+        // window between ack and persist). The change stays in the sending slot; the next
+        // flush re-sends it and the server's change-id dedup answers idempotently. If the
+        // confirm landed but the response apply died, the response's effects arrive later
+        // via broadcast/catch-up instead.
+        this.tr(`flush ${client.name}: STORE FAULT after commit (injected) — resend hits change-id dedup`);
+        return true;
+      }
+      throw err;
+    }
     this.tr(`flush ${client.name}: sent ${pending.length}, response ${describeChanges(result.changes)}`);
     return true;
   }
@@ -323,12 +409,26 @@ export class LWWFuzzHarness {
     try {
       await client.algorithm.applyServerChanges(DOC_ID, wire(changes), client.doc);
     } catch (err) {
+      if (isInjectedFault(err)) {
+        // The store rejected the apply before mutating: committedRev did not advance, so
+        // this packet is effectively lost — the next contiguous packet raises
+        // MissingChangesError and the gap recovery below (or quiesce catch-up) heals it.
+        this.tr(`deliver ${client.name}: ${what} STORE FAULT on apply (injected) — gap recovery later`);
+        return;
+      }
       if (!(err instanceof MissingChangesError)) throw err;
       this.tr(`gap ${client.name}: ${what} ahead of committedRev — recovering`);
-      if (await client.algorithm.hasPending(DOC_ID)) {
-        await this.flush(client, false);
-      } else {
-        await this.catchup(client);
+      try {
+        if (await client.algorithm.hasPending(DOC_ID)) {
+          await this.flush(client, false);
+        } else {
+          await this.catchup(client);
+        }
+      } catch (recoveryErr) {
+        if (!isInjectedFault(recoveryErr)) throw recoveryErr;
+        // Recovery itself died on a fault — the client stays behind; a later gap
+        // recovery or the final quiesce catch-up (faults off) closes it.
+        this.tr(`gap ${client.name}: recovery FAULT (injected) — remaining behind, retry later`);
       }
     }
   }
@@ -337,11 +437,18 @@ export class LWWFuzzHarness {
   private async reconnect(client: LWWFuzzClient, faults: boolean): Promise<void> {
     client.connected = true;
     this.tr(`reconnect ${client.name}`);
-    const pending = await client.algorithm.getPendingToSend(DOC_ID);
-    if (pending && pending.length > 0) {
-      await this.flush(client, faults);
-    } else {
-      await this.catchup(client);
+    try {
+      const pending = await client.algorithm.getPendingToSend(DOC_ID);
+      if (pending && pending.length > 0) {
+        await this.flush(client, faults);
+      } else {
+        await this.catchup(client);
+      }
+    } catch (err) {
+      if (!isInjectedFault(err)) throw err;
+      // Reconnect sync died on a fault — the client stays behind/pending; the next
+      // flush/deliver or the final quiesce (faults off) completes the sync.
+      this.tr(`reconnect ${client.name}: FAULT (injected) — remaining behind, retry later`);
     }
   }
 
@@ -355,6 +462,7 @@ export class LWWFuzzHarness {
   }
 
   private async quiesce(): Promise<void> {
+    this.faults.active = false; // runs must always drain — faults only perturb the action phase
     this.tr('--- quiesce ---');
     for (const client of this.clients) {
       if (!client.connected) await this.reconnect(client, false);

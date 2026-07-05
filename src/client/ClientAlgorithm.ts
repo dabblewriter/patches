@@ -119,8 +119,16 @@ export interface ClientAlgorithm {
   /**
    * Confirms that changes were acknowledged by the server.
    * Called after successful server commit.
+   *
+   * LWW returns the LOCAL corrections its guarded promotion produced: the resolved rows
+   * for sent paths where a newer committed row (or a delta fold) beat the raw sent op.
+   * A non-empty result means the open doc's optimistic values for those paths are stale
+   * and the caller must re-sync the doc from the store — the commit response carries the
+   * same corrections, but its apply is a separate store transaction and may never land
+   * (the ack-persist crash window). OT returns nothing (its commit echo is the sole
+   * confirmation mechanism).
    */
-  confirmSent(docId: string, changes: Change[]): Promise<void>;
+  confirmSent(docId: string, changes: Change[]): Promise<JSONPatchOp[] | void>;
 
   /**
    * After a commit, drop pending changes that were sent but did not come back as

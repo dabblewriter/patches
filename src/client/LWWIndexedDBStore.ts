@@ -1,3 +1,4 @@
+import { consolidateFieldOp } from '../algorithms/lww/consolidateOps.js';
 import { createChange } from '../data/change.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
@@ -405,7 +406,7 @@ export class LWWIndexedDBStore implements LWWClientStore {
    * after) overwrite any stale ops for fields the server won via LWW.
    */
   @blockable
-  async confirmSendingChange(docId: string, ops?: JSONPatchOp[]): Promise<void> {
+  async confirmSendingChange(docId: string, ops?: JSONPatchOp[]): Promise<JSONPatchOp[]> {
     const [tx, sendingChanges, committedOps] = await this.db.transaction(
       ['sendingChanges', 'committedOps'],
       'readwrite'
@@ -414,21 +415,40 @@ export class LWWIndexedDBStore implements LWWClientStore {
     const sending = await sendingChanges.get<SendingChange>(docId);
     if (!sending) {
       await tx.complete();
-      return;
+      return [];
     }
 
     const confirmedPaths = ops && new Set(ops.map(op => op.path));
     const confirmed = confirmedPaths
       ? sending.change.ops.filter(op => confirmedPaths.has(op.path))
       : sending.change.ops;
+    const corrections: JSONPatchOp[] = [];
 
     // Move ops to committed, deleting child-path ops to match server saveOps behavior.
     // Without this, a parent write (e.g. replace /trash {}) would leave stale child ops
     // (e.g. /trash/collectionId/name) that re-create nested structure on doc rebuild.
+    //
+    // Promotion is LWW-guarded through the SAME per-path rule the server applies
+    // (consolidateFieldOp): a sent op that loses to a newer committed row must not be
+    // promoted, and must not prune that row's children. The unguarded put() relied on
+    // the commit response's correction ops (applied right after) to repair the fields
+    // the server resolved differently \u2014 but the response apply is a separate IDB
+    // transaction, and if it dies (the ack-persist crash window) the losing value is
+    // baked into committed state with committedRev already past the winner's rev, where
+    // no catch-up ever redelivers it. Silent, permanent divergence (fuzz seed 1000374).
     await Promise.all(
       confirmed.map(async op => {
+        const existing = await committedOps.get<CommittedOp>([docId, op.path]);
+        const resolved = existing ? consolidateFieldOp(existing, op) : op;
+        if (!resolved) {
+          // Committed row is newer \u2014 the server resolves the same way. The doc's optimistic
+          // value for this path is stale; surface the winning row as a local correction.
+          corrections.push(existing!);
+          return;
+        }
+        if (resolved !== op) corrections.push(resolved); // delta fold \u2014 the doc needs the folded value
         await committedOps.delete([docId, op.path + '/'], [docId, op.path + '/\uffff']);
-        await committedOps.put<CommittedOp>({ ...op, docId });
+        await committedOps.put<CommittedOp>({ ...resolved, docId });
       })
     );
 
@@ -438,11 +458,12 @@ export class LWWIndexedDBStore implements LWWClientStore {
     if (remaining.length > 0) {
       await sendingChanges.put<SendingChange>({ docId, change: { ...sending.change, ops: remaining } });
       await tx.complete();
-      return;
+      return corrections;
     }
 
     await sendingChanges.delete(docId);
     await tx.complete();
+    return corrections;
   }
 
   /**

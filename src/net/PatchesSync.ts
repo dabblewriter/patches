@@ -901,7 +901,17 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // any stale ops for fields the server won via LWW timestamp resolution.
           // For OT this order doesn't matter; for LWW it ensures applyServerChanges
           // is the last writer for corrected fields.
-          await algorithm.confirmSent(docId, changeBatch);
+          const localCorrections = (await algorithm.confirmSent(docId, changeBatch)) ?? [];
+          // LWW's guarded promotion resolved some sent ops against newer committed rows
+          // (see ClientAlgorithm.confirmSent) — the open doc's optimistic values for those
+          // paths are stale NOW, and the response apply below is a separate store
+          // transaction that may never land (the ack-persist crash window). Re-sync the doc
+          // from the store first so a lost response can't leave the doc diverged; the
+          // response's own corrections then apply on top as usual.
+          if (localCorrections.length > 0 && this.patches.getOpenDoc(docId)) {
+            const fullSnapshot = await algorithm.loadDoc(docId);
+            if (fullSnapshot) this._applySnapshotPreservingPending(docId, fullSnapshot, changeBatch);
+          }
           await this._applyServerChangesToDoc(docId, committed);
 
           // Drop any sent change the server rebased away to a no-op (absent from

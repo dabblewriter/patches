@@ -216,18 +216,15 @@ const LWW_FAULT_PANEL_SEEDS = [
 
 // Substrate-fault CI coverage (Phase 3): screened-green seeds run with store/backend fault
 // injection armed (see faultInjection.ts) so the fault paths stay exercised while faults are
-// off in derived configs. NEW-FINDING (day one of fault injection, pinned per the suite
-// convention): under faults, seed 1000319 committed one change TWICE (P3 duplicate). Root
-// cause (engine, two compounding client defects, fixed in fix/torn-reload-frame-skew):
-// reconcilePending swapped pending onto the tail's frame while the caller's later saveDoc
-// installed the tail — a fault between them tore the store (pending frame ahead of
-// committedRev), and applyServerChanges' rev-based doc/store pending merge then re-injected
-// id-duplicates whose rebased resend sailed past the server's baseRev-scoped dedup. Unskip
-// the 1000319 pin (and move it into this panel) once that fix merges. The drop-then-save
-// reconcile loss the same soak found (seeds 1000126/1000212/1000228/1000275) is FIXED
-// (atomic pending replacement) and those seeds now run green in this panel.
-// Repro: FUZZ_FAULTS=1 FUZZ_SEED=1000319 FUZZ_ITERATIONS=1 npm test -- tests/fuzz/convergence.spec.ts
-const OT_FAULT_PANEL_SEEDS = [1000000, 1000001, 1000002, 1000126, 1000212, 1000228, 1000275, 1000003, 1000004, 1000005];
+// off in derived configs. Two of these seeds are fixed findings, kept as regressions:
+// - 1000126/1000212/1000228/1000275: reconcilePending's drop-then-save loss (P3
+//   silent-loss), fixed by the atomic pending replacement (#89).
+// - 1000319: duplicate commit (P3) — the torn-reload window plus the id-blind doc/store
+//   pending merge let a rebased resend sail past the server's baseRev-scoped dedup;
+//   fixed by the single-transaction reconcile + id-aware merge (#91).
+const OT_FAULT_PANEL_SEEDS = [
+  1000000, 1000001, 1000002, 1000126, 1000212, 1000228, 1000275, 1000319, 1000003, 1000004, 1000005,
+];
 
 // Rich-mix CI coverage (DAB-601): screened-green seeds run the extended edit mix (compound
 // move+array changes, copy ops, nested containers) so the new kinds stay exercised while
@@ -252,10 +249,6 @@ describe('convergence fuzz — OT panel', () => {
       await runOTFuzz(seed, { clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
     }, 30_000);
   }
-
-  it.skip('NEW-FINDING: duplicate commit after a post-commit store fault resend (seed 1000319, faults)', async () => {
-    await runOTFuzz(1000319, { clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
-  }, 30_000);
 
   // NEW-FINDING (post-torn-reload-fix soak): the transform-layer consumed-source class is
   // reachable WITHOUT the rich mix — a chain of plain single-op `move` changes inside one

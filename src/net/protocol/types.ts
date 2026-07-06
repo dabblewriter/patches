@@ -62,6 +62,29 @@ export interface SignalingTransport extends ClientTransport {
 }
 
 /**
+ * Peer-level transport surface that `WebRTCAwareness` consumes. `WebRTCTransport`
+ * satisfies it over real WebRTC data channels; `RelayTransport` satisfies it by
+ * relaying every frame through the signaling server instead (no P2P). Anything
+ * that can announce peers and pass raw strings between them qualifies.
+ */
+export interface AwarenessTransport {
+  /** Peer id assigned by the signaling server (`peer-welcome`); undefined until it arrives. */
+  readonly id: string | undefined;
+  /** Open the underlying channel. May be a no-op if the channel is already open. */
+  connect(): Promise<void>;
+  /** Tear down peer bookkeeping. Implementations decide whether the underlying channel closes. */
+  disconnect(): void;
+  /** Emits when a peer becomes reachable (consumers push their full state to it). */
+  onPeerConnect(cb: (peerId: string) => void): Unsubscriber;
+  /** Emits when a peer is gone (consumers drop its state). */
+  onPeerDisconnect(cb: (peerId: string) => void): Unsubscriber;
+  /** Emits a raw payload received from a peer. */
+  onMessage(cb: (data: string) => void): Unsubscriber;
+  /** Send a raw payload to one peer, or to every known peer when `peerId` is omitted. */
+  send(data: string, peerId?: string): void;
+}
+
+/**
  * Minimal contract for server-side transports that can have **multiple** logical peers.
  * Each message must indicate the **from / to** connection. Any additional lifecycle
  * management (upgrade, close, etc.) stays inside the concrete adapter.

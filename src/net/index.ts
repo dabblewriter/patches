@@ -12,6 +12,10 @@ export * from './protocol/utils.js';
 export * from './websocket/AuthorizationProvider.js';
 export * from './websocket/onlineState.js';
 export * from './websocket/PatchesWebSocket.js';
+export * from './signaling/RelayTransport.js';
 export * from './signaling/SignalingService.js';
+// Awareness is transport-agnostic (rides RelayTransport here without pulling in the
+// simple-peer-backed webrtc barrel); also exported from ./webrtc for existing consumers
+export * from './webrtc/WebRTCAwareness.js';
 export * from './websocket/WebSocketServer.js';
 export * from './websocket/WebSocketTransport.js';

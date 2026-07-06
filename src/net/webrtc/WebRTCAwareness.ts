@@ -1,5 +1,5 @@
 import { signal } from 'easy-signal';
-import type { WebRTCTransport } from './WebRTCTransport.js';
+import type { AwarenessTransport } from '../protocol/types.js';
 
 /**
  * Base type for awareness states, representing arbitrary structured data
@@ -8,7 +8,9 @@ import type { WebRTCTransport } from './WebRTCTransport.js';
 type AwarenessState = Record<string, any>;
 
 /**
- * Implements the awareness protocol over WebRTC to synchronize peer states.
+ * Implements the awareness protocol to synchronize peer states over any
+ * {@link AwarenessTransport} — `WebRTCTransport` for direct P2P data channels, or
+ * `RelayTransport` for a server-relayed path with the same semantics.
  * Awareness allows peers to share real-time information about their current state,
  * such as cursor position, selection, user info, or any other application-specific data.
  *
@@ -30,10 +32,11 @@ export class WebRTCAwareness<T extends AwarenessState = AwarenessState> {
   private hasLocalState = false;
 
   /**
-   * Creates a new WebRTC awareness instance.
-   * @param transport - The WebRTC transport to use for awareness communication
+   * Creates a new awareness instance.
+   * @param transport - The peer transport to use for awareness communication
+   *   (e.g. `WebRTCTransport` or `RelayTransport`)
    */
-  constructor(private transport: WebRTCTransport) {
+  constructor(private transport: AwarenessTransport) {
     this.transport.onPeerConnect(this._addPeer.bind(this));
     this.transport.onPeerDisconnect(this._removePeer.bind(this));
     this.transport.onMessage(this._receiveData.bind(this));

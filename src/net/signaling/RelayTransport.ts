@@ -118,7 +118,9 @@ export class RelayTransport implements AwarenessTransport {
       this.rpc.on('peer-welcome', (params: { id: string; peers: string[]; room?: string }) => {
         if (!this._inRoom(params)) return;
         this._id = params.id;
-        const roster = new Set(params.peers);
+        // Stock servers already exclude self from the roster; filter defensively so a server
+        // that doesn't can never induce a phantom self-peer (and a wasted self-send)
+        const roster = new Set(params.peers.filter(peerId => peerId !== params.id));
         // The roster is authoritative: peers we know that the server no longer lists are gone
         // (their disconnect broadcast may have been lost while our stream was down)
         for (const peerId of Array.from(this.peers)) {

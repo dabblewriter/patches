@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayTransport } from '../../../src/net/signaling/RelayTransport';
 import { SignalingService, type JsonRpcMessage } from '../../../src/net/signaling/SignalingService';
 import { WebRTCAwareness } from '../../../src/net/webrtc/WebRTCAwareness';
-import type { ConnectionState, SignalingTransport } from '../../../src/net/protocol/types';
+import type { ConnectionState, JsonRpcRequest, SignalingTransport } from '../../../src/net/protocol/types';
 
 interface MockSignaling extends SignalingTransport {
   /** Parsed frames the transport was asked to send. */
@@ -79,6 +79,18 @@ describe('RelayTransport', () => {
 
       expect(relay.id).toBe('me');
       expect(events).toEqual(['connect:B', 'connect:C']);
+    });
+
+    it('never announces itself, even when a server fails to filter the roster', () => {
+      const transport = createMockSignaling();
+      const relay = new RelayTransport(transport);
+      const events = recordEvents(relay);
+
+      transport.receive(welcome('me', ['me', 'B']));
+      relay.send('payload');
+
+      expect(events).toEqual(['connect:B']);
+      expect(transport.sent.map(frame => frame.params)).toEqual([['B', 'payload']]);
     });
 
     it('treats a repeat welcome as the authoritative roster', () => {
@@ -340,6 +352,63 @@ describe('RelayTransport', () => {
       await service.onClientDisconnected('B');
       await flush();
       expect(awarenessA.states).toEqual([]);
+    });
+
+    it('round-trips rooms against a room-echoing service (the pup shape)', async () => {
+      /**
+       * Stock SignalingService drops the third peer-signal param on relay, so room tagging is
+       * only live against a server that echoes `room` — this emulates that server: it stamps
+       * its room into every outbound frame and records the inbound third param.
+       */
+      class RoomSignalingService extends SignalingService {
+        seenRooms: unknown[] = [];
+        constructor(
+          private clientTransports: Map<string, MockSignaling>,
+          private room: string
+        ) {
+          super();
+        }
+        async handleClientMessage(fromId: string, message: string | JsonRpcRequest): Promise<boolean> {
+          const parsed = typeof message === 'string' ? JSON.parse(message) : message;
+          if (parsed?.method === 'peer-signal' && Array.isArray(parsed.params)) {
+            this.seenRooms.push(parsed.params[2]);
+          }
+          return super.handleClientMessage(fromId, message);
+        }
+        send(id: string, message: JsonRpcMessage): void {
+          const frame = message as any;
+          if (['peer-welcome', 'peer-disconnected', 'signal'].includes(frame?.method)) {
+            frame.params = { ...frame.params, room: this.room };
+          }
+          this.clientTransports.get(id)?.receive(frame as object);
+        }
+      }
+
+      const clientTransports = new Map<string, MockSignaling>();
+      const service = new RoomSignalingService(clientTransports, 'fam');
+      const transportA = createMockSignaling(raw => void service.handleClientMessage('A', raw));
+      const transportB = createMockSignaling(raw => void service.handleClientMessage('B', raw));
+      clientTransports.set('A', transportA);
+      clientTransports.set('B', transportB);
+
+      const awarenessA = new WebRTCAwareness(new RelayTransport(transportA, 'fam'));
+      const awarenessB = new WebRTCAwareness(new RelayTransport(transportB, 'fam'));
+      // A transport for another room sharing A's signaling channel must stay silent
+      const bystander = new RelayTransport(transportA, 'other-room');
+      const bystanderEvents = recordEvents(bystander);
+
+      await service.onClientConnected('A');
+      awarenessA.localState = { user: 'alice' };
+      await flush();
+      await service.onClientConnected('B');
+      awarenessB.localState = { user: 'bob' };
+      await flush();
+
+      expect(awarenessA.states).toEqual([{ user: 'bob', id: 'B' }]);
+      expect(awarenessB.states).toEqual([{ user: 'alice', id: 'A' }]);
+      expect(service.seenRooms.every(room => room === 'fam')).toBe(true);
+      expect(service.seenRooms.length).toBeGreaterThan(0);
+      expect(bystanderEvents).toEqual([]);
     });
   });
 });

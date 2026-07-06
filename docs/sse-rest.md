@@ -23,7 +23,7 @@ Use WebSocket when:
 - You need the lowest possible latency (single persistent connection for both directions)
 - Your infrastructure handles WebSockets well
 
-WebRTC awareness/presence works on either transport: signaling can multiplex over the existing SSE stream via `PatchesRESTSignalingTransport` (see [awareness.md](awareness.md)).
+Awareness/presence works on either transport — server-relayed (`RelayTransport`) or WebRTC — with signaling multiplexed over the existing SSE stream via `PatchesRESTSignalingTransport` (see [awareness.md](awareness.md)).
 
 ## Client Setup
 

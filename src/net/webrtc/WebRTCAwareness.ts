@@ -5,7 +5,7 @@ import type { AwarenessTransport } from '../protocol/types.js';
  * Base type for awareness states, representing arbitrary structured data
  * that will be shared between peers.
  */
-type AwarenessState = Record<string, any>;
+export type AwarenessState = Record<string, any>;
 
 /**
  * Implements the awareness protocol to synchronize peer states over any

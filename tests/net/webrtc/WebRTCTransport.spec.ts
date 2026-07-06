@@ -108,6 +108,27 @@ describe('WebRTCTransport', () => {
     });
   });
 
+  describe('options', () => {
+    it('should pass ICE config (STUN/TURN servers) to simple-peer', () => {
+      const config = { iceServers: [{ urls: 'turn:turn.example.com', username: 'u', credential: 'c' }] };
+      const other = createFakeTransport();
+      new WebRTCTransport(other, { config });
+
+      other.emitMessage(notification('peer-welcome', { id: 'me', peers: ['peer1'] }));
+
+      expect(mockPeerConstructor).toHaveBeenCalledWith({ initiator: true, trickle: false, config });
+    });
+
+    it('should pass trickle through to simple-peer', () => {
+      const other = createFakeTransport();
+      new WebRTCTransport(other, { trickle: true });
+
+      other.emitMessage(notification('peer-welcome', { id: 'me', peers: ['peer1'] }));
+
+      expect(mockPeerConstructor).toHaveBeenCalledWith({ initiator: true, trickle: true, config: undefined });
+    });
+  });
+
   describe('id property', () => {
     it('should return undefined initially', () => {
       expect(transport.id).toBeUndefined();

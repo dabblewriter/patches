@@ -1,7 +1,7 @@
 import Peer from 'simple-peer';
 import { signal, type Unsubscriber } from 'easy-signal';
 import { JSONRPCClient } from '../../net/protocol/JSONRPCClient.js';
-import type { ClientTransport, SignalingTransport } from '../protocol/types.js';
+import type { AwarenessTransport, ClientTransport, SignalingTransport } from '../protocol/types.js';
 import { rpcError } from '../protocol/utils.js';
 
 /**
@@ -23,7 +23,21 @@ interface PeerInfo {
  * connections. Once connections are established, data flows directly between peers
  * without going through a server.
  */
-export class WebRTCTransport implements ClientTransport {
+/**
+ * Options controlling how WebRTC peer connections are established.
+ */
+export interface WebRTCTransportOptions {
+  /**
+   * RTCPeerConnection configuration passed to simple-peer — set `iceServers` here to
+   * use your own STUN/TURN servers. Without a TURN server, peers behind symmetric NATs
+   * (mobile carriers, corporate networks) cannot connect.
+   */
+  config?: RTCConfiguration;
+  /** Trickle ICE: faster connection setup at the cost of more signaling messages. Default false. */
+  trickle?: boolean;
+}
+
+export class WebRTCTransport implements ClientTransport, AwarenessTransport {
   private rpc: JSONRPCClient;
   private peers = new Map<string, PeerInfo>();
   private _id: string | undefined;
@@ -60,7 +74,10 @@ export class WebRTCTransport implements ClientTransport {
    * @param transport - A signaling-capable transport (e.g. `WebSocketTransport`
    *   or `PatchesRESTSignalingTransport`) used to relay WebRTC handshake messages.
    */
-  constructor(private transport: SignalingTransport) {
+  constructor(
+    private transport: SignalingTransport,
+    private options: WebRTCTransportOptions = {}
+  ) {
     this.rpc = new JSONRPCClient(transport);
     this.subscriptions = [];
     this._subscribe();
@@ -179,7 +196,7 @@ export class WebRTCTransport implements ClientTransport {
       this._removePeer(peerId);
     }
 
-    const peer = new Peer({ initiator, trickle: false });
+    const peer = new Peer({ initiator, trickle: this.options.trickle ?? false, config: this.options.config });
     // Stale handlers from a replaced Peer must never act on its replacement
     const isCurrent = () => this.peers.get(peerId)?.peer === peer;
 

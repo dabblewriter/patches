@@ -16,49 +16,81 @@ With awareness, you can show:
 
 The key distinction: awareness data is _ephemeral_. It doesn't get persisted. When a user disconnects, their awareness state disappears. This is by design - nobody cares where Bob's cursor was three days ago.
 
-## WebRTCAwareness: Peer-to-Peer Presence
+## The Pieces
 
-Patches provides `WebRTCAwareness` - a utility that lets clients share presence state directly with each other via WebRTC. The server only handles the initial handshake; after that, awareness data flows peer-to-peer.
+`WebRTCAwareness` synchronizes each peer's state object with everyone else. Despite the name, it doesn't care how the bytes move — it rides on any `AwarenessTransport`. Two ship in the box:
 
-Your awareness state can be any JSON object. User photos, cursor colors, emoji status indicators - whatever your app needs.
+- **`RelayTransport`** — every message goes through your signaling server. No WebRTC, no NAT traversal, no TURN servers, no simple-peer in your bundle. Works for 100% of networks because it's just your existing server connection.
+- **`WebRTCTransport`** — peers exchange data directly over WebRTC data channels. The server only brokers the handshake. Sounds great until you meet symmetric NATs: mobile carriers, hotel wifi, and corporate networks silently fail to connect unless you deploy a TURN server.
+
+Start with `RelayTransport`. Presence payloads are tiny and throttled — relaying them through the server costs almost nothing, and you skip the entire NAT failure class. Reach for WebRTC when you have a real reason for traffic to bypass the server, and budget for TURN when you do.
+
+Both transports speak the same signaling protocol, so the server side is identical either way: a `SignalingService`. You can switch transports later without touching the server.
 
 ## Getting Started
 
-### Setup
+### Server-relayed awareness (recommended)
 
-`WebRTCTransport` needs a signaling channel. It does not know or care which one — anything that implements `SignalingTransport` (send, onMessage, connect, state, onStateChange) works. Two options ship in the box.
+`RelayTransport` wraps any `SignalingTransport` — whichever wire your app already has open. Import from `@dabble/patches/net`; this path never pulls simple-peer into your bundle.
 
-#### Option A: ride on a WebSocket connection
-
-Use this if your app already opens a WebSocket via `PatchesWebSocket`.
+Over a WebSocket:
 
 ```typescript
-import { WebSocketTransport } from '@dabble/patches/net';
-import { WebRTCTransport, WebRTCAwareness } from '@dabble/patches/webrtc';
+import { RelayTransport, WebRTCAwareness, WebSocketTransport } from '@dabble/patches/net';
 
 const ws = new WebSocketTransport(`wss://your.server/ws?token=${token}`);
-const transport = new WebRTCTransport(ws);
+const awareness = new WebRTCAwareness(new RelayTransport(ws));
+
+await awareness.connect();
+```
+
+Over the SSE+REST connection (signaling multiplexes over the existing SSE stream — no second `EventSource`, no second auth token, same `clientId` for doc sync and signaling):
+
+```typescript
+import { PatchesREST, PatchesRESTSignalingTransport, RelayTransport, WebRTCAwareness } from '@dabble/patches/net';
+
+const patches = new PatchesREST('https://your.server/api');
+const signaling = new PatchesRESTSignalingTransport(patches);
+const awareness = new WebRTCAwareness(new RelayTransport(signaling));
+
+await patches.connect(); // opens the shared SSE stream
+await awareness.connect();
+```
+
+#### Rooms: several peer groups on one connection
+
+A server that hosts multiple peer groups per connection (say, one presence room per document) tags signaling frames with a `room` param. Give each `RelayTransport` its room id and it filters inbound frames to its room and stamps outbound ones — several transports then share one signaling connection:
+
+```typescript
+const docAwareness = new WebRTCAwareness(new RelayTransport(signaling, docId));
+const chatAwareness = new WebRTCAwareness(new RelayTransport(signaling, chatId));
+```
+
+Omit the room id for servers that host a single peer group per connection — stock `SignalingService` behavior.
+
+### Peer-to-peer awareness (WebRTC)
+
+Same `WebRTCAwareness` class, different transport. Pass your ICE servers — without a TURN server, peers behind symmetric NATs will not connect:
+
+```typescript
+import { WebRTCAwareness, WebSocketTransport } from '@dabble/patches/net';
+import { WebRTCTransport } from '@dabble/patches/webrtc';
+
+const ws = new WebSocketTransport(`wss://your.server/ws?token=${token}`);
+const transport = new WebRTCTransport(ws, {
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'turn:turn.example.com', username: 'user', credential: 'secret' },
+    ],
+  },
+});
 const awareness = new WebRTCAwareness(transport);
 
 await awareness.connect();
 ```
 
-#### Option B: ride on the SSE+REST connection
-
-Use this if your app uses `PatchesREST`. Signaling multiplexes over the existing SSE stream — no second `EventSource`, no second auth token, same `clientId` for doc sync and signaling.
-
-```typescript
-import { PatchesREST, PatchesRESTSignalingTransport } from '@dabble/patches/net';
-import { WebRTCTransport, WebRTCAwareness } from '@dabble/patches/webrtc';
-
-const patches = new PatchesREST('https://your.server/api');
-const signaling = new PatchesRESTSignalingTransport(patches);
-const transport = new WebRTCTransport(signaling);
-const awareness = new WebRTCAwareness(transport);
-
-await patches.connect(); // opens the shared SSE stream
-await awareness.connect(); // no-op for the transport, wires up WebRTC
-```
+`WebRTCTransport` also accepts `trickle: true` for faster connection setup at the cost of more signaling messages.
 
 ### Setting Your Local State
 
@@ -144,6 +176,8 @@ const updateAwareness = debounce(() => {
 editor.on('cursorActivity', updateAwareness);
 ```
 
+This matters double for `RelayTransport`: a broadcast sends one relayed message per peer, so an unthrottled cursor in a ten-person room is a lot of server traffic for no reason.
+
 ### Sanitize Incoming Data
 
 Peers can send any JSON they want. Don't blindly trust it.
@@ -182,15 +216,13 @@ Add CSS transitions so remote cursors don't teleport:
 
 ## Server-Side: SignalingService
 
-WebRTC is peer-to-peer, but peers need help finding each other initially. That's where `SignalingService` comes in.
-
-`SignalingService` is an abstract class that handles:
+Both transports need the same thing from your server: a `SignalingService`. It handles:
 
 1. Tracking connected clients
 2. Notifying new clients about existing peers
-3. Relaying WebRTC signaling messages (offers, answers, ICE candidates)
+3. Relaying messages between peers (WebRTC handshakes, or the awareness states themselves with `RelayTransport`)
 
-Once peers establish direct connections, the server is out of the picture for awareness data.
+The server treats relayed payloads as opaque JSON either way — there is no relay-specific server code. With WebRTC the server drops out after the handshake; with `RelayTransport` it keeps relaying, which is exactly why that flavor has nothing extra to deploy.
 
 ### Implementing SignalingService
 
@@ -289,10 +321,17 @@ The three key methods (same shape for both flavors):
 - `handleClientMessage()` - Routes signaling messages between peers, returns `true` if it was a signaling message
 - `onClientDisconnected()` - Removes client and notifies remaining peers
 
+### Scoping and multi-instance servers
+
+Two things `SignalingService` deliberately leaves to you, because they're app decisions:
+
+- **Rooms.** The registry is flat: every registered client is a peer of every other. If your app has documents or projects, partition server-side — one `SignalingService` per room, or a room-aware service that tags frames with the `room` param `RelayTransport` understands — or everyone sees everyone.
+- **Multiple server instances.** Room membership and message routing must work when two members' connections land on different instances (and, without sticky routing, when a member's _requests_ land on an instance other than the one holding its stream). Keep membership in shared storage (`getClients`/`setClients` are async and overridable for exactly this) and relay frames across instances yourself (Redis pub/sub, etc.). Don't gate per-request behavior on instance-local state.
+
 ## Full Example: Collaborative Editor with Cursors
 
 ```typescript
-import { WebRTCTransport, WebRTCAwareness } from '@dabble/patches/webrtc';
+import { RelayTransport, WebRTCAwareness, WebSocketTransport } from '@dabble/patches/net';
 import { debounce } from 'lodash';
 
 interface EditorAwareness {
@@ -304,7 +343,7 @@ interface EditorAwareness {
 }
 
 // Setup
-const transport = new WebRTCTransport(signalingServerUrl);
+const transport = new RelayTransport(new WebSocketTransport(signalingServerUrl));
 const awareness = new WebRTCAwareness<EditorAwareness>(transport);
 await awareness.connect();
 

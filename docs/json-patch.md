@@ -231,6 +231,27 @@ const newDoc = applyPatch(doc, patch);
 
 `applyPatch` creates a new document. The original stays untouched. This immutability is fundamental to how Patches handles state - see [Patches](Patches.md) for the bigger picture.
 
+### Soft Writes
+
+A soft op is an initialization write that must never clobber existing data. An op is soft when it carries an explicit `soft: true` flag, or by convention when it is an `add` of an empty container (`{}` or `[]`) at an object path — two clients initializing the same map should merge into it, not reset it.
+
+The skip condition depends on what the path addresses:
+
+- **Object member paths** (and any non-`add` soft op, e.g. a soft `replace`): the op is skipped when the path already exists in the document — writing would overwrite data.
+- **Array-index `add` paths**: an array `add` is an _insert_ (a splice); it never overwrites the element at that index, and "index occupied" says nothing about whether the seeded value is present. An explicit `soft: true` add at an occupied index is skipped only when the exact value already exists somewhere in the array (ensure-present semantics). The empty-container convention does not confer softness on array inserts — inserting an empty row into a grid is real data, not a map initialization. Appends (`/-` or index equal to the array length) always apply.
+
+```typescript
+// Seed a section if missing: safe to replay, safe against concurrent creation
+applyPatch(doc, [
+  { op: 'add', path: '/docs/characters', value: { id: 'characters', children: [] }, soft: true },
+  { op: 'add', path: '/children/2', value: 'characters', soft: true },
+]);
+// If /docs/characters exists → first op skipped.
+// If 'characters' is already in /children → second op skipped; otherwise it inserts at index 2.
+```
+
+Soft semantics are enforced at apply time, so they hold wherever a change is replayed (client, server, history replay). Because of that, changing them changes the materialized state of stored histories — treat the rules above as part of the wire contract.
+
 ### Failure Handling
 
 What happens when an op fails depends on the op and the options. The exact contract:

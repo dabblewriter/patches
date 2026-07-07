@@ -557,6 +557,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           if (serverChanges.length > 0) {
             await this._applyServerChangesToDoc(docId, serverChanges);
           }
+          // Nothing was flushed, so nothing else refreshes hasPending — and getPendingToSend
+          // can itself empty the store (dropping an already-committed strand), leaving a
+          // hasPending:true from the change that queued this sync stuck on until some later
+          // flush. The empty read above is the fresh truth.
+          this._updateDocSyncState(docId, { hasPending: false });
         } else {
           // No committed rev means this is a new doc - fetch from server
           await this._reloadDocFromServer(docId, algorithm, true);

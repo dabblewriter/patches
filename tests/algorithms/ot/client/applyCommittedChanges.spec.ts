@@ -147,6 +147,65 @@ describe('applyCommittedChanges', () => {
     expect(result.changes).toEqual([]);
   });
 
+  it('confirms a stranded pending copy on a redundant own-echo delivery (DAB-607)', () => {
+    // The SSE broadcast already advanced rev to 28795, but a raced pending write left the
+    // acked change stranded in the queue. The HTTP ack then redelivers the echo: before the
+    // fix it was filtered out by rev without the id-drop, so the strand survived and the next
+    // flush re-sent it with baseRev 28795 — past its own commit — and the server committed a
+    // duplicate at 28796.
+    const stranded = createChange(28795, [{ op: 'add', path: '/text', value: 'hi' }]);
+    stranded.id = 'own-change-1';
+    const snapshot = createSnapshot({ text: 'hi' }, 28795, [stranded]);
+    const echo = createChange(28795, [{ op: 'add', path: '/text', value: 'hi' }]);
+    echo.id = 'own-change-1';
+    echo.committedAt = 1000;
+
+    const result = applyCommittedChanges(snapshot, [echo]);
+
+    expect(result.rev).toBe(28795);
+    expect(result.changes).toEqual([]);
+    expect(result.state).toEqual({ text: 'hi' });
+  });
+
+  it('keeps unrelated pending changes on a redundant delivery', () => {
+    const pending = createChange(6, [{ op: 'add', path: '/local', value: true }]);
+    pending.id = 'local-change-1';
+    const snapshot = createSnapshot({ text: 'hello' }, 5, [pending]);
+    const serverChanges = [createChange(4), createChange(5)];
+
+    const result = applyCommittedChanges(snapshot, serverChanges);
+
+    expect(result.rev).toBe(5);
+    expect(result.changes).toEqual([pending]);
+  });
+
+  it('drops a redundant echo from the rebase queue so it cannot skew the tail transform', () => {
+    // Delivery partially overlaps the snapshot: the own echo at rev 5 is already applied, a
+    // foreign change at rev 6 is new. The stranded copy must not sit in the rebase queue —
+    // the committed state already contains its effect, so advancing the foreign ops through
+    // it would land the tail at shifted offsets — and it must not survive as pending.
+    const stranded = createChange(5, [{ op: 'add', path: '/list/0', value: 'a' }]);
+    stranded.id = 'own-change-1';
+    const tail = createChange(6, [{ op: 'add', path: '/list/1', value: 'b' }]);
+    tail.id = 'local-change-2';
+    const snapshot = createSnapshot({ list: ['a'] }, 5, [stranded, tail]);
+
+    const echo = createChange(5, [{ op: 'add', path: '/list/0', value: 'a' }]);
+    echo.id = 'own-change-1';
+    const foreign = createChange(6, [{ op: 'add', path: '/other', value: 1 }]);
+    foreign.id = 'server-change-1';
+
+    const result = applyCommittedChanges(snapshot, [echo, foreign]);
+
+    expect(result.rev).toBe(6);
+    expect(result.state).toEqual({ list: ['a'], other: 1 });
+    expect(result.changes).toHaveLength(1);
+    expect(result.changes[0].id).toBe('local-change-2');
+    expect(result.changes[0].baseRev).toBe(6);
+    expect(result.changes[0].rev).toBe(7);
+    expect(result.changes[0].ops).toEqual([{ op: 'add', path: '/list/1', value: 'b' }]);
+  });
+
   it('should handle complex rebase scenario', () => {
     const pendingChange1 = createChange(3, [{ op: 'add', path: '/local1', value: 'a' }]);
     const pendingChange2 = createChange(4, [{ op: 'add', path: '/local2', value: 'b' }]);

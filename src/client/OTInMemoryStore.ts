@@ -81,6 +81,13 @@ export class OTInMemoryStore implements OTClientStore {
     buf.pending = [...rebasedPendingChanges];
   }
 
+  async listChanges(docId: string, options?: { startAfter?: number }): Promise<Change[]> {
+    const buf = this.docs.get(docId);
+    if (!buf || buf.deleted) return [];
+    const startAfter = options?.startAfter ?? -1;
+    return [...buf.committed, ...buf.pending].filter(change => change.rev > startAfter).sort((a, b) => a.rev - b.rev);
+  }
+
   async dropPendingChanges(docId: string, changeIds: string[]): Promise<void> {
     const buf = this.docs.get(docId);
     if (!buf || changeIds.length === 0) return;

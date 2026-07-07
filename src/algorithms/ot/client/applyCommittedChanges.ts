@@ -57,6 +57,19 @@ export function applyCommittedChanges(
   // Server changes should always have a rev.
   const newServerChanges = committedChangesFromServer.filter(change => change.rev > rev);
 
+  // A commit can be delivered more than once (SSE broadcast + HTTP ack, re-broadcast, catchup
+  // overlapping a broadcast). The first delivery advances `rev` and confirms the pending copy
+  // by id; a redundant delivery is filtered out above and used to skip that confirmation, so a
+  // pending copy stranded by a raced pending write was never cleared — the next flush re-sent
+  // it with a baseRev past its own commit, outside the server's `startAfter: baseRev` id dedup,
+  // committing a duplicate (DAB-607). Confirm those strands here. Echoes in `newServerChanges`
+  // are NOT pre-dropped: rebaseChanges removes them in-walk, where foreign changes interleaved
+  // before an echo must advance through it to meet the queue's tail in the right frame.
+  if (changes && changes.length > 0 && newServerChanges.length < committedChangesFromServer.length) {
+    const staleIds = new Set(committedChangesFromServer.filter(change => change.rev <= rev).map(change => change.id));
+    changes = changes.filter(change => !staleIds.has(change.id));
+  }
+
   if (newServerChanges.length === 0) {
     // No new changes to apply, return the snapshot as is.
     return { state, rev, changes };

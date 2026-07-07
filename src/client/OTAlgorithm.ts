@@ -122,7 +122,9 @@ export class OTAlgorithm implements ClientAlgorithm {
     // batch; the next server echo rebases the stored copy into agreement.
     const snapshot = await this.store.getDoc(docId);
     if (!snapshot || snapshot.changes.length === 0) return null;
-    return this._withConsistentBaseRev(docId, snapshot.changes, snapshot.rev);
+    const pending = await this._dropCommittedStragglers(docId, snapshot.changes, snapshot.rev);
+    if (pending.length === 0) return null;
+    return this._withConsistentBaseRev(docId, pending, snapshot.rev);
   }
 
   async applyServerChanges<T extends object>(
@@ -306,6 +308,37 @@ export class OTAlgorithm implements ClientAlgorithm {
       if (this._docLocks.get(docId) === tail) this._docLocks.delete(docId);
     });
     return run;
+  }
+
+  /**
+   * A pending change whose baseRev has fallen behind `committedRev` may be a strand of its own
+   * committed copy: a raced pending write can re-queue a change after its echo already cleared
+   * it. Re-stamping and re-sending such a strand commits a duplicate — its advanced baseRev is
+   * past the original commit, outside the server's `startAfter: baseRev` id dedup (DAB-607).
+   * Check stragglers against the recent committed tail and drop any already-committed id from
+   * the store and the outgoing batch. Only anomalous queues pay the extra read; a store without
+   * `listChanges` keeps today's behavior.
+   */
+  private async _dropCommittedStragglers(docId: string, pending: Change[], committedRev: number): Promise<Change[]> {
+    if (!this.store.listChanges || pending.every(c => c.baseRev === committedRev)) return pending;
+    const since = Math.max(0, committedRev - RECENT_COMMITTED_ID_WINDOW);
+    const recent = await this.store.listChanges(docId, { startAfter: since });
+    // listChanges merges committed and pending rows; only server-committed copies count
+    // (committedAt is server-stamped, 0 on pending), so a torn pending row can't self-confirm.
+    const committedIds = new Set(recent.filter(c => c.committedAt > 0 && c.rev <= committedRev).map(c => c.id));
+    const stranded = pending.filter(c => committedIds.has(c.id));
+    if (stranded.length === 0) return pending;
+    console.warn(
+      `[patches] Dropping ${stranded.length} already-committed pending change(s) for ${docId} ` +
+        `(${stranded.map(c => c.id).join(',')}) instead of re-sending them as duplicates.`
+    );
+    await this._withDocLock(docId, () =>
+      this.store.dropPendingChanges(
+        docId,
+        stranded.map(c => c.id)
+      )
+    );
+    return pending.filter(c => !committedIds.has(c.id));
   }
 
   /**

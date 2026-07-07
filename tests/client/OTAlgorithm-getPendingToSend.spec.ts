@@ -56,4 +56,49 @@ describe('OTAlgorithm.getPendingToSend baseRev normalization', () => {
   it('returns null when there is nothing pending', async () => {
     expect(await algorithm.getPendingToSend('doc1')).toBeNull();
   });
+
+  describe('already-committed stragglers (DAB-607)', () => {
+    // A raced pending write can re-queue a change after its echo already advanced
+    // committedRev and cleared it. Re-stamping and re-sending it would commit a duplicate:
+    // the advanced baseRev is past the original commit, outside the server's
+    // `startAfter: baseRev` id dedup. The send choke point must drop it, not heal it.
+    const ops = [{ op: 'replace', path: '/title', value: 'a' }] as any;
+
+    it('drops a stranded copy of its own committed change instead of re-sending it', async () => {
+      const stranded = createChange(1794, 1795, ops);
+      const committedCopy = { ...stranded, committedAt: 1234 };
+      // Echo applied (committedRev → 1795) but the stale pending write re-stranded the copy.
+      await store.applyServerChanges('doc1', [committedCopy], [stranded]);
+
+      expect(await algorithm.getPendingToSend('doc1')).toBeNull();
+      // The strand is gone from the store too, not just the outgoing batch.
+      expect(await store.getPendingChanges('doc1')).toEqual([]);
+    });
+
+    it('keeps fresh pending changes while dropping the stranded one', async () => {
+      const stranded = createChange(1794, 1795, ops);
+      const committedCopy = { ...stranded, committedAt: 1234 };
+      const fresh = createChange(1795, 1796, [{ op: 'replace', path: '/title', value: 'ab' }]);
+      await store.applyServerChanges('doc1', [committedCopy], [stranded, fresh]);
+
+      const pending = await algorithm.getPendingToSend('doc1');
+
+      expect(pending!.map(c => c.id)).toEqual([fresh.id]);
+      expect(pending![0].baseRev).toBe(1795);
+      expect((await store.getPendingChanges('doc1')).map(c => c.id)).toEqual([fresh.id]);
+    });
+
+    it('still re-stamps a stale straggler that was never committed', async () => {
+      // Same stale-baseRev signature but no committed copy: not a strand, so the
+      // existing heal-and-send path applies.
+      const straggler = createChange(1791, 1795, ops);
+      await store.savePendingChanges('doc1', [straggler]);
+
+      const pending = await algorithm.getPendingToSend('doc1');
+
+      expect(pending).toHaveLength(1);
+      expect(pending![0].id).toBe(straggler.id);
+      expect(pending![0].baseRev).toBe(1794);
+    });
+  });
 });

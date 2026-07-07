@@ -2,7 +2,7 @@
 .nyc_output
 .obsidian
 npm-debug.log
-node_modules/
+node_modules
 coverage/
 dist/
 .svelte-kit/

@@ -11,9 +11,11 @@ import type { PatchesDoc, PatchesDocOptions } from './PatchesDoc.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
 /**
- * On an idempotent retry, how far back in the committed tail to scan for the change id in
- * case the original submit committed between attempts. Bounded so the scan stays cheap; a
- * just-committed change sits at the head, so a small window catches the realistic cases.
+ * How far back in the committed tail to scan for a change id — on an idempotent retry (in
+ * case the original submit committed between attempts) and when checking a suspect pending
+ * change for an already-committed copy (DAB-607). Also bounds the per-doc in-memory record
+ * of committed ids. Bounded so the scans stay cheap; a just-committed change sits at the
+ * head, so a small window catches the realistic cases.
  */
 const RECENT_COMMITTED_ID_WINDOW = 200;
 
@@ -32,6 +34,13 @@ export class OTAlgorithm implements ClientAlgorithm {
 
   /** Per-doc FIFO mutex (see {@link _withDocLock}). */
   private readonly _docLocks = new Map<string, Promise<unknown>>();
+
+  /**
+   * Per-doc record of recently committed change ids applied by this instance (see
+   * {@link _noteCommittedIds}). Used to recognize a stranded pending copy of an
+   * already-committed change regardless of how rebases have re-stamped it.
+   */
+  private readonly _recentCommittedIds = new Map<string, Set<string>>();
 
   constructor(store: OTClientStore, options: PatchesDocOptions = {}) {
     this.store = store;
@@ -122,7 +131,9 @@ export class OTAlgorithm implements ClientAlgorithm {
     // batch; the next server echo rebases the stored copy into agreement.
     const snapshot = await this.store.getDoc(docId);
     if (!snapshot || snapshot.changes.length === 0) return null;
-    return this._withConsistentBaseRev(docId, snapshot.changes, snapshot.rev);
+    const pending = await this._dropCommittedStragglers(docId, snapshot.changes, snapshot.rev);
+    if (pending.length === 0) return null;
+    return this._withConsistentBaseRev(docId, pending, snapshot.rev);
   }
 
   async applyServerChanges<T extends object>(
@@ -159,11 +170,25 @@ export class OTAlgorithm implements ClientAlgorithm {
         currentSnapshot.changes.push(...newChanges);
       }
 
+      // A pending change whose id this instance has already seen committed-and-applied is a
+      // strand (a raced pending write re-queued it after its echo cleared it). Drop it before
+      // the rebase: leaving it in the queue advances foreign ops through content the committed
+      // state already contains (shifting the tail's frame) and re-sends it as a duplicate on
+      // the next flush (DAB-607). Safe because ids enter the memory only AFTER their batch's
+      // store write resolved — committedRev is past them, so a remembered id can never be a
+      // live echo arriving in this batch's newServerChanges (which rebaseChanges must keep for
+      // its in-walk frame advance).
+      const remembered = this._recentCommittedIds.get(docId);
+      if (remembered && currentSnapshot.changes.length > 0) {
+        currentSnapshot.changes = currentSnapshot.changes.filter(change => !remembered.has(change.id));
+      }
+
       // Use the OT algorithm to apply server changes and rebase pending
       const newSnapshot = applyCommittedChanges(currentSnapshot, serverChanges);
 
       // Save to store atomically
       await this.store.applyServerChanges(docId, serverChanges, newSnapshot.changes);
+      this._noteCommittedIds(docId, serverChanges);
 
       // Build the changes to return for broadcast
       const changesToBroadcast = [...serverChanges, ...newSnapshot.changes];
@@ -247,6 +272,7 @@ export class OTAlgorithm implements ClientAlgorithm {
       // committed changes and replaces pending atomically. The caller's subsequent
       // saveDoc merely compacts what is then already-consistent state.
       await this.store.applyServerChanges(docId, committedChanges, rebased);
+      this._noteCommittedIds(docId, committedChanges);
     });
   }
 
@@ -257,6 +283,7 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async untrackDocs(docIds: string[]): Promise<void> {
+    docIds.forEach(docId => this._recentCommittedIds.delete(docId));
     return this.store.untrackDocs(docIds);
   }
 
@@ -269,15 +296,18 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async deleteDoc(docId: string): Promise<void> {
+    this._recentCommittedIds.delete(docId);
     // Under the lock too: a delete must not race an in-flight mint/apply for the doc.
     return this._withDocLock(docId, () => this.store.deleteDoc(docId));
   }
 
   async confirmDeleteDoc(docId: string): Promise<void> {
+    this._recentCommittedIds.delete(docId);
     return this._withDocLock(docId, () => this.store.confirmDeleteDoc(docId));
   }
 
   async close(): Promise<void> {
+    this._recentCommittedIds.clear();
     return this.store.close();
   }
 
@@ -306,6 +336,85 @@ export class OTAlgorithm implements ClientAlgorithm {
       if (this._docLocks.get(docId) === tail) this._docLocks.delete(docId);
     });
     return run;
+  }
+
+  /**
+   * A pending change that is already committed is a strand: a raced pending write re-queued it
+   * after its echo cleared it. Re-sending it commits a duplicate — its baseRev has advanced
+   * past the original commit, outside the server's `startAfter: baseRev` id dedup (DAB-607).
+   * Two detectors, both matched by id, dropped from the store and the outgoing batch:
+   * - The in-memory committed-id record catches any strand from this instance's session,
+   *   including one a later foreign rebase re-stamped to a clean baseRev (rebaseChanges
+   *   re-stamps every survivor, so baseRev alone can't be trusted).
+   * - The recent committed tail in the store covers strands predating this instance. Only
+   *   stale-baseRev queues pay that read; a store without `listChanges` skips it. Bounded by
+   *   {@link RECENT_COMMITTED_ID_WINDOW}, so a strand older than the window (or compacted
+   *   into a snapshot) can still slip through — the server-side guard is the eventual
+   *   backstop for that tail risk.
+   */
+  private async _dropCommittedStragglers(docId: string, pending: Change[], committedRev: number): Promise<Change[]> {
+    const remembered = this._recentCommittedIds.get(docId);
+    const committedIds = new Set<string>();
+    for (const change of pending) {
+      if (remembered?.has(change.id)) committedIds.add(change.id);
+    }
+    if (this.store.listChanges && !pending.every(c => c.baseRev === committedRev)) {
+      const recent = await this._recentCommittedChanges(docId, committedRev);
+      // listChanges merges committed and pending rows; only server-committed copies count
+      // (committedAt is server-stamped, 0 on pending), so a torn pending row can't self-confirm.
+      for (const change of recent) {
+        if (change.committedAt > 0 && change.rev <= committedRev) committedIds.add(change.id);
+      }
+    }
+    if (committedIds.size === 0) return pending;
+
+    const stranded: Change[] = [];
+    const survivors: Change[] = [];
+    for (const change of pending) {
+      (committedIds.has(change.id) ? stranded : survivors).push(change);
+    }
+    if (stranded.length === 0) return pending;
+    console.warn(
+      `[patches] Dropping ${stranded.length} already-committed pending change(s) for ${docId} ` +
+        `(${stranded.map(c => c.id).join(',')}) instead of re-sending them as duplicates.`
+    );
+    await this._withDocLock(docId, () =>
+      this.store.dropPendingChanges(
+        docId,
+        stranded.map(c => c.id)
+      )
+    );
+    // Remember store-scan hits too: an open doc's in-memory copy of a dropped strand can be
+    // re-injected into the store by a later receive (applyServerChanges' pending merge), and
+    // only the id record survives the rebase re-stamping to catch it again.
+    this._noteCommittedIds(docId, stranded);
+    return survivors;
+  }
+
+  /**
+   * Record committed change ids so a strand of any of them can be recognized later, after
+   * rebases have re-stamped its baseRev/rev beyond recognition. Call only AFTER the store
+   * write for the batch resolves: an id in this record must imply committedRev is past it,
+   * or the receive-side strand filter could strip a live echo out of the rebase walk.
+   * Bounded per doc; eviction only weakens detection (falls back to the store scan).
+   */
+  private _noteCommittedIds(docId: string, committedChanges: Change[]): void {
+    let ids = this._recentCommittedIds.get(docId);
+    if (!ids) this._recentCommittedIds.set(docId, (ids = new Set()));
+    for (const change of committedChanges) {
+      ids.delete(change.id);
+      ids.add(change.id);
+    }
+    while (ids.size > RECENT_COMMITTED_ID_WINDOW) {
+      ids.delete(ids.values().next().value!);
+    }
+  }
+
+  /** The most recent committed tail (bounded by {@link RECENT_COMMITTED_ID_WINDOW}), for id scans. */
+  private async _recentCommittedChanges(docId: string, committedRev: number): Promise<Change[]> {
+    if (!this.store.listChanges) return [];
+    const since = Math.max(0, committedRev - RECENT_COMMITTED_ID_WINDOW);
+    return this.store.listChanges(docId, { startAfter: since });
   }
 
   /**
@@ -348,8 +457,7 @@ export class OTAlgorithm implements ClientAlgorithm {
 
     if (!this.store.listChanges) return [];
     const committedRev = doc ? (doc as OTDoc<T>).committedRev : await this.store.getCommittedRev(docId);
-    const since = Math.max(0, committedRev - RECENT_COMMITTED_ID_WINDOW);
-    const recent = await this.store.listChanges(docId, { startAfter: since });
+    const recent = await this._recentCommittedChanges(docId, committedRev);
     return recent.filter(c => c.id === id);
   }
 

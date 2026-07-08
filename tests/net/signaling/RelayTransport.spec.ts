@@ -10,12 +10,17 @@ interface MockSignaling extends SignalingTransport {
   sent: any[];
   /** Deliver a server frame to every onMessage subscriber. */
   receive(frame: object): void;
+  /** Live onMessage subscriber count — leak probe. */
+  readonly handlerCount: number;
 }
 
 function createMockSignaling(onSend?: (raw: string) => void): MockSignaling {
   const handlers: ((raw: string) => void)[] = [];
   const sent: any[] = [];
   return {
+    get handlerCount() {
+      return handlers.length;
+    },
     state: 'connected' as ConnectionState,
     onStateChange: signal<(state: ConnectionState) => void>(),
     connect: vi.fn(async () => {}),
@@ -409,6 +414,46 @@ describe('RelayTransport', () => {
       expect(service.seenRooms.every(room => room === 'fam')).toBe(true);
       expect(service.seenRooms.length).toBeGreaterThan(0);
       expect(bystanderEvents).toEqual([]);
+    });
+  });
+
+  describe('dispose', () => {
+    it('releases the transport-level handlers that disconnect (deliberately) keeps', () => {
+      const transport = createMockSignaling();
+      const baseline = transport.handlerCount;
+      const relay = new RelayTransport(transport);
+      expect(transport.handlerCount).toBe(baseline + 1);
+
+      // disconnect keeps the transport-level subscription so connect() can reuse the instance
+      relay.disconnect();
+      expect(transport.handlerCount).toBe(baseline + 1);
+
+      // dispose is the final teardown: nothing left on the shared channel
+      relay.dispose();
+      expect(transport.handlerCount).toBe(baseline);
+    });
+
+    it('creating and disposing many transports leaves the shared channel clean', () => {
+      const transport = createMockSignaling();
+      const baseline = transport.handlerCount;
+      for (let i = 0; i < 5; i++) {
+        const relay = new RelayTransport(transport, `room-${i}`);
+        relay.dispose();
+      }
+      expect(transport.handlerCount).toBe(baseline);
+    });
+
+    it('a disposed transport ignores subsequent frames', () => {
+      const transport = createMockSignaling();
+      const relay = new RelayTransport(transport);
+      const connects: string[] = [];
+      relay.onPeerConnect(peerId => connects.push(peerId));
+
+      relay.dispose();
+      transport.receive(welcome('me', ['peer-1']));
+
+      expect(connects).toEqual([]);
+      expect(relay.id).toBeUndefined();
     });
   });
 });

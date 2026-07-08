@@ -24,6 +24,7 @@ export class JSONRPCClient {
   private nextId = 1;
   private pending = new Map<number, { resolve: (value: any) => void; reject: (reason?: any) => void }>();
   private notificationSignals = new Map<string, Signal>();
+  private transportSubscriptions: Unsubscriber[] = [];
 
   /**
    * Creates a new JSON-RPC client instance.
@@ -31,18 +32,36 @@ export class JSONRPCClient {
    * @param transport - The transport layer implementation that will be used for sending/receiving messages
    */
   constructor(private transport: ClientTransport) {
-    transport.onMessage(this.handleMessage.bind(this));
+    this.transportSubscriptions.push(transport.onMessage(this.handleMessage.bind(this)));
 
     // Reject all pending calls when the transport disconnects
     if ('onStateChange' in transport && typeof (transport as any).onStateChange === 'function') {
-      (transport as any).onStateChange((state: string) => {
-        if (state === 'disconnected' || state === 'error') {
-          // NetworkError: the request never got a response because the connection
-          // dropped — connection trouble, not a verdict on the request's doc.
-          this.rejectAllPending(new NetworkError('Transport disconnected'));
-        }
-      });
+      this.transportSubscriptions.push(
+        (transport as any).onStateChange((state: string) => {
+          if (state === 'disconnected' || state === 'error') {
+            // NetworkError: the request never got a response because the connection
+            // dropped — connection trouble, not a verdict on the request's doc.
+            this.rejectAllPending(new NetworkError('Transport disconnected'));
+          }
+        })
+      );
     }
+  }
+
+  /**
+   * Releases the client's subscriptions on the underlying transport and rejects any pending
+   * calls. REQUIRED when the transport outlives this client (e.g. several short-lived clients
+   * sharing one long-lived signaling transport) — without it every discarded client leaves its
+   * message and state handlers attached to the shared transport forever, re-parsing every
+   * inbound frame and pinning the client's whole object graph in memory.
+   *
+   * The client must not be used after dispose; construct a new one instead.
+   */
+  dispose(): void {
+    this.transportSubscriptions.forEach(unsubscribe => unsubscribe());
+    this.transportSubscriptions.length = 0;
+    this.notificationSignals.clear();
+    this.rejectAllPending(new NetworkError('Client disposed'));
   }
 
   /**

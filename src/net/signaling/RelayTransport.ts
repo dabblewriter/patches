@@ -89,6 +89,9 @@ export class RelayTransport implements AwarenessTransport {
   /**
    * Retires every known peer (emitting `onPeerDisconnect` for each) and stops processing
    * signaling messages. The underlying channel stays open — it is shared with other consumers.
+   * The transport remains reusable: {@link connect} restores the subscriptions. For a FINAL
+   * teardown use {@link dispose} instead, which also releases the internal JSON-RPC client's
+   * handlers on the shared channel.
    */
   disconnect(): void {
     this.subscriptions.forEach(u => u());
@@ -97,6 +100,18 @@ export class RelayTransport implements AwarenessTransport {
     const peerIds = Array.from(this.peers);
     this.peers.clear();
     peerIds.forEach(peerId => this.onPeerDisconnect.emit(peerId));
+  }
+
+  /**
+   * Permanently tears this transport down: {@link disconnect}s and releases the internal
+   * JSON-RPC client's subscriptions on the shared signaling channel. Without this, every
+   * discarded RelayTransport leaves two handlers attached to the shared channel forever —
+   * a real leak for hosts that create one per room over a long-lived connection. The
+   * transport must not be reused after dispose.
+   */
+  dispose(): void {
+    this.disconnect();
+    this.rpc.dispose();
   }
 
   /**

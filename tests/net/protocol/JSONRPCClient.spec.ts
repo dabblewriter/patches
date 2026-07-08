@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { JSONRPCError, JSONRPCParseError, StatusError } from '../../../src/net/error';
+import { JSONRPCError, JSONRPCParseError, NetworkError, StatusError } from '../../../src/net/error';
 import { JSONRPCClient } from '../../../src/net/protocol/JSONRPCClient';
 import { JSONRPCServer } from '../../../src/net/protocol/JSONRPCServer';
 import type { ClientTransport } from '../../../src/net/protocol/types';
@@ -812,6 +812,43 @@ describe('JSONRPCClient', () => {
 
       await expect(responsePromise).rejects.toBeInstanceOf(JSONRPCParseError);
       consoleSpy.mockRestore();
+    });
+  });
+
+  describe('dispose', () => {
+    it('releases the transport message subscription and rejects pending calls', async () => {
+      const responsePromise = client.call('testMethod');
+
+      client.dispose();
+
+      expect(mockUnsubscriber).toHaveBeenCalledTimes(1);
+      await expect(responsePromise).rejects.toBeInstanceOf(NetworkError);
+    });
+
+    it('releases the state-change subscription on lifecycle-aware transports', () => {
+      const stateUnsubscriber = vi.fn();
+      const messageUnsubscriber = vi.fn();
+      const lifecycleTransport = {
+        send: vi.fn(),
+        onMessage: vi.fn(() => messageUnsubscriber),
+        onStateChange: vi.fn(() => stateUnsubscriber),
+      } as unknown as ClientTransport;
+
+      const lifecycleClient = new JSONRPCClient(lifecycleTransport);
+      lifecycleClient.dispose();
+
+      expect(messageUnsubscriber).toHaveBeenCalledTimes(1);
+      expect(stateUnsubscriber).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops emitting notifications to subscribers after dispose', () => {
+      const handler = vi.fn();
+      client.on('serverEvent', handler);
+
+      client.dispose();
+      onMessageHandler(JSON.stringify({ jsonrpc: '2.0', method: 'serverEvent', params: ['x'] }));
+
+      expect(handler).not.toHaveBeenCalled();
     });
   });
 });

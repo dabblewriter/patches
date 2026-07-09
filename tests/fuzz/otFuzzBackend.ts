@@ -1,4 +1,5 @@
 import { applyChanges } from '../../src/algorithms/ot/shared/applyChanges.js';
+import { DuplicateChangeIdsError } from '../../src/server/DuplicateChangeIdsError.js';
 import { RevConflictError } from '../../src/server/RevConflictError.js';
 import type { OTStoreBackend } from '../../src/server/types.js';
 import type {
@@ -26,6 +27,8 @@ interface StoredDoc {
  *
  * Faithful to the OTStoreBackend contract in the ways the fuzzer exercises:
  * - `saveChanges` enforces [docId, rev] uniqueness with RevConflictError, like real stores.
+ * - `saveChanges` enforces [docId, change.id] uniqueness with DuplicateChangeIdsError — the
+ *   write-time duplicate guard real stores implement with id markers (DAB-607).
  * - `createVersion` builds and persists version state (required — `getDoc` streams version
  *   state as the snapshot base), by replaying the full change log through `endRev`.
  * - `listVersions` implements the cursor semantics of ListVersionsOptions (startAfter /
@@ -64,11 +67,17 @@ export class OTFuzzBackend implements OTStoreBackend {
   async saveChanges(docId: string, changes: Change[]): Promise<void> {
     const doc = this.getOrCreate(docId);
     const existing = new Set(doc.changes.map(c => c.rev));
+    const existingIds = new Set(doc.changes.map(c => c.id));
+    // Check the whole batch before mutating — a real store's batch/transaction is
+    // all-or-nothing, so a partial save must never leak into the log.
+    const duplicateIds: string[] = [];
     for (const change of changes) {
       if (change.rev == null) throw new Error(`saveChanges: change ${change.id} has no rev`);
       if (existing.has(change.rev)) throw new RevConflictError(`Rev ${change.rev} already exists for ${docId}`);
       existing.add(change.rev);
+      if (existingIds.has(change.id)) duplicateIds.push(change.id);
     }
+    if (duplicateIds.length > 0) throw new DuplicateChangeIdsError(docId, duplicateIds);
     doc.changes.push(...changes);
     doc.changes.sort((a, b) => a.rev - b.rev);
   }

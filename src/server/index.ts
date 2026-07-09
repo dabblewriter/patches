@@ -33,6 +33,7 @@ export { blockable, blockableResponse, blocking, releaseConcurrency, singleInvoc
 
 // Errors
 export { RevConflictError } from './RevConflictError.js';
+export { DuplicateChangeIdsError } from './DuplicateChangeIdsError.js';
 export { ApplyChangesError } from '../algorithms/ot/shared/applyChanges.js';
 
 // Utilities

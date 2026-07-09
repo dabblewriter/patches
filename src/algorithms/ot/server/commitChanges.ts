@@ -1,4 +1,5 @@
 import { StatusError } from '../../../net/error.js';
+import { DuplicateChangeIdsError } from '../../../server/DuplicateChangeIdsError.js';
 import type { CommitResult } from '../../../server/PatchesServer.js';
 import { RevConflictError } from '../../../server/RevConflictError.js';
 import type { OTStoreBackend } from '../../../server/types.js';
@@ -34,6 +35,16 @@ const MAX_CONFLICT_RETRIES = 5;
  * instance committed the same revision), the function retries: re-reads `currentRev`,
  * re-fetches committed changes, re-transforms, and re-saves. The retry naturally resolves
  * because the fresh `currentRev` includes the conflicting commit.
+ *
+ * ## Duplicate Id Guard (DAB-607)
+ *
+ * Incoming change ids are deduped against committed changes after `baseRev`, but that
+ * read-side window cannot see a committed copy at or before `baseRev` (a retry the client
+ * rebased onto a newer tip — e.g. after a snapshot catch-up that carries no change ids),
+ * nor arbitrate two simultaneous sends of the same change. Stores enforcing write-time id
+ * uniqueness throw `DuplicateChangeIdsError` from `saveChanges`; the retry here excludes
+ * the named ids and resolves the request as a resend, so a duplicate never commits and
+ * non-idempotent ops (array removes, text deltas) are never double-applied.
  *
  * @param store - The backend store for persistence.
  * @param docId - The ID of the document.
@@ -152,6 +163,14 @@ export async function commitChanges(
   //    (another instance committed the same rev), re-read and retry.
   let offlineSessionsHandled = false;
 
+  // Ids the STORE reported as already committed (DuplicateChangeIdsError from
+  // saveChanges). The read-side dedup below can only see committed copies after
+  // `baseRev`; a retry the client rebased onto a newer tip carries a baseRev past
+  // its original commit, and two simultaneous sends can both pass the read check —
+  // the store's write-time id guard is the backstop for both (DAB-607). Ids land
+  // here across attempts so the retry resolves the request as a resend.
+  const storeCommittedIds = new Set<string>();
+
   for (let attempt = 0; attempt < MAX_CONFLICT_RETRIES; attempt++) {
     try {
       // Re-read currentRev on retry to pick up the conflicting commit
@@ -188,7 +207,7 @@ export async function commitChanges(
       const committedIds = new Set(allCommittedChanges.filter(sameOrigin).map(c => c.id));
       const seenIncomingIds = new Set<string>();
       const incomingChanges = changes.filter(c => {
-        if (committedIds.has(c.id) || seenIncomingIds.has(c.id)) return false;
+        if (committedIds.has(c.id) || storeCommittedIds.has(c.id) || seenIncomingIds.has(c.id)) return false;
         seenIncomingIds.add(c.id);
         return true;
       }) as Change[];
@@ -241,9 +260,13 @@ export async function commitChanges(
       //    echo's rev, so a foreign commit that interleaved BEFORE the lost echo must meet
       //    the tail in that same frame here too. transformIncomingChanges removes each echo
       //    entry when the walk reaches it and commits only non-echo survivors.
+      // Store-reported duplicates (committed at rev <= baseRev) are excluded outright
+      // rather than kept as advance-only frame entries: their effects are already part
+      // of the base every later change was rebased onto, so the resent tail's frames
+      // include them without any walk-through.
       const seenQueueIds = new Set<string>();
       const queueChanges = changes.filter(c => {
-        if (seenQueueIds.has(c.id)) return false;
+        if (storeCommittedIds.has(c.id) || seenQueueIds.has(c.id)) return false;
         seenQueueIds.add(c.id);
         return true;
       }) as Change[];
@@ -274,6 +297,18 @@ export async function commitChanges(
       // Return catchup changes and newly transformed changes separately
       return { catchupChanges, newChanges: transformedChanges, docReloadRequired };
     } catch (error) {
+      // The store's write-time id guard fired: one or more incoming changes were
+      // already committed (a rebased retry past the read-side dedup window, or a
+      // concurrent duplicate send racing this one). Record the ids and retry — the
+      // next attempt excludes them, so the request resolves as a resend instead of
+      // committing a duplicate. Ids strictly grow per iteration (guarded below), so
+      // this cannot spin; it shares the attempt budget with rev conflicts.
+      if (error instanceof DuplicateChangeIdsError && attempt < MAX_CONFLICT_RETRIES - 1) {
+        const newIds = error.duplicateIds.filter(id => !storeCommittedIds.has(id));
+        if (newIds.length === 0) throw error; // store keeps rejecting ids we already excluded — bail rather than spin
+        newIds.forEach(id => storeCommittedIds.add(id));
+        continue;
+      }
       if (error instanceof RevConflictError && attempt < MAX_CONFLICT_RETRIES - 1) continue;
       throw error;
     }

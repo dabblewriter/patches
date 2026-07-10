@@ -132,6 +132,14 @@ describe('commitChanges — own-echo matching is origin-aware (DAB-601)', () => 
     // frame (tags without the foreign insert). Matching echoes by id alone excluded the
     // foreign change from the transform set AND swallowed the sender's X as already
     // committed — the tail then committed unshifted, deleting 'x' instead of 'y'.
+    //
+    // With the write-time id guard (DAB-607) the store refuses the second commit of id X
+    // outright: ids are globally unique per doc, because per-origin markers would reopen
+    // the reconnect-retry duplicate (a reconnect mints a fresh clientId). The sender's
+    // colliding X is dropped as a duplicate — a genuine id collision is a client id-
+    // generation defect, and refusing it is the data-safe resolution. What DAB-601
+    // guards must STILL hold for the tail: B is not swallowed, and it transforms
+    // against the foreign X in the correct frame — deleting 'y', not 'x'.
     const result = await commitChanges(
       backend,
       DOC,
@@ -142,10 +150,10 @@ describe('commitChanges — own-echo matching is origin-aware (DAB-601)', () => 
       sessionTimeoutMillis
     );
 
-    expect(result.newChanges).toHaveLength(2); // the sender's X is a distinct change, not an echo
+    expect(result.newChanges.map(c => c.id)).toEqual(['B']); // X refused by the id guard, B survives
     const state = headState(backend);
     expect(state.tags).toEqual(['f', 'x']); // B removed 'y' (shifted), not 'x'
-    expect(state.a).toBe(1);
+    expect(state.a).toBeUndefined(); // the colliding X was dropped, not committed
   });
 
   it('falls back to id-only matching when committed rows carry no origin (pre-stamp history)', async () => {

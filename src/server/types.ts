@@ -72,7 +72,23 @@ export interface OTStoreBackend extends ServerStoreBackend, VersioningStoreBacke
    */
   getCurrentRev(docId: string): Promise<number>;
 
-  /** Saves a batch of committed server changes. */
+  /**
+   * Saves a batch of committed server changes.
+   *
+   * Implementations must enforce [docId, rev] uniqueness atomically and throw
+   * `RevConflictError` when a revision already exists (a concurrent commit won
+   * the race), so `commitChanges` can re-read and retry.
+   *
+   * Implementations should also enforce [docId, change.id] uniqueness atomically
+   * — recording committed change ids in the same write as the changes — and
+   * throw `DuplicateChangeIdsError` naming the offending ids when any incoming
+   * change id was already committed. This is the authoritative duplicate guard:
+   * the commit path's read-side id dedup cannot see a committed copy at a rev
+   * at or before the incoming `baseRev` (a retry the client rebased onto a
+   * newer tip), nor arbitrate two simultaneous sends of the same change
+   * (DAB-607). Without it, a duplicate commit double-applies non-idempotent
+   * ops (array inserts/removes, text deltas) — real data corruption.
+   */
   saveChanges(docId: string, changes: Change[]): Promise<void>;
 
   /** Lists committed server changes based on revision numbers. */

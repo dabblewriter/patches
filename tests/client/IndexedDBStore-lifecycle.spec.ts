@@ -32,6 +32,53 @@ describe('IndexedDBStore lifecycle (real store over fake-indexeddb)', () => {
     await ot2.close();
   });
 
+  it('recovers a transaction when the browser closes the live connection out from under us', async () => {
+    const store = new IndexedDBStore(`lifecycle-test-${dbSeq++}`);
+    await store.trackDocs(['doc1']);
+
+    // Simulate the browser putting the still-referenced connection into its "closing"
+    // state — a suspended tab/worker (Safari) or a versionchange — WITHOUT our own
+    // close(), which would null this.db. db.transaction() would otherwise throw
+    // InvalidStateError: "The database connection is closing" (DABBLE-WRITER-3-CA).
+    const raw = (store as unknown as { db: IDBDatabase }).db;
+    expect(raw).toBeTruthy();
+    raw.close();
+
+    // The next write transparently reopens the connection and succeeds instead of throwing.
+    await expect(store.trackDocs(['doc2'])).resolves.toBeUndefined();
+    expect((await store.listDocs()).map(d => d.docId).sort()).toEqual(['doc1', 'doc2']);
+    expect((store as unknown as { db: IDBDatabase | null }).db).not.toBe(raw);
+
+    await store.close();
+  });
+
+  it('closes and reopens on versionchange so it never blocks another connection upgrading', async () => {
+    const dbName = `lifecycle-test-${dbSeq++}`;
+    const store = new IndexedDBStore(dbName);
+    await store.trackDocs(['doc1']);
+    const original = (store as unknown as { db: IDBDatabase }).db;
+
+    // A second connection upgrading past our version fires versionchange on us. Without
+    // the handler this open() would stay blocked until we closed; the handler closes and
+    // reopens us, so the upgrade proceeds and our store stays usable on the new version.
+    const higher = original.version + 1;
+    const upgraded = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open(dbName, higher);
+      req.onupgradeneeded = () => req.result.createObjectStore('extra');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+      req.onblocked = () => reject(new Error('upgrade blocked — versionchange not handled'));
+    });
+    upgraded.close();
+
+    // Store still works, on a fresh connection at the new version.
+    await store.trackDocs(['doc2']);
+    expect((await store.listDocs()).map(d => d.docId).sort()).toEqual(['doc1', 'doc2']);
+    expect((store as unknown as { db: IDBDatabase }).db).not.toBe(original);
+
+    await store.close();
+  });
+
   it('close() rejects later use without leaving an unhandled rejection', async () => {
     const store = new IndexedDBStore(`lifecycle-test-${dbSeq++}`);
     await store.listDocs();

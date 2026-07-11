@@ -21,6 +21,19 @@ interface StoredBranch extends Branch {
 }
 
 /**
+ * `IDBDatabase.transaction()` raises `InvalidStateError` in exactly one situation: the
+ * connection is closing/closed (or an upgrade is mid-flight). Its other failures raise
+ * `NotFoundError` / `InvalidAccessError` / `TypeError`, so matching the name is precise.
+ * The browser puts a still-referenced connection into that "closing" state out from under
+ * us when it suspends a backgrounded tab or worker (Safari does this aggressively —
+ * DABBLE-WRITER-3-CA) or when a `versionchange` from another connection upgrades the DB.
+ * The message wording varies by engine, so never match on it.
+ */
+function isConnectionClosingError(err: unknown): boolean {
+  return err != null && (err as { name?: unknown }).name === 'InvalidStateError';
+}
+
+/**
  * IndexedDB store providing common database operations for all sync algorithms.
  *
  * Can be used as a standalone store or as a shared database connection
@@ -44,6 +57,14 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
   private static readonly DB_VERSION = 2;
 
   protected db: IDBDatabase | null = null;
+  /**
+   * Terminal flag set by `close()`/`deleteDB()`. Any reopen path (suspend recovery,
+   * versionchange) nulls `this.db` before the async open completes, so a `close()` that
+   * lands in that window would early-return on `if (!this.db)` and then get silently
+   * resurrected by the open's `onsuccess`. Every reopen path checks this flag so a closed
+   * store stays closed.
+   */
+  protected closed = false;
   protected dbName?: string;
   protected dbPromise: Deferred<IDBDatabase>;
   protected external: boolean;
@@ -141,10 +162,24 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
         this.initDB(null);
       } else {
         this.dbPromise.reject(request.error);
+        // A reopen (versionchange/suspend recovery) may have no awaiter, so a reopen that
+        // fails on anything but the VersionError handled above (quota, corruption) would
+        // surface as an unhandled rejection on an idle tab. Swallow it here; real getDB()
+        // callers still receive the rejected promise. Mirrors close()'s guard.
+        this.dbPromise.promise.catch(() => undefined);
       }
     };
     request.onsuccess = () => {
       const db = request.result;
+      // close()/deleteDB() ran while this open was in flight. A reopen nulls this.db, so
+      // that close() early-returned without settling this promise — honor the terminal close
+      // instead of resurrecting the connection, and reject so any waiting reopen unblocks.
+      if (this.closed) {
+        db.close();
+        this.dbPromise.reject(new Error('Store has been closed'));
+        this.dbPromise.promise.catch(() => undefined);
+        return;
+      }
       // Missing stores mean the database was created without this store's upgrade
       // subscribers — bump the version so onupgradeneeded fires and creates them
       const missing = [...this.requiredStores].some(name => !db.objectStoreNames.contains(name));
@@ -153,6 +188,19 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
         this.initDB(db.version + 1);
         return;
       }
+      // Another connection (this store's own missing-stores bump, another tab, or a
+      // deploy that raised DB_VERSION) needs to upgrade the database. Close proactively
+      // so we don't block that upgrade, then drop our handle and reopen so the next
+      // transaction() runs on the fresh connection instead of throwing InvalidStateError
+      // on this now-closing one (DABBLE-WRITER-3-CA).
+      db.onversionchange = () => {
+        db.close();
+        if (this.db === db && !this.closed) {
+          this.db = null;
+          this.dbPromise = deferred<IDBDatabase>();
+          this.initDB();
+        }
+      };
       this.db = db;
       this.dbPromise.resolve(this.db);
     };
@@ -198,6 +246,9 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
    * database without closing it (the caller owns the lifecycle).
    */
   async close(): Promise<void> {
+    // Mark terminal before any await so a reopen in flight (which has already nulled
+    // this.db) can't resurrect the store via its open's onsuccess.
+    this.closed = true;
     if (!this.db) return;
     await this.dbPromise.promise;
     if (this.db) {
@@ -232,10 +283,43 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     storeNames: string[],
     mode: IDBTransactionMode
   ): Promise<[IDBTransactionWrapper, ...IDBStoreWrapper[]]> {
-    const db = await this.getDB();
-    const tx = new IDBTransactionWrapper(db.transaction(storeNames, mode));
+    const tx = new IDBTransactionWrapper(await this.beginTransaction(storeNames, mode));
     const stores = storeNames.map(name => tx.getStore(name));
     return [tx, ...stores];
+  }
+
+  /**
+   * Open a raw `IDBTransaction`, transparently recovering from a connection the browser
+   * closed out from under us. `db.transaction()` throws `InvalidStateError` only when the
+   * connection is closing/closed (see `isConnectionClosingError`); we never intend that —
+   * our own `close()` nulls `this.db`, so `getDB()` would already reject with "Store has
+   * been closed". So the browser suspended a backgrounded tab/worker (Safari does this
+   * aggressively — DABBLE-WRITER-3-CA) or a `versionchange` closed us: drop the stale
+   * handle, reopen, and retry once. In managed mode the fresh connection lets the write
+   * survive instead of surfacing as a failed change round-trip; if the reopen also fails
+   * (genuine teardown / page unload) the error propagates. External databases are never
+   * reopened — the host owns that connection's lifecycle — so their errors always propagate.
+   */
+  private async beginTransaction(
+    storeNames: string[],
+    mode: IDBTransactionMode,
+    reopened = false
+  ): Promise<IDBTransaction> {
+    const db = await this.getDB();
+    try {
+      return db.transaction(storeNames, mode);
+    } catch (err) {
+      if (reopened || this.external || !this.dbName || !isConnectionClosingError(err)) throw err;
+      // Only reopen the connection we just found dead; a concurrent caller may have already
+      // swapped in a fresh one, in which case just retry against that. Never reopen once
+      // close() has run — the retry below then rejects with "Store has been closed".
+      if (this.db === db && !this.closed) {
+        this.db = null;
+        this.dbPromise = deferred<IDBDatabase>();
+        this.initDB();
+      }
+      return this.beginTransaction(storeNames, mode, true);
+    }
   }
 
   /** Whether the open database contains the named object store (it may not on an external-mode database the host hasn't upgraded). */

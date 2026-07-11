@@ -79,6 +79,69 @@ describe('IndexedDBStore lifecycle (real store over fake-indexeddb)', () => {
     await store.close();
   });
 
+  it('close() during an in-flight reopen does not resurrect the store', async () => {
+    const store = new IndexedDBStore(`lifecycle-test-${dbSeq++}`);
+    await store.trackDocs(['doc1']);
+
+    // Kill the live connection so the next write takes the reopen path.
+    const raw = (store as unknown as { db: IDBDatabase }).db;
+    raw.close();
+
+    // Start a write. It reopens synchronously (nulls this.db) and then parks awaiting the
+    // fresh connection. fake-indexeddb dispatches open success on a macrotask, so spinning
+    // microtasks lands us squarely in the window where this.db is null and the reopen's
+    // onsuccess is still pending — exactly when a concurrent close() used to be lost.
+    const write = store.trackDocs(['doc2']);
+    for (let i = 0; i < 100 && (store as unknown as { db: IDBDatabase | null }).db !== null; i++) {
+      await Promise.resolve();
+    }
+    expect((store as unknown as { db: IDBDatabase | null }).db).toBeNull();
+
+    // Close inside that window. The reopen's onsuccess must honor the close, not adopt the
+    // fresh connection — so the in-flight write fails cleanly and the store stays closed.
+    const closing = store.close();
+    await expect(write).rejects.toThrow('Store has been closed');
+    await closing;
+    expect((store as unknown as { db: IDBDatabase | null }).db).toBeNull();
+    await expect(store.listDocs()).rejects.toThrow('Store has been closed');
+  });
+
+  it('a failed reopen does not surface an unhandled rejection', async () => {
+    const store = new IndexedDBStore(`lifecycle-test-${dbSeq++}`);
+    await store.trackDocs(['doc1']);
+    const original = (store as unknown as { db: IDBDatabase }).db;
+
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onRejection);
+
+    const realOpen = indexedDB.open;
+    try {
+      // Force the reopen the versionchange handler kicks off to fail with a non-VersionError
+      // (quota/corruption). Nothing awaits that reopen's promise, so without the .catch guard
+      // its rejection would surface as an unhandled rejection on an idle tab.
+      (indexedDB as unknown as { open: unknown }).open = () => {
+        const request: Record<string, unknown> = {};
+        setTimeout(() => {
+          request.error = Object.assign(new Error('mock reopen failure'), { name: 'QuotaExceededError' });
+          (request.onerror as (() => void) | undefined)?.();
+        }, 0);
+        return request;
+      };
+
+      // Drive the versionchange handler the browser would fire when another connection upgrades.
+      (original as unknown as { onversionchange: () => void }).onversionchange();
+
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(rejections).toEqual([]);
+    } finally {
+      (indexedDB as unknown as { open: unknown }).open = realOpen;
+      process.off('unhandledRejection', onRejection);
+    }
+  });
+
   it('close() rejects later use without leaving an unhandled rejection', async () => {
     const store = new IndexedDBStore(`lifecycle-test-${dbSeq++}`);
     await store.listDocs();

@@ -161,9 +161,14 @@ describe('commitChanges', () => {
   });
 
   it('should allow root creation when part of initial batch', async () => {
+    // The doc exists at rev 1 because THIS upload's first batch created it, so its root
+    // creation op destroys nothing but its own content.
     vi.mocked(mockStore.getCurrentRev).mockResolvedValue(1);
+    const firstBatchChange = createChange('batch1', 1, 0);
+    firstBatchChange.batchId = 'initial-batch';
+    vi.mocked(mockStore.listChanges).mockResolvedValue([firstBatchChange]);
 
-    const changes = [createChange('1', 2, 0)]; // rev > 1 indicates part of initial batch
+    const changes = [createChange('1', 2, 0)];
     changes[0].batchId = 'initial-batch';
     changes[0].ops = [{ op: 'add', path: '', value: {} }];
 
@@ -196,6 +201,155 @@ describe('commitChanges', () => {
     await expect(commitChanges(mockStore, 'doc1', changes, sessionTimeoutMillis)).rejects.toThrow(
       /Document doc1 already exists.*Cannot apply root-level replace/
     );
+  });
+
+  describe('batched uploads at baseRev 0', () => {
+    /**
+     * A store whose change log actually grows, so the batch-by-batch sequence a split upload
+     * produces can be replayed against it. Records every read window: `startAfter: 0` on a doc
+     * with history is the whole-log replay that 413s.
+     */
+    const useLog = (seed: Change[] = []) => {
+      const log = [...seed];
+      const reads: any[] = [];
+      vi.mocked(mockStore.getCurrentRev).mockImplementation(async () => log[log.length - 1]?.rev ?? 0);
+      vi.mocked(mockStore.listChanges).mockImplementation(async (_docId, options: any = {}) => {
+        reads.push(options);
+        let out = log.slice();
+        if (options.startAfter !== undefined) out = out.filter(c => c.rev > options.startAfter);
+        if (options.reverse) out.reverse();
+        if (options.limit !== undefined) out = out.slice(0, options.limit);
+        return out;
+      });
+      vi.mocked(mockStore.saveChanges).mockImplementation(async (_docId, changes) => {
+        log.push(...changes);
+      });
+      const commitReads = () => reads.filter(o => o.startAfter !== undefined && !o.reverse).map(o => o.startAfter);
+      return { log, commitReads };
+    };
+
+    /** A change as a client with no local state sends it: baseRev 0, carrying the batch. */
+    const batched = (id: string, rev: number, batchId: string, ops?: Change['ops']) => {
+      const change = createChange(id, rev, 0);
+      change.batchId = batchId;
+      if (ops) change.ops = ops;
+      return change;
+    };
+
+    const foreign = (rev: number) => createChange(`old${rev}`, rev, rev - 1);
+    const history = (n: number) => Array.from({ length: n }, (_, i) => foreign(i + 1));
+    const rootReplace = [{ op: 'replace' as const, path: '', value: { wiped: true } }];
+
+    it('commits every batch of a genuine first upload without rebasing it', async () => {
+      const { log } = useLog();
+      const batches = [
+        [batched('a1', 1, 'up', [{ op: 'add', path: '', value: {} }]), batched('a2', 2, 'up')],
+        [batched('a3', 3, 'up'), batched('a4', 4, 'up')],
+        [batched('a5', 5, 'up')],
+      ];
+
+      const reloads: Array<true | undefined> = [];
+      for (const batch of batches) {
+        reloads.push((await commitChanges(mockStore, 'doc1', batch, sessionTimeoutMillis)).docReloadRequired);
+      }
+
+      // Rebasing these would answer docReloadRequired, and the client drops a batch from pending
+      // and refetches the doc on that — between every batch of a doc that is still growing.
+      expect(reloads).toEqual([undefined, undefined, undefined]);
+      expect(log.map(c => c.id)).toEqual(['a1', 'a2', 'a3', 'a4', 'a5']);
+      expect(log.map(c => c.rev)).toEqual([1, 2, 3, 4, 5]);
+    });
+
+    it('refuses a batched continuation onto a doc the batch did not create, without reading from rev 0', async () => {
+      const { log, commitReads } = useLog(history(8));
+
+      // The first batch of a never-synced client's flush takes the documented rebase-to-head heal.
+      const first = await commitChanges(mockStore, 'doc1', [batched('n1', 1, 'up')], sessionTimeoutMillis);
+      expect(first.docReloadRequired).toBe(true);
+
+      // The rest of the flush was minted against the state that heal told the client to replace.
+      // Rebasing them would stack rev-0 ops verbatim onto a head they were never transformed
+      // against (nothing is committed after the tip, so the transform set is empty); keeping
+      // baseRev 0 would replay the whole log, which is the 413. Refuse, and let the client's
+      // reload rebase them and re-send on the true head.
+      const err = await commitChanges(mockStore, 'doc1', [batched('n2', 2, 'up')], sessionTimeoutMillis).catch(e => e);
+
+      expect(err).toBeInstanceOf(StatusError);
+      expect(err.code).toBe(409);
+      expect(err.data).toEqual({ scope: 'doc' });
+      // Never docReloadRequired: the client drops a batch from pending on that, so a refusal
+      // carrying it would destroy the very work this preserves.
+      expect(err.docReloadRequired).toBeUndefined();
+      expect(commitReads()).not.toContain(0);
+      expect(log.map(c => c.id)).toEqual([...history(8).map(c => c.id), 'n1']);
+    });
+
+    it('rejects a root replace smuggled into a batched continuation on an existing doc', async () => {
+      const { log } = useLog(history(8));
+      await commitChanges(mockStore, 'doc1', [batched('n1', 1, 'up'), batched('n2', 2, 'up')], sessionTimeoutMillis);
+
+      const err = await commitChanges(
+        mockStore,
+        'doc1',
+        [batched('n3', 3, 'up', rootReplace)],
+        sessionTimeoutMillis
+      ).catch(e => e);
+
+      expect(err).toBeInstanceOf(StatusError);
+      expect(err.code).toBe(400);
+      expect(err.data).toEqual({ changeId: 'n3', scope: 'change' });
+      expect(log.some(c => c.ops.some(op => op.path === ''))).toBe(false);
+    });
+
+    it('rejects a root replace whose rev merely lines up with the head', async () => {
+      // Identical on the wire to the root creation an initial batch is entitled to (batchId,
+      // baseRev 0, rev exactly head + 1) but the doc is someone else's, so no arithmetic over
+      // the batch's own revs can tell the two apart. Only the doc's history can.
+      const { log } = useLog(history(1));
+
+      const err = await commitChanges(
+        mockStore,
+        'doc1',
+        [batched('n', 2, 'up', rootReplace)],
+        sessionTimeoutMillis
+      ).catch(e => e);
+
+      expect(err).toBeInstanceOf(StatusError);
+      expect(err.code).toBe(400);
+      expect(log.map(c => c.id)).toEqual(['old1']);
+    });
+
+    it('rejects a root replace a reload re-stamped onto the head', async () => {
+      // After a reload the client re-stamps every pending change onto the new committedRev
+      // WITHOUT transforming its ops (OTAlgorithm._withConsistentBaseRev), so the root op that
+      // the baseRev-0 guard just rejected comes back at baseRev = tip. Keying the guard on
+      // baseRev 0 would wave it through on that second pass and wipe the document.
+      const { log } = useLog(history(8));
+      const restamped = createChange('n', 9, 8);
+      restamped.ops = rootReplace;
+
+      const err = await commitChanges(mockStore, 'doc1', [restamped], sessionTimeoutMillis).catch(e => e);
+
+      expect(err).toBeInstanceOf(StatusError);
+      expect(err.code).toBe(400);
+      expect(err.data).toEqual({ changeId: 'n', scope: 'change' });
+      expect(log.some(c => c.ops.some(op => op.path === ''))).toBe(false);
+    });
+
+    it('resolves an idempotent resend of a continuation batch as a resend', async () => {
+      const { log } = useLog();
+      const second = () => [batched('a3', 3, 'up'), batched('a4', 4, 'up')];
+      await commitChanges(mockStore, 'doc1', [batched('a1', 1, 'up'), batched('a2', 2, 'up')], sessionTimeoutMillis);
+      await commitChanges(mockStore, 'doc1', second(), sessionTimeoutMillis);
+
+      // The ack was lost, so the client sends the same batch again.
+      const resend = await commitChanges(mockStore, 'doc1', second(), sessionTimeoutMillis);
+
+      expect(resend.newChanges).toEqual([]);
+      expect(resend.catchupChanges.map(c => c.id)).toEqual(['a3', 'a4']);
+      expect(resend.docReloadRequired).toBeUndefined();
+      expect(log.map(c => c.id)).toEqual(['a1', 'a2', 'a3', 'a4']);
+    });
   });
 
   it('should normalize createdAt timestamps to be in the past', async () => {

@@ -880,6 +880,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         }
       }
 
+      let reloadedMidFlush = false;
+
       for (const changeBatch of batches) {
         if (!this.state.connected || onlineState.isOffline) {
           throw new NetworkError('Disconnected during flush');
@@ -902,6 +904,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // Pass the batch as resolved so the pending-preserving import can't re-add it
           // from the open doc's stale in-memory queue.
           await this._reloadDocFromServer(docId, algorithm, false, changeBatch);
+          // `batches` predates the reload, which replaced the committed state they were minted
+          // against and rebased the rest of the queue onto the new head. Every remaining batch
+          // still holds the pre-rebase copy of its ops at baseRev 0, and the server cannot
+          // transform that onto a head it never saw: it stacks the ops verbatim over whatever
+          // paths they touch, or reads the whole change log trying to rebase them. Stop sending
+          // them and let the follow-up sync below flush what the store actually holds.
+          reloadedMidFlush = true;
+          break;
         } else {
           // Confirm sent first so server corrections (applied next) overwrite
           // any stale ops for fields the server won via LWW timestamp resolution.
@@ -939,6 +949,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
       const stillHasPending = await algorithm.hasPending(docId);
       this._updateDocSyncState(docId, { hasPending: stillHasPending, syncStatus: 'synced' });
+      // Send the remainder the reload rebased, from the store rather than from `batches`. Sync is
+      // serial-gated, so this queues exactly one follow-up pass instead of recursing, and that
+      // pass flushes on the reloaded committedRev, which no longer answers docReloadRequired.
+      if (reloadedMidFlush && stillHasPending) void this.syncDoc(docId);
     } catch (err) {
       if (this._isDocDeletedError(err)) {
         await this._handleRemoteDocDeleted(docId);

@@ -98,12 +98,22 @@ export class OTFuzzBackend implements OTStoreBackend {
     this.docs.delete(docId);
   }
 
+  /**
+   * The state a version persists: the state at `endRev`. The full log is retained, so replay
+   * from scratch — simple and unambiguous. Overridable so a spec can build it the way a real
+   * backend does, through the exported `buildVersionState`.
+   */
+  protected async buildState(docId: string, metadata: VersionMetadata, _changes: Change[]): Promise<unknown> {
+    const doc = this.getOrCreate(docId);
+    return applyChanges(
+      null,
+      doc.changes.filter(c => c.rev <= metadata.endRev)
+    );
+  }
+
   async createVersion(docId: string, metadata: VersionMetadata, changes?: Change[]): Promise<void> {
     const doc = this.getOrCreate(docId);
-    // Build version state the way a real backend must: state at endRev. The full log is
-    // retained, so replay from scratch — simple and unambiguous.
-    const upToEnd = doc.changes.filter(c => c.rev <= metadata.endRev);
-    const state = applyChanges(null, upToEnd);
+    const state = await this.buildState(docId, metadata, changes ?? []);
     doc.versions.set(metadata.id, { metadata, state: JSON.stringify(state), changes: changes ?? [] });
   }
 

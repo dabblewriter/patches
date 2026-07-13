@@ -7,14 +7,15 @@ import type { Change, VersionMetadata } from '../../src/types';
 import { OTFuzzBackend } from '../fuzz/otFuzzBackend';
 
 /**
- * End-to-end versioning against a real store. The backend builds version state through the
- * exported `buildVersionState`, like a production store does — so the `listChanges` calls it
- * makes are exactly the reads that hit the database.
+ * End-to-end versioning against a real store. The backend persists the state the exported
+ * `buildVersionState` returns, like a production store does: the `listChanges` calls it makes
+ * are exactly the reads that hit the database, and the state it stores is exactly what
+ * chaining to the parent produced (rather than a from-scratch replay of the log, which would
+ * be the true state no matter what the chain did).
  */
 class VersionBuildingBackend extends OTFuzzBackend {
-  async createVersion(docId: string, metadata: VersionMetadata, changes: Change[] = []): Promise<void> {
-    await buildVersionState(this, docId, metadata, changes);
-    await super.createVersion(docId, metadata, changes);
+  protected buildState(docId: string, metadata: VersionMetadata, changes: Change[]): Promise<unknown> {
+    return buildVersionState(this, docId, metadata, changes);
   }
 }
 

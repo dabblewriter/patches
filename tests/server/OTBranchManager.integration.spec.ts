@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { buildVersionState } from '../../src/algorithms/ot/server/buildVersionState';
 import { applyChanges } from '../../src/algorithms/ot/shared/applyChanges';
 import { createVersionMetadata } from '../../src/data/version';
 import { readStreamAsString } from '../../src/server/jsonReadable';
@@ -53,11 +54,10 @@ class MemoryOTBranchStore implements OTStoreBackend, BranchingStoreBackend {
   }
 
   async createVersion(docId: string, metadata: VersionMetadata, changes: Change[] = []): Promise<void> {
+    // Build state through the exported builder, like a production store: the version's parent
+    // chain is what bounds the reads, so a version written without one is visible here.
+    const state = await buildVersionState(this, docId, metadata, changes);
     const versions = this.versions.get(docId) ?? [];
-    // Build state like a production store would: replay the change log through endRev
-    // (docs in these tests start with a root replace, so the log rebuilds from null)
-    const log = (this.docs.get(docId) ?? []).filter(c => c.rev <= metadata.endRev);
-    const state = log.length > 0 ? applyChanges(null, log) : undefined;
     versions.push({ metadata, state, changes });
     this.versions.set(docId, versions);
   }
@@ -230,12 +230,7 @@ describe('OTBranchManager integration', () => {
     // Branch session 1: revs 2..3, versioned on the branch
     await server.commitChanges(branchId, [change('e1', 1, '/edit1', 1)]);
     await server.commitChanges(branchId, [change('e2', 2, '/edit2', 2)]);
-    const session1 = await store.listChanges(branchId, { startAfter: 1 });
-    await store.createVersion(
-      branchId,
-      createVersionMetadata({ origin: 'main', name: 'Session 1', startedAt: 1, endedAt: 2, startRev: 2, endRev: 3 }),
-      session1
-    );
+    await server.captureCurrentVersion(branchId, { name: 'Session 1' });
 
     await manager.mergeBranch(branchId);
     const afterFirst = store.getVersions('doc1').filter(v => v.origin === 'branch');
@@ -243,12 +238,7 @@ describe('OTBranchManager integration', () => {
 
     // Branch session 2: rev 4, versioned on the branch
     await server.commitChanges(branchId, [change('e3', 3, '/edit3', 3)]);
-    const session2 = await store.listChanges(branchId, { startAfter: 3 });
-    await store.createVersion(
-      branchId,
-      createVersionMetadata({ origin: 'main', name: 'Session 2', startedAt: 3, endedAt: 3, startRev: 4, endRev: 4 }),
-      session2
-    );
+    await server.captureCurrentVersion(branchId, { name: 'Session 2' });
 
     await manager.mergeBranch(branchId);
 
@@ -291,6 +281,35 @@ describe('OTBranchManager integration', () => {
     expect(copied[0].startRev).toBe(2);
     expect(copied[0].endRev).toBe(3);
     expect(copied[0].endRev).toBeLessThanOrEqual(await store.getCurrentRev('doc1'));
+  });
+
+  it('chains the first copied version to the source timeline', async () => {
+    const { store, server, manager } = setup();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Prod shape: the source carries its own auto-versions below the branch point.
+    await server.commitChanges('doc1', [rootChange('s1', { src1: 1 })]);
+    await server.commitChanges('doc1', [change('s2', 1, '/src2', 2)]);
+    const sourceVersion = await server.captureCurrentVersion('doc1');
+
+    const branchId = await manager.createBranch('doc1', 2);
+    await server.commitChanges(branchId, [change('e1', 1, '/edit1', 1)]);
+    await server.captureCurrentVersion(branchId, { name: 'Session' });
+
+    await manager.mergeBranch(branchId);
+
+    // Unanchored, building the copy's state replays doc1 from rev 1 (and warns about it).
+    const [copied] = store.getVersions('doc1').filter(v => v.origin === 'branch');
+    expect(copied.parentId).toBe(sourceVersion);
+    expect(warn).not.toHaveBeenCalled();
+
+    // Bridged from the parent snapshot, the copy still holds the true state at its endRev.
+    expect(JSON.parse((await store.loadVersionState('doc1', copied.id))!)).toEqual({
+      src1: 1,
+      src2: 2,
+      edit1: 1,
+    });
+    warn.mockRestore();
   });
 
   it('merges and cold loads correctly across two merge rounds', async () => {
@@ -343,13 +362,7 @@ describe('OTBranchManager integration', () => {
       const branchId = await manager.createBranch('doc1', 1);
       await server.commitChanges(branchId, [change('e1', 1, '/edit1', 1)]);
       await server.commitChanges(branchId, [change('e2', 2, '/edit2', 2)]);
-      const session = await store.listChanges(branchId, { startAfter: 1 });
-      await store.createVersion(
-        branchId,
-        createVersionMetadata({ origin: 'main', name: 'Session 1', startedAt: 1, endedAt: 2, startRev: 2, endRev: 3 }),
-        session
-      );
-      const branchVersionId = store.getVersions(branchId).find(v => v.name === 'Session 1')!.id;
+      const branchVersionId = (await server.captureCurrentVersion(branchId, { name: 'Session 1' }))!;
 
       failWatermarkOnce(store);
       await expect(manager.mergeBranch(branchId)).rejects.toThrow('simulated crash');

@@ -233,12 +233,7 @@ describe('CompressedStoreBackend composition', () => {
 
     await server.commitChanges(branchId, [change('e1', 1, '/edit1', 1)]);
     await server.commitChanges(branchId, [change('e2', 2, '/edit2', 2)]);
-    const session = await wrapped.listChanges(branchId, { startAfter: 1 });
-    await wrapped.createVersion(
-      branchId,
-      createVersionMetadata({ origin: 'main', name: 'Session', startedAt: 1, endedAt: 2, startRev: 2, endRev: 3 }),
-      session
-    );
+    await server.captureCurrentVersion(branchId, { name: 'Session' });
 
     await manager.mergeBranch(branchId);
 

@@ -375,6 +375,7 @@ describe('PatchesHistoryManager', () => {
 
       const otStore = {
         ...mockStore,
+        getCurrentRev: vi.fn().mockResolvedValue(3),
         listChanges: vi.fn().mockResolvedValue(gapChanges),
         loadVersion: vi.fn().mockImplementation((_: string, id: string) => {
           return Promise.resolve(id === 'v1' ? targetVersion : undefined);

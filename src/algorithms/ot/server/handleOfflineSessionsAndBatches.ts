@@ -25,10 +25,10 @@ export async function handleOfflineSessionsAndBatches(
   changes: Change[],
   origin: 'main' | 'offline-branch' = 'offline-branch'
 ) {
-  // For offline branches, find the last main version to use as the initial parent.
-  // This anchors the offline session chain to the main timeline.
+  // Find the last main version to use as the initial parent. This anchors the session chain to
+  // the main timeline; unanchored, the first session's state build replays the doc from rev 1.
   let parentId: string | undefined;
-  if (origin === 'offline-branch' && changes.length > 0) {
+  if (changes.length > 0) {
     const firstRev = changes[0].rev;
     const mainVersions = await store.listVersions(docId, {
       limit: 1,

@@ -1,9 +1,9 @@
 import { concatStreams, parseVersionState } from '../../../server/jsonReadable.js';
 import type { OTStoreBackend } from '../../../server/types.js';
-import type { PatchesSnapshot } from '../../../types.js';
+import type { PatchesSnapshot, VersionMetadata } from '../../../types.js';
 
 /**
- * Finds the latest main version at or before the given revision and loads its raw state.
+ * Finds the latest main version at or before the given revision.
  *
  * The search is bounded by `getCurrentRev`: a version can never legitimately sit
  * ahead of the committed change log. Without this bound an orphan version — e.g.
@@ -13,7 +13,11 @@ import type { PatchesSnapshot } from '../../../types.js';
  * document's head). When a target `beforeRev` is given we also clamp to it so a
  * caller asking for a past state never gets a version from beyond that point.
  */
-async function getLatestMainVersion(store: OTStoreBackend, docId: string, beforeRev?: number) {
+export async function findLatestMainVersion(
+  store: OTStoreBackend,
+  docId: string,
+  beforeRev?: number
+): Promise<VersionMetadata | undefined> {
   const currentRev = await store.getCurrentRev(docId);
   const upperBound = beforeRev != null ? Math.min(beforeRev, currentRev) : currentRev;
   // `startAfter`/`endBefore` are cursors relative to the (reversed) sort order, not
@@ -29,7 +33,12 @@ async function getLatestMainVersion(store: OTStoreBackend, docId: string, before
     origin: 'main',
     orderBy: 'endRev',
   });
-  const version = versions[0];
+  return versions[0];
+}
+
+/** {@link findLatestMainVersion} plus its raw state, for the snapshot readers. */
+async function getLatestMainVersion(store: OTStoreBackend, docId: string, beforeRev?: number) {
+  const version = await findLatestMainVersion(store, docId, beforeRev);
   return {
     rawState: version ? await store.loadVersionState(docId, version.id) : undefined,
     versionRev: version?.endRev ?? 0,

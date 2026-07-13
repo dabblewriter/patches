@@ -1,6 +1,6 @@
 import { commitChanges, type CommitChangesOptions } from '../algorithms/ot/server/commitChanges.js';
 import { createVersion } from '../algorithms/ot/server/createVersion.js';
-import { getSnapshotAtRevision, getSnapshotStream } from '../algorithms/ot/server/getSnapshotAtRevision.js';
+import { findLatestMainVersion, getSnapshotStream } from '../algorithms/ot/server/getSnapshotAtRevision.js';
 import { createChange } from '../data/change.js';
 import { signal } from 'easy-signal';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
@@ -212,14 +212,19 @@ export class OTServer implements PatchesServer {
    * Does NOT build state — creates version metadata + changes, then emits
    * `onVersionCreated` so subscribers can build and persist state out of band.
    *
+   * The version chains to the latest main version, so the store builds its state from that
+   * snapshot plus the changes since. Left unchained it would have to replay the document's
+   * entire history from rev 1 (see `getBaseStateBeforeVersion`).
+   *
    * @param docId The document ID.
    * @param metadata Optional metadata for the version.
    * @returns The ID of the created version, or null if no changes to capture.
    */
   async captureCurrentVersion(docId: string, metadata?: EditableVersionMetadata): Promise<string | null> {
     assertVersionMetadata(metadata);
-    const { changes } = await getSnapshotAtRevision(this.store, docId);
-    const version = await createVersion(this.store, docId, changes, { metadata });
+    const parent = await findLatestMainVersion(this.store, docId);
+    const changes = await this.store.listChanges(docId, { startAfter: parent?.endRev ?? 0 });
+    const version = await createVersion(this.store, docId, changes, { metadata, parentId: parent?.id });
     if (!version) {
       return null;
     }

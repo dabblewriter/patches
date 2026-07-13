@@ -22,7 +22,11 @@ import {
   createVersion as createVersionAlgorithm,
   createVersionAtRev,
 } from '../../src/algorithms/ot/server/createVersion';
-import { getSnapshotAtRevision, getSnapshotStream } from '../../src/algorithms/ot/server/getSnapshotAtRevision';
+import {
+  findLatestMainVersion,
+  getSnapshotAtRevision,
+  getSnapshotStream,
+} from '../../src/algorithms/ot/server/getSnapshotAtRevision';
 import { getStateAtRevision } from '../../src/algorithms/ot/server/getStateAtRevision';
 import { handleOfflineSessionsAndBatches } from '../../src/algorithms/ot/server/handleOfflineSessionsAndBatches';
 import { applyChanges } from '../../src/algorithms/ot/shared/applyChanges';
@@ -422,50 +426,59 @@ describe('OTServer', () => {
   });
 
   describe('captureCurrentVersion', () => {
-    it('should create version with metadata', async () => {
-      const mockVersion = {
-        id: 'version1',
-        origin: 'main' as const,
-        startedAt: Date.now(),
-        endedAt: Date.now(),
-        startRev: 1,
-        endRev: 5,
-      };
+    const mockVersion = {
+      id: 'version1',
+      origin: 'main' as const,
+      startedAt: Date.now(),
+      endedAt: Date.now(),
+      startRev: 1,
+      endRev: 5,
+    };
 
-      vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-        state: { content: 'test' },
-        rev: 5,
-        changes: [
-          {
-            id: 'change1',
-            rev: 5,
-            baseRev: 1,
-            createdAt: Date.now(),
-            committedAt: Date.now(),
-          } as Change,
-        ],
-      });
+    const latestMainVersion = {
+      id: 'parent-v',
+      origin: 'main' as const,
+      startedAt: Date.now(),
+      endedAt: Date.now(),
+      startRev: 1,
+      endRev: 4,
+    };
+
+    it('should chain the version to the latest main version and read only the changes since it', async () => {
+      const changes = [{ id: 'change1', rev: 5, baseRev: 4 } as Change];
+      vi.mocked(findLatestMainVersion).mockResolvedValue(latestMainVersion);
+      vi.mocked(mockStore.listChanges).mockResolvedValue(changes);
       vi.mocked(createVersionAlgorithm).mockResolvedValue(mockVersion);
 
       const result = await server.captureCurrentVersion('doc1', { name: 'v1.0' });
 
-      expect(createVersionAlgorithm).toHaveBeenCalledWith(
-        expect.any(Object), // store
-        'doc1',
-        expect.any(Array), // changes
-        {
-          metadata: { name: 'v1.0' },
-        }
-      );
+      expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', { startAfter: 4 });
+      expect(createVersionAlgorithm).toHaveBeenCalledWith(expect.any(Object), 'doc1', changes, {
+        metadata: { name: 'v1.0' },
+        parentId: 'parent-v',
+      });
+      expect(result).toBe('version1');
+    });
+
+    it('should create a first version with no parent on a doc that has none', async () => {
+      const changes = [{ id: 'change1', rev: 1, baseRev: 0 } as Change];
+      vi.mocked(findLatestMainVersion).mockResolvedValue(undefined);
+      vi.mocked(mockStore.listChanges).mockResolvedValue(changes);
+      vi.mocked(createVersionAlgorithm).mockResolvedValue(mockVersion);
+
+      const result = await server.captureCurrentVersion('doc1');
+
+      expect(mockStore.listChanges).toHaveBeenCalledWith('doc1', { startAfter: 0 });
+      expect(createVersionAlgorithm).toHaveBeenCalledWith(expect.any(Object), 'doc1', changes, {
+        metadata: undefined,
+        parentId: undefined,
+      });
       expect(result).toBe('version1');
     });
 
     it('should return null when no changes to create version', async () => {
-      vi.mocked(getSnapshotAtRevision).mockResolvedValue({
-        state: { content: 'test' },
-        rev: 5,
-        changes: [],
-      });
+      vi.mocked(findLatestMainVersion).mockResolvedValue(latestMainVersion);
+      vi.mocked(mockStore.listChanges).mockResolvedValue([]);
       vi.mocked(createVersionAlgorithm).mockResolvedValue(undefined);
 
       const result = await server.captureCurrentVersion('doc1');

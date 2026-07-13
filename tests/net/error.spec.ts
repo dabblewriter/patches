@@ -200,6 +200,22 @@ describe('StatusError', () => {
       expect(isNetworkError(new DOMException('The operation timed out.', 'TimeoutError'))).toBe(true);
     });
 
+    it('classifies raw status-less fetch TypeErrors that escaped transport wrapping', () => {
+      // A fetch on an unwrapped path (or one re-thrown across a worker boundary as a
+      // bare TypeError) surfaces the browser's fixed, non-localized failure string.
+      expect(isNetworkError(new TypeError('Failed to fetch'))).toBe(true); // Chromium
+      expect(isNetworkError(new TypeError('Load failed'))).toBe(true); // WebKit
+      expect(isNetworkError(new TypeError('NetworkError when attempting to fetch resource.'))).toBe(true); // Gecko
+      // Name survives structured clone even when the TypeError prototype does not.
+      const crossed = new Error('Failed to fetch');
+      crossed.name = 'TypeError';
+      expect(isNetworkError(crossed)).toBe(true);
+      // Exact (not substring) match: near-misses that merely contain "load failed"
+      // must not be swept into connection recovery.
+      expect(isNetworkError(new TypeError('Upload failed'))).toBe(false);
+      expect(isNetworkError(new TypeError('Download failed'))).toBe(false);
+    });
+
     it('does not classify coded, generic, aborted, or non-error failures as network errors', () => {
       expect(isNetworkError(new StatusError(403, 'Forbidden'))).toBe(false);
       expect(isNetworkError(new StatusError(500, 'Internal Server Error'))).toBe(false);

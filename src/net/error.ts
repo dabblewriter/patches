@@ -74,17 +74,40 @@ export class NetworkError extends Error {
 }
 
 /**
+ * The fixed, non-localized messages browser fetch implementations put on the
+ * status-less `TypeError` they throw when a request dies before producing a
+ * response — offline, a DNS/TCP/TLS failure, a dropped connection, or a CORS-opaque
+ * rejection. Chromium: "Failed to fetch"; WebKit: "Load failed"; Gecko:
+ * "NetworkError when attempting to fetch resource". Compared lower-cased and with
+ * any trailing period stripped (Gecko's carries one), matched EXACTLY — a substring
+ * match would sweep in near-misses like "Upload failed" / "Download failed".
+ */
+const RAW_FETCH_FAILURE_MESSAGES = ['failed to fetch', 'load failed', 'networkerror when attempting to fetch resource'];
+
+/**
  * True for failures that never carried an HTTP status because the request died at
  * the network level — see {@link NetworkError}. Matches by name as well as
  * instance so errors from a duplicated module copy or a structured-clone boundary
  * (which preserves only name/message/stack) classify the same, and recognizes the
  * platform's raw timeout shape (`AbortSignal.timeout` firing mid body-read
- * surfaces a `TimeoutError` DOMException past any transport wrapping). Cancelled
- * requests/transactions are a sibling class — see {@link isAbortError}.
+ * surfaces a `TimeoutError` DOMException past any transport wrapping).
+ *
+ * Also recognizes a raw fetch rejection that escaped transport wrapping: a
+ * status-less `TypeError` whose message is one of the browsers' fixed fetch-failure
+ * strings ({@link RAW_FETCH_FAILURE_MESSAGES}). `PatchesREST` wraps these into a
+ * {@link NetworkError}, but a fetch on any unwrapped path (or one re-thrown across a
+ * worker boundary as a bare `TypeError`) would otherwise be misread as a doc-level
+ * failure and latch the doc at a terminal 'error' — so match it here by name+message.
+ * A `TypeError` with any other message (a genuine programming error) stays unmatched.
+ * Cancelled requests/transactions are a sibling class — see {@link isAbortError}.
  */
 export function isNetworkError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
-  return err.name === 'NetworkError' || err.name === 'TimeoutError';
+  if (err.name === 'NetworkError' || err.name === 'TimeoutError') return true;
+  if (err.name === 'TypeError') {
+    return RAW_FETCH_FAILURE_MESSAGES.includes(err.message.toLowerCase().replace(/\.$/, ''));
+  }
+  return false;
 }
 
 /**

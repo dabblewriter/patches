@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { isAbortError, isNetworkError, NetworkError, StatusError } from '../../src/net/error';
+import {
+  isAbortError,
+  isNetworkError,
+  isStorageError,
+  NetworkError,
+  StatusError,
+  StorageError,
+  toStorageError,
+} from '../../src/net/error';
 
 describe('StatusError', () => {
   describe('constructor', () => {
@@ -254,6 +262,69 @@ describe('StatusError', () => {
       expect(isAbortError(new Error('network blip'))).toBe(false);
       expect(isAbortError('AbortError')).toBe(false);
       expect(isAbortError(undefined)).toBe(false);
+    });
+  });
+
+  describe('StorageError, isStorageError and toStorageError', () => {
+    it('creates a named error with a preserved cause', () => {
+      const cause = new DOMException('Unable to store record in object store', 'UnknownError');
+      const error = new StorageError(cause.message, { cause });
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toBeInstanceOf(StorageError);
+      expect(error.name).toBe('StorageError');
+      expect(error.message).toBe('Unable to store record in object store');
+      expect(error.cause).toBe(cause);
+    });
+
+    it('classifies StorageError instances and name-preserving copies (worker boundary)', () => {
+      expect(isStorageError(new StorageError('storage failed'))).toBe(true);
+      const crossed = new Error('storage failed');
+      crossed.name = 'StorageError';
+      expect(isStorageError(crossed)).toBe(true);
+    });
+
+    it('classifies the raw WebKit IndexedDB storage-fault DOMExceptions by name', () => {
+      // The three WebKit faults from the field, all named UnknownError:
+      expect(isStorageError(new DOMException('Unable to store record in object store', 'UnknownError'))).toBe(true);
+      expect(isStorageError(new DOMException('Failed to delete record from object store', 'UnknownError'))).toBe(true);
+      expect(
+        isStorageError(
+          new DOMException('Attempt to get records from database without an in-progress transaction', 'UnknownError')
+        )
+      ).toBe(true);
+      // Storage full:
+      expect(isStorageError(new DOMException('The quota has been exceeded.', 'QuotaExceededError'))).toBe(true);
+    });
+
+    it('does NOT classify connection-closing, abort, coded, or ordinary errors as storage errors', () => {
+      // InvalidStateError is the connection-closing class handled by the reopen-retry.
+      expect(isStorageError(new DOMException('The database connection is closing.', 'InvalidStateError'))).toBe(false);
+      // AbortError is the sibling interruption class (isAbortError).
+      expect(isStorageError(new DOMException('The transaction was aborted.', 'AbortError'))).toBe(false);
+      expect(isStorageError(new StatusError(403, 'Forbidden'))).toBe(false);
+      expect(isStorageError(new Error('some transient failure'))).toBe(false);
+      expect(isStorageError('UnknownError')).toBe(false);
+      expect(isStorageError(undefined)).toBe(false);
+    });
+
+    it('wraps raw storage-fault DOMExceptions into a StorageError, preserving message and cause', () => {
+      const raw = new DOMException('Failed to delete record from object store', 'UnknownError');
+      const wrapped = toStorageError(raw);
+      expect(wrapped).toBeInstanceOf(StorageError);
+      expect((wrapped as StorageError).message).toBe('Failed to delete record from object store');
+      expect((wrapped as StorageError).cause).toBe(raw);
+      expect(isStorageError(wrapped)).toBe(true);
+    });
+
+    it('returns non-storage errors (and already-wrapped / null) unchanged', () => {
+      const already = new StorageError('already wrapped');
+      expect(toStorageError(already)).toBe(already);
+      const abort = new DOMException('aborted', 'AbortError');
+      expect(toStorageError(abort)).toBe(abort);
+      const status = new StatusError(403, 'Forbidden');
+      expect(toStorageError(status)).toBe(status);
+      // IndexedDB request.error can be null; pass it through untouched.
+      expect(toStorageError(null)).toBe(null);
     });
   });
 

@@ -8,6 +8,7 @@ import type {
   PatchesState,
 } from '../types.js';
 import { deferred, type Deferred } from '../utils/deferred.js';
+import { toStorageError } from '../net/error.js';
 import { signal } from 'easy-signal';
 import type { BranchClientStore } from './BranchClientStore.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
@@ -274,7 +275,7 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     await new Promise<void>((resolve, reject) => {
       const request = indexedDB.deleteDatabase(this.dbName!);
       request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+      request.onerror = () => reject(toStorageError(request.error));
       request.onblocked = () => reject(request.error);
     });
   }
@@ -598,7 +599,7 @@ export class IDBTransactionWrapper {
     this.tx = tx;
     this.promise = new Promise((resolve, reject) => {
       tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
+      tx.onerror = () => reject(toStorageError(tx.error));
     });
   }
 
@@ -627,7 +628,7 @@ export class IDBStoreWrapper {
     return new Promise((resolve, reject) => {
       const request = this.store.getAll(this.createRange(lower, upper), count);
       request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      request.onerror = () => reject(toStorageError(request.error));
     });
   }
 
@@ -636,7 +637,7 @@ export class IDBStoreWrapper {
       const index = this.store.index(indexName);
       const request = index.getAll(query);
       request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      request.onerror = () => reject(toStorageError(request.error));
     });
   }
 
@@ -644,7 +645,7 @@ export class IDBStoreWrapper {
     return new Promise((resolve, reject) => {
       const request = this.store.get(key);
       request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      request.onerror = () => reject(toStorageError(request.error));
     });
   }
 
@@ -652,7 +653,7 @@ export class IDBStoreWrapper {
     return new Promise((resolve, reject) => {
       const request = this.store.put(value);
       request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      request.onerror = () => reject(toStorageError(request.error));
     });
   }
 
@@ -663,7 +664,7 @@ export class IDBStoreWrapper {
       const key = upper === undefined ? keyOrLower : this.createRange(keyOrLower, upper);
       const request = this.store.delete(key);
       request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+      request.onerror = () => reject(toStorageError(request.error));
     });
   }
 
@@ -671,7 +672,7 @@ export class IDBStoreWrapper {
     return new Promise((resolve, reject) => {
       const request = this.store.count(this.createRange(lower, upper));
       request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      request.onerror = () => reject(toStorageError(request.error));
     });
   }
 
@@ -679,7 +680,7 @@ export class IDBStoreWrapper {
     return new Promise((resolve, reject) => {
       const request = this.store.openCursor(this.createRange(lower, upper));
       request.onsuccess = () => resolve(request.result?.value);
-      request.onerror = () => reject(request.error);
+      request.onerror = () => reject(toStorageError(request.error));
     });
   }
 
@@ -687,7 +688,7 @@ export class IDBStoreWrapper {
     return new Promise((resolve, reject) => {
       const request = this.store.openCursor(this.createRange(lower, upper), 'prev');
       request.onsuccess = () => resolve(request.result?.value);
-      request.onerror = () => reject(request.error);
+      request.onerror = () => reject(toStorageError(request.error));
     });
   }
 }

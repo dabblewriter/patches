@@ -429,7 +429,9 @@ describe('OTBranchManager', () => {
       // so the merge-base clamp is a no-op and baseRev stays at branchedAtRev.
       vi.mocked(mockStore.getCurrentRev).mockResolvedValue(5);
       vi.mocked(mockStore.listChanges).mockResolvedValue(mockBranchChanges);
-      vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
+      // The branch's versions are the ones to copy; the source carries no main version of its
+      // own unless a test gives it one, so the first copy has nothing to chain to.
+      vi.mocked(mockStore.listVersions).mockImplementation(async docId => (docId === 'branch1' ? mockVersions : []));
       vi.mocked(mockStore.loadVersionState).mockResolvedValue(
         JSON.stringify({ title: 'New Title', section: 'New Section' })
       );
@@ -513,6 +515,7 @@ describe('OTBranchManager', () => {
       // The branch already carries the pinned base from a previous (clamped) merge attempt.
       // A retry must use it verbatim — even though min(branchedAtRev, tip) would now be
       // higher — so previously committed merge changes stay inside the dedup window.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       vi.mocked(mockStore.loadBranch).mockResolvedValue({ ...mockBranch, branchedAtRev: 295, mergeBaseRev: 290 });
       vi.mocked(mockStore.getCurrentRev).mockResolvedValue(296);
 
@@ -520,12 +523,19 @@ describe('OTBranchManager', () => {
 
       await branchManager.mergeBranch('branch1');
 
+      // A recomputed clamp would have based these at min(295, 296) = 295.
       expect(mockServer.commitChanges).toHaveBeenCalledWith('doc1', [
         expect.objectContaining({ id: 'change1', baseRev: 290, rev: 291, batchId: 'branch1' }),
         expect.objectContaining({ id: 'change2', baseRev: 290, rev: 292, batchId: 'branch1' }),
       ]);
-      // No clamp recomputation: the source tip is not even consulted.
-      expect(mockStore.getCurrentRev).not.toHaveBeenCalled();
+      // The clamp path never ran: it warns and re-pins the base, and does neither here. (The
+      // tip itself is read regardless, to bound the version-parent lookup below.)
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('clamping merge base'));
+      expect(mockStore.updateBranch).not.toHaveBeenCalledWith(
+        'branch1',
+        expect.objectContaining({ mergeBaseRev: expect.anything() })
+      );
+      warnSpy.mockRestore();
     });
 
     it('pins the clamped merge base first-writer-wins when the store supports CAS', async () => {
@@ -699,7 +709,9 @@ describe('OTBranchManager', () => {
         },
       ];
 
-      vi.mocked(mockStore.listVersions).mockResolvedValue(multipleVersions);
+      vi.mocked(mockStore.listVersions).mockImplementation(async docId =>
+        docId === 'branch1' ? multipleVersions : []
+      );
       vi.mocked(mockStore.loadVersion).mockResolvedValue(undefined);
       vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: [] });
 
@@ -725,8 +737,8 @@ describe('OTBranchManager', () => {
         }),
         expect.anything()
       );
-      // First iteration has no prior version — parentId key must be omitted,
-      // not set to undefined (Firestore rejects undefined values).
+      // No prior copy and no main version on the source, so there is nothing to chain to: the
+      // parentId key must be omitted, not set to undefined (Firestore rejects undefined values).
       const firstMetadata = vi.mocked(mockStore.createVersion).mock.calls[0][1];
       expect(Object.hasOwn(firstMetadata, 'parentId')).toBe(false);
       expect(mockStore.createVersion).toHaveBeenNthCalledWith(
@@ -741,6 +753,30 @@ describe('OTBranchManager', () => {
           name: 'Feature Branch',
           parentId: 'version1',
         }),
+        expect.anything()
+      );
+    });
+
+    it('chains the first copied version to the latest main version on the source', async () => {
+      const sourceVersion: VersionMetadata = {
+        id: 'source-v1',
+        origin: 'main',
+        startedAt: Date.now(),
+        endedAt: Date.now(),
+        startRev: 1,
+        endRev: 4,
+      };
+      vi.mocked(mockStore.listVersions).mockImplementation(async docId =>
+        docId === 'branch1' ? mockVersions : [sourceVersion]
+      );
+      vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: [] });
+
+      await branchManager.mergeBranch('branch1');
+
+      // Unanchored, building the copy's state would replay the source document from rev 1.
+      expect(mockStore.createVersion).toHaveBeenCalledWith(
+        'doc1',
+        expect.objectContaining({ id: 'version1', origin: 'branch', parentId: 'source-v1' }),
         expect.anything()
       );
     });

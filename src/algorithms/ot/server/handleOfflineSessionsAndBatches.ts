@@ -1,6 +1,7 @@
 import type { OTStoreBackend } from '../../../server/types.js';
 import type { Change } from '../../../types.js';
 import { createVersion } from './createVersion.js';
+import { findLatestMainVersion } from './getSnapshotAtRevision.js';
 
 /**
  * Handles offline/large batch versioning logic for multi-batch uploads.
@@ -25,19 +26,13 @@ export async function handleOfflineSessionsAndBatches(
   changes: Change[],
   origin: 'main' | 'offline-branch' = 'offline-branch'
 ) {
-  // For offline branches, find the last main version to use as the initial parent.
-  // This anchors the offline session chain to the main timeline.
+  // Find the last main version at or before the batch's first change to use as the initial
+  // parent. This anchors the session chain to the main timeline; unanchored, the first
+  // session's state build replays the doc from rev 1.
   let parentId: string | undefined;
-  if (origin === 'offline-branch' && changes.length > 0) {
+  if (changes.length > 0) {
     const firstRev = changes[0].rev;
-    const mainVersions = await store.listVersions(docId, {
-      limit: 1,
-      reverse: true,
-      startAfter: firstRev,
-      origin: 'main',
-      orderBy: 'endRev',
-    });
-    parentId = mainVersions[0]?.id;
+    parentId = (await findLatestMainVersion(store, docId, firstRev - 1))?.id;
   }
 
   let sessionStartIndex = 0;

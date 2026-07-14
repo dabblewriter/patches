@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildVersionState } from '../../src/algorithms/ot/server/buildVersionState';
 import { applyChanges } from '../../src/algorithms/ot/shared/applyChanges';
 import { createVersionMetadata } from '../../src/data/version';
 import { readStreamAsString } from '../../src/server/jsonReadable';
@@ -53,11 +54,10 @@ class MemoryOTBranchStore implements OTStoreBackend, BranchingStoreBackend {
   }
 
   async createVersion(docId: string, metadata: VersionMetadata, changes: Change[] = []): Promise<void> {
+    // Build state through the exported builder, like a production store: the version's parent
+    // chain is what bounds the reads, so a version written without one is visible here.
+    const state = await buildVersionState(this, docId, metadata, changes);
     const versions = this.versions.get(docId) ?? [];
-    // Build state like a production store would: replay the change log through endRev
-    // (docs in these tests start with a root replace, so the log rebuilds from null)
-    const log = (this.docs.get(docId) ?? []).filter(c => c.rev <= metadata.endRev);
-    const state = log.length > 0 ? applyChanges(null, log) : undefined;
     versions.push({ metadata, state, changes });
     this.versions.set(docId, versions);
   }
@@ -223,6 +223,9 @@ describe('OTBranchManager integration', () => {
 
   it('does not re-copy already-merged branch versions on repeat merges', async () => {
     const { store, server, manager } = setup();
+    // The source carries no versions of its own, so each copied version's state build
+    // legitimately replays from rev 1 — and warns about it.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     await server.commitChanges('doc1', [rootChange('s1', { src1: 1 })]);
     const branchId = await manager.createBranch('doc1', 1);
@@ -230,12 +233,7 @@ describe('OTBranchManager integration', () => {
     // Branch session 1: revs 2..3, versioned on the branch
     await server.commitChanges(branchId, [change('e1', 1, '/edit1', 1)]);
     await server.commitChanges(branchId, [change('e2', 2, '/edit2', 2)]);
-    const session1 = await store.listChanges(branchId, { startAfter: 1 });
-    await store.createVersion(
-      branchId,
-      createVersionMetadata({ origin: 'main', name: 'Session 1', startedAt: 1, endedAt: 2, startRev: 2, endRev: 3 }),
-      session1
-    );
+    await server.captureCurrentVersion(branchId, { name: 'Session 1' });
 
     await manager.mergeBranch(branchId);
     const afterFirst = store.getVersions('doc1').filter(v => v.origin === 'branch');
@@ -243,22 +241,21 @@ describe('OTBranchManager integration', () => {
 
     // Branch session 2: rev 4, versioned on the branch
     await server.commitChanges(branchId, [change('e3', 3, '/edit3', 3)]);
-    const session2 = await store.listChanges(branchId, { startAfter: 3 });
-    await store.createVersion(
-      branchId,
-      createVersionMetadata({ origin: 'main', name: 'Session 2', startedAt: 3, endedAt: 3, startRev: 4, endRev: 4 }),
-      session2
-    );
+    await server.captureCurrentVersion(branchId, { name: 'Session 2' });
 
     await manager.mergeBranch(branchId);
 
     // Session 1 must not be duplicated by the second merge
     const afterSecond = store.getVersions('doc1').filter(v => v.origin === 'branch');
     expect(afterSecond.map(v => v.name).sort()).toEqual(['Session 1', 'Session 2']);
+    warn.mockRestore();
   });
 
   it('re-stamps copied branch versions into the source rev-space', async () => {
     const { store, server, manager } = setup();
+    // Neither the branch nor the source carries a chainable version, so the state builds
+    // legitimately replay from rev 1 — and warn about it.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     // Source at rev 1; branch whose local rev-space extends past the post-merge source tip
     // (3 init changes seeded by the client: contentStartRev 4)
@@ -291,10 +288,43 @@ describe('OTBranchManager integration', () => {
     expect(copied[0].startRev).toBe(2);
     expect(copied[0].endRev).toBe(3);
     expect(copied[0].endRev).toBeLessThanOrEqual(await store.getCurrentRev('doc1'));
+    warn.mockRestore();
+  });
+
+  it('chains the first copied version to the source timeline', async () => {
+    const { store, server, manager } = setup();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Prod shape: the source carries its own auto-versions below the branch point.
+    await server.commitChanges('doc1', [rootChange('s1', { src1: 1 })]);
+    await server.commitChanges('doc1', [change('s2', 1, '/src2', 2)]);
+    const sourceVersion = await server.captureCurrentVersion('doc1');
+
+    const branchId = await manager.createBranch('doc1', 2);
+    await server.commitChanges(branchId, [change('e1', 1, '/edit1', 1)]);
+    await server.captureCurrentVersion(branchId, { name: 'Session' });
+
+    await manager.mergeBranch(branchId);
+
+    // Unanchored, building the copy's state replays doc1 from rev 1 (and warns about it).
+    const [copied] = store.getVersions('doc1').filter(v => v.origin === 'branch');
+    expect(copied.parentId).toBe(sourceVersion);
+    expect(warn).not.toHaveBeenCalled();
+
+    // Bridged from the parent snapshot, the copy still holds the true state at its endRev.
+    expect(JSON.parse((await store.loadVersionState('doc1', copied.id))!)).toEqual({
+      src1: 1,
+      src2: 2,
+      edit1: 1,
+    });
+    warn.mockRestore();
   });
 
   it('merges and cold loads correctly across two merge rounds', async () => {
     const { server, manager } = setup();
+    // The source carries no versions of its own, so each copied version's state build
+    // legitimately replays from rev 1 — and warns about it.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     await server.commitChanges('doc1', [rootChange('s1', { src1: 1 })]);
     await server.commitChanges('doc1', [change('s2', 1, '/src2', 2)]);
@@ -308,9 +338,20 @@ describe('OTBranchManager integration', () => {
 
     const { state } = await coldLoad(server, 'doc1');
     expect(state).toEqual({ src1: 1, src2: 2, edit1: 1, edit2: 2 });
+    warn.mockRestore();
   });
 
   describe('merge retry and concurrency safety', () => {
+    // These merges copy branch versions onto sources that carry no versions of their own, so
+    // building each copy's state legitimately replays from rev 1 — and warns about it. The
+    // clamped-branch merges below also warn about clamping. Suppress both for clean output.
+    beforeEach(() => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      vi.mocked(console.warn).mockRestore();
+    });
+
     it('retries cleanly after a crash between commit and watermark update — zero duplicate ops', async () => {
       const { store, server, manager } = setup();
 
@@ -343,13 +384,7 @@ describe('OTBranchManager integration', () => {
       const branchId = await manager.createBranch('doc1', 1);
       await server.commitChanges(branchId, [change('e1', 1, '/edit1', 1)]);
       await server.commitChanges(branchId, [change('e2', 2, '/edit2', 2)]);
-      const session = await store.listChanges(branchId, { startAfter: 1 });
-      await store.createVersion(
-        branchId,
-        createVersionMetadata({ origin: 'main', name: 'Session 1', startedAt: 1, endedAt: 2, startRev: 2, endRev: 3 }),
-        session
-      );
-      const branchVersionId = store.getVersions(branchId).find(v => v.name === 'Session 1')!.id;
+      const branchVersionId = (await server.captureCurrentVersion(branchId, { name: 'Session 1' }))!;
 
       failWatermarkOnce(store);
       await expect(manager.mergeBranch(branchId)).rejects.toThrow('simulated crash');
@@ -452,7 +487,6 @@ describe('OTBranchManager integration', () => {
 
     it('dedups a clamped-branch retry via the pinned merge base even though the tip advanced', async () => {
       const { store, server, manager } = setup();
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       // Migrated doc: source renumbered down to rev 3, branch record still claims
       // branchedAtRev 5 (ahead of the tip).
@@ -490,12 +524,10 @@ describe('OTBranchManager integration', () => {
       expect((await store.loadBranch('b1'))!.lastMergedRev).toBe(3);
       const { state } = await coldLoad(server, 'doc1');
       expect(state).toEqual({ src1: 1, src2: 2, src3: 3, edit1: 1, edit2: 2 });
-      warnSpy.mockRestore();
     });
 
     it('dedups concurrent merges of a clamped branch when one reads the tip after the other commits', async () => {
       const { store, server, manager } = setup();
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       // Migrated doc: source renumbered down to rev 3, branch record still claims
       // branchedAtRev 5 (ahead of the tip).
@@ -553,7 +585,6 @@ describe('OTBranchManager integration', () => {
       expect((await store.loadBranch('b1'))!.lastMergedRev).toBe(3);
       const { state } = await coldLoad(server, 'doc1');
       expect(state).toEqual({ src1: 1, src2: 2, src3: 3, edit1: 1, edit2: 2 });
-      warnSpy.mockRestore();
     });
 
     it('keeps working on stores without the updateBranchIf capability (legacy semantics)', async () => {

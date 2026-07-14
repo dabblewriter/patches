@@ -1,3 +1,4 @@
+import { findLatestMainVersion } from '../algorithms/ot/server/getSnapshotAtRevision.js';
 import { getStateAtRevision } from '../algorithms/ot/server/getStateAtRevision.js';
 import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
@@ -217,13 +218,17 @@ export class OTBranchManager implements BranchManager {
         lastVersionId = v.id;
         continue;
       }
+      const startRev = toSourceRev(v.startRev);
+      // The first copy has no earlier copy to chain to, so it anchors to the source's own
+      // timeline. Unanchored, building its state replays the source document from rev 1.
+      const parentId = lastVersionId ?? (await findLatestMainVersion(this.store, sourceDocId, startRev - 1))?.id;
       const copy = {
         ...v,
         origin: 'branch' as const,
-        startRev: toSourceRev(v.startRev),
+        startRev,
         endRev: toSourceRev(v.endRev),
         groupId: branchId,
-        parentId: lastVersionId,
+        parentId,
       };
       if (copy.parentId === undefined) delete copy.parentId;
       const changes = await this.store.loadVersionChanges?.(branchId, v.id);

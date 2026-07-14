@@ -352,7 +352,8 @@ describe('PatchesHistoryManager', () => {
 
     it('reconstructs through an invalid committed gap change instead of throwing (history viewing)', async () => {
       // Version v1 starts at rev 3 with no parent — revs 1-2 replay as gap
-      // changes, and rev 2 carries a historically-invalid array-index op.
+      // changes (which warns), and rev 2 carries a historically-invalid array-index op.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const targetVersion = { id: 'v1', startRev: 3, endRev: 3, origin: 'main' as const };
       const gapChanges = [
         {
@@ -375,6 +376,7 @@ describe('PatchesHistoryManager', () => {
 
       const otStore = {
         ...mockStore,
+        getCurrentRev: vi.fn().mockResolvedValue(3),
         listChanges: vi.fn().mockResolvedValue(gapChanges),
         loadVersion: vi.fn().mockImplementation((_: string, id: string) => {
           return Promise.resolve(id === 'v1' ? targetVersion : undefined);
@@ -399,6 +401,7 @@ describe('PatchesHistoryManager', () => {
 
       expect(JSON.parse(text)).toEqual({ children: ['a'] });
       expect(skipped).toEqual([{ docId: 'doc1', changeId: 'c2' }]);
+      warn.mockRestore();
     });
   });
 

@@ -4,7 +4,11 @@ import {
   getBaseStateBeforeVersion,
   getStateBeforeVersionAsStream,
 } from '../../../../src/algorithms/ot/server/buildVersionState';
-import { ApplyChangesError, type SkippedChange } from '../../../../src/algorithms/ot/shared/applyChanges';
+import {
+  applyChangesForReconstruction,
+  ApplyChangesError,
+  type SkippedChange,
+} from '../../../../src/algorithms/ot/shared/applyChanges';
 import { readStreamAsString } from '../../../../src/server/jsonReadable';
 import type { OTStoreBackend } from '../../../../src/server/types';
 import type { Change, VersionMetadata } from '../../../../src/types';
@@ -40,15 +44,33 @@ const versionMeta = (overrides: Partial<VersionMetadata> = {}): VersionMetadata 
   ...overrides,
 });
 
-function makeStore(changes: Change[]): OTStoreBackend {
+/** State at `rev` — replayed leniently, the way a real store builds version state. */
+const stateAt = (changes: Change[], rev: number) =>
+  applyChangesForReconstruction(
+    null,
+    changes.filter(c => c.rev <= rev),
+    { onSkippedChange: () => {} }
+  );
+
+function makeStore(changes: Change[], versions: VersionMetadata[] = []): OTStoreBackend {
+  const states = new Map(versions.map(v => [v.id, JSON.stringify(stateAt(changes, v.endRev))]));
   return {
+    getCurrentRev: vi.fn(async () => changes.at(-1)?.rev ?? 0),
     listChanges: vi.fn(async (_docId: string, options: any = {}) => {
       const startAfter = options.startAfter ?? 0;
       const endBefore = options.endBefore ?? Infinity;
       return changes.filter(c => c.rev > startAfter && c.rev < endBefore);
     }),
-    loadVersion: vi.fn(async () => undefined),
-    loadVersionState: vi.fn(async () => undefined),
+    // Mirrors the reversed-cursor semantics of ListVersionsOptions: under `reverse` on
+    // `endRev`, `startAfter: N` selects versions with `endRev < N`.
+    listVersions: vi.fn(async (_docId: string, options: any = {}) => {
+      let result = versions.filter(v => !options.origin || v.origin === options.origin);
+      result.sort((a, b) => b.endRev - a.endRev);
+      if (options.startAfter !== undefined) result = result.filter(v => v.endRev < options.startAfter);
+      return options.limit !== undefined ? result.slice(0, options.limit) : result;
+    }),
+    loadVersion: vi.fn(async (_docId: string, id: string) => versions.find(v => v.id === id)),
+    loadVersionState: vi.fn(async (_docId: string, id: string) => states.get(id)),
   } as unknown as OTStoreBackend;
 }
 
@@ -82,7 +104,9 @@ describe('buildVersionState over a log with an invalid committed op', () => {
 
   it('applies reconstruction mode to gap changes bridged before the version', async () => {
     // Version v2 starts at rev 5 with parent-less history: revs 1-4 (including
-    // the invalid rev 3) are replayed as gap changes.
+    // the invalid rev 3) are replayed as gap changes. The full replay warns; that
+    // warn is under test elsewhere ('version parent chaining').
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const gapVersion = versionMeta({ id: 'v2', startRev: 5, endRev: 5 });
     const versionChanges = [createChange(5, [{ op: 'add', path: '/docs/5wPI/children/2', value: 'scene-3' }])];
     const store = makeStore([...changeLog, ...versionChanges]);
@@ -95,17 +119,21 @@ describe('buildVersionState over a log with an invalid committed op', () => {
     expect(state).toEqual({ docs: { '5wPI': { children: ['scene-1', 'scene-2', 'scene-3'] } } });
     expect(skipped).toHaveLength(1);
     expect(skipped[0].change.id).toBe('change-3');
+    warn.mockRestore();
   });
 
   it('getBaseStateBeforeVersion stays strict without explicit reconstruction options', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {}); // parent-less full replay warns
     const gapVersion = versionMeta({ id: 'v2', startRev: 5, endRev: 5 });
     const store = makeStore(changeLog);
     await expect(getBaseStateBeforeVersion(store, 'projects/p1/content', gapVersion)).rejects.toThrow(
       ApplyChangesError
     );
+    warn.mockRestore();
   });
 
   it('getStateBeforeVersionAsStream reconstructs through the invalid op when opted in', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {}); // parent-less full replay warns
     const gapVersion = versionMeta({ id: 'v2', startRev: 5, endRev: 5 });
     const store = makeStore(changeLog);
 
@@ -115,5 +143,156 @@ describe('buildVersionState over a log with an invalid committed op', () => {
     const json = await readStreamAsString(stream);
 
     expect(JSON.parse(json)).toEqual({ docs: { '5wPI': { children: ['scene-1', 'scene-2'] } } });
+    warn.mockRestore();
+  });
+});
+
+// A version's base state is bridged forward from its parent's snapshot. With no parent the
+// bridge starts at rev 0 and replays the document's entire history — an unbounded read that on
+// a large document is expensive enough to fail outright.
+describe('version parent chaining', () => {
+  const cleanLog: Change[] = [
+    createChange(1, [{ op: 'replace', path: '', value: { words: [] } }]),
+    createChange(2, [{ op: 'add', path: '/words/0', value: 'one' }]),
+    createChange(3, [{ op: 'add', path: '/words/1', value: 'two' }]),
+    createChange(4, [{ op: 'add', path: '/words/2', value: 'three' }]),
+    createChange(5, [{ op: 'add', path: '/words/3', value: 'four' }]),
+  ];
+
+  const parent = versionMeta({ id: 'v-parent', startRev: 1, endRev: 3 });
+  const docId = 'projects/p1/content';
+
+  /** The rev each `listChanges` call started reading after; `0` is a full-history replay. */
+  const readsFrom = (store: OTStoreBackend) =>
+    vi.mocked(store.listChanges).mock.calls.map(([, options]) => options?.startAfter ?? 0);
+
+  it('bridges from the parent snapshot instead of replaying from rev 1', async () => {
+    const store = makeStore(cleanLog, [parent]);
+    const version = versionMeta({ id: 'v2', parentId: 'v-parent', startRev: 4, endRev: 5 });
+
+    const { state, rev } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one', 'two'] });
+    expect(rev).toBe(3);
+    // The parent's snapshot already covers revs 1-3 and the version starts at 4, so there is no
+    // gap to bridge and the change log is never read.
+    expect(readsFrom(store)).toEqual([]);
+  });
+
+  it('bounds the gap read to the parent endRev', async () => {
+    const store = makeStore(cleanLog, [parent]);
+    const version = versionMeta({ id: 'v2', parentId: 'v-parent', startRev: 5, endRev: 5 });
+
+    const { state } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one', 'two', 'three'] });
+    expect(store.listChanges).toHaveBeenCalledTimes(1);
+    expect(store.listChanges).toHaveBeenCalledWith(docId, { startAfter: 3, endBefore: 5 });
+  });
+
+  it('resolves a parent the writer failed to record rather than replaying the whole log', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = makeStore(cleanLog, [parent]);
+    const version = versionMeta({ id: 'v2', startRev: 5, endRev: 5 }); // no parentId
+
+    const { state } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one', 'two', 'three'] });
+    expect(readsFrom(store)).toEqual([3]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no parentId'));
+    // The resolution already returned the parent's metadata; no re-fetch.
+    expect(store.loadVersion).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('resolves the missing parent on the streaming path too', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = makeStore(cleanLog, [parent]);
+    const version = versionMeta({ id: 'v2', startRev: 5, endRev: 5 }); // no parentId
+
+    const json = await readStreamAsString(await getStateBeforeVersionAsStream(store, docId, version));
+
+    expect(JSON.parse(json)).toEqual({ words: ['one', 'two', 'three'] });
+    expect(readsFrom(store)).toEqual([3]);
+    expect(store.loadVersion).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('warns about the full replay — not about chaining — when the resolved parent state is missing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = makeStore(cleanLog, [parent]);
+    vi.mocked(store.loadVersionState).mockResolvedValue(undefined); // resolved parent's state is gone
+    const version = versionMeta({ id: 'v2', startRev: 5, endRev: 5 }); // no parentId
+
+    const { state, rev } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one', 'two', 'three'] });
+    expect(rev).toBe(4);
+    expect(readsFrom(store)).toEqual([0]); // full-history replay
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no usable parent'));
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('chaining'));
+    warn.mockRestore();
+  });
+
+  it('warns about the full replay when the recorded parent cannot be loaded', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = makeStore(cleanLog); // no versions: the recorded parent is dead
+    const version = versionMeta({ id: 'v2', parentId: 'v-gone', startRev: 5, endRev: 5 });
+
+    const { state } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one', 'two', 'three'] });
+    expect(readsFrom(store)).toEqual([0]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no usable parent'));
+    warn.mockRestore();
+  });
+
+  it('ignores a recorded parent whose snapshot overlaps the version', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = makeStore(cleanLog, [parent]); // parent snapshot covers revs 1-3
+    const version = versionMeta({ id: 'v2', parentId: 'v-parent', startRev: 3, endRev: 5 });
+
+    const { state, rev } = await getBaseStateBeforeVersion(store, docId, version);
+
+    // The parent's snapshot (endRev 3) already contains rev 3; the true base is the state at rev 2.
+    expect(state).toEqual({ words: ['one'] });
+    expect(rev).toBe(2);
+    expect(readsFrom(store)).toEqual([0]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('overlaps'));
+    warn.mockRestore();
+  });
+
+  it('keeps the streaming fast path from serving an overlapping parent state', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = makeStore(cleanLog, [parent]);
+    const version = versionMeta({ id: 'v2', parentId: 'v-parent', startRev: 3, endRev: 5 });
+
+    const json = await readStreamAsString(await getStateBeforeVersionAsStream(store, docId, version));
+
+    // Unguarded, the no-gap fast path (endRev 3 >= startRev - 1) would stream the parent's
+    // rev-3 bytes verbatim — one rev too new.
+    expect(JSON.parse(json)).toEqual({ words: ['one'] });
+    expect(readsFrom(store)).toEqual([0]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('overlaps'));
+    warn.mockRestore();
+  });
+
+  it('builds the first version of a document with no parent', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = makeStore(cleanLog);
+    const version = versionMeta({ id: 'v1', startRev: 1, endRev: 5 });
+
+    const state = await buildVersionState(store, docId, version, cleanLog);
+
+    expect(state).toEqual({ words: ['one', 'two', 'three', 'four'] });
+    // Nothing precedes rev 1: no parent to look for, no history to bridge, nothing to warn about.
+    expect(store.listVersions).not.toHaveBeenCalled();
+    expect(readsFrom(store)).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

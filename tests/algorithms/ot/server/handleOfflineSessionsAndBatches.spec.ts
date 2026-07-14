@@ -21,6 +21,8 @@ describe('handleOfflineSessionsAndBatches', () => {
     mockStore = {
       createVersion: vi.fn(),
       listVersions: vi.fn().mockResolvedValue([]),
+      // The parent lookup bounds itself by the committed head; keep it past every test rev.
+      getCurrentRev: vi.fn().mockResolvedValue(100),
     } as any;
   });
 
@@ -140,7 +142,7 @@ describe('handleOfflineSessionsAndBatches', () => {
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
-      startAfter: 6, // firstRev
+      startAfter: 6, // findLatestMainVersion's upperBound + 1, i.e. firstRev when the head is past it
       origin: 'main',
       orderBy: 'endRev',
     });
@@ -168,12 +170,18 @@ describe('handleOfflineSessionsAndBatches', () => {
     );
   });
 
-  it('should not query for main version when origin is main', async () => {
+  it('should set parentId from last main version when origin is main', async () => {
     const changes = [createChange('1', 6, 1000)];
+    const mainVersion = { id: 'main-v1', endRev: 5, origin: 'main' };
+
+    vi.mocked(mockStore.listVersions).mockResolvedValue([mainVersion] as any);
 
     await handleOfflineSessionsAndBatches(mockStore, sessionTimeoutMillis, 'doc1', changes, 'main');
 
-    expect(mockStore.listVersions).not.toHaveBeenCalled();
-    expect(mockStore.createVersion).toHaveBeenCalledWith('doc1', expect.objectContaining({ origin: 'main' }), changes);
+    expect(mockStore.createVersion).toHaveBeenCalledWith(
+      'doc1',
+      expect.objectContaining({ origin: 'main', parentId: 'main-v1' }),
+      changes
+    );
   });
 });

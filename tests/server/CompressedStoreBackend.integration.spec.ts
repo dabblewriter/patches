@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { buildVersionState } from '../../src/algorithms/ot/server/buildVersionState';
 import { applyChanges } from '../../src/algorithms/ot/shared/applyChanges';
 import { base64Compressor } from '../../src/compression';
@@ -201,6 +201,9 @@ describe('CompressedStoreBackend composition', () => {
 
   it('mergeBranch round-trips without double-compressing the source log', async () => {
     const { store, server, manager } = setup();
+    // The source carries no versions of its own, so each copied version's state build
+    // legitimately replays from rev 1 — and warns about it.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     await server.commitChanges('doc1', [rootChange('s1', { src1: 1 })]);
     await server.commitChanges('doc1', [change('s2', 1, '/src2', 2)]);
@@ -223,28 +226,28 @@ describe('CompressedStoreBackend composition', () => {
     expect(merged).toHaveLength(4);
 
     expect(await coldLoad(server, 'doc1')).toEqual({ src1: 1, src2: 2, edit1: 1, edit2: 2 });
+    warn.mockRestore();
   });
 
   it('copies branch versions to the source with uncompressed change rows', async () => {
     const { store, wrapped, server, manager } = setup();
+    // The source carries no versions of its own, so the copied version's state build
+    // legitimately replays from rev 1 — and warns about it.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     await server.commitChanges('doc1', [rootChange('s1', { src1: 1 })]);
     const branchId = await manager.createBranch('doc1', 1);
 
     await server.commitChanges(branchId, [change('e1', 1, '/edit1', 1)]);
     await server.commitChanges(branchId, [change('e2', 2, '/edit2', 2)]);
-    const session = await wrapped.listChanges(branchId, { startAfter: 1 });
-    await wrapped.createVersion(
-      branchId,
-      createVersionMetadata({ origin: 'main', name: 'Session', startedAt: 1, endedAt: 2, startRev: 2, endRev: 3 }),
-      session
-    );
+    await server.captureCurrentVersion(branchId, { name: 'Session' });
 
     await manager.mergeBranch(branchId);
 
     const copied = store.rawVersions('doc1').filter(v => v.metadata.origin === 'branch');
     expect(copied).toHaveLength(1);
     expect(copied[0].changes.every(c => Array.isArray(c.ops))).toBe(true);
+    warn.mockRestore();
   });
 
   it('createVersion hands the inner store uncompressed changes that buildVersionState can apply', async () => {

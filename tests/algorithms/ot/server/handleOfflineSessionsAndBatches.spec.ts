@@ -21,6 +21,8 @@ describe('handleOfflineSessionsAndBatches', () => {
     mockStore = {
       createVersion: vi.fn(),
       listVersions: vi.fn().mockResolvedValue([]),
+      // The parent lookup bounds itself by the committed head; keep it past every test rev.
+      getCurrentRev: vi.fn().mockResolvedValue(100),
     } as any;
   });
 
@@ -140,7 +142,7 @@ describe('handleOfflineSessionsAndBatches', () => {
     expect(mockStore.listVersions).toHaveBeenCalledWith('doc1', {
       limit: 1,
       reverse: true,
-      startAfter: 6, // firstRev
+      startAfter: 6, // findLatestMainVersion's upperBound + 1, i.e. firstRev when the head is past it
       origin: 'main',
       orderBy: 'endRev',
     });

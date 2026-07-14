@@ -104,7 +104,9 @@ describe('buildVersionState over a log with an invalid committed op', () => {
 
   it('applies reconstruction mode to gap changes bridged before the version', async () => {
     // Version v2 starts at rev 5 with parent-less history: revs 1-4 (including
-    // the invalid rev 3) are replayed as gap changes.
+    // the invalid rev 3) are replayed as gap changes. The full replay warns; that
+    // warn is under test elsewhere ('version parent chaining').
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const gapVersion = versionMeta({ id: 'v2', startRev: 5, endRev: 5 });
     const versionChanges = [createChange(5, [{ op: 'add', path: '/docs/5wPI/children/2', value: 'scene-3' }])];
     const store = makeStore([...changeLog, ...versionChanges]);
@@ -117,17 +119,21 @@ describe('buildVersionState over a log with an invalid committed op', () => {
     expect(state).toEqual({ docs: { '5wPI': { children: ['scene-1', 'scene-2', 'scene-3'] } } });
     expect(skipped).toHaveLength(1);
     expect(skipped[0].change.id).toBe('change-3');
+    warn.mockRestore();
   });
 
   it('getBaseStateBeforeVersion stays strict without explicit reconstruction options', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {}); // parent-less full replay warns
     const gapVersion = versionMeta({ id: 'v2', startRev: 5, endRev: 5 });
     const store = makeStore(changeLog);
     await expect(getBaseStateBeforeVersion(store, 'projects/p1/content', gapVersion)).rejects.toThrow(
       ApplyChangesError
     );
+    warn.mockRestore();
   });
 
   it('getStateBeforeVersionAsStream reconstructs through the invalid op when opted in', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {}); // parent-less full replay warns
     const gapVersion = versionMeta({ id: 'v2', startRev: 5, endRev: 5 });
     const store = makeStore(changeLog);
 
@@ -137,6 +143,7 @@ describe('buildVersionState over a log with an invalid committed op', () => {
     const json = await readStreamAsString(stream);
 
     expect(JSON.parse(json)).toEqual({ docs: { '5wPI': { children: ['scene-1', 'scene-2'] } } });
+    warn.mockRestore();
   });
 });
 
@@ -193,6 +200,8 @@ describe('version parent chaining', () => {
     expect(state).toEqual({ words: ['one', 'two', 'three'] });
     expect(readsFrom(store)).toEqual([3]);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('no parentId'));
+    // The resolution already returned the parent's metadata; no re-fetch.
+    expect(store.loadVersion).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 
@@ -205,18 +214,85 @@ describe('version parent chaining', () => {
 
     expect(JSON.parse(json)).toEqual({ words: ['one', 'two', 'three'] });
     expect(readsFrom(store)).toEqual([3]);
+    expect(store.loadVersion).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('warns about the full replay — not about chaining — when the resolved parent state is missing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = makeStore(cleanLog, [parent]);
+    vi.mocked(store.loadVersionState).mockResolvedValue(undefined); // resolved parent's state is gone
+    const version = versionMeta({ id: 'v2', startRev: 5, endRev: 5 }); // no parentId
+
+    const { state, rev } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one', 'two', 'three'] });
+    expect(rev).toBe(4);
+    expect(readsFrom(store)).toEqual([0]); // full-history replay
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no usable parent'));
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('chaining'));
+    warn.mockRestore();
+  });
+
+  it('warns about the full replay when the recorded parent cannot be loaded', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = makeStore(cleanLog); // no versions: the recorded parent is dead
+    const version = versionMeta({ id: 'v2', parentId: 'v-gone', startRev: 5, endRev: 5 });
+
+    const { state } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one', 'two', 'three'] });
+    expect(readsFrom(store)).toEqual([0]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no usable parent'));
+    warn.mockRestore();
+  });
+
+  it('ignores a recorded parent whose snapshot overlaps the version', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = makeStore(cleanLog, [parent]); // parent snapshot covers revs 1-3
+    const version = versionMeta({ id: 'v2', parentId: 'v-parent', startRev: 3, endRev: 5 });
+
+    const { state, rev } = await getBaseStateBeforeVersion(store, docId, version);
+
+    // The parent's snapshot (endRev 3) already contains rev 3; the true base is the state at rev 2.
+    expect(state).toEqual({ words: ['one'] });
+    expect(rev).toBe(2);
+    expect(readsFrom(store)).toEqual([0]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('overlaps'));
+    warn.mockRestore();
+  });
+
+  it('keeps the streaming fast path from serving an overlapping parent state', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = makeStore(cleanLog, [parent]);
+    const version = versionMeta({ id: 'v2', parentId: 'v-parent', startRev: 3, endRev: 5 });
+
+    const json = await readStreamAsString(await getStateBeforeVersionAsStream(store, docId, version));
+
+    // Unguarded, the no-gap fast path (endRev 3 >= startRev - 1) would stream the parent's
+    // rev-3 bytes verbatim — one rev too new.
+    expect(JSON.parse(json)).toEqual({ words: ['one'] });
+    expect(readsFrom(store)).toEqual([0]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('overlaps'));
     warn.mockRestore();
   });
 
   it('builds the first version of a document with no parent', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const store = makeStore(cleanLog);
     const version = versionMeta({ id: 'v1', startRev: 1, endRev: 5 });
 
     const state = await buildVersionState(store, docId, version, cleanLog);
 
     expect(state).toEqual({ words: ['one', 'two', 'three', 'four'] });
-    // Nothing precedes rev 1: no parent to look for, no history to bridge.
+    // Nothing precedes rev 1: no parent to look for, no history to bridge, nothing to warn about.
     expect(store.listVersions).not.toHaveBeenCalled();
     expect(readsFrom(store)).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

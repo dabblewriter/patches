@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { getSnapshotAtRevision, getSnapshotStream } from '../../../../src/algorithms/ot/server/getSnapshotAtRevision';
+import { StatusError } from '../../../../src/net/error';
 import type { OTStoreBackend } from '../../../../src/server';
 
 async function readStream(stream: ReadableStream<string>): Promise<string> {
@@ -175,7 +176,9 @@ describe('getSnapshotAtRevision', () => {
     });
   });
 
-  it('should handle case with no version state', async () => {
+  it('throws a retryable 503 when a version exists but its state is missing', async () => {
+    // A lost (or not-yet-built) state blob must never serve the no-versions shape:
+    // null state + only the tail of changes = the document served as EMPTY at rev 10.
     const mockVersions = [
       {
         id: 'v1',
@@ -186,28 +189,30 @@ describe('getSnapshotAtRevision', () => {
         startRev: 0,
       },
     ];
-    const mockChanges = [
-      {
-        id: 'c1',
-        rev: 11,
-        baseRev: 10,
-        createdAt: 1100,
-        committedAt: 1100,
-        ops: [{ op: 'add', path: '/text', value: 'hello' }],
-      },
-    ];
 
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(11);
     vi.mocked(mockStore.listVersions).mockResolvedValue(mockVersions);
     vi.mocked(mockStore.loadVersionState).mockResolvedValue(undefined);
-    vi.mocked(mockStore.listChanges).mockResolvedValue(mockChanges);
 
-    const result = await getSnapshotAtRevision(mockStore, 'doc1');
+    const err: any = await getSnapshotAtRevision(mockStore, 'doc1').catch(e => e);
 
-    expect(result).toEqual({
-      state: null,
-      rev: 10,
-      changes: mockChanges,
-    });
+    expect(err).toBeInstanceOf(StatusError);
+    expect(err.code).toBe(503);
+    expect(err.data).toEqual({ docId: 'doc1', versionId: 'v1' });
+    expect(mockStore.listChanges).not.toHaveBeenCalled();
+  });
+
+  it('treats an empty-string state (zero-byte blob) as missing too', async () => {
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(11);
+    vi.mocked(mockStore.listVersions).mockResolvedValue([
+      { id: 'v1', endRev: 10, origin: 'main' as const, startedAt: 1000, endedAt: 2000, startRev: 0 },
+    ]);
+    vi.mocked(mockStore.loadVersionState).mockResolvedValue('');
+
+    const err: any = await getSnapshotAtRevision(mockStore, 'doc1').catch(e => e);
+
+    expect(err).toBeInstanceOf(StatusError);
+    expect(err.code).toBe(503);
   });
 
   it('should handle empty changes list', async () => {
@@ -420,6 +425,17 @@ describe('getSnapshotStream', () => {
     const json = await readStream(await getSnapshotStream(mockStore, 'doc1'));
 
     expect(JSON.parse(json)).toEqual({ state: null, rev: 0, changes: [] });
+  });
+
+  it('throws a retryable 503 instead of streaming null state when a version state is missing', async () => {
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(10);
+    vi.mocked(mockStore.listVersions).mockResolvedValue([{ id: 'v1', endRev: 10 } as any]);
+    vi.mocked(mockStore.loadVersionState).mockResolvedValue(undefined);
+
+    const err: any = await getSnapshotStream(mockStore, 'doc1').catch(e => e);
+
+    expect(err).toBeInstanceOf(StatusError);
+    expect(err.code).toBe(503);
   });
 
   it('treats rev 0 as a bound (empty pre-history state), not "latest"', async () => {

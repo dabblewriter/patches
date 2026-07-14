@@ -1,5 +1,6 @@
 import { getStateBeforeVersionAsStream } from '../algorithms/ot/server/buildVersionState.js';
 import type { SkippedChange } from '../algorithms/ot/shared/applyChanges.js';
+import { StatusError } from '../net/error.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import type { Change, EditableVersionMetadata, ListVersionsOptions, VersionMetadata } from '../types.js';
 import { jsonReadable } from './jsonReadable.js';
@@ -89,21 +90,31 @@ export class PatchesHistoryManager {
    * Returns a ReadableStream so the state can be streamed to clients via RPC.
    * @param docId - The ID of the document.
    * @param versionId - The unique ID of the version.
-   * @returns A ReadableStream of the JSON state, or a stream of 'null' if not found.
-   * @throws Error if state loading fails.
+   * @returns A ReadableStream of the JSON state.
+   * @throws StatusError 404 when the version does not exist, retryable StatusError 503 when
+   *   its state is not available (lost, or a deferred build that hasn't landed), or Error if
+   *   state loading fails.
    */
   async getVersionState(docId: string, versionId: string): Promise<ReadableStream<string>> {
+    let rawState: string | ReadableStream<string> | undefined;
     try {
-      const rawState = await this.store.loadVersionState(docId, versionId);
-      if (rawState === undefined) {
-        return jsonReadable('null');
-      }
-      // rawState is already string or ReadableStream<string> — wrap string if needed
-      return typeof rawState === 'string' ? jsonReadable(rawState) : rawState;
+      rawState = await this.store.loadVersionState(docId, versionId);
     } catch (error) {
+      if (error instanceof StatusError) throw error;
       console.error(`Failed to load state for version ${versionId} of doc ${docId}.`, error);
       throw new Error(`Could not load state for version ${versionId}.`, { cause: error });
     }
+    if (rawState) {
+      return typeof rawState === 'string' ? jsonReadable(rawState) : rawState;
+    }
+    // Missing state (undefined, or '' from a zero-byte blob) is not servable as a document:
+    // distinguish a version that doesn't exist from one whose state isn't available.
+    const version = await this.store.loadVersion(docId, versionId);
+    if (!version) throw new StatusError(404, `Version ${versionId} not found for doc ${docId}.`);
+    throw new StatusError(503, `State for version ${versionId} of doc ${docId} is unavailable; retry later.`, {
+      docId,
+      versionId,
+    });
   }
 
   /**

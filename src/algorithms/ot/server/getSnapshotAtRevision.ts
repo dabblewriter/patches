@@ -1,3 +1,4 @@
+import { StatusError } from '../../../net/error.js';
 import { concatStreams, parseVersionState } from '../../../server/jsonReadable.js';
 import type { OTStoreBackend } from '../../../server/types.js';
 import type { PatchesSnapshot, VersionMetadata } from '../../../types.js';
@@ -36,13 +37,25 @@ export async function findLatestMainVersion(
   return versions[0];
 }
 
-/** {@link findLatestMainVersion} plus its raw state, for the snapshot readers. */
+/**
+ * {@link findLatestMainVersion} plus its raw state, for the snapshot readers.
+ *
+ * A recorded-but-missing state blob (undefined, or '' from a zero-byte read) is unservable:
+ * falling through to the no-versions shape would serve the document as EMPTY at the version's
+ * rev, so this throws a retryable 503 instead. Stores that build version state out of band
+ * resolve or fail the read inside `loadVersionState` before it gets here.
+ */
 async function getLatestMainVersion(store: OTStoreBackend, docId: string, beforeRev?: number) {
   const version = await findLatestMainVersion(store, docId, beforeRev);
-  return {
-    rawState: version ? await store.loadVersionState(docId, version.id) : undefined,
-    versionRev: version?.endRev ?? 0,
-  };
+  if (!version) return { rawState: undefined, versionRev: 0 };
+  const rawState = await store.loadVersionState(docId, version.id);
+  if (!rawState) {
+    throw new StatusError(503, `State for version ${version.id} of doc ${docId} is unavailable; retry later.`, {
+      docId,
+      versionId: version.id,
+    });
+  }
+  return { rawState, versionRev: version.endRev };
 }
 
 /**

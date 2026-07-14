@@ -363,8 +363,8 @@ export class LWWServer implements PatchesServer {
   /**
    * Captures the current state of a document as a new version.
    * Only works if store implements VersioningStoreBackend.
-   * Does NOT build state — creates version metadata, then emits `onVersionCreated`
-   * so subscribers can build and persist state out of band.
+   * Saves version metadata via `store.createVersion`; building and persisting state
+   * is the store's concern, inline or deferred (see `VersioningStoreBackend`).
    *
    * @param docId - The document ID.
    * @param metadata - Optional metadata for the version.

@@ -15,33 +15,39 @@ function replayChanges<T>(state: T, changes: Change[], options?: ReplayOptions):
 }
 
 /**
+ * How far up the parent chain to look for an ancestor with state before giving up and
+ * replaying from rev 1: keeps a poisoned or unbuilt chain a bounded read.
+ */
+export const MAX_ANCESTOR_HOPS = 10;
+
+/**
  * Loads the state of the version `version` chains from, and the rev it ends at.
  *
  * A version that starts past rev 1 with no recorded `parentId` is a bug in whatever wrote it:
  * every base state below is bridged from `parent.endRev`, so without a parent the bridge runs
- * from rev 0 and replays the document's *entire* history — unbounded, and on a large document
- * expensive enough to fail the read outright. Rather than do that silently, resolve the parent
+ * from rev 0 and replays the document's *entire* history (unbounded, and on a large document
+ * expensive enough to fail the read outright). Rather than do that silently, resolve the parent
  * the writer should have recorded. The state it yields is identical; the read is bounded.
+ * A parent whose metadata exists but whose state is missing (a lost blob, or a deferred build
+ * that hasn't landed) gets the same treatment through its own `parentId` chain, bounded by
+ * {@link MAX_ANCESTOR_HOPS}.
  *
- * Returns undefined when there is no usable parent to chain from — no earlier version exists,
- * the parent (recorded or resolved) can't be loaded, or the parent's snapshot overlaps this
- * version's range — leaving the caller to build the base by replaying from rev 1. Any of those
- * on a version past rev 1 warns, since that replay is the unbounded read chaining exists to avoid.
+ * Returns undefined when there is no usable parent to chain from, leaving the caller to build
+ * the base by replaying from rev 1; on a version past rev 1 that warns, since the replay is
+ * the unbounded read chaining exists to avoid.
  */
 async function loadParentState(
   store: OTStoreBackend,
   docId: string,
   version: VersionMetadata
 ): Promise<{ rawState: string | ReadableStream<string>; endRev: number } | undefined> {
+  const loadPair = (id: string) => Promise.all([store.loadVersionState(docId, id), store.loadVersion(docId, id)]);
   const recordedParentId = version.parentId;
   let parentMeta: VersionMetadata | undefined;
   let rawState: string | ReadableStream<string> | undefined;
 
   if (recordedParentId) {
-    [rawState, parentMeta] = await Promise.all([
-      store.loadVersionState(docId, recordedParentId),
-      store.loadVersion(docId, recordedParentId),
-    ]);
+    [rawState, parentMeta] = await loadPair(recordedParentId);
   } else if (version.startRev > 1) {
     // Resolve the parent the writer should have recorded. The resolved metadata is already in
     // hand, so only the state needs loading — no re-fetch that a transient miss could fail.
@@ -49,7 +55,21 @@ async function loadParentState(
     if (parentMeta) rawState = await store.loadVersionState(docId, parentMeta.id);
   }
 
-  if (parentMeta && rawState !== undefined) {
+  // Parent metadata without state: walk the ancestor chain to the nearest version with state.
+  // Missing is any falsy read (a zero-byte blob comes back '', never a valid state). A hop that
+  // fails transiently degrades to the replay fallback rather than failing the read; the replay
+  // runs off the change log, a separate subsystem from the state blobs.
+  const statelessParentId = parentMeta && !rawState ? parentMeta.id : undefined;
+  try {
+    for (let hops = 0; parentMeta && !rawState && parentMeta.parentId && hops < MAX_ANCESTOR_HOPS; hops++) {
+      [rawState, parentMeta] = await loadPair(parentMeta.parentId);
+    }
+  } catch (error) {
+    console.warn(`Ancestor walk failed for version ${version.id} of doc ${docId}; replaying from rev 1.`, error);
+    return;
+  }
+
+  if (parentMeta && rawState) {
     // A parent whose snapshot extends into this version's own range can't be chained from: its
     // state already contains revs at or past startRev, so bridging (or fast-path streaming)
     // from it would serve too-new state. Resolved parents can't overlap — findLatestMainVersion
@@ -60,7 +80,11 @@ async function loadParentState(
       );
       return;
     }
-    if (!recordedParentId) {
+    if (statelessParentId) {
+      console.warn(
+        `Version ${version.id} of doc ${docId} has parent ${statelessParentId} with no state; chaining to ancestor ${parentMeta.id} instead.`
+      );
+    } else if (!recordedParentId) {
       console.warn(
         `Version ${version.id} of doc ${docId} starts at rev ${version.startRev} with no parentId; chaining to ${parentMeta.id} rather than replaying from rev 1.`
       );

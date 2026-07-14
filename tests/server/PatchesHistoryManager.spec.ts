@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { StatusError } from '../../src/net/error';
 import { PatchesHistoryManager } from '../../src/server/PatchesHistoryManager';
 import type { PatchesServer } from '../../src/server/PatchesServer';
 import type { VersioningStoreBackend } from '../../src/server/types';
@@ -25,6 +26,7 @@ describe('PatchesHistoryManager', () => {
       createVersion: vi.fn(),
       listVersions: vi.fn(),
       updateVersion: vi.fn(),
+      loadVersion: vi.fn(),
       loadVersionState: vi.fn(),
       loadVersionChanges: vi.fn(),
     } as any;
@@ -235,6 +237,46 @@ describe('PatchesHistoryManager', () => {
       );
 
       consoleSpy.mockRestore();
+    });
+
+    it('throws a retryable 503 when the version exists but its state is missing', async () => {
+      vi.mocked(mockStore.loadVersionState).mockResolvedValue(undefined);
+      vi.mocked(mockStore.loadVersion).mockResolvedValue({ id: 'version1', endRev: 5 } as any);
+
+      const err: any = await historyManager.getVersionState('doc1', 'version1').catch(e => e);
+
+      expect(err).toBeInstanceOf(StatusError);
+      expect(err.code).toBe(503);
+      expect(err.data).toEqual({ docId: 'doc1', versionId: 'version1' });
+    });
+
+    it('treats an empty-string state (zero-byte blob) as missing', async () => {
+      vi.mocked(mockStore.loadVersionState).mockResolvedValue('');
+      vi.mocked(mockStore.loadVersion).mockResolvedValue({ id: 'version1', endRev: 5 } as any);
+
+      const err: any = await historyManager.getVersionState('doc1', 'version1').catch(e => e);
+
+      expect(err).toBeInstanceOf(StatusError);
+      expect(err.code).toBe(503);
+    });
+
+    it('rethrows a StatusError from the store unchanged', async () => {
+      const pendingError = new StatusError(503, 'Version build in progress; retry later.');
+      vi.mocked(mockStore.loadVersionState).mockRejectedValue(pendingError);
+
+      const err: any = await historyManager.getVersionState('doc1', 'version1').catch(e => e);
+
+      expect(err).toBe(pendingError);
+    });
+
+    it('throws 404 when the version does not exist at all', async () => {
+      vi.mocked(mockStore.loadVersionState).mockResolvedValue(undefined);
+      vi.mocked(mockStore.loadVersion).mockResolvedValue(undefined);
+
+      const err: any = await historyManager.getVersionState('doc1', 'nope').catch(e => e);
+
+      expect(err).toBeInstanceOf(StatusError);
+      expect(err.code).toBe(404);
     });
   });
 

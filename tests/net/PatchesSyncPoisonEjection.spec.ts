@@ -1,4 +1,3 @@
-import { signal } from 'easy-signal';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LWWAlgorithm } from '../../src/client/LWWAlgorithm';
 import { LWWInMemoryStore } from '../../src/client/LWWInMemoryStore';
@@ -7,6 +6,7 @@ import { StatusError } from '../../src/net/error';
 import { PatchesSync } from '../../src/net/PatchesSync';
 import { createChange } from '../../src/data/change';
 import type { Change, QuarantinedChange } from '../../src/types';
+import { makeConnection } from './connectionMock.js';
 
 /**
  * Poison-pill ejection routing in PatchesSync.syncDoc: a 4xx commit rejection carrying
@@ -17,24 +17,6 @@ import type { Change, QuarantinedChange } from '../../src/types';
  */
 
 const DOC = 'doc1';
-
-function makeConnection(overrides: Record<string, any> = {}) {
-  return {
-    url: 'mock://server',
-    connect: vi.fn(async () => {}),
-    disconnect: vi.fn(),
-    subscribe: vi.fn(async (ids: string[]) => ids),
-    unsubscribe: vi.fn(async () => {}),
-    getDoc: vi.fn(async () => ({ state: null, rev: 0 })),
-    getChangesSince: vi.fn(async () => []),
-    commitChanges: vi.fn(async (_docId: string, changes: Change[]) => ({ changes })),
-    deleteDoc: vi.fn(async () => {}),
-    onStateChange: signal<(state: string) => void>(),
-    onChangesCommitted: signal<(docId: string, changes: Change[]) => void>(),
-    onDocDeleted: signal<(docId: string) => void>(),
-    ...overrides,
-  };
-}
 
 /** commitChanges mock that rejects every batch, naming the first change with the given data. */
 function rejectingCommit(code: number, data?: (changes: Change[]) => Record<string, any> | undefined) {

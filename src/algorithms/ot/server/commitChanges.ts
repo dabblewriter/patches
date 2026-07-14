@@ -78,17 +78,22 @@ export async function commitChanges(
     // creation op its first batch carries, and the baseRev 0 its later batches keep. Once that
     // first batch lands, its later batches are indistinguishable on the wire from a never-synced
     // client flushing baseRev 0 onto a doc someone else wrote, so ask the doc's own history
-    // rather than the batch's revs. Resolved lazily: only these two rare shapes pay the read.
+    // rather than the batch's revs. Resolved lazily: normal commits (baseRev > 0, no root op)
+    // never pay the read; each continuation batch of a genuine multi-batch upload pays one.
     let ownUpload: Promise<boolean> | undefined;
     const isOwnUpload = () => (ownUpload ??= createdByBatch(store, docId, batchId));
-    const continuation = !!batchId && changes[0].rev! > 1;
+    // A flush starts at rev 1, so rev > 1 at baseRev 0 means the head of this queue was already
+    // resolved elsewhere — a continuation whether or not the flush split. Not keyed on batchId:
+    // an unsplit tail carries none, and it must not slip into the rebase heal below. Historical
+    // imports legitimately start chunks past rev 1 (they preserve their original revs).
+    const continuation = changes[0].rev! > 1 && !options?.historicalImport;
 
     // Prevent stale clients from wiping existing data with a root creation op anywhere in the
     // batch. Not keyed on baseRev: a reload re-stamps pending onto the new tip without
     // transforming its ops (OTAlgorithm._withConsistentBaseRev), so a root op re-sent after one
     // arrives at baseRev = tip and overwrites the doc just the same.
     const rootOpChange = changes.find(c => c.ops.some(op => op.path === ''));
-    if (rootOpChange && !(await isOwnUpload())) {
+    if (rootOpChange && !options?.allowRootReplace && !(await isOwnUpload())) {
       throw new StatusError(
         400,
         `Document ${docId} already exists (rev ${initialRev}). ` +
@@ -99,23 +104,6 @@ export async function commitChanges(
     }
 
     if (changes[0].baseRev === 0) {
-      // The first batch of this flush was answered with docReloadRequired, so these ops were
-      // minted against state the client has since replaced. Neither treatment is sound: rebasing
-      // moves baseRev to the tip, leaving the commit read nothing to transform against, so the
-      // ops stack verbatim onto a head they never saw and overwrite whatever paths they touch;
-      // transforming them honestly means reading the entire change log, which is unbounded and
-      // fails outright on a large doc. Refuse instead. The client's reload rebases what is left
-      // of the queue against the real history and re-sends it on the true head, so the work
-      // survives. Never docReloadRequired here: the client drops a batch from pending on that.
-      if (continuation && !(await isOwnUpload())) {
-        throw new StatusError(
-          409,
-          `Document ${docId} already exists (rev ${initialRev}) and was not created by batch ${batchId}. ` +
-            `Cannot continue a baseRev 0 upload onto it - these changes were made against state the client ` +
-            `has since reloaded. Reload the document and re-send them on the current revision.`,
-          { scope: 'doc' }
-        );
-      }
       if (!continuation) {
         // Rebase explicit baseRev: 0 on existing docs to current revision.
         // The caller signals docReloadRequired so the client knows to call getDoc.
@@ -124,6 +112,24 @@ export async function commitChanges(
         for (const c of changes) {
           c.baseRev = baseRev;
         }
+      } else if (!(await isOwnUpload())) {
+        // The head of this flush was already resolved (its first batch was answered with
+        // docReloadRequired), so these ops were minted against state the client has since
+        // replaced. Neither treatment is sound: rebasing moves baseRev to the tip, leaving the
+        // commit read nothing to transform against, so the ops stack verbatim onto a head they
+        // never saw and overwrite whatever paths they touch; transforming them honestly means
+        // reading the entire change log, which is unbounded and fails outright on a large doc.
+        // Refuse instead. The client reloads on this refusal (409 scope: 'doc'), which rebases
+        // what is left of the queue against the real history and re-sends it on the true head,
+        // so the work survives. Never docReloadRequired here: the client drops a batch from
+        // pending on that, and this batch was not committed.
+        throw new StatusError(
+          409,
+          `Document ${docId} already exists (rev ${initialRev}) and was not created by this upload. ` +
+            `Cannot continue a baseRev 0 upload onto it - these changes were made against state the client ` +
+            `has since reloaded. Reload the document and re-send them on the current revision.`,
+          { scope: 'doc' }
+        );
       }
     }
   }

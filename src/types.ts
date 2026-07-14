@@ -260,6 +260,13 @@ export interface CommitChangesOptions {
    */
   forceCommit?: boolean;
   /**
+   * Permit a root-level op (path: '') to commit onto a document that already has history — an
+   * intentional whole-document replace, e.g. a server-side restore to a previous state. This
+   * bypasses the guard that stops stale clients wiping existing docs, so it is for
+   * server-originated commits only: transports MUST NOT forward it from client-supplied input.
+   */
+  allowRootReplace?: boolean;
+  /**
    * Enable historical import mode for migrations. When true:
    * - Preserves `committedAt` if provided (otherwise sets to serverNow)
    * - Uses first incoming change's timestamp for session gap detection (not serverNow)

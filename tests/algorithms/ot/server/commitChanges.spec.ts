@@ -350,6 +350,60 @@ describe('commitChanges', () => {
       expect(resend.docReloadRequired).toBeUndefined();
       expect(log.map(c => c.id)).toEqual(['a1', 'a2', 'a3', 'a4']);
     });
+
+    it('refuses an unbatched stale baseRev-0 tail instead of rebasing it onto the head', async () => {
+      // The crash window: a flush's first batch was committed and dropped from pending, the
+      // reload never landed, and the remaining queue now fits one wire batch — so it carries no
+      // batchId at all. It is exactly as stale as a split tail and must be refused the same way,
+      // not slipped into the rebase heal (which would commit its ops verbatim onto the head).
+      const { log, commitReads } = useLog(history(8));
+
+      const err = await commitChanges(mockStore, 'doc1', [createChange('n2', 2, 0)], sessionTimeoutMillis).catch(
+        e => e
+      );
+
+      expect(err).toBeInstanceOf(StatusError);
+      expect(err.code).toBe(409);
+      expect(err.data).toEqual({ scope: 'doc' });
+      expect(commitReads()).not.toContain(0);
+      expect(log.map(c => c.id)).toEqual(history(8).map(c => c.id));
+    });
+
+    it('keeps the rebase heal for historical imports whose chunks start past rev 1', async () => {
+      // Imports preserve their original revs, so a later chunk legitimately starts above rev 1;
+      // it must not read as a stale continuation.
+      const { log } = useLog(history(8));
+
+      const result = await commitChanges(mockStore, 'doc1', [createChange('i9', 9, 0)], sessionTimeoutMillis, {
+        historicalImport: true,
+      });
+
+      expect(result.docReloadRequired).toBe(true);
+      expect(log.map(c => c.id)).toEqual([...history(8).map(c => c.id), 'i9']);
+    });
+
+    it('allows an intentional whole-document replace when the caller vouches for it', async () => {
+      // The restore shape: a server-originated root replace at the current head (e.g. pup's
+      // document restore). Without the option it is indistinguishable from a stale client's
+      // re-stamped root op and is refused; the option is the server-side caller's vouch.
+      const { log } = useLog(history(8));
+      const restore = (id: string) => {
+        const change = createChange(id, 9, 8);
+        change.ops = rootReplace;
+        return change;
+      };
+
+      const denied = await commitChanges(mockStore, 'doc1', [restore('r1')], sessionTimeoutMillis).catch(e => e);
+      expect(denied).toBeInstanceOf(StatusError);
+      expect(denied.code).toBe(400);
+
+      const { newChanges } = await commitChanges(mockStore, 'doc1', [restore('r2')], sessionTimeoutMillis, {
+        allowRootReplace: true,
+      });
+      expect(newChanges.map(c => c.id)).toEqual(['r2']);
+      expect(log.at(-1)!.id).toBe('r2');
+      expect(log.at(-1)!.ops).toEqual(rootReplace);
+    });
   });
 
   it('should normalize createdAt timestamps to be in the past', async () => {

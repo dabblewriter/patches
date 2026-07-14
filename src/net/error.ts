@@ -154,6 +154,12 @@ const STORAGE_FAULT_NAMES: ReadonlySet<string> = new Set(['UnknownError', 'Quota
  * of sniffing DOMException names. Per the Patches scope boundary the library only TYPES the
  * failure — the consuming app decides the UX (surface a "your browser couldn't save" banner,
  * prompt a reload, etc.).
+ *
+ * Scope: this types per-REQUEST and per-TRANSACTION durability faults (put/get/delete/cursor
+ * rejects and transaction error/abort). DB-`open` failures are deliberately out of scope —
+ * they mean the store is UNAVAILABLE (private mode, blocked storage, a failed upgrade), an
+ * init/availability concern the open path and the app's startup persistence probe already own,
+ * not a mid-session write that lost just-typed work.
  */
 export class StorageError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -163,14 +169,17 @@ export class StorageError extends Error {
 }
 
 /**
- * True for a storage-layer IndexedDB failure — see {@link StorageError}. Matches by name (not
- * `instanceof`) so it classifies the same after crossing a structured-clone/worker boundary
- * (which keeps only name/message/stack), AND recognizes the raw DOMException shape
+ * True for a storage-layer IndexedDB failure — see {@link StorageError}. Matches purely by
+ * `name`, deliberately WITHOUT an `instanceof Error` gate: it must classify the same after
+ * crossing a structured-clone/worker boundary (which keeps only name/message/stack), AND
+ * `DOMException` only inherits from `Error` on modern engines — an `instanceof Error` gate
+ * would silently fail to classify a raw WebKit `UnknownError` on the exact old-Safari targets
+ * this exists for. Recognizes both the wrapped `StorageError` and the raw DOMException shape
  * ({@link STORAGE_FAULT_NAMES}) on any path that didn't go through {@link toStorageError}.
  */
 export function isStorageError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  return err.name === 'StorageError' || STORAGE_FAULT_NAMES.has(err.name);
+  const name = (err as { name?: unknown } | null | undefined)?.name;
+  return typeof name === 'string' && (name === 'StorageError' || STORAGE_FAULT_NAMES.has(name));
 }
 
 /**
@@ -178,10 +187,15 @@ export function isStorageError(err: unknown): boolean {
  * {@link StorageError}, keeping its message and the original as `cause`. Any other value
  * (including an already-wrapped `StorageError`, an `AbortError`, or a `null` request error)
  * is returned unchanged, so this is safe to apply at every IndexedDB reject site.
+ *
+ * Matches by `name` without an `instanceof Error` gate for the same reason as
+ * {@link isStorageError} — a pre-Safari-12 `DOMException` is not an `Error`, and gating it out
+ * would leave the fault unwrapped and unclassified on exactly the target this exists for.
  */
 export function toStorageError(err: unknown): unknown {
-  if (err instanceof Error && err.name !== 'StorageError' && STORAGE_FAULT_NAMES.has(err.name)) {
-    return new StorageError(err.message, { cause: err });
+  const e = err as { name?: unknown; message?: unknown } | null | undefined;
+  if (e && typeof e.name === 'string' && e.name !== 'StorageError' && STORAGE_FAULT_NAMES.has(e.name)) {
+    return new StorageError(typeof e.message === 'string' ? e.message : e.name, { cause: err });
   }
   return err;
 }

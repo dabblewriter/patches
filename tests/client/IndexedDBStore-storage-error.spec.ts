@@ -51,9 +51,19 @@ describe('IndexedDB store-error wrapping', () => {
 
   it('wraps a transaction-level storage fault into a StorageError', async () => {
     const raw = new DOMException('The quota has been exceeded.', 'QuotaExceededError');
-    const fakeTx = { oncomplete: null, onerror: null, error: raw } as unknown as IDBTransaction;
+    const fakeTx = { oncomplete: null, onerror: null, onabort: null, error: raw } as unknown as IDBTransaction;
     const wrapper = new IDBTransactionWrapper(fakeTx);
     void Promise.resolve().then(() => (fakeTx as unknown as { onerror: () => void }).onerror());
+    await expect(wrapper.complete()).rejects.toBeInstanceOf(StorageError);
+  });
+
+  it('rejects (not hangs) when a transaction ABORTS at commit via onabort only, wrapping tx.error', async () => {
+    // Under quota pressure a commit can fire onabort with tx.error set and NO onerror — the
+    // wrapper must still reject, routing the fault through toStorageError.
+    const raw = new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    const fakeTx = { oncomplete: null, onerror: null, onabort: null, error: raw } as unknown as IDBTransaction;
+    const wrapper = new IDBTransactionWrapper(fakeTx);
+    void Promise.resolve().then(() => (fakeTx as unknown as { onabort: () => void }).onabort());
     await expect(wrapper.complete()).rejects.toBeInstanceOf(StorageError);
   });
 

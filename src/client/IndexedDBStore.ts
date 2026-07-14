@@ -600,6 +600,12 @@ export class IDBTransactionWrapper {
     this.promise = new Promise((resolve, reject) => {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(toStorageError(tx.error));
+      // A transaction that aborts at commit — notably under quota pressure — can fire ONLY
+      // `onabort` (with `tx.error` set) and no `onerror`, which would otherwise leave this
+      // promise pending forever. Reject on abort too, routing a storage-fault abort through the
+      // same typed StorageError; a plain user/teardown AbortError passes through untouched (and
+      // whichever of onerror/onabort fires first wins — the second reject is a no-op).
+      tx.onabort = () => reject(toStorageError(tx.error));
     });
   }
 

@@ -326,6 +326,18 @@ describe('StatusError', () => {
       // IndexedDB request.error can be null; pass it through untouched.
       expect(toStorageError(null)).toBe(null);
     });
+
+    it('classifies and wraps a DOMException-shaped value that is NOT an Error (pre-Safari-12)', () => {
+      // On old WebKit a DOMException does not inherit from Error, so an `instanceof Error`
+      // gate would silently miss the exact iPad-Safari fault this exists for. Simulate that
+      // shape with a plain object carrying only name/message.
+      const oldShape = { name: 'UnknownError', message: 'Unable to store record in object store' };
+      expect(isStorageError(oldShape)).toBe(true);
+      const wrapped = toStorageError(oldShape);
+      expect(wrapped).toBeInstanceOf(StorageError);
+      expect((wrapped as StorageError).message).toBe('Unable to store record in object store');
+      expect((wrapped as StorageError).cause).toBe(oldShape);
+    });
   });
 
   describe('comparison and equality', () => {

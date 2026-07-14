@@ -776,11 +776,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * fetching/flushing: a contiguous tail past `committedRev` applies directly, a gap pulls
    * the authoritative tail. Loops because applying is async and more may buffer meanwhile;
    * the final empty check and the buffer removal (the caller's finally) share a microtask,
-   * so nothing slips between them. Must only run while the buffer entry still exists.
+   * so nothing slips between them. The entry can also vanish mid-drain: a docReloadRequired
+   * answered during a `flushPendingFirst` flush nests a second reload whose finally deletes
+   * it. Anything parked there is redelivered by the next catch-up, so a missing entry means
+   * nothing left to drain — never a crash.
    */
   private async _drainReloadBuffer(docId: string, committedRev: number): Promise<void> {
-    let buffered = this._reloadBuffers.get(docId)!;
-    while (buffered.length > 0) {
+    let buffered = this._reloadBuffers.get(docId);
+    while (buffered && buffered.length > 0) {
       this._reloadBuffers.set(docId, []);
       const tail = buffered.filter(c => c.rev > committedRev);
       if (tail.length > 0) {
@@ -791,7 +794,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           committedRev = changes[changes.length - 1].rev;
         }
       }
-      buffered = this._reloadBuffers.get(docId)!;
+      buffered = this._reloadBuffers.get(docId);
     }
   }
 
@@ -880,12 +883,31 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         }
       }
 
+      let reloadedMidFlush = false;
+
       for (const changeBatch of batches) {
         if (!this.state.connected || onlineState.isOffline) {
           throw new NetworkError('Disconnected during flush');
         }
 
-        const { changes: committed, docReloadRequired } = await this.connection.commitChanges(docId, changeBatch);
+        let commitResult;
+        try {
+          commitResult = await this.connection.commitChanges(docId, changeBatch);
+        } catch (err) {
+          // The server refused the batch as unusably stale against the doc's history (409
+          // scope:'doc'): a baseRev-0 continuation it cannot transform, or a baseRev ahead of
+          // its head. Retrying the same bytes can never succeed; the recovery the refusal
+          // prescribes is a reload, which rebases the entire remaining queue — this refused
+          // batch included, since nothing was committed or dropped — onto the true head. The
+          // follow-up sync below then re-sends it from the store.
+          if (this._isStaleDocError(err)) {
+            await this._reloadDocFromServer(docId, algorithm, false);
+            reloadedMidFlush = true;
+            break;
+          }
+          throw err;
+        }
+        const { changes: committed, docReloadRequired } = commitResult;
 
         if (docReloadRequired) {
           // Our local state is stale (baseRev:0 on existing doc). Confirm the sent
@@ -902,6 +924,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // Pass the batch as resolved so the pending-preserving import can't re-add it
           // from the open doc's stale in-memory queue.
           await this._reloadDocFromServer(docId, algorithm, false, changeBatch);
+          // `batches` predates the reload, which replaced the committed state they were minted
+          // against and rebased the rest of the queue onto the new head. Every remaining batch
+          // still holds the pre-rebase copy of its ops at baseRev 0, and the server cannot
+          // transform that onto a head it never saw: it stacks the ops verbatim over whatever
+          // paths they touch, or reads the whole change log trying to rebase them. Stop sending
+          // them and let the follow-up sync below flush what the store actually holds.
+          reloadedMidFlush = true;
+          break;
         } else {
           // Confirm sent first so server corrections (applied next) overwrite
           // any stale ops for fields the server won via LWW timestamp resolution.
@@ -939,6 +969,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
       const stillHasPending = await algorithm.hasPending(docId);
       this._updateDocSyncState(docId, { hasPending: stillHasPending, syncStatus: 'synced' });
+      // Send the remainder the reload rebased, from the store rather than from `batches`. Sync is
+      // serial-gated, so this queues exactly one follow-up pass instead of recursing, and that
+      // pass flushes on the reloaded committedRev, which no longer answers docReloadRequired.
+      if (reloadedMidFlush && stillHasPending) void this.syncDoc(docId);
     } catch (err) {
       if (this._isDocDeletedError(err)) {
         await this._handleRemoteDocDeleted(docId);
@@ -1350,6 +1384,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   protected _isDocDeletedError(err: unknown): boolean {
     return err instanceof StatusError && err.code === ErrorCodes.DOC_DELETED;
+  }
+
+  /**
+   * A 409 the server scoped to the whole doc: the submission is unusable against the doc's
+   * current history (a stale baseRev-0 continuation, or a baseRev ahead of the server head)
+   * and resending it verbatim can never succeed — only a reload re-bases the queue onto the
+   * doc's real history.
+   */
+  protected _isStaleDocError(err: unknown): boolean {
+    return err instanceof StatusError && err.code === 409 && err.data?.scope === 'doc';
   }
 
   /** Retryable = any failure except a definitive auth/payment/permission/not-found/gone StatusError. */

@@ -1,4 +1,3 @@
-import { signal } from 'easy-signal';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { applyChanges } from '../../src/algorithms/ot/shared/applyChanges';
 import { OTAlgorithm } from '../../src/client/OTAlgorithm';
@@ -6,6 +5,7 @@ import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
 import { Patches } from '../../src/client/Patches';
 import { PatchesSync } from '../../src/net/PatchesSync';
 import type { Change, PatchesSnapshot } from '../../src/types';
+import { makeConnection } from './connectionMock.js';
 
 // Races between PatchesSync and concurrent tracking/broadcast/edit activity, exercised
 // with real Patches/OTAlgorithm/store components and a fake connection.
@@ -19,24 +19,6 @@ class UndefinedWhenEmptyStore extends OTInMemoryStore {
     if (snap && snap.state == null && snap.rev === 0 && snap.changes.length === 0) return undefined;
     return snap;
   }
-}
-
-function makeConnection(overrides: Record<string, any> = {}) {
-  return {
-    url: 'mock://server',
-    connect: vi.fn(async () => {}),
-    disconnect: vi.fn(),
-    subscribe: vi.fn(async (ids: string[]) => ids),
-    unsubscribe: vi.fn(async () => {}),
-    getDoc: vi.fn(async () => ({ state: null, rev: 0 })),
-    getChangesSince: vi.fn(async () => []),
-    commitChanges: vi.fn(async (_docId: string, changes: Change[]) => ({ changes })),
-    deleteDoc: vi.fn(async () => {}),
-    onStateChange: signal<(state: string) => void>(),
-    onChangesCommitted: signal<(docId: string, changes: Change[]) => void>(),
-    onDocDeleted: signal<(docId: string) => void>(),
-    ...overrides,
-  };
 }
 
 function makeChange(rev: number, baseRev: number, path: string, value: any): Change {

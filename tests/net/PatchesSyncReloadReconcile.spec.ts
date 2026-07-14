@@ -13,31 +13,13 @@
  * The fuzz suite's FINDING-5 regression seed exercises the harness's MIRROR of this logic, not
  * PatchesSync itself — this test pins the production code path directly with a fake connection.
  */
-import { signal } from 'easy-signal';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OTAlgorithm } from '../../src/client/OTAlgorithm.js';
 import { OTInMemoryStore } from '../../src/client/OTInMemoryStore.js';
 import { Patches } from '../../src/client/Patches.js';
 import { PatchesSync } from '../../src/net/PatchesSync.js';
 import type { Change, PatchesState } from '../../src/types.js';
-
-function makeConnection(overrides: Record<string, any> = {}) {
-  return {
-    url: 'mock://server',
-    connect: vi.fn(async () => {}),
-    disconnect: vi.fn(),
-    subscribe: vi.fn(async (ids: string[]) => ids),
-    unsubscribe: vi.fn(async () => {}),
-    getDoc: vi.fn(async () => ({ state: null, rev: 0 })),
-    getChangesSince: vi.fn(async () => []),
-    commitChanges: vi.fn(async (_docId: string, changes: Change[]) => ({ changes })),
-    deleteDoc: vi.fn(async () => {}),
-    onStateChange: signal<(state: string) => void>(),
-    onChangesCommitted: signal<(docId: string, changes: Change[]) => void>(),
-    onDocDeleted: signal<(docId: string) => void>(),
-    ...overrides,
-  };
-}
+import { makeConnection } from './connectionMock.js';
 
 const mkChange = (id: string, rev: number, baseRev: number, path: string, value: any): Change => ({
   id,

@@ -126,6 +126,81 @@ export function isAbortError(err: unknown): boolean {
 }
 
 /**
+ * The DOMException names a browser puts on a genuine STORAGE-layer IndexedDB failure —
+ * the store could not read or persist a record even though the transaction opened. WebKit
+ * is the frequent offender: it throws `UnknownError` for "Unable to store record in object
+ * store" / "Failed to delete record from object store" / "Attempt to get records from
+ * database without an in-progress transaction" (storage pressure, eviction, or a corrupted
+ * store), and `QuotaExceededError` when the origin's storage is full.
+ *
+ * These are deliberately NOT included:
+ * - `InvalidStateError` — the connection was closing; {@link IndexedDBStore} already
+ *   reopen-retries that transparently (see `isConnectionClosingError`).
+ * - `AbortError` — a cancelled transaction/request; {@link isAbortError} classifies it as an
+ *   interruption to recover from, not a storage fault.
+ * - `ConstraintError` / `DataError` — key/shape programming errors, not storage degradation.
+ */
+const STORAGE_FAULT_NAMES: ReadonlySet<string> = new Set(['UnknownError', 'QuotaExceededError']);
+
+/**
+ * Error for an IndexedDB operation that failed at the STORAGE layer — the browser could not
+ * read or persist the record (WebKit `UnknownError` under storage pressure/eviction, or a
+ * `QuotaExceededError` when the origin is out of space). See {@link STORAGE_FAULT_NAMES}.
+ *
+ * Like {@link NetworkError}, this describes the local ENVIRONMENT, not the document or the
+ * server: reconnecting won't fix it and the server never saw the write. {@link IndexedDBStore}
+ * wraps the raw DOMException in this at the store boundary (preserving the original as `cause`
+ * and its message) so consumers get one stable, engine-independent type to branch on instead
+ * of sniffing DOMException names. Per the Patches scope boundary the library only TYPES the
+ * failure — the consuming app decides the UX (surface a "your browser couldn't save" banner,
+ * prompt a reload, etc.).
+ *
+ * Scope: this types per-REQUEST and per-TRANSACTION durability faults (put/get/delete/cursor
+ * rejects and transaction error/abort). DB-`open` failures are deliberately out of scope —
+ * they mean the store is UNAVAILABLE (private mode, blocked storage, a failed upgrade), an
+ * init/availability concern the open path and the app's startup persistence probe already own,
+ * not a mid-session write that lost just-typed work.
+ */
+export class StorageError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'StorageError';
+  }
+}
+
+/**
+ * True for a storage-layer IndexedDB failure — see {@link StorageError}. Matches purely by
+ * `name`, deliberately WITHOUT an `instanceof Error` gate: it must classify the same after
+ * crossing a structured-clone/worker boundary (which keeps only name/message/stack), AND
+ * `DOMException` only inherits from `Error` on modern engines — an `instanceof Error` gate
+ * would silently fail to classify a raw WebKit `UnknownError` on the exact old-Safari targets
+ * this exists for. Recognizes both the wrapped `StorageError` and the raw DOMException shape
+ * ({@link STORAGE_FAULT_NAMES}) on any path that didn't go through {@link toStorageError}.
+ */
+export function isStorageError(err: unknown): boolean {
+  const name = (err as { name?: unknown } | null | undefined)?.name;
+  return typeof name === 'string' && (name === 'StorageError' || STORAGE_FAULT_NAMES.has(name));
+}
+
+/**
+ * Wrap a raw IndexedDB storage-fault DOMException ({@link STORAGE_FAULT_NAMES}) in a typed
+ * {@link StorageError}, keeping its message and the original as `cause`. Any other value
+ * (including an already-wrapped `StorageError`, an `AbortError`, or a `null` request error)
+ * is returned unchanged, so this is safe to apply at every IndexedDB reject site.
+ *
+ * Matches by `name` without an `instanceof Error` gate for the same reason as
+ * {@link isStorageError} — a pre-Safari-12 `DOMException` is not an `Error`, and gating it out
+ * would leave the fault unwrapped and unclassified on exactly the target this exists for.
+ */
+export function toStorageError(err: unknown): unknown {
+  const e = err as { name?: unknown; message?: unknown } | null | undefined;
+  if (e && typeof e.name === 'string' && e.name !== 'StorageError' && STORAGE_FAULT_NAMES.has(e.name)) {
+    return new StorageError(typeof e.message === 'string' ? e.message : e.name, { cause: err });
+  }
+  return err;
+}
+
+/**
  * Error rejected by the JSON-RPC client for protocol-level errors (negative
  * JSON-RPC codes like -32601). HTTP-style positive codes are rehydrated into
  * {@link StatusError} instead so callers can branch on `err.code` uniformly.

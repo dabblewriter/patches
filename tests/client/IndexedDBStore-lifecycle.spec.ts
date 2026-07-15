@@ -7,6 +7,29 @@ import { OTIndexedDBStore } from '../../src/client/OTIndexedDBStore';
 
 let dbSeq = 0;
 
+/** Open a connection directly, bypassing the store — used to squat on a database version. */
+function openRaw(name: string, version: number): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(name, version);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+/**
+ * The real blocked grace period is 5s — deliberately longer than a vitest timeout, since it
+ * only expires when a peer genuinely never closes. Shrink it so the blocked tests stay fast,
+ * and restore it so nothing else sees the override.
+ */
+function useShortBlockedGrace(ms = 20): () => void {
+  const store = IndexedDBStore as unknown as { OPEN_BLOCKED_TIMEOUT_MS: number };
+  const original = store.OPEN_BLOCKED_TIMEOUT_MS;
+  store.OPEN_BLOCKED_TIMEOUT_MS = ms;
+  return () => {
+    store.OPEN_BLOCKED_TIMEOUT_MS = original;
+  };
+}
+
 describe('IndexedDBStore lifecycle (real store over fake-indexeddb)', () => {
   it('creates missing algorithm stores when a database created with another algorithm set is reopened', async () => {
     const dbName = `lifecycle-test-${dbSeq++}`;
@@ -160,5 +183,50 @@ describe('IndexedDBStore lifecycle (real store over fake-indexeddb)', () => {
     }
 
     await expect(store.listDocs()).rejects.toThrow('Store has been closed');
+  });
+
+  /**
+   * `blocked` settles nothing — unlike `error` it is not terminal — so an open blocked by a
+   * peer that never closes used to leave `dbPromise` pending forever, hanging every read and
+   * write through the store with no error and no log. Peers honoring `onversionchange` close
+   * in milliseconds; one that cannot (a suspended tab, an external connection) must not cost
+   * the store its entire future.
+   */
+  it('rejects waiters instead of hanging forever when an open stays blocked', async () => {
+    const dbName = `lifecycle-test-${dbSeq++}`;
+    const restoreGrace = useShortBlockedGrace();
+    // Hold a raw connection open at v1 that never honors versionchange — a suspended peer.
+    const squatter = await openRaw(dbName, 1);
+
+    try {
+      // The store opens at DB_VERSION (2) — blocked by the squatter, so neither success nor
+      // error ever fires. Without the blocked handler this line hangs until the test times out.
+      const store = new IndexedDBStore(dbName);
+      await expect(store.listDocs()).rejects.toThrow(/blocked/i);
+      await store.close();
+    } finally {
+      squatter.close();
+      restoreGrace();
+    }
+  });
+
+  it('heals if the blocker closes after waiters were rejected', async () => {
+    const dbName = `lifecycle-test-${dbSeq++}`;
+    const restoreGrace = useShortBlockedGrace();
+    const squatter = await openRaw(dbName, 1);
+    const store = new IndexedDBStore(dbName);
+
+    try {
+      await expect(store.listDocs()).rejects.toThrow(/blocked/i);
+
+      // The peer finally goes away — the original open completes and resolves the fresh
+      // deferred, so the store works again without anyone reopening it.
+      squatter.close();
+      await expect(store.listDocs()).resolves.toEqual([]);
+      await store.close();
+    } finally {
+      squatter.close();
+      restoreGrace();
+    }
   });
 });

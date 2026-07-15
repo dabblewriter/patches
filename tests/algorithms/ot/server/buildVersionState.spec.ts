@@ -4,6 +4,7 @@ import {
   getBaseStateBeforeVersion,
   getStateBeforeVersionAsStream,
   MAX_ANCESTOR_HOPS,
+  resolveBuildParent,
 } from '../../../../src/algorithms/ot/server/buildVersionState';
 import {
   applyChangesForReconstruction,
@@ -264,8 +265,10 @@ describe('version parent chaining', () => {
     expect(state).toEqual({ words: ['one'] });
     expect(rev).toBe(2);
     expect(readsFrom(store)).toEqual([0]);
-    expect(warn).toHaveBeenCalledTimes(1);
+    // resolveBuildParent rejects the overlap; loadParentState adds the replay consequence.
+    expect(warn).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('overlaps'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no usable parent'));
     warn.mockRestore();
   });
 
@@ -280,7 +283,7 @@ describe('version parent chaining', () => {
     // rev-3 bytes verbatim — one rev too new.
     expect(JSON.parse(json)).toEqual({ words: ['one'] });
     expect(readsFrom(store)).toEqual([0]);
-    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('overlaps'));
     warn.mockRestore();
   });
@@ -447,7 +450,10 @@ describe('version parent chaining', () => {
   it('rejects a walked-to ancestor whose snapshot overlaps the version', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const grandparent = versionMeta({ id: 'v-gp', startRev: 1, endRev: 3 }); // contains rev 3
-    const statelessParent = versionMeta({ id: 'v-mid', parentId: 'v-gp', startRev: 4, endRev: 4 });
+    // The direct parent is clean (endRev 2 stays below startRev 3) but stateless, so the walk
+    // hops to v-gp — whose snapshot overlaps. resolveBuildParent can't catch this; the final
+    // guard must.
+    const statelessParent = versionMeta({ id: 'v-mid', parentId: 'v-gp', startRev: 1, endRev: 2 });
     const store = makeStore(cleanLog, [grandparent, statelessParent], ['v-mid']);
     const version = versionMeta({ id: 'v2', parentId: 'v-mid', startRev: 3, endRev: 5 }); // bogus recorded chain
 
@@ -475,5 +481,68 @@ describe('version parent chaining', () => {
     expect(readsFrom(store)).toEqual([]);
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+// Exported for deferred-build backends: a builder draining pending versions must order builds
+// with the same parent resolution the build itself uses, or drain order and built states diverge.
+describe('resolveBuildParent', () => {
+  const docId = 'projects/p1/content';
+  const log: Change[] = [
+    createChange(1, [{ op: 'replace', path: '', value: { words: [] } }]),
+    createChange(2, [{ op: 'add', path: '/words/0', value: 'one' }]),
+    createChange(3, [{ op: 'add', path: '/words/1', value: 'two' }]),
+    createChange(4, [{ op: 'add', path: '/words/2', value: 'three' }]),
+  ];
+
+  it('returns the recorded parent without reading any state', async () => {
+    const parent = versionMeta({ id: 'v-parent', startRev: 1, endRev: 2 });
+    const store = makeStore(log, [parent]);
+    const version = versionMeta({ id: 'v2', parentId: 'v-parent', startRev: 3, endRev: 4 });
+
+    await expect(resolveBuildParent(store, docId, version)).resolves.toBe(parent);
+    expect(store.loadVersionState).not.toHaveBeenCalled();
+  });
+
+  it('ignores a recorded parent whose snapshot overlaps the version range', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const parent = versionMeta({ id: 'v-parent', startRev: 1, endRev: 3 }); // contains rev 3
+    const store = makeStore(log, [parent]);
+    const version = versionMeta({ id: 'v2', parentId: 'v-parent', startRev: 3, endRev: 4 });
+
+    await expect(resolveBuildParent(store, docId, version)).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('overlaps'));
+    warn.mockRestore();
+  });
+
+  it('resolves the latest main version below startRev when no parentId was recorded', async () => {
+    const parent = versionMeta({ id: 'v-parent', startRev: 1, endRev: 3 });
+    const store = makeStore(log, [parent]);
+    const version = versionMeta({ id: 'v2', startRev: 4, endRev: 4 });
+
+    await expect(resolveBuildParent(store, docId, version)).resolves.toBe(parent);
+  });
+
+  it('never resolves an orphan version stamped past the committed change log', async () => {
+    // currentRev is 4; the orphan claims endRev 6 (e.g. left by a no-op offline commit). A raw
+    // "latest main below startRev" query would pick it; the clamp bounds the search to the log.
+    const legit = versionMeta({ id: 'v-legit', startRev: 1, endRev: 4 });
+    const orphan = versionMeta({ id: 'v-orphan', startRev: 5, endRev: 6 });
+    const store = makeStore(log, [legit, orphan]);
+    const version = versionMeta({ id: 'v2', startRev: 8, endRev: 8 });
+
+    await expect(resolveBuildParent(store, docId, version)).resolves.toBe(legit);
+  });
+
+  it('returns undefined at the rev-1 origin and for a dangling parentId', async () => {
+    const store = makeStore(log, []);
+
+    await expect(
+      resolveBuildParent(store, docId, versionMeta({ id: 'v1', startRev: 1, endRev: 4 }))
+    ).resolves.toBeUndefined();
+    expect(store.listVersions).not.toHaveBeenCalled();
+
+    const dangling = versionMeta({ id: 'v2', parentId: 'v-gone', startRev: 3, endRev: 4 });
+    await expect(resolveBuildParent(store, docId, dangling)).resolves.toBeUndefined();
   });
 });

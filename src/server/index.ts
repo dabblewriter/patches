@@ -14,7 +14,11 @@ export { LWWMemoryStoreBackend } from './LWWMemoryStoreBackend.js';
 export { PatchesHistoryManager, type PatchesHistoryManagerOptions } from './PatchesHistoryManager.js';
 
 // Version state building utilities
-export { buildVersionState, getBaseStateBeforeVersion } from '../algorithms/ot/server/buildVersionState.js';
+export {
+  buildVersionState,
+  getBaseStateBeforeVersion,
+  resolveBuildParent,
+} from '../algorithms/ot/server/buildVersionState.js';
 
 // Committed-history replay (reconstruction mode — see applyChangesForReconstruction's doc
 // for when skip-and-continue replay is legitimate; strict apply is the default everywhere)

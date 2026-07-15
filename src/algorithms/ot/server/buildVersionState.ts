@@ -23,6 +23,38 @@ function replayChanges<T>(state: T, changes: Change[], options?: ReplayOptions):
 export const MAX_ANCESTOR_HOPS = 10;
 
 /**
+ * Resolves the version a build of `version` will chain from: the recorded `parentId`, else the
+ * latest main version ending before `startRev` (bounded by the committed change log — see
+ * {@link findLatestMainVersion}, so an orphan version stamped past the log is never selected).
+ * A recorded parent whose snapshot overlaps the version's own range (`endRev` past
+ * `startRev - 1`) already contains revs the build must exclude, so it is unusable and resolves
+ * to `undefined` — the build replays from rev 1 instead.
+ *
+ * Metadata only, no state reads — cheap enough for dependency walks. Exported for
+ * deferred-build backends: a builder draining pending versions must order builds with the same
+ * resolution the build itself uses (see `loadParentState`), or the drain order and the built
+ * states diverge.
+ */
+export async function resolveBuildParent(
+  store: OTStoreBackend,
+  docId: string,
+  version: VersionMetadata
+): Promise<VersionMetadata | undefined> {
+  if (version.parentId) {
+    const parent = await store.loadVersion(docId, version.parentId);
+    if (parent && parent.endRev > version.startRev - 1) {
+      console.warn(
+        `Version ${version.id} of doc ${docId} has parent ${parent.id} whose endRev ${parent.endRev} overlaps its startRev ${version.startRev}; ignoring the parent.`
+      );
+      return undefined;
+    }
+    return parent;
+  }
+  if (version.startRev > 1) return findLatestMainVersion(store, docId, version.startRev - 1);
+  return undefined;
+}
+
+/**
  * Loads the state of the version `version` chains from, and the rev it ends at.
  *
  * A version that starts past rev 1 with no recorded `parentId` is a bug in whatever wrote it:
@@ -45,17 +77,9 @@ async function loadParentState(
 ): Promise<{ rawState: string | ReadableStream<string>; endRev: number } | undefined> {
   const loadPair = (id: string) => Promise.all([store.loadVersionState(docId, id), store.loadVersion(docId, id)]);
   const recordedParentId = version.parentId;
-  let parentMeta: VersionMetadata | undefined;
+  let parentMeta = await resolveBuildParent(store, docId, version);
   let rawState: string | ReadableStream<string> | undefined;
-
-  if (recordedParentId) {
-    [rawState, parentMeta] = await loadPair(recordedParentId);
-  } else if (version.startRev > 1) {
-    // Resolve the parent the writer should have recorded. The resolved metadata is already in
-    // hand, so only the state needs loading — no re-fetch that a transient miss could fail.
-    parentMeta = await findLatestMainVersion(store, docId, version.startRev - 1);
-    if (parentMeta) rawState = await store.loadVersionState(docId, parentMeta.id);
-  }
+  if (parentMeta) rawState = await store.loadVersionState(docId, parentMeta.id);
 
   // Parent metadata without state: walk the ancestor chain to the nearest version with state.
   // Missing is any falsy read (a zero-byte blob comes back '', never a valid state — see
@@ -90,8 +114,9 @@ async function loadParentState(
   if (parentMeta && !isMissingVersionState(rawState)) {
     // A parent whose snapshot extends into this version's own range can't be chained from: its
     // state already contains revs at or past startRev, so bridging (or fast-path streaming)
-    // from it would serve too-new state. Resolved parents can't overlap — findLatestMainVersion
-    // caps endRev at startRev - 1 — so this only catches bad recorded parentIds.
+    // from it would serve too-new state. resolveBuildParent rejects a direct overlapping parent
+    // and findLatestMainVersion caps endRev at startRev - 1, so this only catches ancestors
+    // reached through the walk's recorded parentIds.
     if (parentMeta.endRev > version.startRev - 1) {
       console.warn(
         `Version ${version.id} of doc ${docId} has parent ${parentMeta.id} whose endRev ${parentMeta.endRev} overlaps its startRev ${version.startRev}; ignoring the parent and replaying from rev 1.`

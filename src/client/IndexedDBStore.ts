@@ -57,6 +57,15 @@ function isConnectionClosingError(err: unknown): boolean {
 export class IndexedDBStore implements PatchesStore, BranchClientStore {
   private static readonly DB_VERSION = 2;
 
+  /**
+   * How long an `open` may sit `blocked` by another connection before waiters are rejected
+   * rather than left waiting forever. Peers honoring `onversionchange` close in milliseconds,
+   * so this only expires when one genuinely cannot (a suspended tab, an external connection
+   * with no handler) — long enough not to fail an open that was about to succeed, short enough
+   * that a stuck store surfaces as an error instead of a silent hang.
+   */
+  protected static readonly OPEN_BLOCKED_TIMEOUT_MS = 5_000;
+
   protected db: IDBDatabase | null = null;
   /**
    * Terminal flag set by `close()`/`deleteDB()`. Any reopen path (suspend recovery,
@@ -156,8 +165,44 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
   protected async initDB(version: number | null = IndexedDBStore.DB_VERSION) {
     if (!this.dbName) return;
     const request = indexedDB.open(this.dbName, version ?? undefined);
+    let blockedTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearBlockedTimer = () => {
+      if (blockedTimer !== undefined) {
+        clearTimeout(blockedTimer);
+        blockedTimer = undefined;
+      }
+    };
+
+    // `blocked` fires when another connection still holds this database at an older version,
+    // so our upgrade cannot proceed. Crucially it settles NOTHING: unlike `error` it is not
+    // terminal (`success` still fires if the blocker closes), so without this handler
+    // `dbPromise` can stay pending forever and EVERY read and write through this store hangs
+    // silently — no error, no log, no recovery short of tearing down the worker.
+    //
+    // Failing immediately would be wrong: peers that run the `onversionchange` installed below
+    // close within milliseconds, and that is the overwhelmingly common case. But nothing
+    // GUARANTEES a peer ever closes — a suspended or backgrounded tab/worker may never run its
+    // handler (Safari suspends aggressively — DABBLE-WRITER-3-CA), and an externally-provided
+    // connection never gets `onversionchange` installed at all.
+    //
+    // So: give peers a grace period, then hand the current waiters an error — a rejection they
+    // can retry or surface beats an unbounded wait — and install a fresh deferred for callers
+    // that arrive later. If the blocker does eventually close, this same request's `onsuccess`
+    // resolves that new deferred and the store heals with no reopen.
+    request.onblocked = () => {
+      clearBlockedTimer();
+      blockedTimer = setTimeout(() => {
+        blockedTimer = undefined;
+        if (this.closed) return;
+        const blocked = this.dbPromise;
+        this.dbPromise = deferred<IDBDatabase>();
+        blocked.reject(new Error(`IndexedDB open blocked for "${this.dbName}"`));
+        blocked.promise.catch(() => undefined);
+      }, IndexedDBStore.OPEN_BLOCKED_TIMEOUT_MS);
+    };
 
     request.onerror = () => {
+      clearBlockedTimer();
       // A previous session bumped past DB_VERSION to add missing stores — reopen at the current version
       if (version !== null && request.error?.name === 'VersionError') {
         this.initDB(null);
@@ -171,6 +216,7 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
       }
     };
     request.onsuccess = () => {
+      clearBlockedTimer();
       const db = request.result;
       // close()/deleteDB() ran while this open was in flight. A reopen nulls this.db, so
       // that close() early-returned without settling this promise — honor the terminal close

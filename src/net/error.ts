@@ -53,6 +53,22 @@ export function isRejectionError(err: unknown): boolean {
 }
 
 /**
+ * True when a failure carries an HTTP-style numeric `code` — this package's {@link StatusError},
+ * a *consuming* package's own StatusError class (pup's `FirestoreStore` throws its own, with a
+ * numeric `code`), or an error rehydrated across an RPC/worker boundary that preserved `code`.
+ * Duck-typed on the numeric `code` rather than `instanceof StatusError`, for the same
+ * cross-package hazard {@link isRejectionError} guards against — but across ANY status code, a
+ * retryable 503 included, not just the terminal rejections.
+ *
+ * Use it where a store-thrown status signal must propagate verbatim instead of being wrapped
+ * into a generic, code-less error (which would strip the retryable/authoritative verdict the
+ * code carries). Node system errors use *string* codes (`'ENOENT'`), so they stay unmatched.
+ */
+export function isStatusError(err: unknown): err is Error & { code: number } {
+  return err instanceof Error && typeof (err as { code?: unknown }).code === 'number';
+}
+
+/**
  * Error for a request that died at the network level, without ever producing an
  * HTTP response or status code: a fetch rejection (DNS/TCP/TLS failure or a
  * CORS-opaque rejection — both surface as a status-less `TypeError`), a request

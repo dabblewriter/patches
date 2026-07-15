@@ -50,10 +50,18 @@ export interface VersioningStoreBackend {
 
   /**
    * Loads the state snapshot for a specific version ID.
-   * Returns a JSON string, ReadableStream of JSON chunks, or undefined if not found,
+   * Returns a JSON string, ReadableStream of JSON chunks, or `undefined` if not found —
    * including a version recorded by a deferred implementation whose state hasn't been
    * built yet (see `createVersion`).
    * ReadableStream allows large state blobs to be streamed without full materialization.
+   *
+   * Missing state MUST surface as `undefined` or the empty string `''` (how a zero-byte or
+   * never-written blob reads back) — never as an empty `ReadableStream`. Readers treat any
+   * stream as present state and pipe it straight through without draining it to measure its
+   * length, so an empty stream would serialize invalid JSON instead of the retryable
+   * "state unavailable" (503) signal. `isMissingVersionState` (server/utils) is the shared
+   * predicate that encodes this — the zero-byte case is exactly what the original doc-wipe bug
+   * missed by checking only `=== undefined`.
    */
   loadVersionState(docId: string, versionId: string): Promise<string | ReadableStream<string> | undefined>;
 

@@ -1,12 +1,12 @@
 import { getStateBeforeVersionAsStream } from '../algorithms/ot/server/buildVersionState.js';
 import type { SkippedChange } from '../algorithms/ot/shared/applyChanges.js';
-import { StatusError } from '../net/error.js';
+import { isStatusError, StatusError } from '../net/error.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import type { Change, EditableVersionMetadata, ListVersionsOptions, VersionMetadata } from '../types.js';
 import { jsonReadable } from './jsonReadable.js';
 import type { PatchesServer } from './PatchesServer.js';
 import type { OTStoreBackend, VersioningStoreBackend } from './types.js';
-import { assertVersionMetadata } from './utils.js';
+import { assertVersionMetadata, isMissingVersionState } from './utils.js';
 
 /**
  * Options for {@link PatchesHistoryManager}.
@@ -100,16 +100,28 @@ export class PatchesHistoryManager {
     try {
       rawState = await this.store.loadVersionState(docId, versionId);
     } catch (error) {
-      if (error instanceof StatusError) throw error;
+      // Duck-typed, not `instanceof`: a store from a consuming package (pup) throws its own
+      // StatusError class, which must still pass through verbatim rather than be wrapped generic.
+      if (isStatusError(error)) throw error;
       console.error(`Failed to load state for version ${versionId} of doc ${docId}.`, error);
       throw new Error(`Could not load state for version ${versionId}.`, { cause: error });
     }
-    if (rawState) {
+    if (!isMissingVersionState(rawState)) {
       return typeof rawState === 'string' ? jsonReadable(rawState) : rawState;
     }
     // Missing state (undefined, or '' from a zero-byte blob) is not servable as a document:
-    // distinguish a version that doesn't exist from one whose state isn't available.
-    const version = await this.store.loadVersion(docId, versionId);
+    // distinguish a version that doesn't exist (404) from one whose state isn't available (503).
+    // The disambiguating load stays guarded too, so a transient failure here surfaces
+    // logged/wrapped like every other failure mode of this method — not raw as a code-less
+    // JSON-RPC -32000 leaking the store's stack.
+    let version: VersionMetadata | undefined;
+    try {
+      version = await this.store.loadVersion(docId, versionId);
+    } catch (error) {
+      if (isStatusError(error)) throw error;
+      console.error(`Failed to load version ${versionId} of doc ${docId}.`, error);
+      throw new Error(`Could not load version ${versionId}.`, { cause: error });
+    }
     if (!version) throw new StatusError(404, `Version ${versionId} not found for doc ${docId}.`);
     throw new StatusError(503, `State for version ${versionId} of doc ${docId} is unavailable; retry later.`, {
       docId,
@@ -140,7 +152,9 @@ export class PatchesHistoryManager {
     const otStore = this.store as OTStoreBackend;
     const version = await otStore.loadVersion(docId, versionId);
     if (!version) {
-      throw new Error(`Version ${versionId} not found for doc ${docId}.`);
+      // Same 404 contract as getVersionState — both are RPC-exposed `read`, so a missing
+      // version surfaces one consistent, code-carrying status rather than a generic Error.
+      throw new StatusError(404, `Version ${versionId} not found for doc ${docId}.`);
     }
     // History viewing is reconstruction of settled history, not live apply: a
     // historically-invalid committed op (from lenient-era commits) must not make

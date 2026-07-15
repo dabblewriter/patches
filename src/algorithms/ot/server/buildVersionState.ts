@@ -1,5 +1,7 @@
+import { isStatusError } from '../../../net/error.js';
 import { jsonReadable, parseVersionState } from '../../../server/jsonReadable.js';
 import type { OTStoreBackend } from '../../../server/types.js';
+import { isMissingVersionState } from '../../../server/utils.js';
 import type { Change, PatchesState, VersionMetadata } from '../../../types.js';
 import { applyChanges, applyChangesForReconstruction, type ReplayOptions } from '../shared/applyChanges.js';
 import { findLatestMainVersion } from './getSnapshotAtRevision.js';
@@ -56,20 +58,36 @@ async function loadParentState(
   }
 
   // Parent metadata without state: walk the ancestor chain to the nearest version with state.
-  // Missing is any falsy read (a zero-byte blob comes back '', never a valid state). A hop that
-  // fails transiently degrades to the replay fallback rather than failing the read; the replay
-  // runs off the change log, a separate subsystem from the state blobs.
-  const statelessParentId = parentMeta && !rawState ? parentMeta.id : undefined;
+  // Missing is any falsy read (a zero-byte blob comes back '', never a valid state — see
+  // isMissingVersionState). Each hop prefers the recorded parentId, but an ancestor that never
+  // recorded one (startRev > 1) is resolved the same way the entry branch resolves the version's
+  // own missing parent — otherwise a single stateless link with no parentId would drop straight
+  // to full-history replay even with an intact earlier version right below it. A hop that fails
+  // transiently degrades to the replay fallback (the replay runs off the change log, a separate
+  // subsystem from the state blobs); a StatusError from the store is an authoritative retry
+  // signal and propagates instead, so a deferred backend's "build in progress" reaches the client.
+  const statelessParentId = parentMeta && isMissingVersionState(rawState) ? parentMeta.id : undefined;
   try {
-    for (let hops = 0; parentMeta && !rawState && parentMeta.parentId && hops < MAX_ANCESTOR_HOPS; hops++) {
-      [rawState, parentMeta] = await loadPair(parentMeta.parentId);
+    for (let hops = 0; parentMeta && isMissingVersionState(rawState) && hops < MAX_ANCESTOR_HOPS; hops++) {
+      if (parentMeta.parentId) {
+        [rawState, parentMeta] = await loadPair(parentMeta.parentId);
+      } else if (parentMeta.startRev > 1) {
+        // Resolved metadata is already in hand, so only its state needs loading — no re-fetch.
+        const resolved = await findLatestMainVersion(store, docId, parentMeta.startRev - 1);
+        if (!resolved) break;
+        parentMeta = resolved;
+        rawState = await store.loadVersionState(docId, resolved.id);
+      } else {
+        break; // reached the rev-1 origin with no state; fall through to the replay fallback
+      }
     }
   } catch (error) {
+    if (isStatusError(error)) throw error;
     console.warn(`Ancestor walk failed for version ${version.id} of doc ${docId}; replaying from rev 1.`, error);
     return;
   }
 
-  if (parentMeta && rawState) {
+  if (parentMeta && !isMissingVersionState(rawState)) {
     // A parent whose snapshot extends into this version's own range can't be chained from: its
     // state already contains revs at or past startRev, so bridging (or fast-path streaming)
     // from it would serve too-new state. Resolved parents can't overlap — findLatestMainVersion

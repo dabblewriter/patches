@@ -269,6 +269,26 @@ describe('PatchesHistoryManager', () => {
       expect(err).toBe(pendingError);
     });
 
+    it('rethrows a foreign status-carrying error (e.g. a consuming package StatusError) unchanged', async () => {
+      // pup's FirestoreStore throws its OWN StatusError class — not this package's instance, but
+      // it carries a numeric `code`. Duck-typing on `code` lets it pass through verbatim; an
+      // `instanceof` check would wrap it into a generic, code-less error.
+      class ForeignStatusError extends Error {
+        constructor(
+          public code: number,
+          message: string
+        ) {
+          super(message);
+        }
+      }
+      const foreign = new ForeignStatusError(404, 'Versioning not enabled for this doc.');
+      vi.mocked(mockStore.loadVersionState).mockRejectedValue(foreign);
+
+      const err: any = await historyManager.getVersionState('doc1', 'version1').catch(e => e);
+
+      expect(err).toBe(foreign);
+    });
+
     it('throws 404 when the version does not exist at all', async () => {
       vi.mocked(mockStore.loadVersionState).mockResolvedValue(undefined);
       vi.mocked(mockStore.loadVersion).mockResolvedValue(undefined);
@@ -277,6 +297,22 @@ describe('PatchesHistoryManager', () => {
 
       expect(err).toBeInstanceOf(StatusError);
       expect(err.code).toBe(404);
+    });
+
+    it('wraps a transient failure during the 404-vs-503 disambiguation instead of leaking it raw', async () => {
+      // State reads back missing, then the disambiguating loadVersion fails transiently. That
+      // second failure must be logged/wrapped like the first, not escape as a code-less error
+      // with the store's raw message and stack.
+      vi.mocked(mockStore.loadVersionState).mockResolvedValue(undefined);
+      vi.mocked(mockStore.loadVersion).mockRejectedValue(new Error('firestore deadline exceeded'));
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await expect(historyManager.getVersionState('doc1', 'version1')).rejects.toThrow(
+        'Could not load version version1.'
+      );
+      expect(consoleSpy).toHaveBeenCalledWith('Failed to load version version1 of doc doc1.', expect.any(Error));
+
+      consoleSpy.mockRestore();
     });
   });
 
@@ -346,7 +382,7 @@ describe('PatchesHistoryManager', () => {
       );
     });
 
-    it('should throw when version is not found', async () => {
+    it('should throw a 404 StatusError when version is not found', async () => {
       const otStore = {
         ...mockStore,
         listChanges: vi.fn(),
@@ -354,9 +390,11 @@ describe('PatchesHistoryManager', () => {
       } as any;
       const otHistoryManager = new PatchesHistoryManager(mockServer, otStore);
 
-      await expect(otHistoryManager.getStateBeforeVersion('doc1', 'missing')).rejects.toThrow(
-        'Version missing not found for doc doc1.'
-      );
+      // Same 404 contract as getVersionState — both are RPC-exposed `read`.
+      const err: any = await otHistoryManager.getStateBeforeVersion('doc1', 'missing').catch(e => e);
+      expect(err).toBeInstanceOf(StatusError);
+      expect(err.code).toBe(404);
+      expect(err.message).toContain('Version missing not found for doc doc1.');
     });
 
     it('should return base state using parentId chain', async () => {

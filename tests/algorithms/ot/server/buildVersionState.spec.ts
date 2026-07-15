@@ -10,6 +10,7 @@ import {
   ApplyChangesError,
   type SkippedChange,
 } from '../../../../src/algorithms/ot/shared/applyChanges';
+import { StatusError } from '../../../../src/net/error';
 import { readStreamAsString } from '../../../../src/server/jsonReadable';
 import type { OTStoreBackend } from '../../../../src/server/types';
 import type { Change, VersionMetadata } from '../../../../src/types';
@@ -399,6 +400,47 @@ describe('version parent chaining', () => {
     expect(readsFrom(store)).toEqual([0]);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ancestor walk failed'), expect.any(Error));
+    warn.mockRestore();
+  });
+
+  it('propagates a StatusError thrown mid-walk instead of degrading to replay', async () => {
+    // A deferred backend can throw a retryable 503 ("build in progress") from loadVersionState.
+    // Unlike a transient blob outage, that is an authoritative retry signal — it must reach the
+    // caller, not be swallowed into a silent full-history replay.
+    const grandparent = versionMeta({ id: 'v-gp', startRev: 1, endRev: 2 });
+    const statelessParent = versionMeta({ id: 'v-mid', parentId: 'v-gp', startRev: 3, endRev: 3 });
+    const store = makeStore(cleanLog, [grandparent, statelessParent], ['v-mid']);
+    const realLoad = vi.mocked(store.loadVersionState).getMockImplementation()!;
+    vi.mocked(store.loadVersionState).mockImplementation(async (d: string, id: string) => {
+      if (id === 'v-gp') throw new StatusError(503, 'Version build in progress; retry later.');
+      return realLoad(d, id);
+    });
+    const version = versionMeta({ id: 'v2', parentId: 'v-mid', startRev: 4, endRev: 5 });
+
+    const err: any = await getBaseStateBeforeVersion(store, docId, version).catch(e => e);
+
+    expect(err).toBeInstanceOf(StatusError);
+    expect(err.code).toBe(503);
+  });
+
+  it('resolves a stateless ancestor that recorded no parentId, mid-walk', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const grandparent = versionMeta({ id: 'v-gp', startRev: 1, endRev: 2 });
+    // Stateless AND — unlike the walk tests above — recording no parentId of its own. A bare
+    // parentId walk would exit on entry here and drop to full-history replay.
+    const statelessParent = versionMeta({ id: 'v-mid', startRev: 3, endRev: 3 });
+    const store = makeStore(cleanLog, [grandparent, statelessParent], ['v-mid']);
+    const version = versionMeta({ id: 'v2', parentId: 'v-mid', startRev: 4, endRev: 5 });
+
+    const { state, rev } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one', 'two'] });
+    expect(rev).toBe(3);
+    // findLatestMainVersion resolves the link v-mid failed to record → a bounded bridge from
+    // the grandparent's endRev 2, not the full-history replay (readsFrom [0]) a bare walk gives.
+    expect(readsFrom(store)).toEqual([2]);
+    expect(store.listVersions).toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('chaining to ancestor v-gp'));
     warn.mockRestore();
   });
 

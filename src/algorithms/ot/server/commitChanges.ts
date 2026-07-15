@@ -25,9 +25,9 @@ const MAX_CONFLICT_RETRIES = 5;
  *
  * ## Version Creation
  *
- * Versions are created (metadata + changes saved to store) when session timeouts are
- * detected. After saving, `onVersionCreated` is emitted so subscribers can build and
- * persist state out of band.
+ * Versions are created (metadata + changes saved via `store.createVersion`) when session
+ * timeouts are detected. Building and persisting version state is the store's concern,
+ * inline or deferred (see `VersioningStoreBackend.createVersion`).
  *
  * ## Conflict Retry
  *

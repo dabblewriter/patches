@@ -3,12 +3,14 @@ import {
   buildVersionState,
   getBaseStateBeforeVersion,
   getStateBeforeVersionAsStream,
+  MAX_ANCESTOR_HOPS,
 } from '../../../../src/algorithms/ot/server/buildVersionState';
 import {
   applyChangesForReconstruction,
   ApplyChangesError,
   type SkippedChange,
 } from '../../../../src/algorithms/ot/shared/applyChanges';
+import { StatusError } from '../../../../src/net/error';
 import { readStreamAsString } from '../../../../src/server/jsonReadable';
 import type { OTStoreBackend } from '../../../../src/server/types';
 import type { Change, VersionMetadata } from '../../../../src/types';
@@ -52,8 +54,10 @@ const stateAt = (changes: Change[], rev: number) =>
     { onSkippedChange: () => {} }
   );
 
-function makeStore(changes: Change[], versions: VersionMetadata[] = []): OTStoreBackend {
-  const states = new Map(versions.map(v => [v.id, JSON.stringify(stateAt(changes, v.endRev))]));
+function makeStore(changes: Change[], versions: VersionMetadata[] = [], statelessIds: string[] = []): OTStoreBackend {
+  const states = new Map(
+    versions.filter(v => !statelessIds.includes(v.id)).map(v => [v.id, JSON.stringify(stateAt(changes, v.endRev))])
+  );
   return {
     getCurrentRev: vi.fn(async () => changes.at(-1)?.rev ?? 0),
     listChanges: vi.fn(async (_docId: string, options: any = {}) => {
@@ -275,6 +279,183 @@ describe('version parent chaining', () => {
     // Unguarded, the no-gap fast path (endRev 3 >= startRev - 1) would stream the parent's
     // rev-3 bytes verbatim — one rev too new.
     expect(JSON.parse(json)).toEqual({ words: ['one'] });
+    expect(readsFrom(store)).toEqual([0]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('overlaps'));
+    warn.mockRestore();
+  });
+
+  it('walks past a stateless parent to the nearest ancestor with state', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const grandparent = versionMeta({ id: 'v-gp', startRev: 1, endRev: 2 });
+    const statelessParent = versionMeta({ id: 'v-mid', parentId: 'v-gp', startRev: 3, endRev: 3 });
+    const store = makeStore(cleanLog, [grandparent, statelessParent], ['v-mid']);
+    const version = versionMeta({ id: 'v2', parentId: 'v-mid', startRev: 4, endRev: 5 });
+
+    const { state, rev } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one', 'two'] });
+    expect(rev).toBe(3);
+    // Only the gap between the grandparent (endRev 2) and startRev 4 is bridged — never the full log.
+    expect(readsFrom(store)).toEqual([2]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('chaining to ancestor v-gp'));
+    warn.mockRestore();
+  });
+
+  it('walks past a stateless parent on the streaming path too', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const grandparent = versionMeta({ id: 'v-gp', startRev: 1, endRev: 2 });
+    const statelessParent = versionMeta({ id: 'v-mid', parentId: 'v-gp', startRev: 3, endRev: 3 });
+    const store = makeStore(cleanLog, [grandparent, statelessParent], ['v-mid']);
+    const version = versionMeta({ id: 'v2', parentId: 'v-mid', startRev: 4, endRev: 5 });
+
+    const json = await readStreamAsString(await getStateBeforeVersionAsStream(store, docId, version));
+
+    expect(JSON.parse(json)).toEqual({ words: ['one', 'two'] });
+    expect(readsFrom(store)).toEqual([2]);
+    warn.mockRestore();
+  });
+
+  it('bounds the ancestor walk on a chain with no state anywhere', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // A stateless parentId chain deeper than the walk's hop limit.
+    const depth = MAX_ANCESTOR_HOPS + 5;
+    const chain = Array.from({ length: depth }, (_, i) =>
+      versionMeta({ id: `v-c${i}`, parentId: i > 0 ? `v-c${i - 1}` : undefined, startRev: 1, endRev: 3 })
+    );
+    const store = makeStore(
+      cleanLog,
+      chain,
+      chain.map(v => v.id)
+    );
+    const version = versionMeta({ id: 'v2', parentId: `v-c${depth - 1}`, startRev: 5, endRev: 5 });
+
+    const { state } = await getBaseStateBeforeVersion(store, docId, version);
+
+    // No state found within the bound → today's full-history replay, with its warning.
+    expect(state).toEqual({ words: ['one', 'two', 'three'] });
+    expect(readsFrom(store)).toEqual([0]);
+    // 1 read for the recorded parent + the bounded hops, never the whole chain.
+    expect(vi.mocked(store.loadVersionState).mock.calls).toHaveLength(MAX_ANCESTOR_HOPS + 1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no usable parent'));
+    warn.mockRestore();
+  });
+
+  it('treats an empty-string state as missing and walks past it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const grandparent = versionMeta({ id: 'v-gp', startRev: 1, endRev: 2 });
+    const truncatedParent = versionMeta({ id: 'v-mid', parentId: 'v-gp', startRev: 3, endRev: 3 });
+    const store = makeStore(cleanLog, [grandparent, truncatedParent]);
+    // A zero-byte blob reads back as '', not undefined.
+    const realLoad = vi.mocked(store.loadVersionState).getMockImplementation()!;
+    vi.mocked(store.loadVersionState).mockImplementation(async (d: string, id: string) =>
+      id === 'v-mid' ? '' : realLoad(d, id)
+    );
+    const version = versionMeta({ id: 'v2', parentId: 'v-mid', startRev: 4, endRev: 5 });
+
+    const { state, rev } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one', 'two'] });
+    expect(rev).toBe(3);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('chaining to ancestor v-gp'));
+    warn.mockRestore();
+  });
+
+  it('warns once when a resolved parent is stateless and walked past', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const grandparent = versionMeta({ id: 'v-gp', startRev: 1, endRev: 2 });
+    const statelessParent = versionMeta({ id: 'v-mid', parentId: 'v-gp', startRev: 3, endRev: 3 });
+    const store = makeStore(cleanLog, [grandparent, statelessParent], ['v-mid']);
+    const version = versionMeta({ id: 'v2', startRev: 4, endRev: 5 }); // no parentId
+
+    const { state, rev } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one', 'two'] });
+    expect(rev).toBe(3);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('chaining to ancestor v-gp'));
+    warn.mockRestore();
+  });
+
+  it('degrades to the replay fallback when a walk hop fails transiently', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const grandparent = versionMeta({ id: 'v-gp', startRev: 1, endRev: 2 });
+    const statelessParent = versionMeta({ id: 'v-mid', parentId: 'v-gp', startRev: 3, endRev: 3 });
+    const store = makeStore(cleanLog, [grandparent, statelessParent], ['v-mid']);
+    // The walk hop reads a different subsystem (state blobs) than the replay fallback (change
+    // log), so a transient blob-store failure must not fail the whole read.
+    const realLoad = vi.mocked(store.loadVersionState).getMockImplementation()!;
+    vi.mocked(store.loadVersionState).mockImplementation(async (d: string, id: string) => {
+      if (id === 'v-gp') throw new Error('transient blob outage');
+      return realLoad(d, id);
+    });
+    const version = versionMeta({ id: 'v2', parentId: 'v-mid', startRev: 4, endRev: 5 });
+
+    const { state, rev } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one', 'two'] });
+    expect(rev).toBe(3);
+    expect(readsFrom(store)).toEqual([0]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ancestor walk failed'), expect.any(Error));
+    warn.mockRestore();
+  });
+
+  it('propagates a StatusError thrown mid-walk instead of degrading to replay', async () => {
+    // A deferred backend can throw a retryable 503 ("build in progress") from loadVersionState.
+    // Unlike a transient blob outage, that is an authoritative retry signal — it must reach the
+    // caller, not be swallowed into a silent full-history replay.
+    const grandparent = versionMeta({ id: 'v-gp', startRev: 1, endRev: 2 });
+    const statelessParent = versionMeta({ id: 'v-mid', parentId: 'v-gp', startRev: 3, endRev: 3 });
+    const store = makeStore(cleanLog, [grandparent, statelessParent], ['v-mid']);
+    const realLoad = vi.mocked(store.loadVersionState).getMockImplementation()!;
+    vi.mocked(store.loadVersionState).mockImplementation(async (d: string, id: string) => {
+      if (id === 'v-gp') throw new StatusError(503, 'Version build in progress; retry later.');
+      return realLoad(d, id);
+    });
+    const version = versionMeta({ id: 'v2', parentId: 'v-mid', startRev: 4, endRev: 5 });
+
+    const err: any = await getBaseStateBeforeVersion(store, docId, version).catch(e => e);
+
+    expect(err).toBeInstanceOf(StatusError);
+    expect(err.code).toBe(503);
+  });
+
+  it('resolves a stateless ancestor that recorded no parentId, mid-walk', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const grandparent = versionMeta({ id: 'v-gp', startRev: 1, endRev: 2 });
+    // Stateless AND — unlike the walk tests above — recording no parentId of its own. A bare
+    // parentId walk would exit on entry here and drop to full-history replay.
+    const statelessParent = versionMeta({ id: 'v-mid', startRev: 3, endRev: 3 });
+    const store = makeStore(cleanLog, [grandparent, statelessParent], ['v-mid']);
+    const version = versionMeta({ id: 'v2', parentId: 'v-mid', startRev: 4, endRev: 5 });
+
+    const { state, rev } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one', 'two'] });
+    expect(rev).toBe(3);
+    // findLatestMainVersion resolves the link v-mid failed to record → a bounded bridge from
+    // the grandparent's endRev 2, not the full-history replay (readsFrom [0]) a bare walk gives.
+    expect(readsFrom(store)).toEqual([2]);
+    expect(store.listVersions).toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('chaining to ancestor v-gp'));
+    warn.mockRestore();
+  });
+
+  it('rejects a walked-to ancestor whose snapshot overlaps the version', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const grandparent = versionMeta({ id: 'v-gp', startRev: 1, endRev: 3 }); // contains rev 3
+    const statelessParent = versionMeta({ id: 'v-mid', parentId: 'v-gp', startRev: 4, endRev: 4 });
+    const store = makeStore(cleanLog, [grandparent, statelessParent], ['v-mid']);
+    const version = versionMeta({ id: 'v2', parentId: 'v-mid', startRev: 3, endRev: 5 }); // bogus recorded chain
+
+    const { state, rev } = await getBaseStateBeforeVersion(store, docId, version);
+
+    // The walked-to ancestor's snapshot (endRev 3) already contains rev 3 — unusable.
+    expect(state).toEqual({ words: ['one'] });
+    expect(rev).toBe(2);
     expect(readsFrom(store)).toEqual([0]);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('overlaps'));

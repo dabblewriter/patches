@@ -295,8 +295,10 @@ interface OTStoreBackend extends ServerStoreBackend, VersioningStoreBackend {
   listChanges(docId: string, options: ListChangesOptions): Promise<Change[]>;
 
   // Version operations (inherited from VersioningStoreBackend)
-  // The store is responsible for building and persisting version state from the
-  // supplied changes — inline or queued — and must throw if state creation fails.
+  // The store builds and persists version state from the supplied changes, inline or deferred.
+  // Inline builds must throw if state creation fails. Deferred builds persist state out of band
+  // and must NOT throw here — a not-yet-built (or lost) state surfaces later as a retryable 503
+  // when a reader calls loadVersionState.
   createVersion(docId: string, metadata: VersionMetadata, changes?: Change[]): Promise<void>;
   listVersions(docId: string, options: ListVersionsOptions): Promise<VersionMetadata[]>;
   loadVersion(docId: string, versionId: string): Promise<VersionMetadata | undefined>;

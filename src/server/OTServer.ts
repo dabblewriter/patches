@@ -209,8 +209,8 @@ export class OTServer implements PatchesServer {
 
   /**
    * Captures the current state of a document as a new version.
-   * Does NOT build state — creates version metadata + changes, then emits
-   * `onVersionCreated` so subscribers can build and persist state out of band.
+   * Saves version metadata + changes via `store.createVersion`; building and persisting
+   * state is the store's concern, inline or deferred (see `VersioningStoreBackend`).
    *
    * The version chains to the latest main version, so the store builds its state from that
    * snapshot plus the changes since. Left unchained it would have to replay the document's

@@ -26,8 +26,11 @@ export interface ServerStoreBackend {
 export interface VersioningStoreBackend {
   /**
    * Saves version metadata and optionally the original changes.
-   * Implementations are responsible for building and persisting version state —
-   * inline or queued, but must throw if state creation fails.
+   * Implementations are responsible for building and persisting version state, inline or
+   * deferred. Inline implementations must throw if state creation fails. Deferred
+   * implementations persist state out of band, which means `loadVersionState` callers must
+   * tolerate `undefined` for a recently recorded version until its build lands (the server
+   * algorithms chain past a stateless parent and fail snapshot reads loud with a 503).
    *
    * Concurrency: count-based versioning can fire during continuous high-rate streaming, so two
    * server instances may attempt to create overlapping versions for the same `[startRev, endRev]`
@@ -47,8 +50,18 @@ export interface VersioningStoreBackend {
 
   /**
    * Loads the state snapshot for a specific version ID.
-   * Returns a JSON string, ReadableStream of JSON chunks, or undefined if not found.
+   * Returns a JSON string, ReadableStream of JSON chunks, or `undefined` if not found —
+   * including a version recorded by a deferred implementation whose state hasn't been
+   * built yet (see `createVersion`).
    * ReadableStream allows large state blobs to be streamed without full materialization.
+   *
+   * Missing state MUST surface as `undefined` or the empty string `''` (how a zero-byte or
+   * never-written blob reads back) — never as an empty `ReadableStream`. Readers treat any
+   * stream as present state and pipe it straight through without draining it to measure its
+   * length, so an empty stream would serialize invalid JSON instead of the retryable
+   * "state unavailable" (503) signal. `isMissingVersionState` (server/utils) is the shared
+   * predicate that encodes this — the zero-byte case is exactly what the original doc-wipe bug
+   * missed by checking only `=== undefined`.
    */
   loadVersionState(docId: string, versionId: string): Promise<string | ReadableStream<string> | undefined>;
 

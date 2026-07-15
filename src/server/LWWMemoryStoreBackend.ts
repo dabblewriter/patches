@@ -248,8 +248,7 @@ export class LWWMemoryStoreBackend
   }
 
   async loadVersionState(_docId: string, _versionId: string): Promise<string | undefined> {
-    // State is not stored by the server — it's built out of band by onVersionCreated subscribers.
-    // Override this in test implementations that need to return state.
+    // This backend stores no version state. Override in test implementations that need it.
     return undefined;
   }
 

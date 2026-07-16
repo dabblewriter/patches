@@ -164,11 +164,12 @@ describe('OTAlgorithm quarantine', () => {
       expect(await algorithm.listQuarantinedChanges(DOC)).toEqual([]);
     });
 
-    it('leaves the queue latched (returns null, no mutation) when the poison cannot be inverted', async () => {
+    it('throws (leaving the queue latched, no mutation) when the poison cannot be inverted', async () => {
       const { store, algorithm } = await setup();
       // Craft a corrupt queue directly: the poison replaces /missing/deep, but /missing is
-      // absent from the reconstructed pre-state, so inverting it throws (reads a prop off
-      // undefined). A successor forces the invert path to run.
+      // absent from the reconstructed pre-state, so it can't be inverted. A successor forces
+      // the invert path to run. The throw (vs the benign no-match null) is the contract —
+      // an app-consent caller must be able to tell "nothing to eject" from "still wedged".
       const poison: Change = {
         id: 'poison',
         rev: 2,
@@ -187,10 +188,110 @@ describe('OTAlgorithm quarantine', () => {
       };
       await store.savePendingChanges(DOC, [poison, after]);
 
-      expect(await algorithm.ejectPendingChange(DOC, 'poison', 'forbidden')).toBeNull();
+      // Depending on the shape, the throw comes from the strict-apply probe ("Cannot eject")
+      // or from invertPatch itself ("Patch mismatch") — either way it must throw, not null.
+      await expect(algorithm.ejectPendingChange(DOC, 'poison', 'forbidden')).rejects.toThrow(
+        /Cannot eject|Patch mismatch/
+      );
       // Nothing quarantined, pending queue untouched — the doc stays latched, not half-rebased.
       expect(await algorithm.listQuarantinedChanges(DOC)).toEqual([]);
       expect((await store.getPendingChanges(DOC)).map(c => c.id)).toEqual(['poison', 'after']);
+    });
+
+    it('throws rather than fabricating an inverse for a one-level mismatch with successors', async () => {
+      const { store, algorithm } = await setup();
+      // /s is the string 'x': `replace /s/a` misses by ONE level, which invertPatch would
+      // read as undefined WITHOUT throwing and emit a phantom `remove /s/a` — walking that
+      // fabricated inverse through the successor would corrupt it. The strict-apply probe in
+      // computePendingEjection must catch this shape, not just the deep-miss one above.
+      const poison: Change = {
+        id: 'poison',
+        rev: 2,
+        baseRev: 1,
+        ops: [{ op: 'replace', path: '/s/a', value: 1 }],
+        createdAt: 0,
+        committedAt: 0,
+      };
+      const after: Change = {
+        id: 'after',
+        rev: 3,
+        baseRev: 1,
+        ops: [{ op: 'add', path: '/z', value: 1 }],
+        createdAt: 0,
+        committedAt: 0,
+      };
+      await store.savePendingChanges(DOC, [poison, after]);
+
+      await expect(algorithm.ejectPendingChange(DOC, 'poison', 'forbidden')).rejects.toThrow(/Cannot eject/);
+      expect(await algorithm.listQuarantinedChanges(DOC)).toEqual([]);
+      expect((await store.getPendingChanges(DOC)).map(c => c.id)).toEqual(['poison', 'after']);
+    });
+
+    describe('onlyIfUnappliable (atomic auto-eject re-probe)', () => {
+      it('returns null without ejecting when the change now applies cleanly in its frame', async () => {
+        const { store, algorithm } = await setup();
+        // The auto-eject contract: PatchesSync's verify probe released its lock, and by the
+        // time eject runs the change may have become valid (a broadcast rebased the queue).
+        // A cleanly-applying change must NOT be ejected under the flag.
+        const change = await mint(algorithm, [{ op: 'replace', path: '/a', value: 1 }]);
+        const survivor = await mint(algorithm, [{ op: 'add', path: '/b', value: 2 }]);
+
+        expect(
+          await algorithm.ejectPendingChange(DOC, change.id, 'forbidden', undefined, { onlyIfUnappliable: true })
+        ).toBeNull();
+        expect((await store.getPendingChanges(DOC)).map(c => c.id)).toEqual([change.id, survivor.id]);
+        expect(await algorithm.listQuarantinedChanges(DOC)).toEqual([]);
+      });
+
+      it('still ejects a change that fails its in-frame probe', async () => {
+        const { store, algorithm } = await setup();
+        // A genuinely un-appliable tail poison (no successors, so no invert is needed).
+        const poison: Change = {
+          id: 'poison',
+          rev: 2,
+          baseRev: 1,
+          ops: [{ op: 'replace', path: '/s/a/b', value: 1 }],
+          createdAt: 0,
+          committedAt: 0,
+        };
+        await store.savePendingChanges(DOC, [poison]);
+
+        const entry = await algorithm.ejectPendingChange(DOC, 'poison', 'forbidden', undefined, {
+          onlyIfUnappliable: true,
+        });
+        expect(entry).not.toBeNull();
+        expect(await store.getPendingChanges(DOC)).toEqual([]);
+        expect((await algorithm.listQuarantinedChanges(DOC)).map(e => e.changeId)).toEqual(['poison']);
+      });
+
+      it('returns null (cannot corroborate) when a predecessor is un-appliable', async () => {
+        const { store, algorithm } = await setup();
+        // Same fail-toward-safety posture as verifyPendingChange: no frame, no corroboration,
+        // no auto-eject.
+        const badPredecessor: Change = {
+          id: 'bad',
+          rev: 2,
+          baseRev: 1,
+          ops: [{ op: 'replace', path: '/s/a/b', value: 1 }],
+          createdAt: 0,
+          committedAt: 0,
+        };
+        const named: Change = {
+          id: 'named',
+          rev: 3,
+          baseRev: 1,
+          ops: [{ op: 'add', path: '/ok', value: 1 }],
+          createdAt: 0,
+          committedAt: 0,
+        };
+        await store.savePendingChanges(DOC, [badPredecessor, named]);
+
+        expect(
+          await algorithm.ejectPendingChange(DOC, 'named', 'forbidden', undefined, { onlyIfUnappliable: true })
+        ).toBeNull();
+        expect((await store.getPendingChanges(DOC)).map(c => c.id)).toEqual(['bad', 'named']);
+        expect(await algorithm.listQuarantinedChanges(DOC)).toEqual([]);
+      });
     });
   });
 

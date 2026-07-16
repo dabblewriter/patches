@@ -1418,11 +1418,15 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       const ejections = this._ejectionCounts.get(docId) ?? 0;
       if (ejections >= MAX_DOC_EJECTIONS) return false;
       if (await algorithm.verifyPendingChange(docId, data.changeId)) return false;
+      // onlyIfUnappliable: the probe above released its lock, so the algorithm must
+      // re-corroborate atomically with the ejection — a broadcast in the gap can rebase
+      // the queue and make the change valid again.
       const quarantined = await algorithm.ejectPendingChange(
         docId,
         data.changeId,
         failure.message,
-        this.patches.getOpenDoc(docId)
+        this.patches.getOpenDoc(docId),
+        { onlyIfUnappliable: true }
       );
       if (!quarantined) return false;
       this._ejectionCounts.set(docId, ejections + 1);

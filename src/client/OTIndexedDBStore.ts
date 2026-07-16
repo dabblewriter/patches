@@ -322,25 +322,15 @@ export class OTIndexedDBStore implements OTClientStore {
     return entry;
   }
 
-  /** List quarantined changes for one doc, or all docs when docId is omitted. */
+  /** List quarantined changes for one doc, or all docs when docId is omitted (shared store; see IndexedDBStore). */
   async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
-    if (!(await this.db.hasStore('quarantinedChanges'))) return [];
-    const [tx, quarantined] = await this.db.transaction(['quarantinedChanges'], 'readonly');
-    const entries =
-      docId !== undefined
-        ? await quarantined.getAll<QuarantinedChange>([docId, ''], [docId, '￿'])
-        : await quarantined.getAll<QuarantinedChange>();
-    await tx.complete();
-    return entries;
+    return this.db.listQuarantinedChanges(docId);
   }
 
-  /** Permanently remove a quarantined change. */
+  /** Permanently remove a quarantined change (shared store; see IndexedDBStore). */
   @blockable
   async discardQuarantinedChange(docId: string, changeId: string): Promise<void> {
-    if (!(await this.db.hasStore('quarantinedChanges'))) return;
-    const [tx, quarantined] = await this.db.transaction(['quarantinedChanges'], 'readwrite');
-    await quarantined.delete([docId, changeId]);
-    await tx.complete();
+    return this.db.discardQuarantinedChange(docId, changeId);
   }
 
   // ─── Server Changes ─────────────────────────────────────────────────────

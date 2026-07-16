@@ -526,6 +526,9 @@ export class Patches {
    *
    * @returns The quarantined entry, or null when nothing matched (already committed,
    *   already ejected, or an algorithm without ejection support).
+   * @throws When the change matched but cannot be safely ejected (e.g. an OT queue whose
+   *   poison can't be inverted). The doc is still wedged — surface it rather than treating
+   *   it as resolved.
    */
   async ejectPendingChange(
     docId: string,
@@ -551,7 +554,16 @@ export class Patches {
     }
     const algorithms = Object.values(this.algorithms) as ClientAlgorithm[];
     const lists = await Promise.all(algorithms.map(a => a.listQuarantinedChanges?.() ?? []));
-    return lists.flat();
+    // Dedup by [docId, changeId]: in shared-database setups every algorithm store reads the
+    // same `quarantinedChanges` object store, so without this each entry appears once per
+    // algorithm.
+    const seen = new Set<string>();
+    return lists.flat().filter(entry => {
+      const key = `${entry.docId}\u0000${entry.changeId}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   /** Permanently removes a quarantined change. The app's decision, never automatic. */

@@ -32,10 +32,14 @@ never triggers.
 The server's attribution is a suspicion, not a verdict:
 
 1. **Local corroboration.** A named change is auto-ejected only when it ALSO fails a local
-   strict-apply probe against committed-only state (`verifyPendingChange`). A change the
-   server rejected but that applies cleanly locally (e.g. a server-side policy rejection)
-   stays put: the doc latches at `'error'` with `data.changeId` on the surfaced error, and
-   the app decides: ask the user, then call `patches.ejectPendingChange(docId, changeId)`.
+   strict-apply probe in its own frame (`verifyPendingChange` — committed-only state for
+   LWW, committed + predecessors for OT). A change the server rejected but that applies
+   cleanly locally (e.g. a server-side policy rejection) stays put: the doc latches at
+   `'error'` with `data.changeId` on the surfaced error, and the app decides: ask the user,
+   then call `patches.ejectPendingChange(docId, changeId)`. The probe is re-run atomically
+   with the ejection itself (`opts.onlyIfUnappliable`): a server rebase between probe and
+   eject can make the change valid again, and ejecting it then would quarantine committable
+   work.
 2. **Circuit breaker.** At most 3 auto-ejections per doc per session; past that the doc
    latches like any definitive failure, so a systematic mis-attribution can't serially
    drain an offline queue into quarantine.
@@ -92,9 +96,15 @@ are renumbered contiguously off `committedRev`, preserving the pending invariant
 poison-free queue and both sides converge on it; exact tie-resolution follows the same
 one-sided transform as any OT rebase, so at concurrent same-offset ties it is _a_ queue as
 if the change were never minted, not provably the unique one. If the ejected change can't be
-inverted (a corrupt/mismatched queue), ejection returns null and the doc stays latched rather
-than risking a half-rebased queue. `verifyPendingChange` probes the named change in its own
-frame (committed + predecessors), not committed-only.
+inverted — including when it no longer applies cleanly to its own frame, where an inverse
+would be fabricated from values the change never saw — ejection THROWS and the doc stays
+latched rather than risking a half-rebased queue. The throw is deliberately distinct from
+the benign null ("nothing matched"): an app running the consent flow must be able to tell a
+resolved eject from a doc still wedged behind the change. In practice this means an
+un-appliable poison with successors cannot be ejected (only quarantined-at-tail poisons
+skip the invert); a queue in that state needs snapshot-reload recovery instead.
+`verifyPendingChange` probes the named change in its own frame (committed + predecessors),
+not committed-only.
 
 Caveat on the "never silently drops content" guarantee below: it covers the ejected change
 (preserved in quarantine). A _successor_ whose edits were scoped to structure the ejected

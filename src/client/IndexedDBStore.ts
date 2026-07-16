@@ -6,6 +6,7 @@ import type {
   ListBranchesOptions,
   PatchesSnapshot,
   PatchesState,
+  QuarantinedChange,
 } from '../types.js';
 import { deferred, type Deferred } from '../utils/deferred.js';
 import { toStorageError } from '../net/error.js';
@@ -372,6 +373,35 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
   /** Whether the open database contains the named object store (it may not on an external-mode database the host hasn't upgraded). */
   async hasStore(name: string): Promise<boolean> {
     return (await this.getDB()).objectStoreNames.contains(name);
+  }
+
+  // ─── Quarantine (shared store) ────────────────────────────────────────────
+  // `quarantinedChanges` is one shared object store created here, so list/discard live
+  // here once and the algorithm stores delegate — a per-algorithm copy of these bodies
+  // is how the hasStore guard drifted between OT and LWW.
+
+  /**
+   * List quarantined changes for one doc, or all docs when docId is omitted. Entries from
+   * every algorithm over this database appear here (the store is shared). Absent store
+   * (an external-mode database whose host hasn't bumped its version) returns [].
+   */
+  async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
+    if (!(await this.hasStore('quarantinedChanges'))) return [];
+    const [tx, quarantined] = await this.transaction(['quarantinedChanges'], 'readonly');
+    const entries =
+      docId !== undefined
+        ? await quarantined.getAll<QuarantinedChange>([docId, ''], [docId, '￿'])
+        : await quarantined.getAll<QuarantinedChange>();
+    await tx.complete();
+    return entries;
+  }
+
+  /** Permanently remove a quarantined change. Absent store is a no-op (nothing could have been quarantined). */
+  async discardQuarantinedChange(docId: string, changeId: string): Promise<void> {
+    if (!(await this.hasStore('quarantinedChanges'))) return;
+    const [tx, quarantined] = await this.transaction(['quarantinedChanges'], 'readwrite');
+    await quarantined.delete([docId, changeId]);
+    await tx.complete();
   }
 
   // ─── Algorithm-Specific Methods ──────────────────────────────────────────

@@ -329,40 +329,84 @@ export class OTAlgorithm implements ClientAlgorithm {
    * lives in {@link computePendingEjection}; this method sequences it under the doc lock and
    * persists the result atomically via the store.
    *
-   * Returns null (nothing mutated) when the id doesn't match a pending change, or when the
-   * ejected change can't be inverted — a mismatch leaves the doc latched rather than risking a
-   * half-rebased queue.
+   * Returns null (nothing mutated) when the id doesn't match a pending change, or when
+   * `opts.onlyIfUnappliable` is set and the change now applies cleanly in its frame — a
+   * server rebase between the caller's probe and this call can make yesterday's poison
+   * committable, and ejecting it then would quarantine valid work and drop its dependents.
+   *
+   * @throws When the change can't be safely inverted (it no longer applies to its own
+   *   frame, or a predecessor doesn't). Nothing is mutated and the doc stays latched.
+   *   The throw is deliberate: callers must be able to tell "nothing to eject" (null)
+   *   from "eject impossible" — collapsing both into null lets an app dismiss a consent
+   *   flow as resolved while the doc is still wedged.
    */
   async ejectPendingChange(
     docId: string,
     changeId: string,
     reason: string,
-    doc?: PatchesDoc<any>
+    doc?: PatchesDoc<any>,
+    opts?: { onlyIfUnappliable?: boolean }
   ): Promise<QuarantinedChange | null> {
-    const quarantined = await this._withDocLock(docId, async () => {
+    return this._withDocLock(docId, async () => {
       const snapshot = await this.store.getDoc(docId);
       if (!snapshot) return null;
-      let ejection;
-      try {
-        ejection = computePendingEjection(snapshot.state, snapshot.rev, snapshot.changes, changeId);
-      } catch (err) {
-        console.error(`Cannot eject change ${changeId} from doc ${docId} (inversion failed); leaving it latched:`, err);
-        return null;
-      }
-      if (!ejection) return null;
-      return this.store.quarantinePendingChange(docId, ejection.poison, reason, ejection.newPending);
-    });
-    if (!quarantined) return null;
 
-    // The commit that named this change was rejected, so no server echo is coming for it. The
-    // store no longer holds it (nor its influence on the successors), so rebuild the open doc
-    // from the reconciled store state. import() (not applyChanges) because ejection doesn't
-    // advance committedRev — there is no incremental step to apply.
-    if (doc) {
-      const snapshot = await this.loadDoc(docId);
-      (doc as OTDoc<any>).import(snapshot ?? { state: {}, rev: 0, changes: [] });
-    }
-    return quarantined;
+      // Merge doc-only in-memory pending exactly like applyServerChanges (id-aware; see the
+      // comment there for why rev alone is wrong). The import below wholesale-replaces the
+      // doc's queue, so a change that exists only in the open doc (a torn store write) must
+      // ride through the rebase as a successor rather than be dropped by the rebuild.
+      if (doc) {
+        const otDoc = doc as OTDoc<any>;
+        const inMemoryPending = otDoc.getPendingChanges();
+        const latestRev = snapshot.changes[snapshot.changes.length - 1]?.rev ?? snapshot.rev;
+        const storedIds = new Set(snapshot.changes.map(change => change.id));
+        const newChanges = inMemoryPending.filter(change => change.rev > latestRev && !storedIds.has(change.id));
+        snapshot.changes.push(...newChanges);
+      }
+
+      // The auto-eject path re-corroborates here, under the same lock the ejection runs in
+      // (its earlier verifyPendingChange probe released the lock, and a broadcast may have
+      // rebased the queue since). Same failure posture as the probe: a frame we can't
+      // reconstruct means we can't corroborate, so don't eject.
+      if (opts?.onlyIfUnappliable) {
+        const index = snapshot.changes.findIndex(change => change.id === changeId);
+        if (index === -1) return null;
+        let preState;
+        try {
+          preState = applyChanges(snapshot.state, snapshot.changes.slice(0, index));
+        } catch {
+          return null;
+        }
+        try {
+          applyPatch(preState, snapshot.changes[index].ops, { strict: true, silent: true });
+          return null; // Applies cleanly now — no longer poison; a plain retry will commit it.
+        } catch {
+          // Still un-appliable — proceed with the ejection.
+        }
+      }
+
+      const ejection = computePendingEjection(snapshot.state, snapshot.rev, snapshot.changes, changeId);
+      if (!ejection) return null;
+      const quarantined = await this.store.quarantinePendingChange(docId, ejection.poison, reason, ejection.newPending);
+      if (!quarantined) return null;
+
+      // The commit that named this change was rejected, so no server echo is coming for it.
+      // Rebuild the open doc from the post-ejection snapshot already in hand, INSIDE the
+      // lock: done after release, a queued mint reads the doc's stale poison-inclusive frame
+      // and persists a mis-framed change into the rebased queue, and an interleaved
+      // receive-rebase can re-inject the poison through the pending merge. import() (not
+      // applyChanges) because ejection doesn't advance committedRev — there is no
+      // incremental step to apply. A rebuild failure must not mask the durable ejection:
+      // the entry is persisted and reported; the doc heals on its next import.
+      if (doc) {
+        try {
+          (doc as OTDoc<any>).import({ state: snapshot.state, rev: snapshot.rev, changes: ejection.newPending });
+        } catch (err) {
+          console.error(`Ejected change ${changeId} from doc ${docId}, but rebuilding the open doc failed:`, err);
+        }
+      }
+      return quarantined;
+    });
   }
 
   async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {

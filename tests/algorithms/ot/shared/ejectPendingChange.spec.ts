@@ -107,6 +107,29 @@ describe('computePendingEjection', () => {
     ];
     expect(() => computePendingEjection({}, COMMITTED_REV, queue, 'poison')).toThrow();
   });
+
+  it('throws on a one-level array mismatch instead of fabricating a phantom inverse', () => {
+    // `replace /arr/5` over a 3-element array fails strict apply, but invertPatch reads
+    // arr[5] as undefined WITHOUT throwing and would emit `remove /arr/5` — the inverse of
+    // an effect that never happened. Walked through the successor, that phantom remove
+    // retargets its /arr/6 op to /arr/5: silent corruption. The strict-apply probe must
+    // turn this shape into the documented throw-and-latch instead.
+    const queue = [
+      pending('poison', 6, [{ op: 'replace', path: '/arr/5', value: 9 }]),
+      pending('after', 7, [{ op: 'replace', path: '/arr/6', value: 42 }]),
+    ];
+    expect(() => computePendingEjection({ arr: [1, 2, 3] }, COMMITTED_REV, queue, 'poison')).toThrow(/Cannot eject/);
+  });
+
+  it('throws on a one-level property miss through a primitive instead of fabricating an inverse', () => {
+    // `replace /s/a` over { s: 'x' } misses by one level: reading ('x')['a'] yields
+    // undefined silently, so without the probe the invert fabricates `remove /s/a`.
+    const queue = [
+      pending('poison', 6, [{ op: 'replace', path: '/s/a', value: 1 }]),
+      pending('after', 7, [{ op: 'add', path: '/z', value: 1 }]),
+    ];
+    expect(() => computePendingEjection({ s: 'x' }, COMMITTED_REV, queue, 'poison')).toThrow(/Cannot eject/);
+  });
 });
 
 describe('computePendingEjection — convergence against the real OT server', () => {

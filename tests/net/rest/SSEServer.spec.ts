@@ -193,6 +193,66 @@ describe('SSEServer', () => {
     });
   });
 
+  describe('hasClient', () => {
+    it('should be false for an unknown client', () => {
+      expect(server.hasClient('nope')).toBe(false);
+    });
+
+    it('should be true for a connected client', () => {
+      server.connect('client1');
+      expect(server.hasClient('client1')).toBe(true);
+    });
+
+    it('should stay true for a disconnected client within the buffer TTL', () => {
+      server.connect('client1');
+      server.disconnect('client1');
+      expect(server.hasClient('client1')).toBe(true);
+    });
+
+    it('should be false once the buffer TTL expires', () => {
+      server.connect('client1');
+      server.disconnect('client1');
+      vi.advanceTimersByTime(60_001);
+      expect(server.hasClient('client1')).toBe(false);
+    });
+  });
+
+  describe('addSubscriptions', () => {
+    it('should return null for an unknown client', () => {
+      expect(server.addSubscriptions('unknown', ['doc1'])).toBeNull();
+    });
+
+    it('should register subscriptions and return the docIds', () => {
+      server.connect('client1');
+      expect(server.addSubscriptions('client1', ['doc1', 'doc2'])).toEqual(['doc1', 'doc2']);
+      expect(server.listSubscriptions('doc1')).toContain('client1');
+      expect(server.listSubscriptions('doc2')).toContain('client1');
+    });
+
+    it('should bypass the authorization provider (trusted, pre-authorized input)', () => {
+      const canAccess = vi.fn().mockResolvedValue(false);
+      const authServer = new SSEServer({ auth: { canAccess } });
+      authServer.connect('client1');
+
+      const result = authServer.addSubscriptions('client1', ['doc1']);
+
+      expect(result).toEqual(['doc1']);
+      expect(authServer.listSubscriptions('doc1')).toContain('client1');
+      expect(canAccess).not.toHaveBeenCalled();
+      authServer.destroy();
+    });
+
+    it('should deliver notifications to clients registered this way', async () => {
+      const stream = server.connect('client1');
+      server.addSubscriptions('client1', ['doc1']);
+
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
+
+      const chunks = await readStream(stream, 1);
+      expect(chunks[0]).toContain('event: changesCommitted');
+    });
+  });
+
   describe('notifications', () => {
     it('should send events to connected subscribed clients', async () => {
       const stream = server.connect('client1');

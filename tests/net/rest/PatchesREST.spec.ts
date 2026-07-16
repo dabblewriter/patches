@@ -593,6 +593,12 @@ describe('PatchesREST', () => {
       expect(init?.method).toBe('DELETE');
     });
 
+    it('should resolve an empty subscribe without a request', async () => {
+      const result = await rest.subscribe([]);
+      expect(result).toEqual([]);
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
     it('should GET doc state', async () => {
       const docState = { state: { title: 'Hello' }, rev: 5 };
       globalThis.fetch = mockFetchResponse(docState);
@@ -693,6 +699,125 @@ describe('PatchesREST', () => {
 
       // StatusError, not NetworkError (StatusError keeps the default Error name).
       await expect(rest.getDoc('doc1')).rejects.toMatchObject({ code: 403, name: 'Error' });
+    });
+  });
+
+  describe('subscribe retry (multi-instance misdirection)', () => {
+    /** fetch mock that answers each call with the next response in the list (last repeats). */
+    function mockFetchSequence(responses: Array<{ data: any; status?: number }>) {
+      let call = 0;
+      return vi.fn().mockImplementation(() => {
+        const r = responses[Math.min(call++, responses.length - 1)];
+        const status = r.status ?? 200;
+        return Promise.resolve({
+          ok: status >= 200 && status < 300,
+          status,
+          statusText: status === 200 ? 'OK' : 'Error',
+          json: () => Promise.resolve(r.data),
+        });
+      });
+    }
+
+    beforeEach(async () => {
+      const p = rest.connect();
+      MockEventSource.latest.simulateOpen();
+      await p;
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('retries a subscribe that registered nothing and resolves once one lands', async () => {
+      globalThis.fetch = mockFetchSequence([{ data: { docIds: [] } }, { data: { docIds: ['doc1'] } }]);
+
+      const promise = rest.subscribe(['doc1']);
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(promise).resolves.toEqual(['doc1']);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retry when the server accounts for every id as denied', async () => {
+      const onError = vi.fn();
+      rest.onError(onError);
+      globalThis.fetch = mockFetchSequence([{ data: { docIds: [], denied: ['doc1'] } }]);
+
+      await expect(rest.subscribe(['doc1'])).resolves.toEqual([]);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(onError).not.toHaveBeenCalled();
+    });
+
+    it('does not retry a partial registration — missing ids are authorization denials', async () => {
+      globalThis.fetch = mockFetchSequence([{ data: { docIds: ['doc1'] } }]);
+
+      await expect(rest.subscribe(['doc1', 'doc2'])).resolves.toEqual(['doc1']);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('gives up after max attempts, surfaces telemetry, and resolves empty', async () => {
+      const onError = vi.fn();
+      rest.onError(onError);
+      globalThis.fetch = mockFetchSequence([{ data: { docIds: [] } }]);
+
+      const promise = rest.subscribe(['doc1']);
+      await vi.advanceTimersByTimeAsync(10_000); // flush all backoff delays (0.5s + 1s + 2s)
+      await expect(promise).resolves.toEqual([]);
+
+      expect(globalThis.fetch).toHaveBeenCalledTimes(4);
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0][0].name).toBe('SubscribeIncompleteError');
+    });
+
+    it('retries UNKNOWN_CLIENT and resolves when a later attempt reaches the stream', async () => {
+      globalThis.fetch = mockFetchSequence([
+        { data: { error: 'Unknown client', data: { code: 'UNKNOWN_CLIENT' } }, status: 409 },
+        { data: { docIds: ['doc1'] } },
+      ]);
+
+      const promise = rest.subscribe(['doc1']);
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(promise).resolves.toEqual(['doc1']);
+      expect(rest.state).toBe('connected'); // no teardown on a recovered subscribe
+    });
+
+    it('rebuilds the stream when the server consistently reports UNKNOWN_CLIENT', async () => {
+      const onError = vi.fn();
+      rest.onError(onError);
+      globalThis.fetch = mockFetchSequence([
+        { data: { error: 'Unknown client', data: { code: 'UNKNOWN_CLIENT' } }, status: 409 },
+      ]);
+      const es = MockEventSource.latest;
+
+      const promise = rest.subscribe(['doc1']);
+      promise.catch(() => {}); // assertion below; avoid unhandled rejection while timers run
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await expect(promise).rejects.toMatchObject({ code: 409 });
+      expect(globalThis.fetch).toHaveBeenCalledTimes(4);
+      expect(es.close).toHaveBeenCalled(); // stream torn down
+      expect(onError).toHaveBeenCalledTimes(1);
+    });
+
+    it('propagates other status errors immediately without retrying', async () => {
+      globalThis.fetch = mockFetchSequence([{ data: { error: 'Forbidden' }, status: 403 }]);
+
+      await expect(rest.subscribe(['doc1'])).rejects.toMatchObject({ code: 403 });
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops retrying quietly when disconnected mid-backoff', async () => {
+      const onError = vi.fn();
+      rest.onError(onError);
+      globalThis.fetch = mockFetchSequence([{ data: { docIds: [] } }]);
+
+      const promise = rest.subscribe(['doc1']);
+      rest.disconnect();
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await expect(promise).resolves.toEqual([]);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(onError).not.toHaveBeenCalled();
     });
   });
 

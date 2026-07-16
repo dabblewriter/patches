@@ -44,6 +44,17 @@ const INITIAL_RECONNECT_BACKOFF_MS = 1_000;
 const MAX_RECONNECT_BACKOFF_MS = 30_000;
 /** Max characters of a malformed SSE payload included in the surfaced error message. */
 const MALFORMED_EVENT_SNIPPET_CHARS = 200;
+/**
+ * Total attempts for a subscribe whose response registered nothing. On a
+ * multi-instance server without subscribe routing, a POST that lands on an
+ * instance that doesn't own this client's event stream silently registers
+ * nothing and returns an empty list — indistinguishable from every docId being
+ * denied. Each retry re-rolls the load balancer, so a small budget recovers
+ * most misdirected subscribes while an all-denied response stays cheap.
+ */
+const SUBSCRIBE_MAX_ATTEMPTS = 4;
+/** Base delay between subscribe attempts; doubles each retry (500ms, 1s, 2s). */
+const SUBSCRIBE_RETRY_BASE_DELAY_MS = 500;
 
 /**
  * Options for creating a PatchesREST instance.
@@ -298,12 +309,82 @@ export class PatchesREST implements PatchesConnection {
 
   // --- PatchesAPI: Subscriptions ---
 
+  /**
+   * Subscribe to server events for the given doc IDs. Returns the docIds the
+   * server actually registered (ids denied by authorization are excluded).
+   *
+   * Failure handling exists for the multi-instance hazard: subscriptions are
+   * registered against the instance holding this client's event stream, and a
+   * POST that lands elsewhere can register nothing.
+   *
+   * - A response that registered nothing is retried up to
+   *   {@link SUBSCRIBE_MAX_ATTEMPTS} times (each POST re-rolls the load
+   *   balancer) unless the server explicitly accounted for every id as denied
+   *   (a `denied` array in the response). Exhaustion resolves with `[]` and
+   *   surfaces a `SubscribeIncompleteError` via {@link onError} for telemetry —
+   *   live updates are silently missing in this state, which is otherwise
+   *   invisible (commits and reads still succeed).
+   * - A server verdict that NO instance holds a stream for this client (status
+   *   error with `data.code === 'UNKNOWN_CLIENT'`) is retried the same way,
+   *   then treated as a dead stream: tear down + schedule reconnect (the fresh
+   *   'connected' state drives the consumer's full re-subscribe) and reject.
+   */
   async subscribe(ids: string | string[]): Promise<string[]> {
-    const result = await this._fetch(`/subscriptions/${this.clientId}`, {
-      method: 'POST',
-      body: { docIds: normalizeIds(ids) },
-    });
-    return result.docIds;
+    const requested = normalizeIds(ids);
+    if (requested.length === 0) return [];
+
+    let unknownClient: Error | null = null;
+    for (let attempt = 1; attempt <= SUBSCRIBE_MAX_ATTEMPTS; attempt++) {
+      if (attempt > 1) {
+        await new Promise(resolve =>
+          globalThis.setTimeout(resolve, SUBSCRIBE_RETRY_BASE_DELAY_MS * 2 ** (attempt - 2))
+        );
+        // Deliberately disconnected (or offline) while waiting to retry — the
+        // stream these subscriptions target is gone, so stop quietly.
+        if (!this.shouldBeConnected || onlineState.isOffline) return [];
+      }
+      let result: { docIds?: unknown; denied?: unknown };
+      try {
+        result = await this._fetch(`/subscriptions/${this.clientId}`, {
+          method: 'POST',
+          body: { docIds: requested },
+        });
+      } catch (err) {
+        if (err instanceof StatusError && err.data?.code === 'UNKNOWN_CLIENT') {
+          // The server says no instance owns a stream for our clientId. Retry —
+          // right after a (re)connect this can be the server's stream registry
+          // catching up — and only give up on the stream below once exhausted.
+          unknownClient = err;
+          continue;
+        }
+        throw err;
+      }
+      unknownClient = null;
+      const docIds = Array.isArray(result?.docIds) ? (result.docIds as string[]) : [];
+      if (docIds.length > 0) return docIds;
+      // Nothing registered. A server that reports denial accounting told us
+      // every id was denied — a real (authoritative) empty result, not a
+      // misdirected subscribe. Older servers leave the two indistinguishable.
+      if (Array.isArray(result?.denied)) return docIds;
+    }
+
+    if (unknownClient) {
+      // Authoritative: our stream is gone server-side (stale/half-open here).
+      // Rebuild it — the consumer re-subscribes everything on 'connected'.
+      if (this.shouldBeConnected) {
+        this._teardownStream();
+        this._setState('error');
+        this._scheduleReconnect();
+      }
+      this.onError.emit(unknownClient);
+      throw unknownClient;
+    }
+    const error = new Error(
+      `Subscribe registered no documents after ${SUBSCRIBE_MAX_ATTEMPTS} attempts (${requested.length} requested)`
+    );
+    error.name = 'SubscribeIncompleteError';
+    this.onError.emit(error);
+    return [];
   }
 
   async unsubscribe(ids: string | string[]): Promise<void> {

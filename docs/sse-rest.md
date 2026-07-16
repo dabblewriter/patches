@@ -112,6 +112,14 @@ All document operations use standard HTTP methods. Document IDs can contain slas
 | DELETE | `/subscriptions/:clientId` | Unsubscribe from docs `{ docIds: [...] }`                                     |
 | POST   | `/signal/:clientId`        | WebRTC signaling frame (raw JSON-RPC body). See [awareness.md](awareness.md). |
 
+The subscribe response is `{ docIds: [...] }` — the ids the server actually registered. Servers may
+additionally return `denied: [...]` (ids excluded by authorization) so the client can tell an
+authoritative empty result apart from a subscribe that silently registered nothing, and may answer
+with a status error carrying `data.code: 'UNKNOWN_CLIENT'` when no instance holds an event stream
+for the clientId. `PatchesREST` uses both: it retries a nothing-registered response (unless `denied`
+accounts for every id) and rebuilds the stream on `UNKNOWN_CLIENT`. See
+[Multi-instance deployments](#multi-instance-deployments).
+
 ### Documents
 
 | Method | Path                             | Description                            |
@@ -218,6 +226,27 @@ app.post('/docs/:docId{.+}/_changes', async c => {
   return c.json(result);
 });
 ```
+
+### Multi-instance deployments
+
+`SSEServer` state (streams, subscriptions, buffers) is **instance-local**. When the server runs as
+multiple load-balanced instances without session affinity, a `POST /subscriptions/:clientId` will
+usually land on a _different_ instance than the one holding that client's `GET /events/:clientId`
+stream — and `subscribe()` on an instance that doesn't know the client registers nothing and
+returns `[]`. Nothing errors, so live updates silently never arrive.
+
+Route subscribes to the stream-owning instance yourself (e.g. record which instance handled
+`/events/:clientId` in shared state, and forward misdirected subscribes over your message bus).
+Three APIs support this:
+
+- `hasClient(clientId)` — whether THIS instance holds state for the client (live stream or a
+  disconnected client within its buffer TTL).
+- `addSubscriptions(clientId, docIds)` — register **already-authorized** docIds without auth
+  checks, for a forwarded subscribe arriving from the instance that ran authorization. Returns
+  `null` (instead of `[]`) when the client is unknown, so a failed forward is detectable.
+- When no instance owns the stream, answer the POST with a status error carrying
+  `data.code: 'UNKNOWN_CLIENT'` — `PatchesREST` responds by rebuilding its stream and
+  re-subscribing, instead of waiting on a stream that no longer exists.
 
 ## Reconnection and Recovery
 

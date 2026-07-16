@@ -285,8 +285,12 @@ export class OTIndexedDBStore implements OTClientStore {
    * so a crash between them can neither lose the change nor leave the queue half-rebased.
    *
    * Guards on the poison still being pending: returns null without mutating anything when it
-   * isn't (already committed / already ejected), or when the shared quarantine store is
-   * absent on an external-mode database — ejection then fails safe to the caller's error latch.
+   * isn't (already committed / already ejected). Throws when the shared quarantine store is
+   * absent on an external-mode database whose host hasn't bumped its version — matching LWW
+   * (whose transaction raises on the same condition) and the eject contract: null means
+   * "nothing to eject", and a consent-path caller reading null as resolved while the doc is
+   * still wedged is exactly the conflation the throw exists to prevent. Auto-eject callers
+   * catch and latch, same as any eject failure.
    */
   @blockable
   async quarantinePendingChange(
@@ -295,7 +299,12 @@ export class OTIndexedDBStore implements OTClientStore {
     reason: string,
     rebasedPending: Change[]
   ): Promise<QuarantinedChange | null> {
-    if (!(await this.db.hasStore('quarantinedChanges'))) return null;
+    if (!(await this.db.hasStore('quarantinedChanges'))) {
+      throw new Error(
+        `Cannot eject change ${poison.id} from doc ${docId}: the 'quarantinedChanges' store is missing ` +
+          `(external-mode database whose host hasn't upgraded its DB version). Nothing was mutated.`
+      );
+    }
 
     const [tx, pendingChanges, quarantined] = await this.db.transaction(
       ['pendingChanges', 'quarantinedChanges'],

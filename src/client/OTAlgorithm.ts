@@ -355,6 +355,13 @@ export class OTAlgorithm implements ClientAlgorithm {
       // comment there for why rev alone is wrong). The import below wholesale-replaces the
       // doc's queue, so a change that exists only in the open doc (a torn store write) must
       // ride through the rebase as a successor rather than be dropped by the rebuild.
+      //
+      // Deliberately NO `_recentCommittedIds` strand filter here (unlike applyServerChanges):
+      // ejection neither rebases against server changes nor re-sends anything — it treats
+      // the pending queue as ground truth, and removing only the poison stays self-consistent
+      // even with a strand sitting ahead of it (committed + strand IS the poison's frame
+      // within that queue). The filter guards re-send duplication and foreign-op frame
+      // advance, neither of which happens here; the next flush's own path handles strands.
       if (doc) {
         const otDoc = doc as OTDoc<any>;
         const inMemoryPending = otDoc.getPendingChanges();

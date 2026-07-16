@@ -72,7 +72,9 @@ Persistence: quarantined changes live in the shared `quarantinedChanges` Indexed
 self-migrate; external-mode hosts must bump their own DB version so `upgradePatchesDB`
 runs, and add `quarantinedChanges` to any store-name registries (export/import tooling).
 Until the host does, the store logs a console error at open and quarantine is inert
-(`listQuarantinedChanges` returns `[]`, ejection fails safe to the error latch), but
+(`listQuarantinedChanges` returns `[]`; ejection THROWS — auto-eject callers catch and
+latch, and the consent path surfaces "could not eject" instead of misreading a null as
+resolved), but
 previously-working operations keep working.
 
 ## Algorithm support

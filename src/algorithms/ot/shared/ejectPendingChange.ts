@@ -69,8 +69,10 @@ export function computePendingEjection(
 
   let rebasedAfter: Change[];
   if (after.length === 0) {
-    // Nothing depends on the ejected change, so no rebase (and no invert) is needed — the
-    // common case, since the poison is usually the oldest change blocking the queue head.
+    // Nothing depends on the ejected change, so no rebase (and no invert) is needed. This is
+    // the tail-of-queue case — which includes the single-change queue, where the poison
+    // blocking the head IS the tail. (A mid-queue poison with work stacked behind it takes
+    // the invert path below.)
     rebasedAfter = [];
   } else {
     // The state the poison applied to = committed state advanced through its predecessors.
@@ -103,6 +105,20 @@ export function computePendingEjection(
   // committedRev with these very revs, so this is a no-op for them and only re-seats the
   // rebased successors into the gap the poison left. rebaseChanges has already dropped any
   // successor whose ops transformed away to nothing.
+  //
+  // A predecessor with a stale baseRev is the same mint/rebase race
+  // `OTAlgorithm._withConsistentBaseRev` re-stamps — warn on the same trigger rather than
+  // silently masking it here (the re-stamp can misplace ops if foreign changes landed in
+  // between; the strict probe above only vouches for the poison's frame, not the queue's).
+  const staleBaseRevs = before.filter(change => change.baseRev !== committedRev);
+  if (staleBaseRevs.length > 0) {
+    console.warn(
+      `[patches] Ejection of ${changeId} is re-stamping ${staleBaseRevs.length} predecessor(s) from baseRev ` +
+        `${staleBaseRevs.map(c => c.baseRev).join(',')} to ${committedRev}. This indicates a mint/rebase ` +
+        `race (likely two client instances over one store) and can misplace ops if foreign ` +
+        `changes landed in between.`
+    );
+  }
   let rev = committedRev;
   const newPending = [...before, ...rebasedAfter].map(change => ({
     ...change,

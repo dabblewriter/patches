@@ -1,5 +1,5 @@
 import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
-import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
+import type { Change, PatchesSnapshot, PatchesState, QuarantinedChange } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
 import { IndexedDBStore } from './IndexedDBStore.js';
 import type { OTClientStore } from './OTClientStore.js';
@@ -157,8 +157,13 @@ export class OTIndexedDBStore implements OTClientStore {
    */
   @blockable
   async deleteDoc(docId: string): Promise<void> {
-    const [tx, snapshots, committedChanges, pendingChanges, docsStore] = await this.db.transaction(
-      ['snapshots', 'committedChanges', 'pendingChanges', 'docs'],
+    // quarantinedChanges may be absent on an external-mode database whose host hasn't
+    // bumped its version yet; deletion must keep working there.
+    const withQuarantine = await this.db.hasStore('quarantinedChanges');
+    const storeNames = ['snapshots', 'committedChanges', 'pendingChanges', 'docs'];
+    if (withQuarantine) storeNames.push('quarantinedChanges');
+    const [tx, snapshots, committedChanges, pendingChanges, docsStore, quarantined] = await this.db.transaction(
+      storeNames,
       'readwrite'
     );
 
@@ -169,6 +174,7 @@ export class OTIndexedDBStore implements OTClientStore {
       snapshots.delete(docId),
       committedChanges.delete([docId, 0], [docId, Infinity]),
       pendingChanges.delete([docId, 0], [docId, Infinity]),
+      ...(quarantined ? [quarantined.delete([docId, ''], [docId, '￿'])] : []),
     ]);
 
     await tx.complete();
@@ -269,6 +275,62 @@ export class OTIndexedDBStore implements OTClientStore {
     const pending = await pendingChanges.getAll<Change>([docId, startRev], [docId, Infinity]);
     await tx.complete();
     return [...committed, ...pending].sort((a, b) => a.rev - b.rev);
+  }
+
+  // ─── Quarantine ─────────────────────────────────────────────────────────
+
+  /**
+   * Atomically move one pending change into quarantine and replace the pending queue with
+   * its rebased remainder. The quarantine write and the pending swap share one transaction,
+   * so a crash between them can neither lose the change nor leave the queue half-rebased.
+   *
+   * Guards on the poison still being pending: returns null without mutating anything when it
+   * isn't (already committed / already ejected), or when the shared quarantine store is
+   * absent on an external-mode database — ejection then fails safe to the caller's error latch.
+   */
+  @blockable
+  async quarantinePendingChange(
+    docId: string,
+    poison: Change,
+    reason: string,
+    rebasedPending: Change[]
+  ): Promise<QuarantinedChange | null> {
+    if (!(await this.db.hasStore('quarantinedChanges'))) return null;
+
+    const [tx, pendingChanges, quarantined] = await this.db.transaction(
+      ['pendingChanges', 'quarantinedChanges'],
+      'readwrite'
+    );
+
+    const pending = await pendingChanges.getAll<StoredChange>([docId, 0], [docId, Infinity]);
+    if (!pending.some(change => change.id === poison.id)) {
+      await tx.complete();
+      return null;
+    }
+
+    const entry: QuarantinedChange = {
+      docId,
+      changeId: poison.id,
+      change: poison,
+      reason,
+      quarantinedAt: Date.now(),
+    };
+    await quarantined.put<QuarantinedChange>(entry);
+    await pendingChanges.delete([docId, 0], [docId, Infinity]);
+    await Promise.all(rebasedPending.map(change => pendingChanges.put<StoredChange>({ ...change, docId })));
+    await tx.complete();
+    return entry;
+  }
+
+  /** List quarantined changes for one doc, or all docs when docId is omitted (shared store; see IndexedDBStore). */
+  async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
+    return this.db.listQuarantinedChanges(docId);
+  }
+
+  /** Permanently remove a quarantined change (shared store; see IndexedDBStore). */
+  @blockable
+  async discardQuarantinedChange(docId: string, changeId: string): Promise<void> {
+    return this.db.discardQuarantinedChange(docId, changeId);
   }
 
   // ─── Server Changes ─────────────────────────────────────────────────────

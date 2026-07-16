@@ -115,6 +115,27 @@ describe('LWWAlgorithm quarantine', () => {
       expect(await store.listQuarantinedChanges(DOC)).toEqual([]);
     });
 
+    it('onlyIfUnappliable declines a sending change that now applies cleanly, still ejects one that does not', async () => {
+      const { store, algorithm } = await setup();
+      // Applies cleanly against committed state: the atomic auto-eject re-probe must decline.
+      const clean = await capture(algorithm, [{ op: 'replace', path: '/title', value: 'y' }]);
+      expect(
+        await algorithm.ejectPendingChange(DOC, clean.id, 'nope', undefined, { onlyIfUnappliable: true })
+      ).toBeNull();
+      expect((await store.getSendingChange(DOC))?.id).toBe(clean.id);
+      expect(await store.listQuarantinedChanges(DOC)).toEqual([]);
+
+      // Clear the slot and capture a genuinely un-appliable change: still ejects under the flag.
+      await store.quarantineSendingChange(DOC, clean.id, 'clear the slot');
+      await store.discardQuarantinedChange(DOC, clean.id);
+      const poison = await capture(algorithm, [{ op: 'replace', path: '/title/a/b', value: 1 }]);
+      const entry = await algorithm.ejectPendingChange(DOC, poison.id, 'rejected', undefined, {
+        onlyIfUnappliable: true,
+      });
+      expect(entry?.changeId).toBe(poison.id);
+      expect(await store.getSendingChange(DOC)).toBeNull();
+    });
+
     it('quarantines only the unconfirmed remainder of a partially-confirmed change', async () => {
       const { store, algorithm } = await setup();
       const sending = await capture(algorithm, [

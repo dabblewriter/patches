@@ -267,11 +267,27 @@ export class LWWAlgorithm implements ClientAlgorithm {
     docId: string,
     changeId: string,
     reason: string,
-    doc?: PatchesDoc<any>
+    doc?: PatchesDoc<any>,
+    opts?: { onlyIfUnappliable?: boolean }
   ): Promise<QuarantinedChange | null> {
-    const quarantined = await this._withDocLock(docId, () =>
-      this.store.quarantineSendingChange(docId, changeId, reason)
-    );
+    const quarantined = await this._withDocLock(docId, async () => {
+      // Re-corroborate under the lock when asked (see ClientAlgorithm.ejectPendingChange):
+      // the sending slot is immutable, but committed state can advance between the caller's
+      // probe and this call, making the change appliable again.
+      if (opts?.onlyIfUnappliable) {
+        const sending = await this.store.getSendingChange(docId);
+        if (sending && sending.id === changeId) {
+          const { state } = await this.store.getCommittedState(docId);
+          try {
+            applyPatch(state, sending.ops, { strict: true, silent: true });
+            return null; // Applies cleanly now — no longer poison; a plain retry will commit it.
+          } catch {
+            // Still un-appliable — proceed with the ejection.
+          }
+        }
+      }
+      return this.store.quarantineSendingChange(docId, changeId, reason);
+    });
     if (!quarantined) return null;
     // The commit that triggered ejection was rejected, so no response is coming for it.
     this._expectedResponseIds.delete(docId);

@@ -1,5 +1,5 @@
 import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
-import type { Change, PatchesSnapshot, PatchesState } from '../types.js';
+import type { Change, PatchesSnapshot, PatchesState, QuarantinedChange } from '../types.js';
 import type { OTClientStore } from './OTClientStore.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
@@ -17,6 +17,9 @@ interface DocBuffers {
  */
 export class OTInMemoryStore implements OTClientStore {
   private docs: Map<string, DocBuffers> = new Map();
+  // Kept outside the per-doc buffers so untracking (cache eviction) preserves quarantine —
+  // only an explicit delete or discard removes an entry (see docs/quarantine.md).
+  private quarantined: Map<string, Map<string, QuarantinedChange>> = new Map();
 
   // ─── Reconstruction ────────────────────────────────────────────────────
   async getDoc(docId: string): Promise<PatchesSnapshot | undefined> {
@@ -95,6 +98,41 @@ export class OTInMemoryStore implements OTClientStore {
     buf.pending = buf.pending.filter(change => !ids.has(change.id));
   }
 
+  // ─── Quarantine ────────────────────────────────────────────────────────
+  async quarantinePendingChange(
+    docId: string,
+    poison: Change,
+    reason: string,
+    rebasedPending: Change[]
+  ): Promise<QuarantinedChange | null> {
+    const buf = this.docs.get(docId);
+    if (!buf || !buf.pending.some(change => change.id === poison.id)) return null;
+
+    const entry: QuarantinedChange = {
+      docId,
+      changeId: poison.id,
+      change: poison,
+      reason,
+      quarantinedAt: Date.now(),
+    };
+    let docQuarantine = this.quarantined.get(docId);
+    if (!docQuarantine) this.quarantined.set(docId, (docQuarantine = new Map()));
+    docQuarantine.set(poison.id, entry);
+    buf.pending = [...rebasedPending];
+    return entry;
+  }
+
+  async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
+    if (docId !== undefined) {
+      return Array.from(this.quarantined.get(docId)?.values() ?? []);
+    }
+    return Array.from(this.quarantined.values()).flatMap(entries => Array.from(entries.values()));
+  }
+
+  async discardQuarantinedChange(docId: string, changeId: string): Promise<void> {
+    this.quarantined.get(docId)?.delete(changeId);
+  }
+
   // ─── Metadata / Tracking ───────────────────────────────────────────
   async trackDocs(docIds: string[], _algorithm?: 'ot' | 'lww'): Promise<void> {
     for (const docId of docIds) {
@@ -118,13 +156,17 @@ export class OTInMemoryStore implements OTClientStore {
     buf.pending = [];
     buf.snapshot = undefined;
     this.docs.set(docId, buf);
+    // Deleting a doc discards its quarantine too — the change has nowhere left to recover to.
+    this.quarantined.delete(docId);
   }
 
   async confirmDeleteDoc(docId: string): Promise<void> {
     this.docs.delete(docId);
+    this.quarantined.delete(docId);
   }
 
   async close(): Promise<void> {
     this.docs.clear();
+    this.quarantined.clear();
   }
 }

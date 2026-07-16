@@ -32,10 +32,14 @@ never triggers.
 The server's attribution is a suspicion, not a verdict:
 
 1. **Local corroboration.** A named change is auto-ejected only when it ALSO fails a local
-   strict-apply probe against committed-only state (`verifyPendingChange`). A change the
-   server rejected but that applies cleanly locally (e.g. a server-side policy rejection)
-   stays put: the doc latches at `'error'` with `data.changeId` on the surfaced error, and
-   the app decides: ask the user, then call `patches.ejectPendingChange(docId, changeId)`.
+   strict-apply probe in its own frame (`verifyPendingChange` — committed-only state for
+   LWW, committed + predecessors for OT). A change the server rejected but that applies
+   cleanly locally (e.g. a server-side policy rejection) stays put: the doc latches at
+   `'error'` with `data.changeId` on the surfaced error, and the app decides: ask the user,
+   then call `patches.ejectPendingChange(docId, changeId)`. The probe is re-run atomically
+   with the ejection itself (`opts.onlyIfUnappliable`): a server rebase between probe and
+   eject can make the change valid again, and ejecting it then would quarantine committable
+   work.
 2. **Circuit breaker.** At most 3 auto-ejections per doc per session; past that the doc
    latches like any definitive failure, so a systematic mis-attribution can't serially
    drain an offline queue into quarantine.
@@ -71,14 +75,46 @@ Until the host does, the store logs a console error at open and quarantine is in
 (`listQuarantinedChanges` returns `[]`, ejection fails safe to the error latch), but
 previously-working operations keep working.
 
-## Algorithm support (v1: LWW only)
+## Algorithm support
 
-LWW's only server-addressable pending identity is the single in-flight sending change, so
-ejection clears the sending slot into quarantine; `pendingOps` minted since capture
+Both algorithms implement ejection.
+
+**LWW.** Its only server-addressable pending identity is the single in-flight sending change,
+so ejection clears the sending slot into quarantine; `pendingOps` minted since capture
 survive and flush next. No rebasing; LWW pending is path-keyed.
 
-OT ejection (invert + rebase of successors) is deliberately deferred: the OT server
-transforms rather than rejects, so there is no live emitter of change-scoped OT
-rejections. The OT server's few commit rejections now throw `StatusError` with
-`data.scope` (and `data.changeId` for the root-op guard) so clients classify them
-correctly, but OT docs latch rather than eject until telemetry proves a real trigger.
+**OT.** An OT pending queue is a _sequential program_ — each change's ops are expressed in the
+frame the changes before it produce — so ejecting one change from the middle can't be a plain
+splice: its successors were built on top of it and must be rebased into the frame that skips
+it. `computePendingEjection` (`src/algorithms/ot/shared/ejectPendingChange.ts`) inverts the
+ejected change against the state it applied to (committed + predecessors) and walks that
+inverse through the successors with the same one-sided diamond `rebaseChanges` runs for an
+incoming server change — the ejected change genuinely preceded them, so its inverse is the
+"already-happened" side their position ties yield to. Predecessors are untouched; survivors
+are renumbered contiguously off `committedRev`, preserving the pending invariant (all
+`baseRev === committedRev`, sequential revs). The server accepts the result as a valid
+poison-free queue and both sides converge on it; exact tie-resolution follows the same
+one-sided transform as any OT rebase, so at concurrent same-offset ties it is _a_ queue as
+if the change were never minted, not provably the unique one. If the ejected change can't be
+inverted — including when it no longer applies cleanly to its own frame, where an inverse
+would be fabricated from values the change never saw — ejection THROWS and the doc stays
+latched rather than risking a half-rebased queue. The throw is deliberately distinct from
+the benign null ("nothing matched"): an app running the consent flow must be able to tell a
+resolved eject from a doc still wedged behind the change. In practice this means an
+un-appliable poison with successors cannot be ejected (only quarantined-at-tail poisons
+skip the invert); a queue in that state needs snapshot-reload recovery instead.
+`verifyPendingChange` probes the named change in its own frame (committed + predecessors),
+not committed-only.
+
+Caveat on the "never silently drops content" guarantee below: it covers the ejected change
+(preserved in quarantine). A _successor_ whose edits were scoped to structure the ejected
+change created (it added `/a`; the successor set `/a/b`) transforms away to nothing under the
+inverse and is dropped — its content is lost, because it edited something the ejection
+removes. Dependents of the ejected change are not separately preserved.
+
+Who emits change-scoped OT rejections: the OT _server_ transforms rather than rejects (its few
+commit rejections carry `data.scope`, plus `data.changeId` for the root-op guard), but the
+consuming app server can reject on policy — e.g. Dabble's Pup rejects a content write from a
+role that may not make it, attaching `{ changeId, scope: 'change' }`. Such a change applies
+cleanly locally, so `verifyPendingChange` returns true and PatchesSync does NOT auto-eject: the
+doc latches with `data.changeId` surfaced for the app to eject on consent.

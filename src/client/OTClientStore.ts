@@ -1,4 +1,4 @@
-import type { Change } from '../types.js';
+import type { Change, QuarantinedChange } from '../types.js';
 import type { PatchesStore } from './PatchesStore.js';
 
 /**
@@ -68,4 +68,36 @@ export interface OTClientStore extends PatchesStore {
    * @param rebasedPendingChanges Pending changes after OT rebasing (replaces all existing pending)
    */
   applyServerChanges(docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]): Promise<void>;
+
+  /**
+   * Atomically move one pending change into quarantine and replace the pending queue with
+   * its rebased remainder.
+   *
+   * The caller (OTAlgorithm) computes `rebasedPending` — the queue with `poison` removed and
+   * its successors transformed as though it had never been minted. This method only persists
+   * the result: it writes the quarantine entry and swaps the pending queue in ONE transaction,
+   * so a crash between the two can neither lose the change nor leave the queue half-rebased.
+   *
+   * Guards on the poison still being pending: returns null without mutating anything when
+   * `poison.id` isn't in the current pending queue (already committed, already ejected, or a
+   * store without the quarantine object store), so a duplicate ejection is a safe no-op.
+   *
+   * @param docId          Document identifier
+   * @param poison         The change to quarantine (removed from pending)
+   * @param reason         Human-readable rejection reason, stored on the quarantine entry
+   * @param rebasedPending The replacement pending queue (poison gone, successors rebased)
+   * @returns The quarantined entry, or null when `poison.id` no longer matches a pending change.
+   */
+  quarantinePendingChange(
+    docId: string,
+    poison: Change,
+    reason: string,
+    rebasedPending: Change[]
+  ): Promise<QuarantinedChange | null>;
+
+  /** List quarantined changes for one doc, or all docs when docId is omitted. */
+  listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]>;
+
+  /** Permanently remove a quarantined change. The app's decision, never automatic. */
+  discardQuarantinedChange(docId: string, changeId: string): Promise<void>;
 }

@@ -187,24 +187,37 @@ export interface ClientAlgorithm {
 
   /**
    * Local strict-apply probe corroborating a server rejection of a pending change: does
-   * the named change apply cleanly against the committed-only local state? Returns true
-   * when it applies cleanly or when no pending change matches the id. Optional; only LWW
-   * implements it today (see docs/quarantine.md).
+   * the named change apply cleanly against the frame it was minted in? That frame is
+   * algorithm-specific — committed-only state for LWW, committed state advanced through
+   * the change's pending predecessors for OT. Returns true when it applies cleanly, when
+   * no pending change matches the id, or when the frame itself can't be reconstructed
+   * (can't corroborate → fail toward "don't eject"). Optional (see docs/quarantine.md).
    */
   verifyPendingChange?(docId: string, changeId: string): Promise<boolean>;
 
   /**
    * Atomically move the named pending change from the outgoing queue into quarantine,
-   * then bring the open doc (if provided) back in line with the store. Optional; only
-   * LWW implements it today (see docs/quarantine.md).
+   * then bring the open doc (if provided) back in line with the store. Optional (see
+   * docs/quarantine.md).
    *
-   * @returns The quarantined entry, or null when docId/changeId don't match a pending change.
+   * `opts.onlyIfUnappliable` re-runs the verifyPendingChange probe under the same lock
+   * the ejection runs in, and ejects only when the change still fails it. Auto-eject
+   * callers must pass it: their earlier probe released the lock, and a server rebase in
+   * the gap can make the change valid again — ejecting it then would quarantine
+   * committable work.
+   *
+   * @returns The quarantined entry, or null when nothing was ejected (docId/changeId
+   *   don't match a pending change, or `opts.onlyIfUnappliable` found it applies cleanly).
+   * @throws When the change matched but cannot be safely ejected (the algorithm can't
+   *   compute a trustworthy rebase of its successors). Nothing is mutated. Callers must
+   *   not treat this as the benign null — the doc is still wedged behind the change.
    */
   ejectPendingChange?(
     docId: string,
     changeId: string,
     reason: string,
-    doc?: PatchesDoc<any>
+    doc?: PatchesDoc<any>,
+    opts?: { onlyIfUnappliable?: boolean }
   ): Promise<QuarantinedChange | null>;
 
   /** Lists quarantined changes for one doc, or all docs when docId is omitted. */

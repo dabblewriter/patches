@@ -136,6 +136,7 @@ describe('OTIndexedDBStore', () => {
     (store as any).db.close = vi.fn().mockResolvedValue(undefined);
     (store as any).db.deleteDB = vi.fn().mockResolvedValue(undefined);
     (store as any).db.setName = vi.fn();
+    (store as any).db.hasStore = vi.fn().mockResolvedValue(true);
     (store as any).db.listDocs = vi.fn().mockResolvedValue([]);
     (store as any).db.trackDocs = vi.fn().mockResolvedValue(undefined);
     (store as any).db.confirmDeleteDoc = vi.fn().mockResolvedValue(undefined);

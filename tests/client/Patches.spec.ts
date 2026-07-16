@@ -950,5 +950,19 @@ describe('Patches', () => {
       expect(lwwAlgorithm.untrackDocs).toHaveBeenCalledWith(['settings']);
       expect(otAlgorithm.untrackDocs).not.toHaveBeenCalled();
     });
+
+    it('listQuarantinedChanges dedups entries both algorithm stores report from a shared database', async () => {
+      // In shared-database setups (createMultiAlgorithmIndexedDBPatches) every algorithm
+      // store reads the same `quarantinedChanges` object store, so both return the same
+      // entries; the aggregate must not double them.
+      const entry = { docId: 'doc1', changeId: 'c1', change: createChange('c1', 2), reason: 'r', quarantinedAt: 1 };
+      const other = { docId: 'doc2', changeId: 'c2', change: createChange('c2', 3), reason: 'r', quarantinedAt: 2 };
+      (otAlgorithm as any).listQuarantinedChanges = vi.fn().mockResolvedValue([entry, other]);
+      (lwwAlgorithm as any).listQuarantinedChanges = vi.fn().mockResolvedValue([entry, other]);
+
+      const listed = await multiPatches.listQuarantinedChanges();
+
+      expect(listed.map(e => `${e.docId}/${e.changeId}`).sort()).toEqual(['doc1/c1', 'doc2/c2']);
+    });
   });
 });

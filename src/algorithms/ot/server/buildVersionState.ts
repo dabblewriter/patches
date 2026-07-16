@@ -26,9 +26,11 @@ export const MAX_ANCESTOR_HOPS = 10;
  * Resolves the version a build of `version` will chain from: the recorded `parentId`, else the
  * latest main version ending before `startRev` (bounded by the committed change log — see
  * {@link findLatestMainVersion}, so an orphan version stamped past the log is never selected).
- * A recorded parent whose snapshot overlaps the version's own range (`endRev` past
- * `startRev - 1`) already contains revs the build must exclude, so it is unusable and resolves
- * to `undefined` — the build replays from rev 1 instead.
+ *
+ * Resolution only — an overlapping recorded parent (`endRev` past `startRev - 1`) is still
+ * returned. Whether its snapshot is usable is the build's concern: `loadParentState` rejects it
+ * after the ancestor walk, so a stateless overlapping link can still be walked past to a clean
+ * ancestor instead of forcing a full-history replay.
  *
  * Metadata only, no state reads — cheap enough for dependency walks. Exported for
  * deferred-build backends: a builder draining pending versions must order builds with the same
@@ -40,16 +42,7 @@ export async function resolveBuildParent(
   docId: string,
   version: VersionMetadata
 ): Promise<VersionMetadata | undefined> {
-  if (version.parentId) {
-    const parent = await store.loadVersion(docId, version.parentId);
-    if (parent && parent.endRev > version.startRev - 1) {
-      console.warn(
-        `Version ${version.id} of doc ${docId} has parent ${parent.id} whose endRev ${parent.endRev} overlaps its startRev ${version.startRev}; ignoring the parent.`
-      );
-      return undefined;
-    }
-    return parent;
-  }
+  if (version.parentId) return store.loadVersion(docId, version.parentId);
   if (version.startRev > 1) return findLatestMainVersion(store, docId, version.startRev - 1);
   return undefined;
 }
@@ -77,9 +70,16 @@ async function loadParentState(
 ): Promise<{ rawState: string | ReadableStream<string>; endRev: number } | undefined> {
   const loadPair = (id: string) => Promise.all([store.loadVersionState(docId, id), store.loadVersion(docId, id)]);
   const recordedParentId = version.parentId;
-  let parentMeta = await resolveBuildParent(store, docId, version);
+  let parentMeta: VersionMetadata | undefined;
   let rawState: string | ReadableStream<string> | undefined;
-  if (parentMeta) rawState = await store.loadVersionState(docId, parentMeta.id);
+  if (recordedParentId) {
+    // resolveBuildParent's first branch, inlined so the metadata and state
+    // loads stay parallel — the common case of every chained build and read.
+    [rawState, parentMeta] = await loadPair(recordedParentId);
+  } else {
+    parentMeta = await resolveBuildParent(store, docId, version);
+    if (parentMeta) rawState = await store.loadVersionState(docId, parentMeta.id);
+  }
 
   // Parent metadata without state: walk the ancestor chain to the nearest version with state.
   // Missing is any falsy read (a zero-byte blob comes back '', never a valid state — see
@@ -114,9 +114,8 @@ async function loadParentState(
   if (parentMeta && !isMissingVersionState(rawState)) {
     // A parent whose snapshot extends into this version's own range can't be chained from: its
     // state already contains revs at or past startRev, so bridging (or fast-path streaming)
-    // from it would serve too-new state. resolveBuildParent rejects a direct overlapping parent
-    // and findLatestMainVersion caps endRev at startRev - 1, so this only catches ancestors
-    // reached through the walk's recorded parentIds.
+    // from it would serve too-new state. Resolved parents can't overlap — findLatestMainVersion
+    // caps endRev at startRev - 1 — so this only catches bad recorded parentIds.
     if (parentMeta.endRev > version.startRev - 1) {
       console.warn(
         `Version ${version.id} of doc ${docId} has parent ${parentMeta.id} whose endRev ${parentMeta.endRev} overlaps its startRev ${version.startRev}; ignoring the parent and replaying from rev 1.`

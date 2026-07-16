@@ -265,10 +265,8 @@ describe('version parent chaining', () => {
     expect(state).toEqual({ words: ['one'] });
     expect(rev).toBe(2);
     expect(readsFrom(store)).toEqual([0]);
-    // resolveBuildParent rejects the overlap; loadParentState adds the replay consequence.
-    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('overlaps'));
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no usable parent'));
     warn.mockRestore();
   });
 
@@ -283,7 +281,7 @@ describe('version parent chaining', () => {
     // rev-3 bytes verbatim — one rev too new.
     expect(JSON.parse(json)).toEqual({ words: ['one'] });
     expect(readsFrom(store)).toEqual([0]);
-    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('overlaps'));
     warn.mockRestore();
   });
@@ -317,6 +315,26 @@ describe('version parent chaining', () => {
 
     expect(JSON.parse(json)).toEqual({ words: ['one', 'two'] });
     expect(readsFrom(store)).toEqual([2]);
+    warn.mockRestore();
+  });
+
+  it('walks past a stateless parent whose metadata overlaps the version', async () => {
+    // The overlap only makes the parent's SNAPSHOT unusable; with no snapshot
+    // there is nothing to reject, and dropping to full replay would abandon a
+    // clean stateful ancestor one hop up.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const grandparent = versionMeta({ id: 'v-gp', startRev: 1, endRev: 2 });
+    const statelessOverlapping = versionMeta({ id: 'v-mid', parentId: 'v-gp', startRev: 3, endRev: 4 });
+    const store = makeStore(cleanLog, [grandparent, statelessOverlapping], ['v-mid']);
+    const version = versionMeta({ id: 'v2', parentId: 'v-mid', startRev: 3, endRev: 5 });
+
+    const { state, rev } = await getBaseStateBeforeVersion(store, docId, version);
+
+    expect(state).toEqual({ words: ['one'] });
+    expect(rev).toBe(2);
+    expect(readsFrom(store)).toEqual([]); // chained from v-gp, no replay
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('chaining to ancestor v-gp'));
     warn.mockRestore();
   });
 
@@ -504,15 +522,14 @@ describe('resolveBuildParent', () => {
     expect(store.loadVersionState).not.toHaveBeenCalled();
   });
 
-  it('ignores a recorded parent whose snapshot overlaps the version range', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  it("returns an overlapping recorded parent — usability is the build's concern, not resolution's", async () => {
+    // Rejecting here would also skip the ancestor walk: a stateless
+    // overlapping link must still be walked past to a clean ancestor.
     const parent = versionMeta({ id: 'v-parent', startRev: 1, endRev: 3 }); // contains rev 3
     const store = makeStore(log, [parent]);
     const version = versionMeta({ id: 'v2', parentId: 'v-parent', startRev: 3, endRev: 4 });
 
-    await expect(resolveBuildParent(store, docId, version)).resolves.toBeUndefined();
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('overlaps'));
-    warn.mockRestore();
+    await expect(resolveBuildParent(store, docId, version)).resolves.toBe(parent);
   });
 
   it('resolves the latest main version below startRev when no parentId was recorded', async () => {

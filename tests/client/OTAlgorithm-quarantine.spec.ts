@@ -264,6 +264,40 @@ describe('OTAlgorithm quarantine', () => {
         expect((await algorithm.listQuarantinedChanges(DOC)).map(e => e.changeId)).toEqual(['poison']);
       });
 
+      it('throws (latching) for an un-appliable poison WITH successors — auto-eject is tail-only', async () => {
+        const { store, algorithm } = await setup();
+        // Pins the combination PatchesSync actually exercises. Any change reaching
+        // computePendingEjection via the auto-eject path has, by construction, already failed
+        // this same in-frame probe — so with successors present the ejection's own probe
+        // fails again and throws. Auto-eject can therefore only ever SUCCEED for a tail
+        // poison; a mid-queue un-appliable poison latches for snapshot-reload recovery
+        // (docs/quarantine.md). The motivating policy-403 case is unaffected: it applies
+        // cleanly and goes down the consent path, which handles mid-queue fine.
+        const poison: Change = {
+          id: 'poison',
+          rev: 2,
+          baseRev: 1,
+          ops: [{ op: 'replace', path: '/s/a/b', value: 1 }],
+          createdAt: 0,
+          committedAt: 0,
+        };
+        const after: Change = {
+          id: 'after',
+          rev: 3,
+          baseRev: 1,
+          ops: [{ op: 'add', path: '/z', value: 1 }],
+          createdAt: 0,
+          committedAt: 0,
+        };
+        await store.savePendingChanges(DOC, [poison, after]);
+
+        await expect(
+          algorithm.ejectPendingChange(DOC, 'poison', 'forbidden', undefined, { onlyIfUnappliable: true })
+        ).rejects.toThrow(/Cannot eject/);
+        expect((await store.getPendingChanges(DOC)).map(c => c.id)).toEqual(['poison', 'after']);
+        expect(await algorithm.listQuarantinedChanges(DOC)).toEqual([]);
+      });
+
       it('returns null (cannot corroborate) when a predecessor is un-appliable', async () => {
         const { store, algorithm } = await setup();
         // Same fail-toward-safety posture as verifyPendingChange: no frame, no corroboration,

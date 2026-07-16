@@ -1,5 +1,6 @@
 import { Delta } from '@dabble/delta';
 import { describe, expect, it } from 'vitest';
+import { applyCommittedChanges } from '../../../../src/algorithms/ot/client/applyCommittedChanges';
 import { applyChanges } from '../../../../src/algorithms/ot/shared/applyChanges';
 import { computePendingEjection } from '../../../../src/algorithms/ot/shared/ejectPendingChange';
 import { commitChanges } from '../../../../src/algorithms/ot/server/commitChanges';
@@ -194,6 +195,49 @@ describe('computePendingEjection — convergence against the real OT server', ()
     expect(textOf(serverHead)).toBe('Yhello\n');
     expect(serverHead.comments).toEqual({ a: { body: 'note' } });
   });
+
+  it('converges when a foreign change lands between the ejection and the flush', async () => {
+    // The transform is NOT identity here: another client commits after the ejection is
+    // computed but before this client flushes, so the server must walk the ejected queue
+    // over the foreign change — the concurrency window opts.onlyIfUnappliable guards on
+    // the client side, exercised against the real server transform.
+    const backend = new OTFuzzBackend();
+    const docId = 'doc-foreign';
+    const committed = { text: [{ insert: 'hello\n' }], comments: {} };
+    await seed(backend, docId, committed);
+
+    const queue: Change[] = [
+      { id: 'poison', rev: 2, baseRev: 1, ops: [txt([{ insert: 'XXX' }])], createdAt: 0, committedAt: 0 },
+      { id: 'after', rev: 3, baseRev: 1, ops: [txt([{ retain: 3 }, { insert: 'Y' }])], createdAt: 0, committedAt: 0 },
+    ];
+    const { newPending } = computePendingEjection(committed, 1, queue, 'poison')!;
+
+    await commitChanges(
+      backend,
+      docId,
+      [{ id: 'foreign', rev: 2, baseRev: 1, ops: [txt([{ insert: 'FF' }])], createdAt: 0 }],
+      TIMEOUT
+    );
+    await commitChanges(backend, docId, newPending, TIMEOUT);
+
+    const log = backend.log(docId);
+    expect(log.map(c => c.rev)).toEqual(log.map((_, i) => i + 1));
+    expect(log.some(c => c.id === 'poison')).toBe(false);
+    expect(log.some(c => c.id === 'foreign')).toBe(true);
+    expect(log.some(c => c.id === 'after')).toBe(true);
+
+    // Client-side receive: committed rev 1 with the ejected queue pending, applying the
+    // server's tail (foreign + its own echoes) must clear pending and land on the server
+    // head — convergence under concurrency, not just a well-formed commit.
+    const clientSnapshot = applyCommittedChanges({ state: committed, rev: 1, changes: newPending }, log.slice(1));
+    expect(clientSnapshot.changes).toEqual([]);
+    const serverHead = applyChanges(null as any, log) as any;
+    expect(clientSnapshot.state).toEqual(serverHead);
+    // The foreign edit and the survivor both landed; the poison's content is nowhere.
+    expect(textOf(serverHead)).toContain('FF');
+    expect(textOf(serverHead)).toContain('Y');
+    expect(textOf(serverHead)).not.toContain('XXX');
+  });
 });
 
 describe('computePendingEjection — randomized property tests', () => {
@@ -267,6 +311,43 @@ describe('computePendingEjection — randomized property tests', () => {
         expect(log.some(c => c.id === ejectId)).toBe(false);
         // Server head equals the client's post-ejection belief — the core OT convergence property.
         expect(applyChanges(null as any, log)).toEqual(applyChanges(committed, newPending));
+      });
+  });
+
+  it.each(SEEDS)('seed %i: converges when a foreign change lands between ejection and flush', seed => {
+    // Same programs as above, but a foreign client commits between the ejection and this
+    // client's flush, so the server transform over the ejected queue is not identity.
+    // Convergence is then asserted CLIENT-side too: receiving the tail must clear pending
+    // and land exactly on the server head.
+    const rng = new PRNG(seed);
+    const committed = { text: [{ insert: 'seedtext\n' }], o: { x: 0, y: 0, z: 0 } };
+    const program = randomProgram(rng, committed);
+    const ejectId = program[rng.int(program.length)].id;
+    const { newPending } = computePendingEjection(committed, 1, program, ejectId)!;
+
+    const foreignOps = rng.chance(0.5)
+      ? [txt([{ insert: rng.pick(['F', 'GG']) }])]
+      : [{ op: 'replace' as const, path: `/o/${rng.pick(['x', 'y', 'z'])}`, value: rng.int(1000) }];
+
+    const backend = new OTFuzzBackend();
+    const docId = `doc-foreign-${seed}`;
+    return commitChanges(
+      backend,
+      docId,
+      [{ id: 'seed', rev: 1, baseRev: 0, ops: [{ op: 'replace', path: '', value: committed }], createdAt: 0 }],
+      TIMEOUT
+    )
+      .then(() =>
+        commitChanges(backend, docId, [{ id: 'foreign', rev: 2, baseRev: 1, ops: foreignOps, createdAt: 0 }], TIMEOUT)
+      )
+      .then(() => commitChanges(backend, docId, newPending, TIMEOUT))
+      .then(() => {
+        const log = backend.log(docId);
+        expect(log.map(c => c.rev)).toEqual(log.map((_, i) => i + 1));
+        expect(log.some(c => c.id === ejectId)).toBe(false);
+        const clientSnapshot = applyCommittedChanges({ state: committed, rev: 1, changes: newPending }, log.slice(1));
+        expect(clientSnapshot.changes).toEqual([]);
+        expect(clientSnapshot.state).toEqual(applyChanges(null as any, log));
       });
   });
 

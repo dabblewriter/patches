@@ -193,6 +193,9 @@ describe('PatchesStore interface', () => {
         expect(Array.isArray(serverChanges)).toBe(true);
         expect(Array.isArray(rebasedPendingChanges)).toBe(true);
       },
+      quarantinePendingChange: async () => null,
+      listQuarantinedChanges: async () => [],
+      discardQuarantinedChange: async () => {},
     });
 
     it('should implement all required OT methods', () => {
@@ -369,5 +372,8 @@ describe('PatchesStore interface', () => {
     savePendingChanges: async () => {},
     dropPendingChanges: async () => {},
     applyServerChanges: async () => {},
+    quarantinePendingChange: async () => null,
+    listQuarantinedChanges: async () => [],
+    discardQuarantinedChange: async () => {},
   });
 });

@@ -1,9 +1,12 @@
 import { applyCommittedChanges } from '../algorithms/ot/client/applyCommittedChanges.js';
+import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
 import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
+import { computePendingEjection } from '../algorithms/ot/shared/ejectPendingChange.js';
 import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
 import { createChange } from '../data/change.js';
+import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
-import type { Change, PatchesSnapshot } from '../types.js';
+import type { Change, PatchesSnapshot, QuarantinedChange } from '../types.js';
 import type { ClientAlgorithm } from './ClientAlgorithm.js';
 import type { OTClientStore } from './OTClientStore.js';
 import { OTDoc } from './OTDoc.js';
@@ -274,6 +277,100 @@ export class OTAlgorithm implements ClientAlgorithm {
       await this.store.applyServerChanges(docId, committedChanges, rebased);
       this._noteCommittedIds(docId, committedChanges);
     });
+  }
+
+  // --- Quarantine (poison-pill ejection) ---
+
+  /**
+   * Local strict-apply probe corroborating a server rejection of a pending change: does the
+   * named change apply cleanly against the frame it was minted in — committed state advanced
+   * through its predecessors in the pending queue? Returns true when it applies cleanly, or
+   * when no pending change matches the id.
+   *
+   * Unlike LWW (whose sending change is always based on committed-only state), an OT pending
+   * change is a sequential program: change N is expressed on top of changes 1..N-1, so the
+   * probe must advance through the predecessors to reach the right base — probing against
+   * committed-only or full-pending state would both misjudge it.
+   *
+   * PatchesSync auto-ejects only when this returns FALSE (the server's suspicion is
+   * corroborated by a genuinely un-appliable change). A change the server rejected on policy
+   * grounds — e.g. a role that may not write this path — still applies cleanly locally, so it
+   * returns true and the doc latches with `data.changeId` surfaced for the app to eject on
+   * consent (see docs/quarantine.md).
+   */
+  async verifyPendingChange(docId: string, changeId: string): Promise<boolean> {
+    return this._withDocLock(docId, async () => {
+      const snapshot = await this.store.getDoc(docId);
+      if (!snapshot) return true;
+      const index = snapshot.changes.findIndex(change => change.id === changeId);
+      if (index === -1) return true;
+      // Reconstruct the frame the named change was minted in. If a PREDECESSOR won't
+      // strict-apply, we can't build that frame — so we can't corroborate the server's
+      // suspicion about THIS change. Fail toward true (don't auto-eject; the doc latches for
+      // app consent), never toward a false that would auto-discard a change we couldn't probe.
+      let preState;
+      try {
+        preState = applyChanges(snapshot.state, snapshot.changes.slice(0, index));
+      } catch {
+        return true;
+      }
+      try {
+        applyPatch(preState, snapshot.changes[index].ops, { strict: true, silent: true });
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /**
+   * Move the named pending change into quarantine and rebase its successors as though it had
+   * never been minted, then bring the open doc back in line with the store. The rebase math
+   * lives in {@link computePendingEjection}; this method sequences it under the doc lock and
+   * persists the result atomically via the store.
+   *
+   * Returns null (nothing mutated) when the id doesn't match a pending change, or when the
+   * ejected change can't be inverted — a mismatch leaves the doc latched rather than risking a
+   * half-rebased queue.
+   */
+  async ejectPendingChange(
+    docId: string,
+    changeId: string,
+    reason: string,
+    doc?: PatchesDoc<any>
+  ): Promise<QuarantinedChange | null> {
+    const quarantined = await this._withDocLock(docId, async () => {
+      const snapshot = await this.store.getDoc(docId);
+      if (!snapshot) return null;
+      let ejection;
+      try {
+        ejection = computePendingEjection(snapshot.state, snapshot.rev, snapshot.changes, changeId);
+      } catch (err) {
+        console.error(`Cannot eject change ${changeId} from doc ${docId} (inversion failed); leaving it latched:`, err);
+        return null;
+      }
+      if (!ejection) return null;
+      return this.store.quarantinePendingChange(docId, ejection.poison, reason, ejection.newPending);
+    });
+    if (!quarantined) return null;
+
+    // The commit that named this change was rejected, so no server echo is coming for it. The
+    // store no longer holds it (nor its influence on the successors), so rebuild the open doc
+    // from the reconciled store state. import() (not applyChanges) because ejection doesn't
+    // advance committedRev — there is no incremental step to apply.
+    if (doc) {
+      const snapshot = await this.loadDoc(docId);
+      (doc as OTDoc<any>).import(snapshot ?? { state: {}, rev: 0, changes: [] });
+    }
+    return quarantined;
+  }
+
+  async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
+    return this.store.listQuarantinedChanges(docId);
+  }
+
+  async discardQuarantinedChange(docId: string, changeId: string): Promise<void> {
+    return this.store.discardQuarantinedChange(docId, changeId);
   }
 
   // --- Store forwarding methods ---

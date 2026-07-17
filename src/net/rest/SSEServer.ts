@@ -80,9 +80,16 @@ export interface SSEServerOptions {
  *
  * // POST /subscriptions/:clientId
  * app.post('/subscriptions/:clientId', async (c) => {
+ *   const clientId = c.req.param('clientId');
+ *   if (!sse.hasClient(clientId)) {
+ *     // Multi-instance: forward to the stream-owning instance, or when no
+ *     // instance owns it answer 409 { data: { code: 'UNKNOWN_CLIENT' } }.
+ *     // This gate MUST run before any `denied` accounting is derived — see
+ *     // "Multi-instance deployments" in docs/sse-rest.md.
+ *   }
  *   const { docIds } = await c.req.json();
- *   const ctx = { clientId: c.req.param('clientId'), ...authData };
- *   const subscribed = await sse.subscribe(c.req.param('clientId'), docIds, ctx);
+ *   const ctx = { clientId, ...authData };
+ *   const subscribed = await sse.subscribe(clientId, docIds, ctx);
  *   return c.json({ docIds: subscribed });
  * });
  * ```
@@ -207,12 +214,63 @@ export class SSEServer {
   }
 
   /**
+   * Whether this server instance currently holds state for the client — a live
+   * SSE stream, or a disconnected client still within its buffer TTL.
+   *
+   * In a multi-instance deployment each SSEServer only knows its own clients:
+   * a subscribe request load-balanced to a different instance than the one
+   * holding the client's stream would silently register nothing (see
+   * {@link subscribe}). Callers routing between instances should use this to
+   * decide whether to handle a subscribe locally or forward it to the
+   * stream-owning instance ({@link addSubscriptions}).
+   *
+   * Treat `true` as "may hold state", NOT "owns the live stream": a
+   * disconnected client stays claimable for up to `bufferTTLMs` (default 5
+   * minutes), and a reconnect routinely lands on a different instance — so for
+   * that window two instances can both truthfully answer `true` for the same
+   * client. A router that picks the stale claimant registers subscriptions on
+   * an instance the client will never return to (events buffer there
+   * silently). When more than one instance claims a client, prefer the one
+   * with the live stream (`getConnectionIds()` lists connected clients only).
+   */
+  hasClient(clientId: string): boolean {
+    return this.clients.has(clientId);
+  }
+
+  /**
+   * Register subscriptions for a client WITHOUT authorization checks.
+   *
+   * For trusted server-to-server use only — e.g. a multi-instance deployment
+   * forwarding an already-authorized subscribe from the instance that handled
+   * the HTTP request to the instance that owns the client's event stream.
+   * Never call this with client-supplied docIds that haven't passed
+   * authorization.
+   *
+   * @returns The registered docIds, or null when the client is unknown on this
+   *   instance — distinguishable from success so the caller can surface the
+   *   failure (and the client can reconnect/retry) instead of the subscription
+   *   being silently dropped.
+   */
+  addSubscriptions(clientId: string, docIds: string[]): string[] | null {
+    const client = this.clients.get(clientId);
+    if (!client) return null;
+    for (const docId of docIds) {
+      client.subscriptions.add(docId);
+    }
+    return [...docIds];
+  }
+
+  /**
    * Subscribe a client to documents.
    *
    * @param clientId - The client to subscribe.
    * @param docIds - Document IDs to subscribe to.
    * @param ctx - Auth context for authorization checks.
-   * @returns The list of document IDs successfully subscribed.
+   * @returns The list of document IDs successfully subscribed. NOTE: an
+   *   unknown clientId (no stream state on this instance) also returns [] —
+   *   indistinguishable from every docId being denied. Callers that need to
+   *   tell the two apart (e.g. to route a misdirected subscribe to the right
+   *   instance) should check {@link hasClient} first.
    */
   async subscribe(clientId: string, docIds: string[], ctx?: AuthContext): Promise<string[]> {
     const client = this.clients.get(clientId);

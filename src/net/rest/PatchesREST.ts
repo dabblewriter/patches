@@ -310,29 +310,44 @@ export class PatchesREST implements PatchesConnection {
   // --- PatchesAPI: Subscriptions ---
 
   /**
-   * Subscribe to server events for the given doc IDs. Returns the docIds the
-   * server actually registered (ids denied by authorization are excluded).
+   * Subscribe to server events for the given doc IDs. Returns the requested
+   * ids the server registered (ids denied by authorization are excluded).
    *
    * Failure handling exists for the multi-instance hazard: subscriptions are
    * registered against the instance holding this client's event stream, and a
    * POST that lands elsewhere can register nothing.
    *
-   * - A response that registered nothing is retried up to
-   *   {@link SUBSCRIBE_MAX_ATTEMPTS} times (each POST re-rolls the load
-   *   balancer) unless the server explicitly accounted for every id as denied
-   *   (a `denied` array in the response). Exhaustion resolves with `[]` and
-   *   surfaces a `SubscribeIncompleteError` via {@link onError} for telemetry —
-   *   live updates are silently missing in this state, which is otherwise
-   *   invisible (commits and reads still succeed).
-   * - A server verdict that NO instance holds a stream for this client (status
-   *   error with `data.code === 'UNKNOWN_CLIENT'`) is retried the same way,
-   *   then treated as a dead stream: tear down + schedule reconnect (the fresh
-   *   'connected' state drives the consumer's full re-subscribe) and reject.
+   * The response accounts for an id when it appears in `docIds` (registered)
+   * or in the optional `denied` array (authoritatively refused by access
+   * control). An id in NEITHER means "unknown, safe to retry" — the server's
+   * access check failed transiently, or the POST was misdirected. Unaccounted
+   * ids are retried (only those ids) up to {@link SUBSCRIBE_MAX_ATTEMPTS}
+   * total attempts — each POST re-rolls the load balancer. Exhaustion rejects
+   * with a `SubscribeIncompleteError`; like any other request-scoped error it
+   * is NOT also emitted on {@link onError} (the consumer's catch is the single
+   * telemetry channel). Live updates are silently missing in this state, which
+   * is otherwise invisible (commits and reads still succeed).
+   *
+   * A server verdict that NO instance holds a stream for this client (status
+   * error with `data.code === 'UNKNOWN_CLIENT'`) is retried the same way, then
+   * treated as a dead stream: tear down + schedule reconnect (the fresh
+   * 'connected' state drives the consumer's full re-subscribe) and reject —
+   * unless the stream this subscribe was issued against has already been
+   * replaced, in which case the verdict is stale and the fresh stream is left
+   * alone.
    */
   async subscribe(ids: string | string[]): Promise<string[]> {
-    const requested = normalizeIds(ids);
+    const requested = [...new Set(normalizeIds(ids))];
     if (requested.length === 0) return [];
 
+    // The stream this subscribe belongs to. Overlapping subscribes are routine
+    // (resync and newly-tracked docs), so an exhausted UNKNOWN_CLIENT below
+    // must not tear down a stream rebuilt after this call started.
+    const es = this.eventSource;
+
+    const registered = new Set<string>();
+    const accounted = new Set<string>();
+    let missing = requested;
     let unknownClient: Error | null = null;
     for (let attempt = 1; attempt <= SUBSCRIBE_MAX_ATTEMPTS; attempt++) {
       if (attempt > 1) {
@@ -341,13 +356,13 @@ export class PatchesREST implements PatchesConnection {
         );
         // Deliberately disconnected (or offline) while waiting to retry — the
         // stream these subscriptions target is gone, so stop quietly.
-        if (!this.shouldBeConnected || onlineState.isOffline) return [];
+        if (!this.shouldBeConnected || onlineState.isOffline) return requested.filter(id => registered.has(id));
       }
       let result: { docIds?: unknown; denied?: unknown };
       try {
         result = await this._fetch(`/subscriptions/${this.clientId}`, {
           method: 'POST',
-          body: { docIds: requested },
+          body: { docIds: missing },
         });
       } catch (err) {
         if (err instanceof StatusError && err.data?.code === 'UNKNOWN_CLIENT') {
@@ -361,30 +376,38 @@ export class PatchesREST implements PatchesConnection {
       }
       unknownClient = null;
       const docIds = Array.isArray(result?.docIds) ? (result.docIds as string[]) : [];
-      if (docIds.length > 0) return docIds;
-      // Nothing registered. A server that reports denial accounting told us
-      // every id was denied — a real (authoritative) empty result, not a
-      // misdirected subscribe. Older servers leave the two indistinguishable.
-      if (Array.isArray(result?.denied)) return docIds;
+      const denied = Array.isArray(result?.denied) ? (result.denied as string[]) : [];
+      for (const id of docIds) {
+        registered.add(id);
+        accounted.add(id);
+      }
+      for (const id of denied) accounted.add(id);
+      // Completeness is set membership, never counts: an id is settled only
+      // when the server put it in `docIds` or `denied`. `denied: []` accounts
+      // for nothing, and an old server that never sends `denied` leaves every
+      // non-registered id unaccounted — both retry naturally. An all-denied
+      // response is complete: authoritative, no retry, no error.
+      missing = missing.filter(id => !accounted.has(id));
+      if (missing.length === 0) return requested.filter(id => registered.has(id));
     }
 
     if (unknownClient) {
       // Authoritative: our stream is gone server-side (stale/half-open here).
-      // Rebuild it — the consumer re-subscribes everything on 'connected'.
-      if (this.shouldBeConnected) {
+      // Rebuild it — the consumer re-subscribes everything on 'connected' —
+      // but only if it is still the stream this subscribe was issued against;
+      // a replacement built mid-retry is healthy and must be left alone.
+      if (this.shouldBeConnected && this.eventSource === es) {
         this._teardownStream();
         this._setState('error');
         this._scheduleReconnect();
       }
-      this.onError.emit(unknownClient);
       throw unknownClient;
     }
     const error = new Error(
-      `Subscribe registered no documents after ${SUBSCRIBE_MAX_ATTEMPTS} attempts (${requested.length} requested)`
+      `Subscribe left ${missing.length} of ${requested.length} requested documents unaccounted for after ${SUBSCRIBE_MAX_ATTEMPTS} attempts`
     );
     error.name = 'SubscribeIncompleteError';
-    this.onError.emit(error);
-    return [];
+    throw error;
   }
 
   async unsubscribe(ids: string | string[]): Promise<void> {

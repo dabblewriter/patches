@@ -112,13 +112,21 @@ All document operations use standard HTTP methods. Document IDs can contain slas
 | DELETE | `/subscriptions/:clientId` | Unsubscribe from docs `{ docIds: [...] }`                                     |
 | POST   | `/signal/:clientId`        | WebRTC signaling frame (raw JSON-RPC body). See [awareness.md](awareness.md). |
 
-The subscribe response is `{ docIds: [...] }` — the ids the server actually registered. Servers may
-additionally return `denied: [...]` (ids excluded by authorization) so the client can tell an
-authoritative empty result apart from a subscribe that silently registered nothing, and may answer
-with a status error carrying `data.code: 'UNKNOWN_CLIENT'` when no instance holds an event stream
-for the clientId. `PatchesREST` uses both: it retries a nothing-registered response (unless `denied`
-accounts for every id) and rebuilds the stream on `UNKNOWN_CLIENT`. See
-[Multi-instance deployments](#multi-instance-deployments).
+The subscribe response is `{ docIds: [...], denied?: [...] }`:
+
+- `docIds` — the ids actually registered on the instance holding the client's event stream.
+- `denied` — ids **authoritatively refused by access control** (a definitive authorization "no").
+- An id whose access check errored transiently (a thrown/rejected check, an unreachable registry)
+  belongs in **neither** array — absence means "unknown, safe to retry".
+
+`PatchesREST` gates completeness on set membership, never on counts: the response is complete when
+every requested id appears in `docIds` or `denied`. Unaccounted ids are retried — only those ids,
+with backoff, each POST re-rolling the load balancer. An older server that never sends `denied`
+simply leaves non-registered ids unaccounted (they retry naturally), and `denied: []` accounts for
+nothing — it does not disable retries. Servers may also answer with a status error carrying
+`data.code: 'UNKNOWN_CLIENT'` when no instance holds an event stream for the clientId;
+`PatchesREST` responds by rebuilding its stream. Adopting `denied` requires the unknown-client
+check — see [Multi-instance deployments](#multi-instance-deployments) for the contract.
 
 ### Documents
 
@@ -240,13 +248,58 @@ Route subscribes to the stream-owning instance yourself (e.g. record which insta
 Three APIs support this:
 
 - `hasClient(clientId)` — whether THIS instance holds state for the client (live stream or a
-  disconnected client within its buffer TTL).
+  disconnected client within its buffer TTL). Treat `true` as "may hold state", **not** "owns the
+  live stream": a disconnected client stays claimable for up to `bufferTTLMs` (default 5 minutes),
+  and without session affinity a reconnect routinely lands on a different instance — so during
+  that window two instances can both truthfully answer `true` for the same client. A router that
+  picks the stale claimant registers subscriptions on an instance the client will never return
+  to, and events buffer there silently. Prefer the instance holding the live stream (shared state
+  recording who served `/events/:clientId` last, or a live-only check à la `getConnectionIds()`)
+  whenever both claim the client.
 - `addSubscriptions(clientId, docIds)` — register **already-authorized** docIds without auth
   checks, for a forwarded subscribe arriving from the instance that ran authorization. Returns
-  `null` (instead of `[]`) when the client is unknown, so a failed forward is detectable.
+  `null` (instead of `[]`) when the client is unknown, so a failed forward is detectable. This
+  method is trusted: it must never be reachable with client-supplied docIds that haven't passed
+  authorization — wiring it to such a route hands any client read access to arbitrary documents
+  via `changesCommitted`.
 - When no instance owns the stream, answer the POST with a status error carrying
   `data.code: 'UNKNOWN_CLIENT'` — `PatchesREST` responds by rebuilding its stream and
   re-subscribing, instead of waiting on a stream that no longer exists.
+
+#### The `denied` contract
+
+`denied` must mean "authorization refused" — never "this instance didn't know the client" and
+never "the access check errored". The `denied` field and the `hasClient`/`UNKNOWN_CLIENT` check
+are a package deal, not independent options: a server that adopts `denied` alone will answer a
+misdirected subscribe with `{ docIds: [], denied: [everything] }`, which the client treats as
+authoritative — no retry, no telemetry, and live updates silently never arrive. That re-creates
+the exact failure this contract exists to fix, with the client-side mitigation disabled. Adopting
+`denied` without the unknown-client gate is strictly worse than not adopting it.
+
+The required ordering:
+
+```typescript
+app.post('/subscriptions/:clientId', async c => {
+  const clientId = c.req.param('clientId');
+  if (!sse.hasClient(clientId)) {
+    // Forward to the stream-owning instance — or, when no instance owns it:
+    return c.json({ error: 'Unknown client', data: { code: 'UNKNOWN_CLIENT' } }, 409);
+  }
+  const { docIds } = await c.req.json();
+  const ctx = { clientId, ...c.get('auth') };
+  const subscribed = await sse.subscribe(clientId, docIds, ctx);
+  return c.json({ docIds: subscribed, denied: docIds.filter((id: string) => !subscribed.includes(id)) });
+});
+```
+
+The subtraction on the last line is only safe because the `hasClient` gate above it ran — and only
+when every non-registered id really was an authorization "no". If an access check can fail
+transiently (a database blip, a registry timeout), the affected ids must be left out of BOTH
+arrays so the client retries them; sweeping them into `denied` converts a transient fault into a
+permanent, silent subscription loss. Note that `SSEServer.subscribe` folds errored checks into
+"not registered" — subtraction over its result is only contract-safe when `canAccess` cannot fail
+transiently. Otherwise derive `denied` from your own auth results, or omit the field entirely:
+without `denied`, the client simply retries any shortfall, which is always safe.
 
 ## Reconnection and Recovery
 

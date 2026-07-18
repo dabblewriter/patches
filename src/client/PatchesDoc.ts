@@ -21,6 +21,16 @@ export interface PatchesDocOptions {
    * { sizeCalculator: compressedSizeBase64, maxStorageBytes: 1_000_000 }
    */
   sizeCalculator?: (data: unknown) => number;
+  /**
+   * Wire payload limit in bytes (uncompressed JSON) for splitting a change across network
+   * batches. `PatchesSync` and offline branch seeding both resolve it from here (falling back
+   * to a 1MB default) so a branch's seed is split into exactly the changes that get committed.
+   * Splitting a seed only by `maxStorageBytes` — which may be a *compressed* measure — lets the
+   * wire re-split it into more revisions than the branch's `contentStartRev` counted, so a merge
+   * replays the seeded body content and doubles the document (DAB-760). Set this equal to the
+   * `PatchesSync` `maxPayloadBytes` option when overriding the default.
+   */
+  maxPayloadBytes?: number;
 }
 
 /**

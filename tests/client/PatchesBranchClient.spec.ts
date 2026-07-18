@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { breakChangesIntoBatches } from '../../src/algorithms/ot/shared/changeBatching';
 import type { BranchClientStore } from '../../src/client/BranchClientStore';
 import { PatchesBranchClient } from '../../src/client/PatchesBranchClient';
+import { compressedSizeUint8 } from '../../src/compression';
+import { createChange } from '../../src/data/change';
 import type { BranchAPI } from '../../src/net/protocol/types';
 import type { Branch } from '../../src/types';
 
@@ -159,6 +162,36 @@ describe('PatchesBranchClient', () => {
 
       // Should emit onChange for sync
       expect(patches.onChange.emit).toHaveBeenCalledWith('my-branch');
+    });
+
+    it('splits the seed for the wire so contentStartRev matches the committed span (DAB-760)', async () => {
+      // Mirrors dw3's real config with small limits: the storage limit is a COMPRESSED measure,
+      // the wire payload limit is UNCOMPRESSED. A highly-compressible seed fits one storage piece
+      // but the wire splits it into several — `contentStartRev` must count the WIRE pieces, or it
+      // undercounts the seed and the merge replays the tail, doubling the document.
+      patches.docOptions = { maxStorageBytes: 3000, maxPayloadBytes: 6000, sizeCalculator: compressedSizeUint8 };
+      const bigBody = 'The grey cat sat by the window. '.repeat(1000); // ~32KB, compresses tiny
+      const initialState = { docs: { d1: { id: 'd1', body: { content: { ops: [{ insert: bigBody }] } } } } };
+
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
+      await client.createBranch(5, { id: 'big-branch' }, initialState);
+
+      // The seed as PatchesSync would actually commit it on the wire (both limits applied).
+      const rootReplace = createChange(0, 1, [{ op: 'replace' as const, path: '', value: initialState }], {
+        committedAt: 0,
+      });
+      const wireSeed = breakChangesIntoBatches([rootReplace], {
+        maxPayloadBytes: 6000,
+        maxStorageBytes: 3000,
+        sizeCalculator: compressedSizeUint8,
+      }).flat();
+      expect(wireSeed.length).toBeGreaterThan(1); // the seed really is split into several wire changes
+
+      // One pending change is persisted per wire change...
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledTimes(wireSeed.length);
+      // ...and contentStartRev = committed span + 1, so a merge cannot replay any seeded content.
+      const sentMeta = offlineApi.createBranch.mock.calls[0][2] as { contentStartRev: number };
+      expect(sentMeta.contentStartRev).toBe(wireSeed[wireSeed.length - 1].rev + 1);
     });
 
     it('should refresh branches after offline create', async () => {

@@ -144,7 +144,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     }
 
     // Use options if provided, otherwise fall back to patches.docOptions
-    this.maxPayloadBytes = options?.maxPayloadBytes;
+    this.maxPayloadBytes = options?.maxPayloadBytes ?? patches.docOptions?.maxPayloadBytes;
     this.maxStorageBytes = options?.maxStorageBytes ?? patches.docOptions?.maxStorageBytes;
     this.sizeCalculator = options?.sizeCalculator ?? patches.docOptions?.sizeCalculator;
 

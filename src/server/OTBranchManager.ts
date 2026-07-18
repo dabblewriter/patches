@@ -2,6 +2,7 @@ import { findLatestMainVersion } from '../algorithms/ot/server/getSnapshotAtRevi
 import { getStateAtRevision } from '../algorithms/ot/server/getStateAtRevision.js';
 import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
+import { toOps } from '../json-patch/ops/text.js';
 import { createVersionMetadata } from '../data/version.js';
 import type { Branch, Change, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
 import type { BranchManager } from './BranchManager.js';
@@ -24,6 +25,74 @@ import type { BranchingStoreBackend, OTStoreBackend } from './types.js';
  * Requires both OT operations and branch metadata operations.
  */
 type OTBranchStore = OTStoreBackend & BranchingStoreBackend;
+
+/**
+ * Minimum length of a re-inserted text run we treat as content *duplication* rather than a
+ * legitimate leading edit. Bodies/descriptions that double are far longer than this; a short
+ * genuine prepend never reaches it.
+ */
+const MERGE_DUP_MIN_CHARS = 16;
+
+/** The run of text a `@txt` delta prepends at position 0 (empty when it begins with retain/delete). */
+function leadingInsertText(value: unknown): string {
+  const ops = toOps(value);
+  if (!ops) return '';
+  let text = '';
+  for (const op of ops) {
+    const insert = (op as { insert?: unknown }).insert;
+    if (typeof insert === 'string') text += insert;
+    else break; // a retain / delete / embed ends the leading prepend
+  }
+  return text;
+}
+
+/** Read the value at a JSON-Pointer `path` (e.g. `/docs/<id>/body/content`) in a plain doc state. */
+function valueAtPath(root: unknown, path: string): unknown {
+  let cur: unknown = root;
+  for (const token of path.split('/')) {
+    if (token === '') continue; // leading '' from the initial slash
+    if (cur == null || typeof cur !== 'object') return undefined;
+    const key = token.replace(/~1/g, '/').replace(/~0/g, '~');
+    cur = (cur as Record<string, unknown>)[key];
+  }
+  return cur;
+}
+
+/** Plain text of a `@txt` field's current value (`Delta` / `{ ops }` / `Op[]`), or null if not a delta. */
+function fieldPlainText(value: unknown): string | null {
+  const ops = toOps(value);
+  if (!ops) return null;
+  let text = '';
+  for (const op of ops) {
+    const insert = (op as { insert?: unknown }).insert;
+    if (typeof insert === 'string') text += insert;
+    else if (insert != null) text += '￼'; // embed placeholder — never matches real text
+  }
+  return text;
+}
+
+/**
+ * Thrown by {@link OTBranchManager.mergeBranch} when a merge would duplicate a field's existing
+ * content — the DAB-760 signature: a merge floor that undercounts the branch's seed replays
+ * seeded body text as a retain-less whole-field insert onto a non-empty target, doubling it.
+ * Refusing keeps the merge from silently doubling the document; merges are idempotent, so a
+ * corrected retry can proceed.
+ */
+export class MergeContentDuplicationError extends Error {
+  readonly code = 'MERGE_CONTENT_DUPLICATION';
+  constructor(
+    readonly sourceDocId: string,
+    readonly path: string,
+    readonly duplicatedChars: number
+  ) {
+    super(
+      `Merge aborted: would duplicate existing content at "${path}" of ${sourceDocId} — a ` +
+        `retain-less insert of ${duplicatedChars} chars matching the field's current head ` +
+        `(content-doubling signature; refusing to double the document).`
+    );
+    this.name = 'MergeContentDuplicationError';
+  }
+}
 
 /**
  * OT-specific branch manager implementation.
@@ -248,6 +317,11 @@ export class OTBranchManager implements BranchManager {
       batchId: branchId,
     }));
 
+    // Refuse a merge that would duplicate existing content (DAB-760): a floor that undercounts
+    // the branch's seed replays seeded body text as a retain-less whole-field insert, doubling
+    // the document. Checked against the branch's base revision before anything is committed.
+    await this.assertNoContentDuplication(sourceDocId, branchStartRevOnSource, changesToCommit);
+
     // Commit changes to source doc with error handling
     const committedMergeChanges = await wrapMergeCommit(branchId, sourceDocId, async () => {
       return (await this.patchesServer.commitChanges(sourceDocId, changesToCommit)).changes;
@@ -258,6 +332,62 @@ export class OTBranchManager implements BranchManager {
     // mergeable). CAS-guarded against concurrent merges when the store supports it.
     await advanceMergeWatermark(this.store, branchId, branch.lastMergedRev, lastBranchRev);
     return committedMergeChanges;
+  }
+
+  /**
+   * Guard against the content-doubling failure (DAB-760). When a merge's floor
+   * (`contentStartRev` / `lastMergedRev`) undercounts the branch's seed, the merge replays
+   * seeded body text as retain-less `@txt` inserts, re-inserting each field's existing body at
+   * position 0 and doubling it. Detect that signature in the changes about to be committed and
+   * refuse rather than corrupt the source document.
+   *
+   * Cheap in the common case: only reconstructs the base state when a change actually carries a
+   * substantial leading text insert. An ordinary edit — a leading retain, a short insert, or a
+   * delete-then-insert replacement — never reaches the state read.
+   *
+   * `baseRev` is the source revision the branch diverged from. A healthy branch's base equals
+   * the source there, so a candidate op that re-inserts the field's existing head is duplicating
+   * content that is already present rather than adding anything new. New docs/fields the branch
+   * introduced have no base value and are correctly left alone.
+   */
+  private async assertNoContentDuplication(sourceDocId: string, baseRev: number, changes: Change[]): Promise<void> {
+    // Cheap first pass: a change can only produce the doubling signature via a `@txt` op that
+    // *prepends* a substantial run of text (no leading retain). Everything else is skipped.
+    const candidates: { path: string; inserted: string }[] = [];
+    for (const change of changes) {
+      for (const op of change.ops) {
+        if (op.op !== '@txt' || typeof op.path !== 'string') continue;
+        const inserted = leadingInsertText(op.value);
+        if (inserted.length >= MERGE_DUP_MIN_CHARS) candidates.push({ path: op.path, inserted });
+      }
+    }
+    if (candidates.length === 0) return;
+
+    // Only now pay for a state reconstruction. A guard failure here must not block healthy
+    // merges, so a reconstruction error is logged and treated as "cannot check" rather than
+    // fatal — the primary defense is a correct merge floor, not this backstop.
+    let state: unknown;
+    try {
+      ({ state } = await getStateAtRevision(this.store, sourceDocId, baseRev, { reconstruction: {} }));
+    } catch (error) {
+      console.warn(
+        `[OTBranchManager] content-doubling guard could not reconstruct ${sourceDocId}@${baseRev}; ` +
+          `skipping check:`,
+        error
+      );
+      return;
+    }
+
+    for (const { path, inserted } of candidates) {
+      const current = fieldPlainText(valueAtPath(state, path));
+      if (current != null && current.startsWith(inserted)) {
+        console.error(
+          `[OTBranchManager] refusing merge into ${sourceDocId}: content-doubling signature at ` +
+            `"${path}" — re-inserting ${inserted.length} chars already present at the field head.`
+        );
+        throw new MergeContentDuplicationError(sourceDocId, path, inserted.length);
+      }
+    }
   }
 
   /**

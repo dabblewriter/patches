@@ -1,5 +1,5 @@
 import { store, type Store } from 'easy-signal';
-import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
+import { breakChangesIntoBatches } from '../algorithms/ot/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import type { BranchAPI } from '../net/protocol/types.js';
 import type { Branch, Change, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
@@ -169,12 +169,19 @@ export class PatchesBranchClient {
       committedAt: 0,
     });
 
-    // Break the change into multiple if it exceeds the storage size limit
-    let initChanges = [rootReplace];
+    // Split the seed exactly as PatchesSync will commit it on the wire — by BOTH the per-change
+    // storage limit (possibly a compressed measure) AND the uncompressed payload limit — so the
+    // pending seed we persist here matches the changes that actually get committed. Splitting by
+    // storage only let the wire's payload re-split add revisions the branch never counted, so
+    // `contentStartRev` undercounted the seed and the merge replayed the tail as a retain-less
+    // whole-body insert, doubling the document (DAB-760). `maxPayloadBytes` is resolved the same
+    // way PatchesSync resolves it (docOptions, else a 1MB default) so the two splits agree.
     const options = this.patches.docOptions;
-    if (options.maxStorageBytes) {
-      initChanges = breakChanges(initChanges, options.maxStorageBytes, options.sizeCalculator);
-    }
+    const initChanges = breakChangesIntoBatches([rootReplace], {
+      maxPayloadBytes: options.maxPayloadBytes,
+      maxStorageBytes: options.maxStorageBytes,
+      sizeCalculator: options.sizeCalculator,
+    }).flat();
 
     // contentStartRev is the first revision after all init changes
     const contentStartRev = initChanges[initChanges.length - 1].rev + 1;

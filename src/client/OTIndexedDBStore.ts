@@ -1,7 +1,7 @@
 import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
 import type { Change, PatchesSnapshot, PatchesState, QuarantinedChange } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
-import { IndexedDBStore } from './IndexedDBStore.js';
+import { IndexedDBStore, type StorageGuardOptions } from './IndexedDBStore.js';
 import type { OTClientStore } from './OTClientStore.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
@@ -38,8 +38,12 @@ interface StoredChange extends Change {
 export class OTIndexedDBStore implements OTClientStore {
   public db: IndexedDBStore;
 
-  constructor(db?: string | IndexedDBStore) {
-    this.db = !db || typeof db === 'string' ? new IndexedDBStore(db) : db;
+  // Guard options apply only when this store opens the database itself; an existing
+  // IndexedDBStore already owns its connection and its options, so passing both is an error.
+  constructor(db?: string, options?: StorageGuardOptions);
+  constructor(db: IndexedDBStore);
+  constructor(db?: string | IndexedDBStore, options?: StorageGuardOptions) {
+    this.db = !db || typeof db === 'string' ? new IndexedDBStore(db, options) : db;
 
     // Subscribe to upgrade event to create OT-specific stores
     this.db.requireStores('committedChanges', 'pendingChanges');

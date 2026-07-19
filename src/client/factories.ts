@@ -1,7 +1,7 @@
 import type { AlgorithmName } from './PatchesStore.js';
 import { OTInMemoryStore } from './OTInMemoryStore.js';
 import { LWWInMemoryStore } from './LWWInMemoryStore.js';
-import { IndexedDBStore } from './IndexedDBStore.js';
+import { IndexedDBStore, type StorageGuardOptions } from './IndexedDBStore.js';
 import { LWWIndexedDBStore } from './LWWIndexedDBStore.js';
 import { LWWAlgorithm } from './LWWAlgorithm.js';
 import { OTIndexedDBStore } from './OTIndexedDBStore.js';
@@ -33,6 +33,8 @@ export interface MultiAlgorithmFactoryOptions extends PatchesFactoryOptions {
 export interface IndexedDBFactoryOptions extends PatchesFactoryOptions {
   /** Database name for IndexedDB storage. */
   dbName: string;
+  /** Storage guard tuning passed through to the IndexedDB store. */
+  storeOptions?: StorageGuardOptions;
 }
 
 /**
@@ -41,6 +43,16 @@ export interface IndexedDBFactoryOptions extends PatchesFactoryOptions {
 export interface MultiAlgorithmIndexedDBFactoryOptions extends MultiAlgorithmFactoryOptions {
   /** Database name for IndexedDB storage. */
   dbName: string;
+  /** Storage guard tuning passed through to the IndexedDB store. */
+  storeOptions?: StorageGuardOptions;
+}
+
+/**
+ * Options for the externally-managed-database factory.
+ */
+export interface MultiAlgorithmExternalDBFactoryOptions extends MultiAlgorithmFactoryOptions {
+  /** Storage guard tuning passed through to the IndexedDB store. */
+  storeOptions?: StorageGuardOptions;
 }
 
 // --- OT-only factories ---
@@ -66,7 +78,7 @@ export function createOTPatches(options: PatchesFactoryOptions = {}): Patches {
  * For persistent storage in browser environments.
  */
 export function createOTIndexedDBPatches(options: IndexedDBFactoryOptions): Patches {
-  const store = new OTIndexedDBStore(options.dbName);
+  const store = new OTIndexedDBStore(options.dbName, options.storeOptions);
   const otAlgorithm = new OTAlgorithm(store, options.docOptions);
 
   return new Patches({
@@ -100,7 +112,7 @@ export function createLWWPatches(options: PatchesFactoryOptions = {}): Patches {
  * For persistent storage in browser environments.
  */
 export function createLWWIndexedDBPatches(options: IndexedDBFactoryOptions): Patches {
-  const store = new LWWIndexedDBStore(options.dbName);
+  const store = new LWWIndexedDBStore(options.dbName, options.storeOptions);
   const lwwAlgorithm = new LWWAlgorithm(store);
 
   return new Patches({
@@ -138,7 +150,7 @@ export function createMultiAlgorithmPatches(options: MultiAlgorithmFactoryOption
  */
 export function createMultiAlgorithmIndexedDBPatches(options: MultiAlgorithmIndexedDBFactoryOptions): Patches {
   // Create a shared IndexedDB store that both OT and LWW will use
-  const baseStore = new IndexedDBStore(options.dbName);
+  const baseStore = new IndexedDBStore(options.dbName, options.storeOptions);
   const otStore = new OTIndexedDBStore(baseStore);
   const lwwStore = new LWWIndexedDBStore(baseStore);
 
@@ -163,9 +175,9 @@ export function createMultiAlgorithmIndexedDBPatches(options: MultiAlgorithmInde
  */
 export function createMultiAlgorithmExternalDBPatches(
   db: IDBDatabase | Promise<IDBDatabase>,
-  options: MultiAlgorithmFactoryOptions = {}
+  options: MultiAlgorithmExternalDBFactoryOptions = {}
 ): Patches {
-  const baseStore = new IndexedDBStore(db);
+  const baseStore = new IndexedDBStore(db, options.storeOptions);
   const otStore = new OTIndexedDBStore(baseStore);
   const lwwStore = new LWWIndexedDBStore(baseStore);
 

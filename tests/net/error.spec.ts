@@ -6,6 +6,7 @@ import {
   NetworkError,
   StatusError,
   StorageError,
+  StorageTimeoutError,
   toStorageError,
 } from '../../src/net/error';
 
@@ -294,6 +295,18 @@ describe('StatusError', () => {
       ).toBe(true);
       // Storage full:
       expect(isStorageError(new DOMException('The quota has been exceeded.', 'QuotaExceededError'))).toBe(true);
+    });
+
+    it('classifies StorageTimeoutError so storage-fault branches see guard timeouts too', () => {
+      expect(isStorageError(new StorageTimeoutError('transaction', ['docs'], 4000))).toBe(true);
+      expect(isStorageError(new StorageTimeoutError('open', [], 4000))).toBe(true);
+      // Name-preserving copy across a worker boundary still classifies.
+      const crossed = new Error('IndexedDB transaction [docs] did not settle within 4000ms');
+      crossed.name = 'StorageTimeoutError';
+      expect(isStorageError(crossed)).toBe(true);
+      // But it is never wrapped: it is already typed.
+      const timeout = new StorageTimeoutError('transaction', ['docs'], 4000);
+      expect(toStorageError(timeout)).toBe(timeout);
     });
 
     it('does NOT classify connection-closing, abort, coded, or ordinary errors as storage errors', () => {

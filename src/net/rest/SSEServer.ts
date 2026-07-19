@@ -1,25 +1,24 @@
 import type { AuthContext, AuthorizationProvider } from '../websocket/AuthorizationProvider.js';
+import { InMemorySSEEventStore, type SSEEventStore, type SSEReplayResult } from './SSEEventStore.js';
 
 /**
- * A buffered SSE event waiting to be sent or replayed.
- */
-export interface BufferedEvent {
-  id: number;
-  event: string;
-  data: string;
-  timestamp: number;
-}
-
-/**
- * Per-client connection state tracked by the SSEServer.
+ * Per-client connection state tracked by the SSEServer. Event buffering and
+ * ids live in the {@link SSEEventStore}; this holds only what fan-out needs.
  */
 interface ClientState {
   writer: WritableStreamDefaultWriter<Uint8Array> | null;
   encoder: TextEncoder;
+  /** Local routing set — authoritative for which events this instance delivers. */
   subscriptions: Set<string>;
-  buffer: BufferedEvent[];
-  nextEventId: number;
-  disconnectedAt: number | null;
+  /**
+   * Non-null while connect()'s hydration task is pending: collects docIds
+   * unsubscribed before the (possibly stale) store snapshot is applied, so the
+   * apply can't resurrect them. Also tells notify() the routing set may still
+   * grow, so routing must be decided inside the pipeline, not at notify time.
+   */
+  hydrating: Set<string> | null;
+  /** Serializes this client's append→write pipeline and connect replay. */
+  pipeline: Promise<void>;
   expiryTimer: ReturnType<typeof globalThis.setTimeout> | null;
   /**
    * Number of old connections force-closed by a reconnect whose close the
@@ -41,19 +40,26 @@ export interface SSEServerOptions {
    * Sliding window for the event buffer while connected, in milliseconds.
    * Must cover the worst-case gap between a silent network failure and
    * TCP detecting it (heartbeat interval + TCP retransmission timeout).
-   * Default: bufferTTLMs (matches the disconnect buffer lifetime).
+   * Used by the default in-memory event store; ignored when `eventStore` is
+   * provided. Default: bufferTTLMs (matches the disconnect buffer lifetime).
    */
   bufferWindowMs?: number;
   /** Authorization provider for subscription access control. */
   auth?: AuthorizationProvider;
+  /**
+   * Event persistence backing replay across reconnects (and, for shared
+   * stores, across instances). Default: an in-memory store reproducing the
+   * original single-instance buffering behavior.
+   */
+  eventStore?: SSEEventStore;
 }
 
 /**
  * Framework-agnostic SSE server for the Patches real-time collaboration service.
  *
- * Manages SSE connections, document subscriptions, per-client event buffering,
- * and heartbeats. Does NOT create HTTP routes — the framework calls these methods
- * from its route handlers.
+ * Manages SSE connections, document subscriptions, per-client event buffering
+ * (via a pluggable {@link SSEEventStore}), and heartbeats. Does NOT create HTTP
+ * routes — the framework calls these methods from its route handlers.
  *
  * Returns standard ReadableStream from connect(), compatible with any Web Standard
  * framework (Hono, Express + node:stream, Cloudflare Workers, Deno, etc.).
@@ -99,14 +105,19 @@ export class SSEServer {
   private heartbeatInterval: ReturnType<typeof globalThis.setInterval> | null = null;
   private heartbeatIntervalMs: number;
   private bufferTTLMs: number;
-  private bufferWindowMs: number;
   private auth?: AuthorizationProvider;
+  private eventStore: SSEEventStore;
 
   constructor(options?: SSEServerOptions) {
     this.heartbeatIntervalMs = options?.heartbeatIntervalMs ?? 30_000;
     this.bufferTTLMs = options?.bufferTTLMs ?? 300_000;
-    this.bufferWindowMs = options?.bufferWindowMs ?? this.bufferTTLMs;
     this.auth = options?.auth;
+    this.eventStore =
+      options?.eventStore ??
+      new InMemorySSEEventStore({
+        bufferWindowMs: options?.bufferWindowMs ?? this.bufferTTLMs,
+        isClientConnected: clientId => !!this.clients.get(clientId)?.writer,
+      });
     this._startHeartbeat();
   }
 
@@ -118,69 +129,87 @@ export class SSEServer {
    * framework pipes to the HTTP response.
    *
    * If `lastEventId` is provided (from the Last-Event-ID header on reconnect),
-   * buffered events are replayed. If the buffer has expired, a `resync` event
-   * is sent so the client knows to do a full re-sync.
+   * the event store decides continuity: a verified continuation is replayed,
+   * otherwise a `resync` event (no id) tells the client to do a full re-sync.
    *
    * The framework MUST call `disconnect(clientId)` when the response closes.
    */
   connect(clientId: string, lastEventId?: string): ReadableStream<Uint8Array> {
-    let client = this.clients.get(clientId);
+    let existing = this.clients.get(clientId);
+    const isNew = !existing;
 
-    if (client) {
+    if (existing) {
       // Reconnecting — clean up previous connection
-      if (client.expiryTimer) {
-        globalThis.clearTimeout(client.expiryTimer);
-        client.expiryTimer = null;
+      if (existing.expiryTimer) {
+        globalThis.clearTimeout(existing.expiryTimer);
+        existing.expiryTimer = null;
       }
-      if (client.writer) {
-        client.writer.close().catch(SSEServer.noop);
-        client.writer = null;
-        client.staleCloses++;
+      if (existing.writer) {
+        existing.writer.close().catch(SSEServer.noop);
+        existing.writer = null;
+        existing.staleCloses++;
       }
-      client.disconnectedAt = null;
     } else {
-      // New client
-      client = {
+      existing = {
         writer: null,
         encoder: new TextEncoder(),
         subscriptions: new Set(),
-        buffer: [],
-        nextEventId: 1,
-        disconnectedAt: null,
+        hydrating: null,
+        pipeline: Promise.resolve(),
         expiryTimer: null,
         staleCloses: 0,
       };
-      this.clients.set(clientId, client);
+      this.clients.set(clientId, existing);
     }
+    const client = existing;
 
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
-    client.writer = writable.getWriter();
+    const writer = writable.getWriter();
+    client.writer = writer;
 
     // Set browser reconnect interval and flush response headers (some servers buffer until first body byte).
-    client.writer.write(client.encoder.encode('retry: 5000\n\n'));
+    writer.write(client.encoder.encode('retry: 5000\n\n')).catch(SSEServer.noop);
 
-    // Replay buffered events or send resync
+    if (isNew) {
+      // No local state (e.g. the client's stream moved to this instance) —
+      // hydrate the routing set from the store before replay so post-replay
+      // events fan out. Unsubscribes racing the load are collected in
+      // `hydrating` and excluded when the (stale) snapshot is applied.
+      client.hydrating = new Set();
+      const subscriptions = this.eventStore.loadSubscriptions(clientId).catch((): string[] => []);
+      this._enqueue(client, async () => {
+        const stored = await subscriptions;
+        const removed = client.hydrating ?? new Set<string>();
+        client.hydrating = null;
+        for (const docId of stored) {
+          if (!removed.has(docId)) client.subscriptions.add(docId);
+        }
+      });
+    } else {
+      // Reconnect onto existing local state: re-read the stored subscriptions
+      // purely to refresh their lifetime in the store — a client whose
+      // reconnects only ever land on instances that already hold its state
+      // would otherwise never touch the store and its recorded subscriptions
+      // could expire mid-session, silently emptying a later cross-instance
+      // hydration. The result is deliberately unapplied: the local set is
+      // authoritative.
+      this.eventStore.loadSubscriptions(clientId).catch(SSEServer.noop);
+    }
+
     if (lastEventId) {
-      const lastId = parseInt(lastEventId, 10);
-      if (isNaN(lastId)) {
-        // Invalid ID — force resync
-        this._writeEvent(client, { id: client.nextEventId++, event: 'resync', data: '{}', timestamp: Date.now() });
-        client.buffer = [];
-      } else {
-        // Trim confirmed events — the client has acknowledged receipt up to lastId
-        const knownClient = client.nextEventId > 1;
-        client.buffer = client.buffer.filter(e => e.id > lastId);
-
-        if (!knownClient && lastId > 0) {
-          // Client claims a lastEventId but we have no history — buffer expired or server restarted
-          this._writeEvent(client, { id: client.nextEventId++, event: 'resync', data: '{}', timestamp: Date.now() });
+      // Issued now so the store sees the cursor before any subsequent appends.
+      const replay = this.eventStore.replay(clientId, lastEventId).catch((): SSEReplayResult => ({ type: 'resync' }));
+      this._enqueue(client, async () => {
+        const result = await replay;
+        if (client.writer !== writer) return; // Replaced while awaiting
+        if (result.type === 'resync') {
+          this._writeFrame(writer, client.encoder, null, 'resync', '{}');
         } else {
-          // Replay remaining buffered events (these are unconfirmed)
-          for (const event of client.buffer) {
-            this._writeEvent(client, event);
+          for (const event of result.events) {
+            this._writeFrame(writer, client.encoder, event.id, event.event, event.data);
           }
         }
-      }
+      });
     }
 
     return readable;
@@ -191,7 +220,7 @@ export class SSEServer {
    * when the HTTP response ends (e.g., on the response 'close' event).
    *
    * Starts the buffer expiry timer. If the client reconnects before it expires,
-   * buffered events are replayed.
+   * stored events are replayed.
    */
   disconnect(clientId: string): void {
     const client = this.clients.get(clientId);
@@ -205,7 +234,6 @@ export class SSEServer {
     }
 
     client.writer = null;
-    client.disconnectedAt = Date.now();
 
     // Start buffer expiry timer
     client.expiryTimer = globalThis.setTimeout(() => {
@@ -257,6 +285,7 @@ export class SSEServer {
     for (const docId of docIds) {
       client.subscriptions.add(docId);
     }
+    this.eventStore.addSubscriptions(clientId, docIds).catch(SSEServer.noop);
     return [...docIds];
   }
 
@@ -280,6 +309,7 @@ export class SSEServer {
       for (const docId of docIds) {
         client.subscriptions.add(docId);
       }
+      this.eventStore.addSubscriptions(clientId, docIds).catch(SSEServer.noop);
       return [...docIds];
     }
 
@@ -298,6 +328,9 @@ export class SSEServer {
         client.subscriptions.add(result.value);
       }
     }
+    if (allowed.length) {
+      this.eventStore.addSubscriptions(clientId, allowed).catch(SSEServer.noop);
+    }
     return allowed;
   }
 
@@ -309,14 +342,21 @@ export class SSEServer {
     if (!client) return;
     for (const docId of docIds) {
       client.subscriptions.delete(docId);
+      // A pending hydration snapshot may still contain this docId — record the
+      // removal so the apply can't resurrect it.
+      client.hydrating?.add(docId);
     }
+    this.eventStore.removeSubscriptions(clientId, docIds).catch(SSEServer.noop);
   }
 
   /**
    * Send a notification event to all clients subscribed to the document.
    *
-   * Connected clients receive the event immediately via their SSE stream.
-   * Disconnected clients (within buffer TTL) get the event buffered for replay.
+   * Connected clients receive the event via their SSE stream. Every event is
+   * also appended to the event store (connected or not) so it can be replayed
+   * after a reconnect. The store-assigned id is written on the wire frame; if
+   * the store cannot persist the event, the frame is delivered without an id
+   * so the client's cursor never advances past unstored events.
    *
    * @param docId - The document ID used for subscription routing. This may differ
    *   from `params.docId` — for example, when subscriptions are stored by root
@@ -331,24 +371,25 @@ export class SSEServer {
 
     for (const [clientId, client] of this.clients) {
       if (clientId === exceptClientId) continue;
-      if (!client.subscriptions.has(docId)) continue;
+      // Routing is decided inside the pipeline task (behind any pending
+      // hydration) so an event arriving while connect() is still filling the
+      // routing set is neither dropped nor left out of the store. Clients that
+      // are neither subscribed nor hydrating are skipped without a task.
+      if (!client.subscriptions.has(docId) && !client.hydrating) continue;
 
-      const now = Date.now();
-      const buffered: BufferedEvent = {
-        id: client.nextEventId++,
-        event,
-        data,
-        timestamp: now,
-      };
-
-      // Always buffer — covers the gap between network death and heartbeat detection.
-      // Trim events older than the buffer window to prevent unbounded growth.
-      client.buffer.push(buffered);
-      this._trimBuffer(client, now);
-
-      if (client.writer) {
-        this._writeEvent(client, buffered);
-      }
+      this._enqueue(client, async () => {
+        if (!client.subscriptions.has(docId)) return;
+        // Appends run inside the pipeline so each client's store order matches
+        // its wire order — the replay cursor is the LAST id on the wire, so an
+        // id appended out of order could leapfrog an undelivered event. The
+        // writer is captured before the append: a stream replaced while the
+        // append is in flight is not written to — its replay (whose store read
+        // was issued after this append) delivers the event instead.
+        const writer = client.writer;
+        const eventId = await this.eventStore.append(clientId, event, data).catch(() => null);
+        if (!writer || client.writer !== writer) return; // Disconnected at append time, or replaced since
+        this._writeFrame(writer, client.encoder, eventId, event, data);
+      });
     }
   }
 
@@ -356,10 +397,12 @@ export class SSEServer {
    * Send an event directly to a single connected client, bypassing subscription
    * routing. Used for client-targeted traffic like WebRTC signaling.
    *
-   * Unlike {@link notify}, this does NOT buffer through expiry: if the client
-   * is currently disconnected, the call returns false and the event is dropped.
-   * Stale signaling replayed after a buffer expiry is harmful (peers gone, ICE
-   * candidates moot), so we deliberately do not preserve it.
+   * Unlike {@link notify}, this is never stored and the frame carries no id
+   * (ids belong to stored events — a fabricated id would corrupt the client's
+   * replay cursor): if the client is currently disconnected, the call returns
+   * false and the event is dropped. Stale signaling replayed after a buffer
+   * expiry is harmful (peers gone, ICE candidates moot), so we deliberately do
+   * not preserve it.
    *
    * @param clientId - Target client.
    * @param event - SSE event type (e.g. `'signal'`).
@@ -368,13 +411,12 @@ export class SSEServer {
    */
   sendToClient(clientId: string, event: string, data: string): boolean {
     const client = this.clients.get(clientId);
-    if (!client || !client.writer) return false;
+    if (!client?.writer) return false;
 
-    this._writeEvent(client, {
-      id: client.nextEventId++,
-      event,
-      data,
-      timestamp: Date.now(),
+    const writer = client.writer;
+    this._enqueue(client, async () => {
+      if (client.writer !== writer) return;
+      this._writeFrame(writer, client.encoder, null, event, data);
     });
 
     return true;
@@ -407,7 +449,30 @@ export class SSEServer {
   }
 
   /**
-   * Clean up all resources (heartbeat interval, client buffers, timers).
+   * Drop this instance's local state for a client whose live stream has been
+   * claimed by ANOTHER instance (a multi-instance routing signal — e.g. pup
+   * broadcasts a claim when a stream connects). Cancels the expiry timer and
+   * closes any lingering local writer WITHOUT touching the event store: the
+   * client is live elsewhere and its stored events and subscriptions must
+   * survive for that stream to use. Without this, the abandoned instance's
+   * retained ClientState keeps appending every relayed event to a shared store
+   * (duplicates) until its buffer TTL fires — and that TTL cleanup would drop
+   * the live client's store state.
+   */
+  releaseClient(clientId: string): void {
+    const client = this.clients.get(clientId);
+    if (!client) return;
+    if (client.expiryTimer) {
+      globalThis.clearTimeout(client.expiryTimer);
+    }
+    client.writer?.close().catch(SSEServer.noop);
+    this.clients.delete(clientId);
+  }
+
+  /**
+   * Clean up local resources (heartbeat interval, connections, timers). Does
+   * NOT drop event store state — with a shared store, clients reconnect to
+   * another instance and replay from where they left off.
    */
   destroy(): void {
     if (this.heartbeatInterval) {
@@ -427,26 +492,19 @@ export class SSEServer {
 
   // --- Private Helpers ---
 
-  /**
-   * Trim buffer to keep only events within the sliding window (while connected)
-   * or all events (while disconnected — those are managed by the TTL timer).
-   */
-  private _trimBuffer(client: ClientState, now: number): void {
-    if (client.disconnectedAt !== null) return; // Disconnected — keep everything for replay
-    const cutoff = now - this.bufferWindowMs;
-    const idx = client.buffer.findIndex(e => e.timestamp >= cutoff);
-    if (idx > 0) {
-      client.buffer = client.buffer.slice(idx);
-    } else if (idx === -1) {
-      // All events are older than the window
-      client.buffer = [];
-    }
+  private _enqueue(client: ClientState, task: () => Promise<void>): void {
+    client.pipeline = client.pipeline.then(task).catch(SSEServer.noop);
   }
 
-  private _writeEvent(client: ClientState, event: BufferedEvent): void {
-    if (!client.writer) return;
-    const msg = `id: ${event.id}\nevent: ${event.event}\ndata: ${event.data}\n\n`;
-    client.writer.write(client.encoder.encode(msg)).catch(() => {
+  private _writeFrame(
+    writer: WritableStreamDefaultWriter<Uint8Array>,
+    encoder: TextEncoder,
+    id: string | null,
+    event: string,
+    data: string
+  ): void {
+    const frame = `${id != null ? `id: ${id}\n` : ''}event: ${event}\ndata: ${data}\n\n`;
+    writer.write(encoder.encode(frame)).catch(() => {
       // Write failed — connection is dead, will be cleaned up via disconnect()
     });
   }
@@ -485,5 +543,9 @@ export class SSEServer {
       client.writer.close().catch(SSEServer.noop);
     }
     this.clients.delete(clientId);
+    // Advisory for shared stores: this instance only knows the client hasn't
+    // reconnected HERE — a shared store may no-op and rely on key TTLs
+    // instead, since the client can be live on another instance.
+    this.eventStore.dropClient(clientId).catch(SSEServer.noop);
   }
 }

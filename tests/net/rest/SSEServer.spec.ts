@@ -308,6 +308,21 @@ describe('SSEServer', () => {
       expect(chunks2[0]).toContain('event: changesCommitted');
     });
 
+    it('should not buffer the excluded event for a disconnected originating client', async () => {
+      server.connect('client1');
+      await server.subscribe('client1', ['doc1']);
+      server.disconnect('client1');
+
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'echo' }] }, 'client1');
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'other' }] });
+
+      const stream = server.connect('client1', '0');
+      const chunks = await readStream(stream, 1);
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]).toContain('"id":"other"');
+      expect(chunks[0]).not.toContain('"id":"echo"');
+    });
+
     it('should buffer events for disconnected clients', async () => {
       server.connect('client1');
       await server.subscribe('client1', ['doc1']);

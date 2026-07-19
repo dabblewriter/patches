@@ -56,7 +56,7 @@ doc.change(draft => {
 
 ```typescript
 interface PatchesRESTOptions {
-  // Explicit client ID. If not provided, restored from sessionStorage or generated.
+  // Explicit client ID. If not provided, a random id is generated per instance.
   clientId?: string;
 
   // Static headers for every request (e.g. Authorization)
@@ -67,20 +67,13 @@ interface PatchesRESTOptions {
 }
 ```
 
-### Client ID Persistence
+### Client ID
 
-By default, `PatchesREST` persists the client ID in `sessionStorage`. This means:
+By default, `PatchesREST` mints a random client ID per instance. It is deliberately never persisted: browsers copy `sessionStorage` on Duplicate Tab and restore it on reopen-closed-tab, and two live clients sharing an id would fight over the `/events` stream and, with sender exclusion, miss each other's changes.
 
-- **Page refresh** → same client ID → seamless buffer replay, no full re-sync
-- **New tab** → new client ID (each tab is a separate client)
-- **Tab close** → sessionStorage cleared
-- **Web Worker** → no sessionStorage, falls back to random UUID per construction
-
-To control this yourself, pass `clientId` in the options:
+To control the id yourself, pass `clientId` in the options. It must be unique per live connection:
 
 ```typescript
-const clientId = localStorage.getItem('my-client-id') ?? crypto.randomUUID();
-localStorage.setItem('my-client-id', clientId);
 const rest = new PatchesREST(url, { clientId });
 ```
 
@@ -102,6 +95,8 @@ Both implement the `PatchesConnection` interface, so everything downstream (`Pat
 ## REST API
 
 All document operations use standard HTTP methods. Document IDs can contain slashes (they're hierarchical). Sub-resources use `_`-prefixed path segments to avoid collisions.
+
+Mutating (non-GET) requests carry the client ID as a `clientId` query parameter so the server can bind mutations to their origin (via `setAuthContext`) and exclude the sender from its own `changesCommitted` fan-out. A query parameter (unlike a custom header) needs no CORS allow-list and adds no preflight requirement of its own, and a server that predates the feature simply ignores it. GETs omit it, and `POST /signal/:clientId` already carries the id in its path.
 
 ### SSE & Subscriptions
 

@@ -20,7 +20,6 @@ import type { ConnectionState } from '../protocol/types.js';
 import { onlineState } from '../websocket/onlineState.js';
 import { normalizeIds } from './utils.js';
 
-const SESSION_STORAGE_KEY = 'patches-clientId';
 const REQUEST_TIMEOUT_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 30_000;
 /**
@@ -61,8 +60,11 @@ const SUBSCRIBE_RETRY_BASE_DELAY_MS = 500;
  */
 export interface PatchesRESTOptions {
   /**
-   * Explicit client ID. If not provided, restored from sessionStorage (when available)
-   * or generated via createId(). Persisted to sessionStorage automatically.
+   * Explicit client ID. If not provided, a random id is generated per instance.
+   * Sent as a `clientId` query parameter on mutating requests so the server can
+   * exclude this client from SSE notifications about its own commits/deletes, so
+   * it must be unique per live connection: two connected clients sharing an id
+   * would each be excluded from the other's changes.
    */
   clientId?: string;
 
@@ -125,14 +127,9 @@ export class PatchesREST implements PatchesConnection {
     this._url = url.replace(/\/$/, ''); // Strip trailing slash
     this.options = options ?? {};
 
-    // Resolve clientId: explicit > sessionStorage > random
-    const storage = typeof globalThis.sessionStorage !== 'undefined' ? globalThis.sessionStorage : undefined;
-    this.clientId = this.options.clientId ?? storage?.getItem(SESSION_STORAGE_KEY) ?? createId(22);
-    try {
-      storage?.setItem(SESSION_STORAGE_KEY, this.clientId);
-    } catch {
-      // sessionStorage may throw in private browsing or when full
-    }
+    // Per-instance, never persisted: sessionStorage survives Duplicate Tab, and
+    // two live clients sharing an id would miss each other's changes.
+    this.clientId = this.options.clientId ?? createId(22);
   }
 
   // --- URL ---
@@ -651,9 +648,17 @@ export class PatchesREST implements PatchesConnection {
     const method = init?.method ?? 'GET';
     const hasBody = init?.body !== undefined;
 
+    // Mutations carry clientId so the server can exclude the sender from its own
+    // SSE fan-out; GETs omit it (see docs/sse-rest.md). String append, not the URL
+    // API: this._url may be a relative base.
+    let url = `${this._url}${path}`;
+    if (method !== 'GET') {
+      url += `${url.includes('?') ? '&' : '?'}clientId=${encodeURIComponent(this.clientId)}`;
+    }
+
     let response: Response;
     try {
-      response = await globalThis.fetch(`${this._url}${path}`, {
+      response = await globalThis.fetch(url, {
         method,
         credentials: 'include',
         headers: {

@@ -4,7 +4,7 @@ import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change, PatchesSnapshot, PatchesState, QuarantinedChange } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
-import { IDBStoreWrapper, IndexedDBStore } from './IndexedDBStore.js';
+import { IDBStoreWrapper, IndexedDBStore, type StorageGuardOptions } from './IndexedDBStore.js';
 import type { LWWClientStore } from './LWWClientStore.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
@@ -64,8 +64,12 @@ interface Snapshot {
 export class LWWIndexedDBStore implements LWWClientStore {
   public db: IndexedDBStore;
 
-  constructor(db?: string | IndexedDBStore) {
-    this.db = !db || typeof db === 'string' ? new IndexedDBStore(db) : db;
+  // Guard options apply only when this store opens the database itself; an existing
+  // IndexedDBStore already owns its connection and its options, so passing both is an error.
+  constructor(db?: string, options?: StorageGuardOptions);
+  constructor(db: IndexedDBStore);
+  constructor(db?: string | IndexedDBStore, options?: StorageGuardOptions) {
+    this.db = !db || typeof db === 'string' ? new IndexedDBStore(db, options) : db;
 
     // Subscribe to upgrade event to create LWW-specific stores
     this.db.requireStores('committedOps', 'pendingOps', 'sendingChanges');

@@ -184,18 +184,43 @@ export class StorageError extends Error {
   }
 }
 
+/** Label shared by the guard's soft warning and {@link StorageTimeoutError} so the two log lines correlate. */
+export function storageOpLabel(operation: string, storeNames: string[]): string {
+  return `IndexedDB ${operation}${storeNames.length ? ` [${storeNames.join(', ')}]` : ''}`;
+}
+
+/**
+ * An IndexedDB open, transaction, or database delete that never settled (no success, error,
+ * or abort event) within the hard threshold (`storageTimeoutMs`, default 4000ms). Converts
+ * an otherwise silent infinite hang into a typed, catchable failure.
+ */
+export class StorageTimeoutError extends Error {
+  constructor(
+    public readonly operation: 'open' | 'transaction' | 'delete',
+    public readonly storeNames: string[],
+    public readonly elapsedMs: number
+  ) {
+    super(`${storageOpLabel(operation, storeNames)} did not settle within ${elapsedMs}ms`);
+    this.name = 'StorageTimeoutError';
+  }
+}
+
 /**
  * True for a storage-layer IndexedDB failure — see {@link StorageError}. Matches purely by
  * `name`, deliberately WITHOUT an `instanceof Error` gate: it must classify the same after
  * crossing a structured-clone/worker boundary (which keeps only name/message/stack), AND
  * `DOMException` only inherits from `Error` on modern engines — an `instanceof Error` gate
  * would silently fail to classify a raw WebKit `UnknownError` on the exact old-Safari targets
- * this exists for. Recognizes both the wrapped `StorageError` and the raw DOMException shape
- * ({@link STORAGE_FAULT_NAMES}) on any path that didn't go through {@link toStorageError}.
+ * this exists for. Recognizes the wrapped `StorageError`, the guard's
+ * {@link StorageTimeoutError}, and the raw DOMException shape ({@link STORAGE_FAULT_NAMES})
+ * on any path that didn't go through {@link toStorageError}.
  */
 export function isStorageError(err: unknown): boolean {
   const name = (err as { name?: unknown } | null | undefined)?.name;
-  return typeof name === 'string' && (name === 'StorageError' || STORAGE_FAULT_NAMES.has(name));
+  return (
+    typeof name === 'string' &&
+    (name === 'StorageError' || name === 'StorageTimeoutError' || STORAGE_FAULT_NAMES.has(name))
+  );
 }
 
 /**

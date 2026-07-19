@@ -5,7 +5,13 @@ export { OTServer, type CommitChangesOptions, type OTServerOptions } from './OTS
 // Branch managers
 export type { BranchManager } from './BranchManager.js';
 export { LWWBranchManager } from './LWWBranchManager.js';
-export { OTBranchManager } from './OTBranchManager.js';
+export {
+  MergeContentDuplicationError,
+  OTBranchManager,
+  type ContentDuplicationGuardOptions,
+  type MergeBranchOptions,
+  type OTBranchManagerOptions,
+} from './OTBranchManager.js';
 
 // In-memory backends (for testing)
 export { LWWMemoryStoreBackend } from './LWWMemoryStoreBackend.js';

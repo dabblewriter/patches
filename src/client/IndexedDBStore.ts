@@ -9,7 +9,7 @@ import type {
   QuarantinedChange,
 } from '../types.js';
 import { deferred, type Deferred } from '../utils/deferred.js';
-import { toStorageError } from '../net/error.js';
+import { StorageTimeoutError, storageOpLabel, toStorageError } from '../net/error.js';
 import { signal } from 'easy-signal';
 import type { BranchClientStore } from './BranchClientStore.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
@@ -20,6 +20,97 @@ interface StoredBranch extends Branch {
   _docId: string;
   /** Numeric pending flag for IndexedDB indexing (1 when pending, absent otherwise) */
   _pending?: 1;
+}
+
+/** Soft threshold: an operation still unsettled after this fires `onSlowStorage`. */
+export const DEFAULT_SLOW_STORAGE_MS = 1000;
+/** Hard threshold: an operation still unsettled after this is rejected with {@link StorageTimeoutError}. */
+export const DEFAULT_STORAGE_TIMEOUT_MS = 4000;
+
+/** Passed to `onSlowStorage` when an IndexedDB operation crosses the soft threshold without settling. */
+export interface SlowStorageInfo {
+  operation: 'open' | 'transaction' | 'delete';
+  storeNames: string[];
+  elapsedMs: number;
+}
+
+/**
+ * Max-time guard options for IndexedDB opens, transactions, and deletes. Some machines have
+ * IDB calls that never settle (no success, error, or abort event), silently losing every
+ * write. A healthy operation settles in single-digit milliseconds, so these thresholds only
+ * trip on a genuinely unsettled one. Ships enabled; omitting options uses the defaults.
+ */
+export interface StorageGuardOptions {
+  /** Soft threshold in ms before `onSlowStorage` is invoked (no throw). Default {@link DEFAULT_SLOW_STORAGE_MS}. */
+  slowStorageMs?: number;
+  /** Hard threshold in ms before the operation is rejected with {@link StorageTimeoutError}. Default {@link DEFAULT_STORAGE_TIMEOUT_MS}. */
+  storageTimeoutMs?: number;
+  /** Invoked once per operation at the soft threshold. Defaults to a console.warn. */
+  onSlowStorage?: (info: SlowStorageInfo) => void;
+}
+
+function warnSlowStorage({ operation, storeNames, elapsedMs }: SlowStorageInfo): void {
+  console.warn(`${storageOpLabel(operation, storeNames)} still unsettled after ${elapsedMs}ms`);
+}
+
+interface StorageGuard {
+  /** Push the hard deadline out to a full `storageTimeoutMs` from now. No-op once settled. */
+  extend(): void;
+  /** Stand down the hard timer only (observable activity owns the deadline); the soft timer stays. */
+  clearHard(): void;
+  /** Settled: clear all timers; `extend()` becomes a no-op. */
+  clear(): void;
+}
+
+/**
+ * Arm the soft/hard guard timers for one storage operation. The soft timer fires
+ * `onSlowStorage` once; the hard timer invokes `onTimeout` with the elapsed ms.
+ * `storeNames` is called lazily, only when a timer actually fires.
+ */
+function armStorageGuard(
+  options: StorageGuardOptions | undefined,
+  operation: SlowStorageInfo['operation'],
+  storeNames: () => string[],
+  onTimeout: (elapsedMs: number) => void
+): StorageGuard {
+  const started = Date.now();
+  const timeoutMs = options?.storageTimeoutMs ?? DEFAULT_STORAGE_TIMEOUT_MS;
+  let done = false;
+  let slowTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    slowTimer = undefined;
+    (options?.onSlowStorage ?? warnSlowStorage)({
+      operation,
+      storeNames: storeNames(),
+      elapsedMs: Date.now() - started,
+    });
+  }, options?.slowStorageMs ?? DEFAULT_SLOW_STORAGE_MS);
+  const fireHard = () => {
+    hardTimer = undefined;
+    onTimeout(Date.now() - started);
+  };
+  let hardTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(fireHard, timeoutMs);
+  const clearHard = () => {
+    if (hardTimer !== undefined) {
+      clearTimeout(hardTimer);
+      hardTimer = undefined;
+    }
+  };
+  return {
+    extend() {
+      if (done) return;
+      clearHard();
+      hardTimer = setTimeout(fireHard, timeoutMs);
+    },
+    clearHard,
+    clear() {
+      done = true;
+      clearHard();
+      if (slowTimer !== undefined) {
+        clearTimeout(slowTimer);
+        slowTimer = undefined;
+      }
+    },
+  };
 }
 
 /**
@@ -79,6 +170,13 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
   protected dbName?: string;
   protected dbPromise: Deferred<IDBDatabase>;
   protected external: boolean;
+  protected options: StorageGuardOptions;
+  /**
+   * Cancels the in-flight open's guard and blocked timers. Every reopen path (setName,
+   * versionchange, suspend recovery) and close() must call this so a superseded open's
+   * timers can never reject or replace the current `dbPromise`.
+   */
+  protected cancelOpenGuard?: () => void;
   protected requiredStores = new Set(['docs', 'snapshots', 'branches', 'quarantinedChanges']);
 
   /**
@@ -87,7 +185,8 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
    */
   readonly onUpgrade = signal<(db: IDBDatabase, oldVersion: number, transaction: IDBTransaction) => void>();
 
-  constructor(dbOrName?: string | IDBDatabase | Promise<IDBDatabase>) {
+  constructor(dbOrName?: string | IDBDatabase | Promise<IDBDatabase>, options?: StorageGuardOptions) {
+    this.options = options ?? {};
     this.dbPromise = deferred<IDBDatabase>();
 
     if (dbOrName != null && typeof dbOrName !== 'string') {
@@ -165,6 +264,8 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
   /** Opens the database. `version: null` opens at whatever version currently exists. */
   protected async initDB(version: number | null = IndexedDBStore.DB_VERSION) {
     if (!this.dbName) return;
+    // A superseded open's timers must never touch this open's promise.
+    this.cancelOpenGuard?.();
     const request = indexedDB.open(this.dbName, version ?? undefined);
     let blockedTimer: ReturnType<typeof setTimeout> | undefined;
     const clearBlockedTimer = () => {
@@ -172,6 +273,26 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
         clearTimeout(blockedTimer);
         blockedTimer = undefined;
       }
+    };
+
+    // Max-time guard: on some machines `indexedDB.open` never settles with ANY event,
+    // leaving `dbPromise` pending forever. On timeout, reject waiters and re-arm so late
+    // arrivals also fail fast. The hard timer stands down for observable activity
+    // (`blocked` has its own grace period below, `upgradeneeded` runs to success/error);
+    // the soft timer stays until settle so any slow open reports.
+    const guard = armStorageGuard(
+      this.options,
+      'open',
+      () => [],
+      elapsedMs => {
+        if (this.closed) return;
+        this.rejectOpenWaiters(new StorageTimeoutError('open', [], elapsedMs));
+        guard.extend();
+      }
+    );
+    this.cancelOpenGuard = () => {
+      clearBlockedTimer();
+      guard.clear();
     };
 
     // `blocked` fires when another connection still holds this database at an older version,
@@ -192,18 +313,21 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     // resolves that new deferred and the store heals with no reopen.
     request.onblocked = () => {
       clearBlockedTimer();
+      // Observable state, not a silent hang: the grace period owns the deadline.
+      guard.clearHard();
       blockedTimer = setTimeout(() => {
         blockedTimer = undefined;
         if (this.closed) return;
-        const blocked = this.dbPromise;
-        this.dbPromise = deferred<IDBDatabase>();
-        blocked.reject(new Error(`IndexedDB open blocked for "${this.dbName}"`));
-        blocked.promise.catch(() => undefined);
+        this.rejectOpenWaiters(new Error(`IndexedDB open blocked for "${this.dbName}"`));
+        // Re-arm the hard guard so callers arriving after this rejection also fail fast
+        // if the open stays wedged, instead of parking forever on the fresh deferred.
+        guard.extend();
       }, IndexedDBStore.OPEN_BLOCKED_TIMEOUT_MS);
     };
 
     request.onerror = () => {
       clearBlockedTimer();
+      guard.clear();
       // A previous session bumped past DB_VERSION to add missing stores — reopen at the current version
       if (version !== null && request.error?.name === 'VersionError') {
         this.initDB(null);
@@ -218,6 +342,7 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     };
     request.onsuccess = () => {
       clearBlockedTimer();
+      guard.clear();
       const db = request.result;
       // close()/deleteDB() ran while this open was in flight. A reopen nulls this.db, so
       // that close() early-returned without settling this promise — honor the terminal close
@@ -254,6 +379,11 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     };
 
     request.onupgradeneeded = event => {
+      // An upgrade is observable progress, and its transaction may legitimately run long
+      // (index builds iterate every record): stand the hard deadline down like `blocked`
+      // does and let success/error settle the open.
+      clearBlockedTimer();
+      guard.clearHard();
       const db = (event.target as IDBOpenDBRequest).result;
       const transaction = (event.target as IDBOpenDBRequest).transaction!;
       const oldVersion = event.oldVersion;
@@ -265,6 +395,17 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
 
   protected getDB(): Promise<IDBDatabase> {
     return this.dbPromise.promise;
+  }
+
+  /**
+   * Reject current open waiters and install a fresh deferred, so a success that eventually
+   * lands still heals the store. Shared by the hang-guard and blocked-grace expiries.
+   */
+  protected rejectOpenWaiters(err: Error): void {
+    const waiting = this.dbPromise;
+    this.dbPromise = deferred<IDBDatabase>();
+    waiting.reject(err);
+    waiting.promise.catch(() => undefined);
   }
 
   /**
@@ -297,6 +438,8 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     // Mark terminal before any await so a reopen in flight (which has already nulled
     // this.db) can't resurrect the store via its open's onsuccess.
     this.closed = true;
+    // An in-flight open's guard timers have nothing left to report or reject.
+    this.cancelOpenGuard?.();
     if (!this.db) return;
     await this.dbPromise.promise;
     if (this.db) {
@@ -321,9 +464,24 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     await this.close();
     await new Promise<void>((resolve, reject) => {
       const request = indexedDB.deleteDatabase(this.dbName!);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(toStorageError(request.error));
-      request.onblocked = () => reject(request.error);
+      const guard = armStorageGuard(
+        this.options,
+        'delete',
+        () => [],
+        elapsedMs => reject(new StorageTimeoutError('delete', [], elapsedMs))
+      );
+      request.onsuccess = () => {
+        guard.clear();
+        resolve();
+      };
+      request.onerror = () => {
+        guard.clear();
+        reject(toStorageError(request.error));
+      };
+      request.onblocked = () => {
+        guard.clear();
+        reject(request.error);
+      };
     });
   }
 
@@ -331,7 +489,7 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     storeNames: string[],
     mode: IDBTransactionMode
   ): Promise<[IDBTransactionWrapper, ...IDBStoreWrapper[]]> {
-    const tx = new IDBTransactionWrapper(await this.beginTransaction(storeNames, mode));
+    const tx = new IDBTransactionWrapper(await this.beginTransaction(storeNames, mode), this.options);
     const stores = storeNames.map(name => tx.getStore(name));
     return [tx, ...stores];
   }
@@ -670,23 +828,61 @@ function stripInternal(stored: StoredBranch): Branch {
 export class IDBTransactionWrapper {
   protected tx: IDBTransaction;
   protected promise: Promise<void>;
+  /**
+   * Rejects when the transaction fails or times out; never resolves. Store wrappers race
+   * their requests against it so a request that never settles still rejects with the
+   * transaction's typed error instead of parking its caller forever.
+   */
+  protected failure: Promise<never>;
+  /** Called by store wrappers on every request settle; a settling request is progress, not a hang. */
+  protected extendDeadline: () => void;
 
-  constructor(tx: IDBTransaction) {
+  constructor(tx: IDBTransaction, options?: StorageGuardOptions) {
     this.tx = tx;
+    const storeNames = () => Array.from(tx.objectStoreNames ?? []);
+    let guard!: StorageGuard;
     this.promise = new Promise((resolve, reject) => {
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(toStorageError(tx.error));
+      // Max-time guard: some machines have transactions that never fire ANY of the settle
+      // events below. Every request settle extends the hard deadline, so a bulk transaction
+      // still making progress is never aborted; only a genuinely stalled one times out.
+      guard = armStorageGuard(options, 'transaction', storeNames, elapsedMs => {
+        guard.clear();
+        // Reject BEFORE aborting so the typed timeout wins over the AbortError the abort
+        // fires (the later onabort reject is a no-op on the settled promise).
+        reject(new StorageTimeoutError('transaction', storeNames(), elapsedMs));
+        try {
+          tx.abort();
+        } catch {
+          // Connection already dead/finished; nothing left to abort.
+        }
+      });
+      tx.oncomplete = () => {
+        guard.clear();
+        resolve();
+      };
+      tx.onerror = () => {
+        guard.clear();
+        reject(toStorageError(tx.error));
+      };
       // A transaction that aborts at commit — notably under quota pressure — can fire ONLY
       // `onabort` (with `tx.error` set) and no `onerror`, which would otherwise leave this
       // promise pending forever. Reject on abort too, routing a storage-fault abort through the
       // same typed StorageError; a plain user/teardown AbortError passes through untouched (and
       // whichever of onerror/onabort fires first wins — the second reject is a no-op).
-      tx.onabort = () => reject(toStorageError(tx.error));
+      tx.onabort = () => {
+        guard.clear();
+        reject(toStorageError(tx.error));
+      };
     });
+    this.extendDeadline = () => guard.extend();
+    this.failure = new Promise<never>((_, reject) => this.promise.catch(reject));
+    // The failure promise may have no racers when the transaction settles (or nobody ever
+    // awaits complete()); swallow so it can't surface as an unhandled rejection.
+    this.failure.catch(() => undefined);
   }
 
   getStore(name: string): IDBStoreWrapper {
-    return new IDBStoreWrapper(this.tx.objectStore(name));
+    return new IDBStoreWrapper(this.tx.objectStore(name), this.failure, this.extendDeadline);
   }
 
   async complete(): Promise<void> {
@@ -696,9 +892,13 @@ export class IDBTransactionWrapper {
 
 export class IDBStoreWrapper {
   protected store: IDBObjectStore;
+  protected failure?: Promise<never>;
+  protected onSettle?: () => void;
 
-  constructor(store: IDBObjectStore) {
+  constructor(store: IDBObjectStore, failure?: Promise<never>, onSettle?: () => void) {
     this.store = store;
+    this.failure = failure;
+    this.onSettle = onSettle;
   }
 
   protected createRange(lower?: any, upper?: any): IDBKeyRange | undefined {
@@ -706,71 +906,67 @@ export class IDBStoreWrapper {
     return IDBKeyRange.bound(lower, upper);
   }
 
-  async getAll<T>(lower?: any, upper?: any, count?: number): Promise<T[]> {
-    return new Promise((resolve, reject) => {
-      const request = this.store.getAll(this.createRange(lower, upper), count);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(toStorageError(request.error));
+  /**
+   * Issue a request, racing it against the owning transaction's failure so a request that
+   * never fires success OR error still rejects with the transaction's typed error instead
+   * of parking its caller forever. Each settle extends the transaction's hard deadline.
+   */
+  protected run<T>(makeRequest: () => IDBRequest, map?: (result: any) => T): Promise<T> {
+    const request = new Promise<T>((resolve, reject) => {
+      const req = makeRequest();
+      req.onsuccess = () => {
+        this.onSettle?.();
+        resolve(map ? map(req.result) : req.result);
+      };
+      req.onerror = () => {
+        this.onSettle?.();
+        reject(toStorageError(req.error));
+      };
     });
+    if (!this.failure) return request;
+    // A request rejection landing after the race was lost (e.g. the AbortError from the
+    // guard's tx.abort()) must not surface as an unhandled rejection.
+    request.catch(() => undefined);
+    return Promise.race([request, this.failure]);
+  }
+
+  async getAll<T>(lower?: any, upper?: any, count?: number): Promise<T[]> {
+    return this.run(() => this.store.getAll(this.createRange(lower, upper), count));
   }
 
   async getAllByIndex<T>(indexName: string, query?: IDBValidKey | IDBKeyRange): Promise<T[]> {
-    return new Promise((resolve, reject) => {
-      const index = this.store.index(indexName);
-      const request = index.getAll(query);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(toStorageError(request.error));
-    });
+    return this.run(() => this.store.index(indexName).getAll(query));
   }
 
   async get<T>(key: IDBValidKey): Promise<T | undefined> {
-    return new Promise((resolve, reject) => {
-      const request = this.store.get(key);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(toStorageError(request.error));
-    });
+    return this.run(() => this.store.get(key));
   }
 
   async put<T>(value: T): Promise<IDBValidKey> {
-    return new Promise((resolve, reject) => {
-      const request = this.store.put(value);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(toStorageError(request.error));
-    });
+    return this.run(() => this.store.put(value));
   }
 
   async delete(key: IDBValidKey): Promise<void>;
   async delete(lower: any, upper: any): Promise<void>;
   async delete(keyOrLower: IDBValidKey | any, upper?: any): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const key = upper === undefined ? keyOrLower : this.createRange(keyOrLower, upper);
-      const request = this.store.delete(key);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(toStorageError(request.error));
-    });
+    return this.run(() => this.store.delete(upper === undefined ? keyOrLower : this.createRange(keyOrLower, upper)));
   }
 
   async count(lower?: any, upper?: any): Promise<number> {
-    return new Promise((resolve, reject) => {
-      const request = this.store.count(this.createRange(lower, upper));
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(toStorageError(request.error));
-    });
+    return this.run(() => this.store.count(this.createRange(lower, upper)));
   }
 
   async getFirstFromCursor<T>(lower?: any, upper?: any): Promise<T | undefined> {
-    return new Promise((resolve, reject) => {
-      const request = this.store.openCursor(this.createRange(lower, upper));
-      request.onsuccess = () => resolve(request.result?.value);
-      request.onerror = () => reject(toStorageError(request.error));
-    });
+    return this.run(
+      () => this.store.openCursor(this.createRange(lower, upper)),
+      cursor => cursor?.value
+    );
   }
 
   async getLastFromCursor<T>(lower?: any, upper?: any): Promise<T | undefined> {
-    return new Promise((resolve, reject) => {
-      const request = this.store.openCursor(this.createRange(lower, upper), 'prev');
-      request.onsuccess = () => resolve(request.result?.value);
-      request.onerror = () => reject(toStorageError(request.error));
-    });
+    return this.run(
+      () => this.store.openCursor(this.createRange(lower, upper), 'prev'),
+      cursor => cursor?.value
+    );
   }
 }

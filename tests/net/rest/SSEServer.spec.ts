@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SSEEventStore, SSEReplayResult } from '../../../src/net/rest/SSEEventStore';
 import { SSEServer } from '../../../src/net/rest/SSEServer';
 
 /** Helper: read chunks from a ReadableStream, skipping the initial retry message. */
@@ -23,6 +24,35 @@ async function readFirstChunk(stream: ReadableStream<Uint8Array>): Promise<strin
   const { value } = await reader.read();
   reader.releaseLock();
   return new TextDecoder().decode(value);
+}
+
+/** Helper: a mock SSEEventStore whose methods can be overridden per test. */
+function createStore(overrides: Partial<SSEEventStore> = {}): SSEEventStore {
+  return {
+    append: vi.fn(async () => null),
+    replay: vi.fn(async (): Promise<SSEReplayResult> => ({ type: 'events', events: [] })),
+    addSubscriptions: vi.fn(async () => {}),
+    removeSubscriptions: vi.fn(async () => {}),
+    loadSubscriptions: vi.fn(async (): Promise<string[]> => []),
+    dropClient: vi.fn(async () => {}),
+    ...overrides,
+  };
+}
+
+/** Helper: a promise resolvable from outside. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(r => (resolve = r));
+  return { promise, resolve };
+}
+
+/**
+ * Helper: drain pending microtasks. Notify appends ride each client's
+ * pipeline, so a test simulating a disconnect/reconnect must let them land
+ * first — as any real reconnect (a later network round trip) does.
+ */
+async function flushAsync(ticks = 25) {
+  for (let i = 0; i < ticks; i++) await Promise.resolve();
 }
 
 describe('SSEServer', () => {
@@ -218,23 +248,23 @@ describe('SSEServer', () => {
   });
 
   describe('addSubscriptions', () => {
-    it('should return null for an unknown client', () => {
-      expect(server.addSubscriptions('unknown', ['doc1'])).toBeNull();
+    it('should return null for an unknown client', async () => {
+      expect(await server.addSubscriptions('unknown', ['doc1'])).toBeNull();
     });
 
-    it('should register subscriptions and return the docIds', () => {
+    it('should register subscriptions and return the docIds', async () => {
       server.connect('client1');
-      expect(server.addSubscriptions('client1', ['doc1', 'doc2'])).toEqual(['doc1', 'doc2']);
+      expect(await server.addSubscriptions('client1', ['doc1', 'doc2'])).toEqual(['doc1', 'doc2']);
       expect(server.listSubscriptions('doc1')).toContain('client1');
       expect(server.listSubscriptions('doc2')).toContain('client1');
     });
 
-    it('should bypass the authorization provider (trusted, pre-authorized input)', () => {
+    it('should bypass the authorization provider (trusted, pre-authorized input)', async () => {
       const canAccess = vi.fn().mockResolvedValue(false);
       const authServer = new SSEServer({ auth: { canAccess } });
       authServer.connect('client1');
 
-      const result = authServer.addSubscriptions('client1', ['doc1']);
+      const result = await authServer.addSubscriptions('client1', ['doc1']);
 
       expect(result).toEqual(['doc1']);
       expect(authServer.listSubscriptions('doc1')).toContain('client1');
@@ -244,7 +274,7 @@ describe('SSEServer', () => {
 
     it('should deliver notifications to clients registered this way', async () => {
       const stream = server.connect('client1');
-      server.addSubscriptions('client1', ['doc1']);
+      await server.addSubscriptions('client1', ['doc1']);
 
       server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
 
@@ -328,9 +358,12 @@ describe('SSEServer', () => {
       await server.subscribe('client1', ['doc1']);
       server.disconnect('client1');
 
-      // Send while disconnected
+      // Send while disconnected — and let the appends land BEFORE the
+      // reconnect, so the asserted frames come from replay() rather than from
+      // the pending notify tasks writing to the new stream.
       server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
       server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c2' }] });
+      await flushAsync();
 
       // Reconnect and replay
       const stream = server.connect('client1', '0');
@@ -443,6 +476,7 @@ describe('SSEServer', () => {
       server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
       server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c2' }] });
       server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c3' }] });
+      await flushAsync();
 
       // Network dies silently. Heartbeat detects it after ~15s.
       // Simulate: disconnect detected, then immediate reconnect.
@@ -470,12 +504,14 @@ describe('SSEServer', () => {
 
       // Event at T=0
       shortServer.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
+      await flushAsync();
 
       // Advance past the buffer window
       vi.advanceTimersByTime(6_000);
 
       // Event at T=6s — should trim the old event
       shortServer.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c2' }] });
+      await flushAsync();
 
       // Disconnect and reconnect — only event 2 should be available
       shortServer.disconnect('client1');
@@ -500,6 +536,7 @@ describe('SSEServer', () => {
       server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'a' }] });
       server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'b' }] });
       server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c' }] });
+      await flushAsync();
 
       // Reconnect having received event 1 — should get events 2 and 3 only
       const stream = server.connect('client1', '1');
@@ -513,6 +550,41 @@ describe('SSEServer', () => {
     it('should send resync for invalid lastEventId', async () => {
       server.connect('client1');
       const stream = server.connect('client1', 'not-a-number');
+      const chunks = await readStream(stream, 1);
+      expect(chunks[0]).toContain('event: resync');
+    });
+  });
+
+  describe('resync cursor re-anchoring', () => {
+    it('should write a store-assigned id on the resync frame so the cursor re-anchors', async () => {
+      // Cursor from a previous store epoch (e.g. from before a server restart).
+      const stream1 = server.connect('client1', '137');
+      const chunks1 = await readStream(stream1, 1);
+      expect(chunks1[0]).toBe('id: 1\nevent: resync\ndata: {}\n\n');
+
+      await server.subscribe('client1', ['doc1']);
+      server.disconnect('client1');
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
+      await flushAsync();
+
+      // The re-anchored cursor verifies against the current epoch.
+      const stream2 = server.connect('client1', '1');
+      const chunks2 = await readStream(stream2, 1);
+      expect(chunks2[0]).toContain('id: 2');
+      expect(chunks2[0]).toContain('event: changesCommitted');
+    });
+
+    it('should resync a cursor from an old epoch instead of claiming an empty continuation', async () => {
+      server.connect('client1');
+      await server.subscribe('client1', ['doc1']);
+      server.disconnect('client1');
+      // An append in the current epoch makes the client "known" to the store.
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1', changes: [{ id: 'c1' }] });
+      await flushAsync();
+
+      // A cursor this epoch never assigned must not silently verify as an
+      // empty continuation (that would strand the buffered event forever).
+      const stream = server.connect('client1', '137');
       const chunks = await readStream(stream, 1);
       expect(chunks[0]).toContain('event: resync');
     });
@@ -546,6 +618,485 @@ describe('SSEServer', () => {
       server.destroy();
 
       expect(server.getConnectionIds()).toEqual([]);
+    });
+  });
+});
+
+describe('SSEServer event store seam', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('should append once per notify and write the store-assigned id on the wire', async () => {
+    let n = 40;
+    const store = createStore({ append: vi.fn(async () => String(++n)) });
+    const server = new SSEServer({ eventStore: store });
+    const stream = server.connect('c1');
+    await server.subscribe('c1', ['doc1']);
+
+    server.notify('doc1', 'changesCommitted', { docId: 'doc1' });
+    server.notify('doc1', 'docDeleted', { docId: 'doc1' });
+
+    const chunks = await readStream(stream, 2);
+    expect(chunks[0]).toContain('id: 41');
+    expect(chunks[1]).toContain('id: 42');
+    expect(vi.mocked(store.append).mock.calls).toEqual([
+      ['c1', 'changesCommitted', '{"docId":"doc1"}'],
+      ['c1', 'docDeleted', '{"docId":"doc1"}'],
+    ]);
+
+    server.destroy();
+  });
+
+  it('should preserve per-client write order when appends resolve out of order', async () => {
+    const slow = deferred<string | null>();
+    const store = createStore({
+      append: vi.fn<SSEEventStore['append']>().mockReturnValueOnce(slow.promise).mockResolvedValueOnce('2'),
+    });
+    const server = new SSEServer({ eventStore: store });
+    const stream = server.connect('c1');
+    await server.subscribe('c1', ['doc1']);
+
+    server.notify('doc1', 'changesCommitted', { docId: 'doc1', seq: 1 });
+    server.notify('doc1', 'changesCommitted', { docId: 'doc1', seq: 2 });
+    slow.resolve('1'); // First append finishes AFTER the second
+
+    const chunks = await readStream(stream, 2);
+    expect(chunks[0]).toContain('id: 1');
+    expect(chunks[0]).toContain('"seq":1');
+    expect(chunks[1]).toContain('id: 2');
+    expect(chunks[1]).toContain('"seq":2');
+
+    server.destroy();
+  });
+
+  it("should not block one client behind another client's pending append", async () => {
+    const stuck = deferred<string | null>();
+    const store = createStore({
+      append: vi.fn(async (clientId: string) => (clientId === 'c1' ? stuck.promise : '7')),
+    });
+    const server = new SSEServer({ eventStore: store });
+    server.connect('c1');
+    const stream2 = server.connect('c2');
+    await server.subscribe('c1', ['doc1']);
+    await server.subscribe('c2', ['doc1']);
+
+    server.notify('doc1', 'changesCommitted', { docId: 'doc1' });
+
+    // c2 receives its event while c1's append is still in flight.
+    const chunks = await readStream(stream2, 1);
+    expect(chunks[0]).toContain('id: 7');
+
+    stuck.resolve('1');
+    server.destroy();
+  });
+
+  it('should replay a store continuation with its opaque ids verbatim', async () => {
+    const store = createStore({
+      replay: vi.fn(
+        async (): Promise<SSEReplayResult> => ({
+          type: 'events',
+          events: [
+            { id: 'evt-8', event: 'changesCommitted', data: '{"docId":"doc1"}' },
+            { id: 'evt-9', event: 'docDeleted', data: '{"docId":"doc2"}' },
+          ],
+        })
+      ),
+    });
+    const server = new SSEServer({ eventStore: store });
+
+    const stream = server.connect('c1', 'evt-7');
+
+    // The read is issued inside the pipeline task, not synchronously.
+    const chunks = await readStream(stream, 2);
+    expect(store.replay).toHaveBeenCalledWith('c1', 'evt-7');
+    expect(chunks[0]).toBe('id: evt-8\nevent: changesCommitted\ndata: {"docId":"doc1"}\n\n');
+    expect(chunks[1]).toBe('id: evt-9\nevent: docDeleted\ndata: {"docId":"doc2"}\n\n');
+
+    server.destroy();
+  });
+
+  it('should emit an id-less resync when the store cannot verify continuity', async () => {
+    const store = createStore({ replay: vi.fn(async (): Promise<SSEReplayResult> => ({ type: 'resync' })) });
+    const server = new SSEServer({ eventStore: store });
+
+    const stream = server.connect('c1', 'evt-7');
+
+    const chunks = await readStream(stream, 1);
+    expect(chunks[0]).toBe('event: resync\ndata: {}\n\n');
+
+    server.destroy();
+  });
+
+  it('should write the store re-anchor id on the resync frame when provided', async () => {
+    const store = createStore({
+      replay: vi.fn(async (): Promise<SSEReplayResult> => ({ type: 'resync', id: 'anchor-3' })),
+    });
+    const server = new SSEServer({ eventStore: store });
+
+    const stream = server.connect('c1', 'evt-7');
+
+    const chunks = await readStream(stream, 1);
+    expect(chunks[0]).toBe('id: anchor-3\nevent: resync\ndata: {}\n\n');
+
+    server.destroy();
+  });
+
+  it('should issue the replay read behind an append still in the pipeline', async () => {
+    const gate = deferred<string | null>();
+    const store = createStore({
+      append: vi.fn<SSEEventStore['append']>().mockReturnValueOnce(gate.promise),
+      replay: vi.fn(
+        async (): Promise<SSEReplayResult> => ({
+          type: 'events',
+          events: [{ id: '2', event: 'changesCommitted', data: '{"n":2}' }],
+        })
+      ),
+    });
+    const server = new SSEServer({ eventStore: store });
+    server.connect('c1');
+    await server.subscribe('c1', ['doc1']);
+
+    // Event 2's append is in flight when the client reconnects with its
+    // cursor at 1. Reading the store before that append lands would omit the
+    // event from the replay meant to cover it — committed to the store,
+    // written to no wire, and unreachable once the cursor passes it.
+    server.notify('doc1', 'changesCommitted', { n: 2 });
+    const stream2 = server.connect('c1', '1');
+    await flushAsync();
+    expect(store.replay).not.toHaveBeenCalled();
+
+    gate.resolve('2');
+    await flushAsync();
+    expect(store.replay).toHaveBeenCalledWith('c1', '1');
+    // Delivered exactly once, by the replay — the pending notify task must
+    // not also write it to the replacement stream. The sentinel occupying the
+    // second frame proves there was no duplicate.
+    server.sendToClient('c1', 'sentinel', 'x');
+    const chunks = await readStream(stream2, 2);
+    expect(chunks[0]).toBe('id: 2\nevent: changesCommitted\ndata: {"n":2}\n\n');
+    expect(chunks[1]).toBe('event: sentinel\ndata: x\n\n');
+
+    server.destroy();
+  });
+
+  it('should degrade a hung append to an id-less frame instead of wedging the pipeline', async () => {
+    const store = createStore({
+      append: vi
+        .fn<SSEEventStore['append']>()
+        .mockImplementationOnce(() => new Promise(() => {})) // never settles
+        .mockResolvedValue('2'),
+    });
+    const server = new SSEServer({ eventStore: store, storeTimeoutMs: 1_000 });
+    const stream = server.connect('c1');
+    await server.subscribe('c1', ['doc1']);
+
+    server.notify('doc1', 'changesCommitted', { n: 1 });
+    server.notify('doc1', 'changesCommitted', { n: 2 });
+    await flushAsync();
+    vi.advanceTimersByTime(1_001);
+
+    const chunks = await readStream(stream, 2);
+    // The hung append degrades to an id-less frame (cursor must not advance
+    // past the unstored event) and the queued second event still flows.
+    expect(chunks[0]).toBe('event: changesCommitted\ndata: {"n":1}\n\n');
+    expect(chunks[1]).toBe('id: 2\nevent: changesCommitted\ndata: {"n":2}\n\n');
+
+    server.destroy();
+  });
+
+  it('should degrade a hung replay to a resync', async () => {
+    const store = createStore({ replay: vi.fn(() => new Promise<SSEReplayResult>(() => {})) });
+    const server = new SSEServer({ eventStore: store, storeTimeoutMs: 1_000 });
+
+    const stream = server.connect('c1', '5');
+    await flushAsync();
+    vi.advanceTimersByTime(1_001);
+
+    const chunks = await readStream(stream, 1);
+    expect(chunks[0]).toBe('event: resync\ndata: {}\n\n');
+
+    server.destroy();
+  });
+
+  it('should land subscription mutations in the store in issue order', async () => {
+    const addGate = deferred<void>();
+    const calls: string[] = [];
+    const store = createStore({
+      addSubscriptions: vi.fn(async () => {
+        calls.push('add');
+        await addGate.promise;
+      }),
+      removeSubscriptions: vi.fn(async () => {
+        calls.push('remove');
+      }),
+    });
+    const server = new SSEServer({ eventStore: store });
+    server.connect('c1');
+
+    const subscribed = server.subscribe('c1', ['doc1']);
+    const unsubscribed = server.unsubscribe('c1', ['doc1']);
+    await flushAsync();
+    // The remove must not overtake the still-pending add — landing out of
+    // order would leave the doc subscribed in the store.
+    expect(store.removeSubscriptions).not.toHaveBeenCalled();
+
+    addGate.resolve();
+    await Promise.all([subscribed, unsubscribed]);
+    expect(calls).toEqual(['add', 'remove']);
+
+    server.destroy();
+  });
+
+  it('should write nothing for an empty continuation', async () => {
+    const store = createStore();
+    const server = new SSEServer({ eventStore: store });
+
+    const stream = server.connect('c1', 'evt-7');
+    // Let the replay task finish, then write a sentinel — the sentinel being
+    // the first frame proves replay wrote nothing.
+    await flushAsync();
+    server.sendToClient('c1', 'sentinel', 'x');
+
+    const chunks = await readStream(stream, 1);
+    expect(chunks[0]).toBe('event: sentinel\ndata: x\n\n');
+
+    server.destroy();
+  });
+
+  it('should hydrate local subscriptions from the store before replay on cold state', async () => {
+    const store = createStore({
+      loadSubscriptions: vi.fn(async () => ['doc1']),
+      replay: vi.fn(
+        async (): Promise<SSEReplayResult> => ({
+          type: 'events',
+          events: [{ id: 'r1', event: 'caughtUp', data: '{}' }],
+        })
+      ),
+      append: vi.fn(async () => 'n2'),
+    });
+    const server = new SSEServer({ eventStore: store });
+
+    const stream = server.connect('c1', 'r0');
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    await reader.read(); // retry: 5000
+
+    expect(decoder.decode((await reader.read()).value)).toBe('id: r1\nevent: caughtUp\ndata: {}\n\n');
+    expect(vi.mocked(store.loadSubscriptions).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(store.replay).mock.invocationCallOrder[0]
+    );
+    expect(server.listSubscriptions('doc1')).toContain('c1');
+
+    // Post-replay events fan out via the hydrated set.
+    server.notify('doc1', 'changesCommitted', { docId: 'doc1' });
+    expect(decoder.decode((await reader.read()).value)).toBe(
+      'id: n2\nevent: changesCommitted\ndata: {"docId":"doc1"}\n\n'
+    );
+
+    reader.releaseLock();
+    server.destroy();
+  });
+
+  it('should deliver the frame without an id when append is degraded', async () => {
+    const store = createStore({ append: vi.fn(async () => null) });
+    const server = new SSEServer({ eventStore: store });
+    const stream = server.connect('c1');
+    await server.subscribe('c1', ['doc1']);
+
+    server.notify('doc1', 'changesCommitted', { docId: 'doc1' });
+
+    // No id line — the client's Last-Event-ID cursor must not advance past an unstored event.
+    const chunks = await readStream(stream, 1);
+    expect(chunks[0]).toBe('event: changesCommitted\ndata: {"docId":"doc1"}\n\n');
+    expect(chunks[0]).not.toContain('id:');
+
+    server.destroy();
+  });
+
+  it('should treat a throwing append as degraded', async () => {
+    const store = createStore({ append: vi.fn(async () => Promise.reject(new Error('store down'))) });
+    const server = new SSEServer({ eventStore: store });
+    const stream = server.connect('c1');
+    await server.subscribe('c1', ['doc1']);
+
+    server.notify('doc1', 'changesCommitted', { docId: 'doc1' });
+
+    const chunks = await readStream(stream, 1);
+    expect(chunks[0]).toBe('event: changesCommitted\ndata: {"docId":"doc1"}\n\n');
+
+    server.destroy();
+  });
+
+  it('should mirror subscription mutations and TTL cleanup to the store', async () => {
+    const store = createStore();
+    const server = new SSEServer({ eventStore: store, bufferTTLMs: 60_000 });
+    server.connect('c1');
+
+    await server.subscribe('c1', ['doc1', 'doc2']);
+    expect(store.addSubscriptions).toHaveBeenCalledWith('c1', ['doc1', 'doc2']);
+
+    await server.unsubscribe('c1', ['doc1']);
+    expect(store.removeSubscriptions).toHaveBeenCalledWith('c1', ['doc1']);
+
+    server.disconnect('c1');
+    vi.advanceTimersByTime(60_001);
+    expect(store.dropClient).toHaveBeenCalledWith('c1');
+
+    server.destroy();
+  });
+
+  it('should not drop store state on destroy', () => {
+    const store = createStore();
+    const server = new SSEServer({ eventStore: store });
+    server.connect('c1');
+
+    server.destroy();
+
+    expect(store.dropClient).not.toHaveBeenCalled();
+  });
+
+  it('should deliver and store an event that arrives while hydration is in flight', async () => {
+    const load = deferred<string[]>();
+    const store = createStore({
+      loadSubscriptions: vi.fn(() => load.promise),
+      append: vi.fn(async () => 'h1'),
+    });
+    const server = new SSEServer({ eventStore: store });
+    const stream = server.connect('c1');
+
+    // The event arrives before the stored subscriptions have been applied —
+    // it must be neither dropped nor left out of the store.
+    server.notify('doc1', 'changesCommitted', { docId: 'doc1' });
+    load.resolve(['doc1']);
+
+    const chunks = await readStream(stream, 1);
+    expect(chunks[0]).toBe('id: h1\nevent: changesCommitted\ndata: {"docId":"doc1"}\n\n');
+    expect(store.append).toHaveBeenCalledWith('c1', 'changesCommitted', '{"docId":"doc1"}');
+
+    server.destroy();
+  });
+
+  it('should not resurrect a doc unsubscribed while hydration is in flight', async () => {
+    const load = deferred<string[]>();
+    const store = createStore({ loadSubscriptions: vi.fn(() => load.promise) });
+    const server = new SSEServer({ eventStore: store });
+    server.connect('c1');
+
+    // Unsubscribe races the (stale) snapshot — the apply must not re-add it.
+    server.unsubscribe('c1', ['docY']);
+    load.resolve(['docY']);
+    await flushAsync();
+
+    expect(server.listSubscriptions('docY')).not.toContain('c1');
+    server.notify('docY', 'changesCommitted', { docId: 'docY' });
+    await flushAsync();
+    expect(store.append).not.toHaveBeenCalled();
+
+    server.destroy();
+  });
+
+  it('should refresh stored subscriptions on every reconnect, not only on cold state', async () => {
+    const store = createStore();
+    const server = new SSEServer({ eventStore: store });
+
+    server.connect('c1');
+    expect(store.loadSubscriptions).toHaveBeenCalledTimes(1);
+
+    server.disconnect('c1');
+    server.connect('c1'); // warm local state — load again purely as a TTL touch
+    expect(store.loadSubscriptions).toHaveBeenCalledTimes(2);
+
+    server.destroy();
+  });
+
+  describe('releaseClient', () => {
+    it('should drop local state without touching the store when another instance claims the stream', async () => {
+      const store = createStore();
+      const server = new SSEServer({ eventStore: store, bufferTTLMs: 60_000 });
+      server.connect('c1');
+      await server.subscribe('c1', ['doc1']);
+      server.disconnect('c1');
+
+      server.releaseClient('c1');
+
+      expect(server.hasClient('c1')).toBe(false);
+      // The expiry timer was cancelled — it must not fire dropClient against a
+      // client that is live on another instance.
+      vi.advanceTimersByTime(60_001);
+      expect(store.dropClient).not.toHaveBeenCalled();
+
+      // A ghost no longer appends relayed events to the shared store.
+      server.notify('doc1', 'changesCommitted', { docId: 'doc1' });
+      await flushAsync();
+      expect(store.append).not.toHaveBeenCalled();
+
+      server.destroy();
+    });
+
+    it('should close a lingering live writer on release', async () => {
+      const server = new SSEServer({ eventStore: createStore() });
+      const stream = server.connect('c1');
+
+      server.releaseClient('c1');
+
+      const reader = stream.getReader();
+      await reader.read(); // retry: 5000
+      const { done } = await reader.read();
+      expect(done).toBe(true);
+      reader.releaseLock();
+
+      server.destroy();
+    });
+
+    it('should ignore unknown clients', () => {
+      const server = new SSEServer({ eventStore: createStore() });
+      expect(() => server.releaseClient('ghost')).not.toThrow();
+      server.destroy();
+    });
+
+    it('should suppress appends already queued when the client is released', async () => {
+      const gate = deferred<string | null>();
+      const store = createStore({
+        append: vi.fn<SSEEventStore['append']>().mockReturnValueOnce(gate.promise).mockResolvedValue('9'),
+      });
+      const server = new SSEServer({ eventStore: store });
+      server.connect('c1');
+      await server.subscribe('c1', ['doc1']);
+
+      server.notify('doc1', 'changesCommitted', { n: 1 }); // append in flight
+      server.notify('doc1', 'changesCommitted', { n: 2 }); // queued behind it
+      await flushAsync();
+      server.releaseClient('c1'); // another instance claimed the stream
+
+      gate.resolve('1');
+      await flushAsync();
+      // The queued task must not append into the shared store for a client
+      // that is live elsewhere — that's the duplicate releaseClient exists to
+      // prevent, and the queue is deepest exactly when the store is slow.
+      expect(store.append).toHaveBeenCalledTimes(1);
+
+      server.destroy();
+    });
+
+    it("should not mark a later reconnection disconnected when the released stream's close arrives late", async () => {
+      const server = new SSEServer({ eventStore: createStore() });
+      server.connect('c1'); // live stream, half-open network — no close reported yet
+      server.releaseClient('c1'); // claim from another instance force-closes the writer
+      server.connect('c1'); // client load-balances back before that close lands
+      server.disconnect('c1'); // the framework finally reports the released stream's close
+
+      // The fresh stream must still be live (heartbeats, notify writes).
+      expect(server.getConnectionIds()).toContain('c1');
+
+      server.disconnect('c1'); // genuine close of the current stream
+      expect(server.getConnectionIds()).not.toContain('c1');
+
+      server.destroy();
     });
   });
 });

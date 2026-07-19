@@ -1,9 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildVersionState } from '../../src/algorithms/ot/server/buildVersionState';
+import { breakChanges, breakChangesIntoBatches } from '../../src/algorithms/ot/shared/changeBatching';
 import { applyChanges } from '../../src/algorithms/ot/shared/applyChanges';
+import { compressedSizeUint8 } from '../../src/compression';
+import { createChange } from '../../src/data/change';
 import { createVersionMetadata } from '../../src/data/version';
+import type { BranchClientStore } from '../../src/client/BranchClientStore';
+import { OTAlgorithm } from '../../src/client/OTAlgorithm';
+import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
+import { PatchesBranchClient } from '../../src/client/PatchesBranchClient';
 import { readStreamAsString } from '../../src/server/jsonReadable';
-import { OTBranchManager } from '../../src/server/OTBranchManager';
+import {
+  MergeContentDuplicationError,
+  OTBranchManager,
+  type OTBranchManagerOptions,
+} from '../../src/server/OTBranchManager';
 import { OTServer } from '../../src/server/OTServer';
 import type { BranchingStoreBackend, OTStoreBackend } from '../../src/server/types';
 import type {
@@ -169,10 +180,10 @@ async function coldLoad(server: OTServer, docId: string): Promise<{ state: any; 
   return { state: applyChanges(state, changes), rev, changes };
 }
 
-function setup() {
+function setup(managerOptions?: OTBranchManagerOptions) {
   const store = new MemoryOTBranchStore();
   const server = new OTServer(store);
-  const manager = new OTBranchManager(store, server);
+  const manager = new OTBranchManager(store, server, managerOptions);
   return { store, server, manager };
 }
 
@@ -602,5 +613,568 @@ describe('OTBranchManager integration', () => {
       expect((await store.loadBranch(branchId))!.lastMergedRev).toBe(3);
       expect(await changeIds(store, 'doc1')).toEqual(['s1', 'e1', 'e2']);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DAB-760: "merging an editor copy duplicates the content of every scene".
+//
+// An editor copy is a client-seeded branch: the whole manuscript is seeded as
+// changes at branch revs 1..N (a root replace, split by breakChanges), and
+// `contentStartRev` = N+1. Merge replays only changes at/after contentStartRev,
+// so the seed is meant to be excluded and never re-applied to main.
+//
+// The reporter rejected every tracked change first (net-zero content delta) and
+// the merge STILL doubled every scene's body — Ryan's server-side op evidence:
+// "~150 docs hit with @txt ops that are pure inserts with no leading retain —
+// the merge inserted the branch's entire body at position 0 of each doc."
+//
+// Unlike every existing branch-merge test above (plain JSON `add` ops), these
+// exercise `@txt` text-field merge, which is where a retain-less whole-body
+// insert can arise (see src/json-patch/ops/text.ts apply-onto-empty-base).
+// ---------------------------------------------------------------------------
+
+/** An `@txt` (text field) op: composes `ops` onto the delta at `path`. */
+function txtOp(path: string, ops: any[]) {
+  return { op: '@txt' as const, path, value: ops };
+}
+
+/** A one-op `@txt` change. */
+function txtChange(id: string, baseRev: number, path: string, ops: any[]): ChangeInput {
+  return { id, baseRev, rev: baseRev + 1, ops: [txtOp(path, ops)] };
+}
+
+describe('DAB-760 editor-copy merge doubling', () => {
+  const BODY1 = 'Chapter one. The grey cat sat by the window.\n';
+  const BODY2 = 'Chapter two. The dog ran across the wide green yard.\n';
+
+  // The guard is opt-in (refuse-vs-warn and the length threshold are consuming-server
+  // policy); these tests arm it the way a protecting server would. The low threshold
+  // matches the short test bodies.
+  const GUARD: OTBranchManagerOptions = { contentDuplicationGuard: { action: 'refuse', minLength: 16 } };
+
+  // A realistic two-scene manuscript. Bodies are inline Delta `{ops}` in the
+  // project state — exactly how `cloneDeep(liveProject)` captures them.
+  function manuscript() {
+    return {
+      docs: {
+        d1: { id: 'd1', body: { content: { ops: [{ insert: BODY1 }] } } },
+        d2: { id: 'd2', body: { content: { ops: [{ insert: BODY2 }] } } },
+      },
+    };
+  }
+
+  function docBody(state: any, docId: string): string {
+    const c = state?.docs?.[docId]?.body?.content;
+    const ops: any[] = Array.isArray(c) ? c : (c?.ops ?? []);
+    return ops.map(o => (typeof o.insert === 'string' ? o.insert : '')).join('');
+  }
+
+  // A) Control — proves two things at once using the REAL client seeding path:
+  //    1. `breakChanges` splits the whole-project seed into a structural replace
+  //       plus one retain-less `@txt` insert per doc body (Ryan's op shape).
+  //    2. When `contentStartRev` correctly counts that split, the merge excludes
+  //       the entire seed and does not double — the server merge is faithful.
+  it('control: real breakChanges seed with a correct contentStartRev does not double', async () => {
+    const { store, server, manager } = setup(GUARD);
+    const state = manuscript();
+    await server.commitChanges('doc1', [rootChange('s1', state)]);
+
+    // Seed exactly as the client does: one root-replace, split by breakChanges.
+    const rootReplace = createChange(0, 1, [{ op: 'replace', path: '', value: state }], { committedAt: 0 }) as Change;
+    const seed = breakChanges([rootReplace], 200); // small budget → per-doc @txt extraction
+    // The seed really is a structural replace + per-doc @txt body inserts.
+    expect(seed[0].ops[0].op).toBe('replace');
+    expect(seed.some(c => c.ops.some((o: any) => o.op === '@txt'))).toBe(true);
+    const seedSpan = seed[seed.length - 1].rev; // N
+    expect(seedSpan).toBeGreaterThan(1);
+
+    const branchId = 'branchOK';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: seedSpan + 1 }); // correct floor
+    await store.saveChanges(branchId, seed);
+
+    // A real edit above the floor that nets to zero: tracked insert, then reject.
+    await server.commitChanges(branchId, [txtChange('ins', seedSpan, '/docs/d1/body/content', [{ insert: 'X' }])]);
+    await server.commitChanges(branchId, [txtChange('rej', seedSpan + 1, '/docs/d1/body/content', [{ delete: 1 }])]);
+
+    await manager.mergeBranch(branchId);
+
+    const { state: after } = await coldLoad(server, 'doc1');
+    expect(docBody(after, 'd1')).toBe(BODY1);
+    expect(docBody(after, 'd2')).toBe(BODY2);
+  });
+
+  // B) Guard — the recorded `contentStartRev` undercounts the seed's committed
+  //    rev span, so the per-doc `@txt` body inserts (revs 2..N) sit ABOVE the
+  //    floor and `mergeBranch` would replay them onto main, re-inserting every
+  //    scene's body at position 0 (the original DAB-760 doubling — no real edits,
+  //    the reviewer rejected everything). The merge guard now detects that
+  //    content-doubling signature and refuses the merge before committing, so the
+  //    manuscript is left intact instead of doubled.
+  //
+  //    In production the desync arises at the seed→server sync boundary (the seed
+  //    spans more revs than the floor accounts for). Modeled here as the floor
+  //    sitting just after the structural replace (rev 1).
+  it('guard: a floor that undercounts the seed is refused, not doubled', async () => {
+    const { store, server, manager } = setup(GUARD);
+    await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+
+    // The real breakChanges shape for a large manuscript, made explicit so the
+    // assertions are exact: structural replace (rev 1) then one @txt body per doc.
+    const seed: Change[] = [
+      createChange(
+        0,
+        1,
+        [
+          {
+            op: 'replace',
+            path: '',
+            value: { docs: { d1: { id: 'd1', body: { content: {} } }, d2: { id: 'd2', body: { content: {} } } } },
+          },
+        ],
+        { committedAt: 0 }
+      ) as Change,
+      createChange(1, 2, [txtOp('/docs/d1/body/content', [{ insert: BODY1 }])], { committedAt: 0 }) as Change,
+      createChange(2, 3, [txtOp('/docs/d2/body/content', [{ insert: BODY2 }])], { committedAt: 0 }) as Change,
+    ];
+    const seedSpan = seed[seed.length - 1].rev; // 3
+    expect(seedSpan).toBeGreaterThan(2); // the @txt bodies really are above the floor
+
+    // THE DEFECT: floor undercounts the seed (2 instead of seedSpan + 1 = 4).
+    const branchId = 'branchBug';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: 2 });
+    await store.saveChanges(branchId, seed);
+
+    // A branch version above the floor — a refused merge must not copy it onto the source.
+    await store.createVersion(
+      branchId,
+      createVersionMetadata({ origin: 'main', startRev: 2, endRev: 3, groupId: branchId }),
+      seed.slice(1)
+    );
+
+    // Before the guard this doubled every scene; now the merge is refused before committing.
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(branchId)).rejects.toBeInstanceOf(MergeContentDuplicationError);
+    err.mockRestore();
+
+    // Nothing was committed — the manuscript is untouched (not doubled).
+    const { state: after } = await coldLoad(server, 'doc1');
+    expect(docBody(after, 'd1')).toBe(BODY1);
+    expect(docBody(after, 'd2')).toBe(BODY2);
+
+    // ...and the refusal is genuinely side-effect-free: no changes, no orphaned version
+    // copies on the source, and no watermark advance.
+    expect(await changeIds(store, 'doc1')).toEqual(['s1']);
+    expect(store.getVersions('doc1')).toEqual([]);
+    expect((await store.loadBranch(branchId))!.lastMergedRev).toBeUndefined();
+  });
+
+  // C) No false positive — a legitimate branch that inserts a substantial NEW
+  //    opening paragraph at the very start of a scene is a retain-less leading
+  //    insert too, but it does not duplicate the field's existing head, so the
+  //    guard must let it merge and land the new text (inserted, not doubled).
+  it('guard: allows a legitimate large leading insert of new text', async () => {
+    const { server, manager } = setup(GUARD);
+    await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+
+    const branchId = await manager.createBranch('doc1', 1); // server-materialized seed at rev 1
+    const NEW_OPENING = 'A wholly new opening paragraph that did not exist before.\n';
+    await server.commitChanges(branchId, [txtChange('open', 1, '/docs/d1/body/content', [{ insert: NEW_OPENING }])]);
+
+    await manager.mergeBranch(branchId); // must NOT throw
+
+    const { state: after } = await coldLoad(server, 'doc1');
+    expect(docBody(after, 'd1')).toBe(NEW_OPENING + BODY1); // inserted at the head, not doubled
+    expect(docBody(after, 'd2')).toBe(BODY2);
+  });
+
+  // D) Recreate the REAL desync end-to-end with the actual batching functions — nothing about
+  //    the floor is hand-picked. dw3 computes `contentStartRev` from a COMPRESSED storage split
+  //    (MAX_STORAGE_BYTES via compressedSizeUint8) but PatchesSync commits the seed split by the
+  //    UNCOMPRESSED payload limit. A highly-compressible manuscript fits one storage piece yet
+  //    the wire splits it into several, so `contentStartRev` undercounts the committed seed and
+  //    the merge replays the tail. The small limits below mirror that real compressed/uncompressed
+  //    asymmetry (dw3 uses 900KB compressed storage vs a 1MB uncompressed wire limit).
+  it('recreate: compressed-vs-uncompressed seed split undercounts the floor; guard refuses the merge', async () => {
+    const { store, server, manager } = setup(GUARD);
+    const STORAGE = 3_000; // compressed measure (mirrors dw3 MAX_STORAGE_BYTES = 900_000)
+    const PAYLOAD = 6_000; // uncompressed wire limit (mirrors the 1MB maxPayloadBytes)
+
+    const bigBody = 'The grey cat sat by the window and watched the rain. '.repeat(600); // ~32KB, compresses tiny
+    const state = { docs: { d1: { id: 'd1', body: { content: { ops: [{ insert: bigBody }] } } } } };
+    await server.commitChanges('doc1', [rootChange('s1', state)]);
+
+    const rootReplace = createChange(0, 1, [{ op: 'replace', path: '', value: state }], { committedAt: 0 }) as Change;
+
+    // What the branch client USED to record for the floor: a storage-only (compressed) split.
+    const storageOnly = breakChanges([rootReplace], STORAGE, compressedSizeUint8);
+    const oldContentStartRev = storageOnly[storageOnly.length - 1].rev + 1;
+
+    // What PatchesSync actually commits on the wire: split by both limits (payload is uncompressed).
+    const committedSeed = breakChangesIntoBatches([rootReplace], {
+      maxPayloadBytes: PAYLOAD,
+      maxStorageBytes: STORAGE,
+      sizeCalculator: compressedSizeUint8,
+    }).flat();
+    const committedSpan = committedSeed[committedSeed.length - 1].rev;
+
+    // THE DESYNC — straight from the real functions, no hand-set floor:
+    expect(committedSpan).toBeGreaterThan(oldContentStartRev - 1);
+
+    // A branch created the old way pins the undercounting floor while the server holds the full
+    // committed seed. The merge would re-insert the seeded body onto main; the guard refuses it.
+    const branchId = 'branchRecreate';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: oldContentStartRev });
+    await store.saveChanges(branchId, committedSeed);
+
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(branchId)).rejects.toBeInstanceOf(MergeContentDuplicationError);
+    err.mockRestore();
+
+    const { state: after } = await coldLoad(server, 'doc1');
+    expect(docBody(after, 'd1')).toBe(bigBody); // intact, not doubled
+  });
+
+  // E) End-to-end through the FIXED client path: the branch client persists the seed through
+  //    a real algorithm whose own storage split is stricter than `docOptions` (the configs
+  //    are independent in real deployments) and derives `contentStartRev` from the revisions
+  //    actually persisted. The committed seed then matches the floor, so a real server merge
+  //    with the guard armed neither doubles nor refuses. Under the old prediction-based
+  //    floor, this exact setup undercounted the seed and the merge replayed its tail.
+  it('end-to-end: a client-seeded branch derives a floor that merges without doubling', async () => {
+    const { store, server, manager } = setup(GUARD);
+
+    const bigBody = 'The grey cat sat by the window and watched the rain.\n'.repeat(600); // ~32KB
+    const state = { docs: { d1: { id: 'd1', body: { content: { ops: [{ insert: bigBody }] } } } } };
+    await server.commitChanges('doc1', [rootChange('s1', state)]);
+
+    const docOptions = { maxStorageBytes: 3_000, maxPayloadBytes: 6_000, sizeCalculator: compressedSizeUint8 };
+    const clientStore = new OTInMemoryStore();
+    // The algorithm's own (uncompressed) storage limit re-splits the docOptions pre-split.
+    const algorithm = new OTAlgorithm(clientStore, { maxStorageBytes: 2_000 });
+    let sentContentStartRev = 0;
+    const offlineApi = {
+      listBranches: async () => [],
+      createBranch: async (_docId: string, _rev: number, meta?: { contentStartRev?: number }) => {
+        sentContentStartRev = meta!.contentStartRev!;
+        return 'branchE2E';
+      },
+      updateBranch: async () => {},
+      deleteBranch: async () => {},
+      loadBranch: async () => undefined,
+      saveBranches: async () => {},
+      removeBranches: async () => {},
+      listPendingBranches: async () => [],
+      getLastModifiedAt: async () => undefined,
+    } as unknown as BranchClientStore;
+    const patchesStub = {
+      defaultAlgorithm: 'ot',
+      algorithms: { ot: algorithm },
+      docOptions,
+      trackDocs: async () => {},
+      untrackDocs: async () => {},
+      onChange: { emit: () => {} },
+    } as any;
+
+    const client = new PatchesBranchClient('doc1', offlineApi, patchesStub);
+    const branchId = await client.createBranch(1, { id: 'branchE2E' }, state);
+
+    // The floor counts the revisions the algorithm actually persisted...
+    const seed = await clientStore.getPendingChanges(branchId);
+    expect(seed.length).toBeGreaterThan(1);
+    expect(sentContentStartRev).toBe(seed[seed.length - 1].rev + 1);
+    // ...and the persisted seed is flush-stable: re-splitting with the sync config does not
+    // renumber it, so the committed revisions are exactly the persisted ones.
+    expect(breakChangesIntoBatches(seed, docOptions).flat().length).toBe(seed.length);
+
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: sentContentStartRev });
+    await store.saveChanges(branchId, seed);
+
+    // A tracked edit that nets to zero (insert, then reject), like the original report.
+    const seedSpan = seed[seed.length - 1].rev;
+    await server.commitChanges(branchId, [txtChange('ins', seedSpan, '/docs/d1/body/content', [{ insert: 'X' }])]);
+    await server.commitChanges(branchId, [txtChange('rej', seedSpan + 1, '/docs/d1/body/content', [{ delete: 1 }])]);
+
+    await manager.mergeBranch(branchId); // guard armed — a bad floor would refuse here
+
+    const { state: after } = await coldLoad(server, 'doc1');
+    expect(docBody(after, 'd1')).toBe(bigBody); // intact: not doubled, not refused
+  });
+
+  // F) The near-miss: a floor off by ONE rev replays only the seed's LAST stored piece — a
+  //    bare insert that is a mid-body slice, not a prefix of the field head. A prefix check
+  //    misses it (silent corruption); tracking what the batch inserts against what survives
+  //    catches it.
+  it('guard: a floor off by one rev (a single tail piece) is refused', async () => {
+    const { store, server, manager } = setup(GUARD);
+    const STORAGE = 3_000;
+    const PAYLOAD = 6_000;
+
+    const bigBody = 'The grey cat sat by the window and watched the rain.\n'.repeat(600);
+    const state = { docs: { d1: { id: 'd1', body: { content: { ops: [{ insert: bigBody }] } } } } };
+    await server.commitChanges('doc1', [rootChange('s1', state)]);
+
+    const rootReplace = createChange(0, 1, [{ op: 'replace', path: '', value: state }], { committedAt: 0 }) as Change;
+    const committedSeed = breakChangesIntoBatches([rootReplace], {
+      maxPayloadBytes: PAYLOAD,
+      maxStorageBytes: STORAGE,
+      sizeCalculator: compressedSizeUint8,
+    }).flat();
+    const committedSpan = committedSeed[committedSeed.length - 1].rev;
+    expect(committedSpan).toBeGreaterThan(2);
+
+    const branchId = 'branchOffByOne';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: committedSpan }); // one short
+    await store.saveChanges(branchId, committedSeed);
+
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(branchId)).rejects.toBeInstanceOf(MergeContentDuplicationError);
+    err.mockRestore();
+
+    const { state: after } = await coldLoad(server, 'doc1');
+    expect(docBody(after, 'd1')).toBe(bigBody);
+  });
+
+  // G) A whole-field `replace`/`add` is in the same family as the `@txt` seed pieces (the
+  //    seed splitter emits structural replaces alongside them): one carrying an
+  //    already-doubled value must be refused, while an ordinary rewrite passes.
+  it('guard: a whole-field replace carrying doubled content is refused; a plain rewrite is not', async () => {
+    const { server, manager } = setup(GUARD);
+    await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+
+    const doubled = await manager.createBranch('doc1', 1, { id: 'branchReplaceDoubled' });
+    await server.commitChanges(doubled, [
+      {
+        id: 'rep',
+        baseRev: 1,
+        rev: 2,
+        ops: [{ op: 'replace', path: '/docs/d1/body/content', value: { ops: [{ insert: BODY1 + BODY1 }] } }],
+      },
+    ]);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(doubled)).rejects.toBeInstanceOf(MergeContentDuplicationError);
+    err.mockRestore();
+
+    const REWRITE = `Rewritten opening. ${BODY1}`;
+    const rewrite = await manager.createBranch('doc1', 1, { id: 'branchReplaceRewrite' });
+    await server.commitChanges(rewrite, [
+      {
+        id: 'rw',
+        baseRev: 1,
+        rev: 2,
+        ops: [{ op: 'replace', path: '/docs/d1/body/content', value: { ops: [{ insert: REWRITE }] } }],
+      },
+    ]);
+    await manager.mergeBranch(rewrite); // must NOT throw
+
+    const { state: after } = await coldLoad(server, 'doc1');
+    expect(docBody(after, 'd1')).toBe(REWRITE);
+  });
+
+  // H) Ordinary editing shapes that carry a substantial leading insert must all merge: the
+  //    delta library normalizes a paste-over-selection to insert-before-delete, so a prefix
+  //    check refuses them. Tracking deleted spans lets them net out.
+  it('guard: paste-over-selection, identical re-paste, and delete+undo all merge', async () => {
+    const path = '/docs/d1/body/content';
+
+    // Select-all, paste back a trimmed version that keeps the opening.
+    {
+      const { server, manager } = setup(GUARD);
+      await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+      const branchId = await manager.createBranch('doc1', 1);
+      const TRIMMED = 'Chapter one. The grey cat sat.\n';
+      await server.commitChanges(branchId, [
+        txtChange('trim', 1, path, [{ insert: TRIMMED }, { delete: BODY1.length }]),
+      ]);
+      await manager.mergeBranch(branchId); // must NOT throw
+      const { state: after } = await coldLoad(server, 'doc1');
+      expect(docBody(after, 'd1')).toBe(TRIMMED);
+    }
+
+    // Select-all, paste identical content back.
+    {
+      const { server, manager } = setup(GUARD);
+      await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+      const branchId = await manager.createBranch('doc1', 1);
+      await server.commitChanges(branchId, [
+        txtChange('paste', 1, path, [{ insert: BODY1 }, { delete: BODY1.length }]),
+      ]);
+      await manager.mergeBranch(branchId); // must NOT throw
+      const { state: after } = await coldLoad(server, 'doc1');
+      expect(docBody(after, 'd1')).toBe(BODY1);
+    }
+
+    // Delete the opening, then undo — both inside the same merge batch.
+    {
+      const { server, manager } = setup(GUARD);
+      await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+      const branchId = await manager.createBranch('doc1', 1);
+      await server.commitChanges(branchId, [txtChange('del', 1, path, [{ delete: 20 }])]);
+      await server.commitChanges(branchId, [txtChange('undo', 2, path, [{ insert: BODY1.slice(0, 20) }])]);
+      await manager.mergeBranch(branchId); // must NOT throw
+      const { state: after } = await coldLoad(server, 'doc1');
+      expect(docBody(after, 'd1')).toBe(BODY1);
+    }
+  });
+
+  // I) Repeat merges compare against the source's CURRENT head, not the branch point: after
+  //    the source dropped a scene's content, a writer re-pasting it on the branch is
+  //    restoring content the source no longer has — not duplicating it.
+  it('guard: re-adding content the source has since deleted merges on a second merge', async () => {
+    const { server, manager } = setup(GUARD);
+    const path = '/docs/d1/body/content';
+    await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+
+    const branchId = await manager.createBranch('doc1', 1);
+    await server.commitChanges(branchId, [txtChange('e1', 1, path, [{ insert: 'X' }])]);
+    await manager.mergeBranch(branchId); // first merge: doc1 now holds 'X' + BODY1 at rev 2
+
+    // The source drops the scene's whole body...
+    await server.commitChanges('doc1', [txtChange('m1', 2, path, [{ delete: BODY1.length + 1 }])]);
+    // ...and the writer re-pastes it on the branch.
+    await server.commitChanges(branchId, [txtChange('rp', 2, path, [{ insert: BODY1 }])]);
+
+    await manager.mergeBranch(branchId); // must NOT throw — the head no longer holds BODY1
+
+    const { state: after } = await coldLoad(server, 'doc1');
+    const body = docBody(after, 'd1');
+    expect(body.indexOf(BODY1)).toBeGreaterThanOrEqual(0);
+    expect(body.indexOf(BODY1)).toBe(body.lastIndexOf(BODY1)); // restored once, not doubled
+  });
+
+  // J) A field opening with an embed is protected too: the replayed seed re-inserts the
+  //    embed and the body text ahead of the original, and the text run behind the embed is
+  //    what identifies the duplication.
+  it('guard: a field opening with an embed is still protected', async () => {
+    const { store, server, manager } = setup(GUARD);
+    const path = '/docs/d1/body/content';
+    const withEmbed = {
+      docs: { d1: { id: 'd1', body: { content: { ops: [{ insert: { image: 'cover.png' } }, { insert: BODY1 }] } } } },
+    };
+    await server.commitChanges('doc1', [rootChange('s1', withEmbed)]);
+
+    const seed: Change[] = [
+      createChange(0, 1, [{ op: 'replace', path: '', value: { docs: { d1: { id: 'd1', body: { content: {} } } } } }], {
+        committedAt: 0,
+      }) as Change,
+      createChange(1, 2, [txtOp(path, [{ insert: { image: 'cover.png' } }, { insert: BODY1 }])], {
+        committedAt: 0,
+      }) as Change,
+    ];
+    const branchId = 'branchEmbed';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: 2 }); // undercounts
+    await store.saveChanges(branchId, seed);
+
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(branchId)).rejects.toBeInstanceOf(MergeContentDuplicationError);
+    err.mockRestore();
+  });
+
+  // K) The guard is policy, so it is off unless the consuming server configures it — the
+  //    doubling shape merges (badly) on an unconfigured manager. This also documents the raw
+  //    failure the guard exists to stop.
+  it('without configuration the guard is off and the doubling shape merges', async () => {
+    const { store, server, manager } = setup(); // no guard configured
+    await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+    const branchId = 'branchUnguarded';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: 2 });
+    await store.saveChanges(branchId, [
+      createChange(0, 1, [{ op: 'replace', path: '', value: {} }], { committedAt: 0 }) as Change,
+      createChange(1, 2, [txtOp('/docs/d1/body/content', [{ insert: BODY1 }])], { committedAt: 0 }) as Change,
+    ]);
+
+    await manager.mergeBranch(branchId); // no guard: proceeds
+
+    const { state: after } = await coldLoad(server, 'doc1');
+    expect(docBody(after, 'd1')).toBe(BODY1 + BODY1); // the unguarded outcome: doubled
+  });
+
+  // L) 'warn' logs the signature and lets the merge proceed — the observe-only rollout mode.
+  it('guard action warn: logs and proceeds', async () => {
+    const { store, server, manager } = setup({ contentDuplicationGuard: { action: 'warn', minLength: 16 } });
+    await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+    const branchId = 'branchWarn';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: 2 });
+    await store.saveChanges(branchId, [
+      createChange(0, 1, [{ op: 'replace', path: '', value: {} }], { committedAt: 0 }) as Change,
+      createChange(1, 2, [txtOp('/docs/d1/body/content', [{ insert: BODY1 }])], { committedAt: 0 }) as Change,
+    ]);
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await manager.mergeBranch(branchId); // must NOT throw
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('/docs/d1/body/content'));
+    warn.mockRestore();
+
+    const { state: after } = await coldLoad(server, 'doc1');
+    expect(docBody(after, 'd1')).toBe(BODY1 + BODY1);
+  });
+
+  // M) The per-merge override is the recovery escape hatch: 'off' lets a consumer push a
+  //    refused merge through after inspection, and arming per-merge works on an
+  //    unconfigured manager.
+  it('per-merge override can disable the configured guard', async () => {
+    const { store, server, manager } = setup(GUARD);
+    await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+    const branchId = 'branchOverride';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: 2 });
+    await store.saveChanges(branchId, [
+      createChange(0, 1, [{ op: 'replace', path: '', value: {} }], { committedAt: 0 }) as Change,
+      createChange(1, 2, [txtOp('/docs/d1/body/content', [{ insert: BODY1 }])], { committedAt: 0 }) as Change,
+    ]);
+
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(branchId)).rejects.toBeInstanceOf(MergeContentDuplicationError);
+    err.mockRestore();
+    await manager.mergeBranch(branchId, { contentDuplicationGuard: 'off' }); // explicit override
+
+    const { state: after } = await coldLoad(server, 'doc1');
+    expect(docBody(after, 'd1')).toBe(BODY1 + BODY1);
+  });
+
+  it('per-merge override can arm the guard on an unconfigured manager', async () => {
+    const { store, server, manager } = setup(); // no guard configured
+    await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+    const branchId = 'branchArm';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: 2 });
+    // Use a body long enough for the default 64-char threshold (no configured minLength).
+    const LONG = BODY1.repeat(3);
+    await server.commitChanges('doc1', [txtChange('grow', 1, '/docs/d1/body/content', [{ insert: LONG }])]);
+    await store.saveChanges(branchId, [
+      createChange(0, 1, [{ op: 'replace', path: '', value: {} }], { committedAt: 0 }) as Change,
+      createChange(1, 2, [txtOp('/docs/d1/body/content', [{ insert: LONG }])], { committedAt: 0 }) as Change,
+    ]);
+
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(branchId, { contentDuplicationGuard: 'refuse' })).rejects.toBeInstanceOf(
+      MergeContentDuplicationError
+    );
+    err.mockRestore();
+  });
+
+  // N) With the guard armed, "cannot check" must not become "checked, fine": a failure
+  //    reading the source's head propagates (the caller can retry) instead of silently
+  //    skipping the check and letting a doubling merge through.
+  it('guard: a head reconstruction failure propagates instead of skipping the check', async () => {
+    const { store, server, manager } = setup(GUARD);
+    await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+    const branchId = 'branchReadFail';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: 2 });
+    await store.saveChanges(branchId, [
+      createChange(0, 1, [{ op: 'replace', path: '', value: {} }], { committedAt: 0 }) as Change,
+      createChange(1, 2, [txtOp('/docs/d1/body/content', [{ insert: BODY1 }])], { committedAt: 0 }) as Change,
+    ]);
+
+    const originalListChanges = store.listChanges.bind(store);
+    store.listChanges = async (docId, options) => {
+      if (docId === 'doc1') throw new Error('simulated store read failure');
+      return originalListChanges(docId, options);
+    };
+
+    await expect(manager.mergeBranch(branchId)).rejects.toThrow('simulated store read failure');
+
+    // Nothing was committed while the check was unavailable.
+    store.listChanges = originalListChanges;
+    expect(await changeIds(store, 'doc1')).toEqual(['s1']);
+    expect((await store.loadBranch(branchId))!.lastMergedRev).toBeUndefined();
   });
 });

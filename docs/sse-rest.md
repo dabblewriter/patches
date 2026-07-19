@@ -213,7 +213,9 @@ app.post('/subscriptions/:clientId', async c => {
 
 app.delete('/subscriptions/:clientId', async c => {
   const { docIds } = await c.req.json();
-  sse.unsubscribe(c.req.param('clientId'), docIds);
+  // Awaited so the store mirror lands before the response — a reconnect on a
+  // cold instance after the ack can't rehydrate the removed subscription.
+  await sse.unsubscribe(c.req.param('clientId'), docIds);
   return c.body(null, 204);
 });
 
@@ -268,6 +270,12 @@ Three APIs support this:
   method is trusted: it must never be reachable with client-supplied docIds that haven't passed
   authorization — wiring it to such a route hands any client read access to arbitrary documents
   via `changesCommitted`.
+- `releaseClient(clientId)` — drop THIS instance's local state for a client whose live stream was
+  just claimed by another instance (broadcast a claim over your message bus when `/events`
+  connects, and call this on every other instance). With a shared event store this keeps exactly
+  one instance appending the client's events — a stale ghost would append every relayed event a
+  second time — and cancels the ghost's buffer-TTL expiry, which would otherwise fire `dropClient`
+  against a client that is live elsewhere. Never touches the event store.
 - When no instance owns the stream, answer the POST with a status error carrying
   `data.code: 'UNKNOWN_CLIENT'` — `PatchesREST` responds by rebuilding its stream and
   re-subscribing, instead of waiting on a stream that no longer exists.

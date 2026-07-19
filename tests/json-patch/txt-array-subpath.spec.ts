@@ -1,3 +1,4 @@
+import { Delta } from '@dabble/delta';
 import { describe, expect, it } from 'vitest';
 import { applyPatch } from '../../src/json-patch/applyPatch.js';
 import { transformPatch } from '../../src/json-patch/transformPatch.js';
@@ -103,18 +104,41 @@ describe('@txt at array-element sub-paths', () => {
       ).toEqual([{ op: '@txt', path: '/list/1/text', value: [{ retain: 5 }, { insert: 'second' }] }]);
     });
 
+    it('threads through a batch of sequential @txt ops on the same sub-path', () => {
+      // Ops within one patch each apply after the previous, so ours has to be advanced over
+      // every one of them to stay in the same coordinate space — see the delta threading in
+      // `text.transform`. A queue that batches content edits emits exactly this shape, and a
+      // single-op test can't tell correct threading apart from transforming only against the
+      // first op.
+      const theirs = [
+        { op: '@txt', path: '/list/1/text', value: [{ retain: 1 }, { insert: 'AAA' }] },
+        { op: '@txt', path: '/list/1/text', value: [{ retain: 2 }, { insert: 'B' }] },
+      ];
+      const ours = [{ op: '@txt', path: '/list/1/text', value: [{ retain: 2 }, { insert: 'S' }] }];
+
+      const transformed = transformPatch(state, theirs, ours);
+      expect(transformed).toEqual([{ op: '@txt', path: '/list/1/text', value: [{ retain: 6 }, { insert: 'S' }] }]);
+
+      // 'bbb\n' + their two edits = 'bABAAbb\n', where the base chars now sit at 0, 5 and 6.
+      // Ours still lands between the two it was written between, not at its original (now
+      // stale) offset of 2.
+      const converged = applyPatch(applyPatch(state, theirs), transformed) as typeof state;
+      expect(converged.list[1].text).toEqual({ ops: [{ insert: 'bABAAbSb\n' }] });
+    });
+
     it('survives a wholesale replace of the same sub-path and composes onto the new content', () => {
-      // Same semantics as `@txt` vs `replace` at an object path (see transformPatch.spec):
+      // Same semantics as `@txt` vs `replace` at an object path (see transform.spec.ts):
       // the text op is not clobbered — it applies after the replace. This is what keeps a
       // mixed fleet safe: an old client replacing the whole text object concurrent with a
       // new client's incremental edit loses neither write.
-      expect(
-        transformPatch(
-          state,
-          [{ op: 'replace', path: '/list/1/text', value: { ops: [{ insert: 'rewritten\n' }] } }],
-          [txt('/list/1/text')]
-        )
-      ).toEqual([txt('/list/1/text')]);
+      const replace = [{ op: 'replace', path: '/list/1/text', value: { ops: [{ insert: 'rewritten\n' }] } }];
+      const transformed = transformPatch(state, replace, [txt('/list/1/text')]);
+      expect(transformed).toEqual([txt('/list/1/text')]);
+
+      // Surviving is only half of it — the op has to land on the replaced content, not the
+      // content it was written against. Neither write is lost.
+      const converged = applyPatch(applyPatch(state, replace), transformed) as typeof state;
+      expect(converged.list[1].text).toEqual({ ops: [{ insert: 'xrewritten\n' }] });
     });
 
     it('drops when its whole element was replaced', () => {
@@ -139,6 +163,12 @@ describe('@txt at array-element sub-paths', () => {
         list: { id: string; text?: unknown }[];
       };
       expect(result.list[0].text).toEqual({ ops: [{ insert: 'x\n' }] });
+
+      // What gets stored is a Delta instance, not a plain `{ ops }` literal — `toEqual` treats
+      // the two as equal, so pin it explicitly. Consumers that structurally clone the document
+      // (persisting to IndexedDB, posting across a worker) get the plain shape back out.
+      expect(result.list[0].text).toBeInstanceOf(Delta);
+      expect(structuredClone(result.list[0].text)).toEqual({ ops: [{ insert: 'x\n' }] });
     });
   });
 });

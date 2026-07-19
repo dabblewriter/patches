@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { breakChangesIntoBatches } from '../../src/algorithms/ot/shared/changeBatching';
 import type { BranchClientStore } from '../../src/client/BranchClientStore';
+import { OTAlgorithm } from '../../src/client/OTAlgorithm';
+import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
 import { PatchesBranchClient } from '../../src/client/PatchesBranchClient';
+import type { PatchesDocOptions } from '../../src/client/PatchesDoc';
 import { compressedSizeUint8 } from '../../src/compression';
 import { createChange } from '../../src/data/change';
 import type { BranchAPI } from '../../src/net/protocol/types';
@@ -45,7 +48,9 @@ describe('PatchesBranchClient', () => {
       getLastModifiedAt: vi.fn().mockResolvedValue(undefined),
     };
     mockAlgorithm = {
-      handleDocChange: vi.fn().mockResolvedValue([]),
+      // A real algorithm returns the changes it persisted; the branch client derives
+      // `contentStartRev` from their revs.
+      handleDocChange: vi.fn().mockResolvedValue([{ rev: 1 }]),
     };
     patches = {
       defaultAlgorithm: 'ot',
@@ -135,7 +140,17 @@ describe('PatchesBranchClient', () => {
       );
     });
 
+    /** Wire up a real algorithm + store so persisted revs (the floor's source of truth) are real. */
+    function useRealAlgorithm(docOptions: PatchesDocOptions = {}, algorithmOptions: PatchesDocOptions = docOptions) {
+      const store = new OTInMemoryStore();
+      const algorithm = new OTAlgorithm(store, algorithmOptions);
+      patches.docOptions = docOptions;
+      patches.algorithms = { ot: algorithm };
+      return store;
+    }
+
     it('should create branch offline with initial state', async () => {
+      const store = useRealAlgorithm();
       const client = new PatchesBranchClient('doc1', offlineApi, patches);
 
       const id = await client.createBranch(5, { id: 'my-branch', name: 'Feature' }, { title: 'Hello' });
@@ -146,52 +161,66 @@ describe('PatchesBranchClient', () => {
       expect(offlineApi.createBranch).toHaveBeenCalledWith('doc1', 5, {
         id: 'my-branch',
         name: 'Feature',
-        contentStartRev: 2, // one init change at rev 1, so content starts at 2
+        contentStartRev: 2, // one persisted init change at rev 1, so content starts at 2
       });
 
       // Should track the branch document
       expect(patches.trackDocs).toHaveBeenCalledWith(['my-branch'], 'ot');
 
-      // Should call handleDocChange with the root-replace ops
-      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith(
-        'my-branch',
-        [{ op: 'replace', path: '', value: { title: 'Hello' } }],
-        undefined,
-        {}
-      );
+      // Should persist the root-replace seed as a pending change through the algorithm
+      const pending = await store.getPendingChanges('my-branch');
+      expect(pending).toHaveLength(1);
+      expect(pending[0].rev).toBe(1);
+      expect(pending[0].ops).toEqual([{ op: 'replace', path: '', value: { title: 'Hello' } }]);
 
       // Should emit onChange for sync
       expect(patches.onChange.emit).toHaveBeenCalledWith('my-branch');
     });
 
-    it('splits the seed for the wire so contentStartRev matches the committed span (DAB-760)', async () => {
+    it('splits the seed for the wire and counts the floor from the persisted revs', async () => {
       // Mirrors dw3's real config with small limits: the storage limit is a COMPRESSED measure,
       // the wire payload limit is UNCOMPRESSED. A highly-compressible seed fits one storage piece
-      // but the wire splits it into several — `contentStartRev` must count the WIRE pieces, or it
-      // undercounts the seed and the merge replays the tail, doubling the document.
-      patches.docOptions = { maxStorageBytes: 3000, maxPayloadBytes: 6000, sizeCalculator: compressedSizeUint8 };
+      // but the wire splits it into several — `contentStartRev` must count the changes actually
+      // persisted, or it undercounts the seed and a merge replays the tail, doubling the document.
+      const docOptions = { maxStorageBytes: 3000, maxPayloadBytes: 6000, sizeCalculator: compressedSizeUint8 };
+      const store = useRealAlgorithm(docOptions);
       const bigBody = 'The grey cat sat by the window. '.repeat(1000); // ~32KB, compresses tiny
       const initialState = { docs: { d1: { id: 'd1', body: { content: { ops: [{ insert: bigBody }] } } } } };
 
       const client = new PatchesBranchClient('doc1', offlineApi, patches);
       await client.createBranch(5, { id: 'big-branch' }, initialState);
 
-      // The seed as PatchesSync would actually commit it on the wire (both limits applied).
+      // The seed really was split into several persisted changes...
+      const persisted = await store.getPendingChanges('big-branch');
+      expect(persisted.length).toBeGreaterThan(1);
+      // ...and contentStartRev = last persisted rev + 1, so a merge cannot replay seeded content.
+      const sentMeta = offlineApi.createBranch.mock.calls[0][2] as { contentStartRev: number };
+      expect(sentMeta.contentStartRev).toBe(persisted[persisted.length - 1].rev + 1);
+    });
+
+    it('derives contentStartRev from the revs the algorithm persisted, not a predicted split', async () => {
+      // `patches.docOptions` and the algorithm's own options are configured independently, and
+      // the algorithm re-splits whatever it persists by ITS `maxStorageBytes`. Predicting the
+      // floor from `docOptions` undercounts the seed whenever the two configs disagree — the
+      // persisted revs are the truth.
+      const docOptions = { maxStorageBytes: 3000, maxPayloadBytes: 6000, sizeCalculator: compressedSizeUint8 };
+      const store = useRealAlgorithm(docOptions, { maxStorageBytes: 2000 }); // stricter, uncompressed
+      const bigBody = 'The grey cat sat by the window. '.repeat(1000);
+      const initialState = { docs: { d1: { id: 'd1', body: { content: { ops: [{ insert: bigBody }] } } } } };
+
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
+      await client.createBranch(5, { id: 'big-branch' }, initialState);
+
+      // The algorithm split further than a docOptions-based prediction would say...
       const rootReplace = createChange(0, 1, [{ op: 'replace' as const, path: '', value: initialState }], {
         committedAt: 0,
       });
-      const wireSeed = breakChangesIntoBatches([rootReplace], {
-        maxPayloadBytes: 6000,
-        maxStorageBytes: 3000,
-        sizeCalculator: compressedSizeUint8,
-      }).flat();
-      expect(wireSeed.length).toBeGreaterThan(1); // the seed really is split into several wire changes
-
-      // One pending change is persisted per wire change...
-      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledTimes(wireSeed.length);
-      // ...and contentStartRev = committed span + 1, so a merge cannot replay any seeded content.
+      const predicted = breakChangesIntoBatches([rootReplace], docOptions).flat();
+      const persisted = await store.getPendingChanges('big-branch');
+      expect(persisted.length).toBeGreaterThan(predicted.length);
+      // ...and the floor still counts every persisted rev.
       const sentMeta = offlineApi.createBranch.mock.calls[0][2] as { contentStartRev: number };
-      expect(sentMeta.contentStartRev).toBe(wireSeed[wireSeed.length - 1].rev + 1);
+      expect(sentMeta.contentStartRev).toBe(persisted[persisted.length - 1].rev + 1);
     });
 
     it('should refresh branches after offline create', async () => {
@@ -205,7 +234,7 @@ describe('PatchesBranchClient', () => {
     });
 
     it('should use specified algorithm', async () => {
-      const lwwAlgorithm = { handleDocChange: vi.fn().mockResolvedValue([]) };
+      const lwwAlgorithm = { handleDocChange: vi.fn().mockResolvedValue([{ rev: 1 }]) };
       patches.algorithms.lww = lwwAlgorithm;
       const client = new PatchesBranchClient('doc1', offlineApi, patches, { algorithm: 'lww' });
 
@@ -250,7 +279,21 @@ describe('PatchesBranchClient', () => {
 
       await expect(client.createBranch(5, { id: 'fail-branch' }, { data: 'test' })).rejects.toThrow('Algorithm failed');
 
-      // Should rollback by removing the branch and untracking the doc
+      // Should rollback by removing the branch and untracking the doc — and the branch meta
+      // was never created, since seeding failed before the floor could be derived.
+      expect(offlineApi.createBranch).not.toHaveBeenCalled();
+      expect(offlineApi.removeBranches).toHaveBeenCalledWith(['fail-branch']);
+      expect(patches.untrackDocs).toHaveBeenCalledWith(['fail-branch']);
+    });
+
+    it('should rollback when branch creation fails after seeding', async () => {
+      offlineApi.createBranch.mockRejectedValue(new Error('store write failed'));
+      const client = new PatchesBranchClient('doc1', offlineApi, patches);
+
+      await expect(client.createBranch(5, { id: 'fail-branch' }, { data: 'test' })).rejects.toThrow(
+        'store write failed'
+      );
+
       expect(offlineApi.removeBranches).toHaveBeenCalledWith(['fail-branch']);
       expect(patches.untrackDocs).toHaveBeenCalledWith(['fail-branch']);
     });

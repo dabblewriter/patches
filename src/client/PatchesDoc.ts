@@ -27,7 +27,7 @@ export interface PatchesDocOptions {
    * to a 1MB default) so a branch's seed is split into exactly the changes that get committed.
    * Splitting a seed only by `maxStorageBytes` — which may be a *compressed* measure — lets the
    * wire re-split it into more revisions than the branch's `contentStartRev` counted, so a merge
-   * replays the seeded body content and doubles the document (DAB-760). Set this equal to the
+   * replays the seeded body content and doubles the document. Set this equal to the
    * `PatchesSync` `maxPayloadBytes` option when overriding the default.
    */
   maxPayloadBytes?: number;

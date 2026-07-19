@@ -37,10 +37,15 @@ export function getAuthContext(): AuthContext | undefined {
 
 /**
  * Set the auth context for the current request.
- * Called by the RPC server before invoking a handler.
+ *
+ * The WebSocket RPC server calls this automatically before invoking a handler.
+ * REST servers call it themselves to bind a mutation to its origin (e.g. the
+ * `clientId` query parameter sent by `PatchesREST`): set the context
+ * synchronously — after all awaits — immediately before invoking the
+ * `OTServer`/`LWWServer` method, which captures it as its first synchronous
+ * statement, then call `clearAuthContext()` once the call settles.
  *
  * @param ctx - The auth context to set
- * @internal
  */
 export function setAuthContext(ctx: AuthContext | undefined): void {
   _ctx = ctx;
@@ -48,9 +53,8 @@ export function setAuthContext(ctx: AuthContext | undefined): void {
 
 /**
  * Clear the auth context after request handling completes.
- * Called by the RPC server after a handler returns.
- *
- * @internal
+ * The WebSocket RPC server calls this automatically after a handler returns;
+ * REST servers pair it with `setAuthContext`.
  */
 export function clearAuthContext(): void {
   _ctx = undefined;

@@ -6,7 +6,7 @@ export * from './PatchesSync.js';
 export * from './rest/index.js';
 export * from './protocol/JSONRPCClient.js';
 export * from './protocol/JSONRPCServer.js';
-export { getAuthContext, getClientId } from './serverContext.js';
+export { clearAuthContext, getAuthContext, getClientId, setAuthContext } from './serverContext.js';
 export type * from './protocol/types.js';
 export * from './protocol/utils.js';
 export * from './websocket/AuthorizationProvider.js';

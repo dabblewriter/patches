@@ -181,6 +181,7 @@ otServer.onDocDeleted((docId, originClientId) => {
 ### Example Routes (Hono)
 
 ```typescript
+import { clearAuthContext, setAuthContext } from '@dabble/patches/net';
 import { Hono } from 'hono';
 
 const app = new Hono();
@@ -225,8 +226,18 @@ app.get('/docs/:docId{.+}', async c => {
 
 app.post('/docs/:docId{.+}/_changes', async c => {
   const { changes, options } = await c.req.json();
-  const result = await otServer.commitChanges(c.req.param('docId'), changes, options);
-  return c.json(result);
+  // Bind the sender's identity from the `clientId` query param. Set it
+  // synchronously after all awaits: OTServer captures it as its first
+  // synchronous statement and emits it as `originClientId`, which is what
+  // excludes the sender from its own fan-out in the wiring above. Without
+  // this the committing client is echoed its own changes.
+  setAuthContext({ ...c.get('auth'), clientId: c.req.query('clientId') });
+  try {
+    const result = await otServer.commitChanges(c.req.param('docId'), changes, options);
+    return c.json(result);
+  } finally {
+    clearAuthContext();
+  }
 });
 ```
 

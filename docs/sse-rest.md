@@ -217,7 +217,9 @@ app.post('/subscriptions/:clientId', async c => {
 
 app.delete('/subscriptions/:clientId', async c => {
   const { docIds } = await c.req.json();
-  sse.unsubscribe(c.req.param('clientId'), docIds);
+  // Awaited so the store mirror lands before the response — a reconnect on a
+  // cold instance after the ack can't rehydrate the removed subscription.
+  await sse.unsubscribe(c.req.param('clientId'), docIds);
   return c.body(null, 204);
 });
 

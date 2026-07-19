@@ -14,6 +14,14 @@ export interface SSEStoredEvent {
  * - `events`: a verified-complete continuation after `lastEventId` (possibly
  *   empty — the client is up to date).
  * - `resync`: continuity cannot be verified — the client must do a full sync.
+ *   `id`, when set, is a store-assigned re-anchor: it is written on the resync
+ *   frame so the client's Last-Event-ID cursor moves into the store's CURRENT
+ *   id space. Without it a browser EventSource keeps its stale cursor forever
+ *   (per spec an id-less frame leaves the cursor unchanged), and every later
+ *   reconnect must resync — or worse, a stale cursor could ambiguously match
+ *   ids from a new epoch. A store that returns a re-anchor id MUST treat it as
+ *   a valid cursor: a later `replay(clientId, id)` must verify the events
+ *   appended after it.
  *
  * How strong "verified" is depends on the store: {@link InMemorySSEEventStore}
  * deliberately reproduces the original single-instance buffering behavior and
@@ -22,7 +30,7 @@ export interface SSEStoredEvent {
  * store (e.g. a Redis stream store that resyncs when the cursor predates the
  * oldest retained entry).
  */
-export type SSEReplayResult = { type: 'events'; events: SSEStoredEvent[] } | { type: 'resync' };
+export type SSEReplayResult = { type: 'events'; events: SSEStoredEvent[] } | { type: 'resync'; id?: string | null };
 
 /**
  * Pluggable event persistence for {@link SSEServer}. The store owns event ids,
@@ -45,10 +53,20 @@ export interface SSEEventStore {
    */
   replay(clientId: string, lastEventId: string): Promise<SSEReplayResult>;
 
-  /** Record subscriptions so a later instance can rehydrate fan-out routing. */
+  /**
+   * Record subscriptions so a later instance can rehydrate fan-out routing.
+   *
+   * Contract for add/remove (the server serializes them per client, so they
+   * arrive in issue order): implementations must apply them in arrival order
+   * and idempotently, and once the returned promise resolves the mutation must
+   * be visible to a subsequent {@link loadSubscriptions} from ANY instance —
+   * the server awaits the promise before acknowledging a subscribe/unsubscribe
+   * so a reconnect elsewhere can't rehydrate a set the client was told no
+   * longer holds.
+   */
   addSubscriptions(clientId: string, docIds: string[]): Promise<void>;
 
-  /** Remove recorded subscriptions. */
+  /** Remove recorded subscriptions. Same ordering/visibility contract as {@link addSubscriptions}. */
   removeSubscriptions(clientId: string, docIds: string[]): Promise<void>;
 
   /**
@@ -123,17 +141,22 @@ export class InMemorySSEEventStore implements SSEEventStore {
   async replay(clientId: string, lastEventId: string): Promise<SSEReplayResult> {
     const client = this.clients.get(clientId);
     const lastId = parseInt(lastEventId, 10);
-    if (isNaN(lastId)) {
-      if (client) client.events = [];
-      return { type: 'resync' };
+    // A cursor this store never assigned cannot verify: unparsable, non-zero
+    // while the client has no ids yet (buffer expired or server restarted), or
+    // at/past the counter (a pre-restart epoch — the entry was recreated after
+    // the restart, so small old-epoch cursors would ambiguously match new
+    // ids). Resync, and re-anchor the client's cursor with a fresh id so the
+    // next reconnect verifies against the current epoch. The full sync the
+    // resync triggers covers everything up to the anchor, so buffered events
+    // are cleared rather than replayed.
+    const known = (client?.nextEventId ?? 1) > 1;
+    if (isNaN(lastId) || (!known && lastId > 0) || (client && lastId >= client.nextEventId)) {
+      const anchored = this._ensure(clientId);
+      anchored.events = [];
+      return { type: 'resync', id: String(anchored.nextEventId++) };
     }
 
-    // A client with no assigned ids yet cannot verify a non-zero cursor —
-    // its buffer expired or the server restarted.
-    const known = (client?.nextEventId ?? 1) > 1;
     if (client) client.events = client.events.filter(e => e.id > lastId);
-    if (!known && lastId > 0) return { type: 'resync' };
-
     const events = (client?.events ?? []).map(({ id, event, data }) => ({ id: String(id), event, data }));
     return { type: 'events', events };
   }

@@ -33,23 +33,28 @@ describe('InMemorySSEEventStore', () => {
     });
   });
 
-  it('should return an empty continuation for a known client with a high cursor', async () => {
+  it('should resync a cursor at or past the counter (an id this epoch never assigned)', async () => {
     const store = new InMemorySSEEventStore();
     await store.append('c1', 'e', 'a');
-    expect(await store.replay('c1', '9')).toEqual({ type: 'events', events: [] });
+    // '9' can only come from a previous epoch (pre-restart). Claiming a
+    // verified empty continuation would strand buffered events forever —
+    // resync instead, re-anchoring the cursor with a fresh id.
+    expect(await store.replay('c1', '9')).toEqual({ type: 'resync', id: '2' });
+    // The re-anchored cursor verifies from here on.
+    expect(await store.replay('c1', '2')).toEqual({ type: 'events', events: [] });
   });
 
   it('should resync on a non-numeric cursor', async () => {
     const store = new InMemorySSEEventStore();
     await store.append('c1', 'e', 'a');
-    expect(await store.replay('c1', 'not-a-number')).toEqual({ type: 'resync' });
+    expect(await store.replay('c1', 'not-a-number')).toEqual({ type: 'resync', id: '2' });
     // The buffer was cleared alongside the resync.
     expect(await store.replay('c1', '0')).toEqual({ type: 'events', events: [] });
   });
 
   it('should resync on a non-zero cursor with no history', async () => {
     const store = new InMemorySSEEventStore();
-    expect(await store.replay('c1', '5')).toEqual({ type: 'resync' });
+    expect(await store.replay('c1', '5')).toEqual({ type: 'resync', id: '1' });
     expect(await store.replay('c1', '0')).toEqual({ type: 'events', events: [] });
   });
 
@@ -100,6 +105,6 @@ describe('InMemorySSEEventStore', () => {
 
     expect(await store.loadSubscriptions('c1')).toEqual([]);
     // The counter reset means a stale cursor can no longer be verified.
-    expect(await store.replay('c1', '1')).toEqual({ type: 'resync' });
+    expect(await store.replay('c1', '1')).toEqual({ type: 'resync', id: '1' });
   });
 });

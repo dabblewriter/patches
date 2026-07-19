@@ -19,6 +19,11 @@ interface ClientState {
   hydrating: Set<string> | null;
   /** Serializes this client's append→write pipeline and connect replay. */
   pipeline: Promise<void>;
+  /**
+   * Serializes this client's store subscription mutations so add/remove land
+   * in issue order (see the {@link SSEEventStore.addSubscriptions} contract).
+   */
+  subOps: Promise<void>;
   expiryTimer: ReturnType<typeof globalThis.setTimeout> | null;
   /**
    * Number of old connections force-closed by a reconnect whose close the
@@ -52,6 +57,15 @@ export interface SSEServerOptions {
    * original single-instance buffering behavior.
    */
   eventStore?: SSEEventStore;
+  /**
+   * Milliseconds to wait on an event store call before degrading it (append →
+   * id-less frame, replay → resync, hydration → empty set). Store calls ride
+   * each client's serialized pipeline, so a call that never settles (e.g. a
+   * Redis client that queues commands across a reconnect indefinitely) would
+   * otherwise wedge that client's event delivery permanently — and invisibly,
+   * since heartbeats bypass the pipeline. Default: 10000.
+   */
+  storeTimeoutMs?: number;
 }
 
 /**
@@ -102,15 +116,25 @@ export interface SSEServerOptions {
  */
 export class SSEServer {
   private clients = new Map<string, ClientState>();
+  /**
+   * Pending close callbacks for streams force-closed while their ClientState
+   * was being discarded (releaseClient / buffer-TTL cleanup). The per-state
+   * staleCloses counter dies with the state, so without this a lagging
+   * framework close for a released stream would mark a fresh reconnection
+   * (new state, staleCloses 0) as disconnected.
+   */
+  private orphanedCloses = new Map<string, number>();
   private heartbeatInterval: ReturnType<typeof globalThis.setInterval> | null = null;
   private heartbeatIntervalMs: number;
   private bufferTTLMs: number;
+  private storeTimeoutMs: number;
   private auth?: AuthorizationProvider;
   private eventStore: SSEEventStore;
 
   constructor(options?: SSEServerOptions) {
     this.heartbeatIntervalMs = options?.heartbeatIntervalMs ?? 30_000;
     this.bufferTTLMs = options?.bufferTTLMs ?? 300_000;
+    this.storeTimeoutMs = options?.storeTimeoutMs ?? 10_000;
     this.auth = options?.auth;
     this.eventStore =
       options?.eventStore ??
@@ -130,7 +154,8 @@ export class SSEServer {
    *
    * If `lastEventId` is provided (from the Last-Event-ID header on reconnect),
    * the event store decides continuity: a verified continuation is replayed,
-   * otherwise a `resync` event (no id) tells the client to do a full re-sync.
+   * otherwise a `resync` event tells the client to do a full re-sync (carrying
+   * a store-assigned re-anchor id when the store provides one).
    *
    * The framework MUST call `disconnect(clientId)` when the response closes.
    */
@@ -156,6 +181,7 @@ export class SSEServer {
         subscriptions: new Set(),
         hydrating: null,
         pipeline: Promise.resolve(),
+        subOps: Promise.resolve(),
         expiryTimer: null,
         staleCloses: 0,
       };
@@ -175,8 +201,13 @@ export class SSEServer {
       // hydrate the routing set from the store before replay so post-replay
       // events fan out. Unsubscribes racing the load are collected in
       // `hydrating` and excluded when the (stale) snapshot is applied.
+      // Rehydration deliberately does NOT re-run the AuthorizationProvider:
+      // only authorized subscribe() calls ever reach the store, and the
+      // store's retention TTL bounds how long that grant can outlive a
+      // revocation (matching base behavior, where revocation never stopped an
+      // already-live feed).
       client.hydrating = new Set();
-      const subscriptions = this.eventStore.loadSubscriptions(clientId).catch((): string[] => []);
+      const subscriptions = this._guardStoreCall(this.eventStore.loadSubscriptions(clientId), []);
       this._enqueue(client, async () => {
         const stored = await subscriptions;
         const removed = client.hydrating ?? new Set<string>();
@@ -197,13 +228,21 @@ export class SSEServer {
     }
 
     if (lastEventId) {
-      // Issued now so the store sees the cursor before any subsequent appends.
-      const replay = this.eventStore.replay(clientId, lastEventId).catch((): SSEReplayResult => ({ type: 'resync' }));
       this._enqueue(client, async () => {
-        const result = await replay;
+        // The read is ISSUED inside the pipeline task: it lands after every
+        // append already queued (whose events the replay must cover — a read
+        // issued at connect time could execute before an in-flight append
+        // lands, permanently skipping an event that was committed to the
+        // store but dropped from the replaced wire) and before anything
+        // enqueued later (whose appends must not be double-delivered).
+        const result = await this._guardStoreCall<SSEReplayResult>(this.eventStore.replay(clientId, lastEventId), {
+          type: 'resync',
+        });
         if (client.writer !== writer) return; // Replaced while awaiting
         if (result.type === 'resync') {
-          this._writeFrame(writer, client.encoder, null, 'resync', '{}');
+          // A store-assigned re-anchor id moves the client's cursor into the
+          // store's current id space (see SSEReplayResult).
+          this._writeFrame(writer, client.encoder, result.id ?? null, 'resync', '{}');
         } else {
           for (const event of result.events) {
             this._writeFrame(writer, client.encoder, event.id, event.event, event.data);
@@ -223,6 +262,16 @@ export class SSEServer {
    * stored events are replayed.
    */
   disconnect(clientId: string): void {
+    // A close reported for a stream that was force-closed while its state was
+    // being discarded (releaseClient / TTL cleanup) — any state found now
+    // belongs to a NEWER connection and must not absorb this close.
+    const orphaned = this.orphanedCloses.get(clientId);
+    if (orphaned !== undefined) {
+      if (orphaned <= 1) this.orphanedCloses.delete(clientId);
+      else this.orphanedCloses.set(clientId, orphaned - 1);
+      return;
+    }
+
     const client = this.clients.get(clientId);
     if (!client) return;
 
@@ -274,18 +323,20 @@ export class SSEServer {
    * Never call this with client-supplied docIds that haven't passed
    * authorization.
    *
+   * Resolves once the store mirror has settled (see {@link _mirrorSubs}).
+   *
    * @returns The registered docIds, or null when the client is unknown on this
    *   instance — distinguishable from success so the caller can surface the
    *   failure (and the client can reconnect/retry) instead of the subscription
    *   being silently dropped.
    */
-  addSubscriptions(clientId: string, docIds: string[]): string[] | null {
+  async addSubscriptions(clientId: string, docIds: string[]): Promise<string[] | null> {
     const client = this.clients.get(clientId);
     if (!client) return null;
     for (const docId of docIds) {
       client.subscriptions.add(docId);
     }
-    this.eventStore.addSubscriptions(clientId, docIds).catch(SSEServer.noop);
+    await this._mirrorSubs(client, () => this.eventStore.addSubscriptions(clientId, docIds));
     return [...docIds];
   }
 
@@ -309,7 +360,7 @@ export class SSEServer {
       for (const docId of docIds) {
         client.subscriptions.add(docId);
       }
-      this.eventStore.addSubscriptions(clientId, docIds).catch(SSEServer.noop);
+      await this._mirrorSubs(client, () => this.eventStore.addSubscriptions(clientId, docIds));
       return [...docIds];
     }
 
@@ -329,24 +380,29 @@ export class SSEServer {
       }
     }
     if (allowed.length) {
-      this.eventStore.addSubscriptions(clientId, allowed).catch(SSEServer.noop);
+      await this._mirrorSubs(client, () => this.eventStore.addSubscriptions(clientId, allowed));
     }
     return allowed;
   }
 
   /**
    * Unsubscribe a client from documents.
+   *
+   * Resolves once the store mirror has settled — callers answering an HTTP
+   * unsubscribe should await it, so a reconnect landing on a cold instance
+   * after the response can't rehydrate a subscription the client was told is
+   * gone.
    */
-  unsubscribe(clientId: string, docIds: string[]): void {
+  unsubscribe(clientId: string, docIds: string[]): Promise<void> {
     const client = this.clients.get(clientId);
-    if (!client) return;
+    if (!client) return Promise.resolve();
     for (const docId of docIds) {
       client.subscriptions.delete(docId);
       // A pending hydration snapshot may still contain this docId — record the
       // removal so the apply can't resurrect it.
       client.hydrating?.add(docId);
     }
-    this.eventStore.removeSubscriptions(clientId, docIds).catch(SSEServer.noop);
+    return this._mirrorSubs(client, () => this.eventStore.removeSubscriptions(clientId, docIds));
   }
 
   /**
@@ -377,17 +433,23 @@ export class SSEServer {
       // are neither subscribed nor hydrating are skipped without a task.
       if (!client.subscriptions.has(docId) && !client.hydrating) continue;
 
+      // The writer is captured at ENQUEUE time: a task that ends up running
+      // after a reconnect must not write to the replacement stream, because
+      // the reconnect's replay task is queued behind this append and would
+      // deliver the same event again — the mismatch guard below drops the
+      // direct write and lets the replay deliver it exactly once.
+      const writer = client.writer;
       this._enqueue(client, async () => {
+        // State replaced or discarded (releaseClient / TTL cleanup / destroy)
+        // while queued — a released ghost must not keep appending to a shared
+        // store for a client that is live on another instance.
+        if (this.clients.get(clientId) !== client) return;
         if (!client.subscriptions.has(docId)) return;
         // Appends run inside the pipeline so each client's store order matches
         // its wire order — the replay cursor is the LAST id on the wire, so an
-        // id appended out of order could leapfrog an undelivered event. The
-        // writer is captured before the append: a stream replaced while the
-        // append is in flight is not written to — its replay (whose store read
-        // was issued after this append) delivers the event instead.
-        const writer = client.writer;
-        const eventId = await this.eventStore.append(clientId, event, data).catch(() => null);
-        if (!writer || client.writer !== writer) return; // Disconnected at append time, or replaced since
+        // id appended out of order could leapfrog an undelivered event.
+        const eventId = await this._guardStoreCall(this.eventStore.append(clientId, event, data), null);
+        if (!writer || client.writer !== writer) return; // Disconnected at enqueue time, or replaced since
         this._writeFrame(writer, client.encoder, eventId, event, data);
       });
     }
@@ -413,12 +475,12 @@ export class SSEServer {
     const client = this.clients.get(clientId);
     if (!client?.writer) return false;
 
-    const writer = client.writer;
-    this._enqueue(client, async () => {
-      if (client.writer !== writer) return;
-      this._writeFrame(writer, client.encoder, null, event, data);
-    });
-
+    // Written synchronously, NOT via the pipeline: these frames never touch
+    // the store, so queueing them would couple signaling latency to store
+    // latency and make the `true` return a promise the queued task might not
+    // keep (a stream replaced before the task runs would silently drop a
+    // frame that is never stored or replayed).
+    this._writeFrame(client.writer, client.encoder, null, event, data);
     return true;
   }
 
@@ -465,8 +527,7 @@ export class SSEServer {
     if (client.expiryTimer) {
       globalThis.clearTimeout(client.expiryTimer);
     }
-    client.writer?.close().catch(SSEServer.noop);
-    this.clients.delete(clientId);
+    this._retireClient(clientId, client);
   }
 
   /**
@@ -488,12 +549,48 @@ export class SSEServer {
       }
     }
     this.clients.clear();
+    this.orphanedCloses.clear();
   }
 
   // --- Private Helpers ---
 
   private _enqueue(client: ClientState, task: () => Promise<void>): void {
     client.pipeline = client.pipeline.then(task).catch(SSEServer.noop);
+  }
+
+  /**
+   * Bound a store call by `storeTimeoutMs`, resolving with `fallback` on
+   * timeout or rejection. Store calls run inside per-client serialized chains;
+   * a call that never settles would otherwise wedge the chain permanently
+   * (and invisibly — heartbeats bypass the pipeline, so the stream still
+   * looks healthy) with no recovery, since reconnects reuse the same chain.
+   */
+  private _guardStoreCall<T>(call: Promise<T>, fallback: T): Promise<T> {
+    return new Promise<T>(resolve => {
+      const timer = globalThis.setTimeout(() => resolve(fallback), this.storeTimeoutMs);
+      call.then(
+        value => {
+          globalThis.clearTimeout(timer);
+          resolve(value);
+        },
+        () => {
+          globalThis.clearTimeout(timer);
+          resolve(fallback);
+        }
+      );
+    });
+  }
+
+  /**
+   * Mirror a subscription mutation to the store on the client's serialized
+   * subOps chain, so adds and removes land in issue order (the store contract
+   * requires in-order application). Resolves when the mutation has settled —
+   * or timed out — never rejects: the local routing set is authoritative and
+   * a failed mirror only degrades cross-instance rehydration.
+   */
+  private _mirrorSubs(client: ClientState, op: () => Promise<void>): Promise<void> {
+    client.subOps = client.subOps.then(() => this._guardStoreCall(op(), undefined)).catch(SSEServer.noop);
+    return client.subOps;
   }
 
   private _writeFrame(
@@ -539,13 +636,28 @@ export class SSEServer {
     if (client.expiryTimer) {
       globalThis.clearTimeout(client.expiryTimer);
     }
-    if (client.writer) {
-      client.writer.close().catch(SSEServer.noop);
-    }
-    this.clients.delete(clientId);
+    this._retireClient(clientId, client);
     // Advisory for shared stores: this instance only knows the client hasn't
     // reconnected HERE — a shared store may no-op and rely on key TTLs
     // instead, since the client can be live on another instance.
     this.eventStore.dropClient(clientId).catch(SSEServer.noop);
+  }
+
+  /**
+   * Discard a client's state, transferring any close callbacks the framework
+   * still owes us (a force-closed live writer, plus closes already pending in
+   * staleCloses) into {@link orphanedCloses} so they can't be misattributed to
+   * a later reconnection's stream.
+   */
+  private _retireClient(clientId: string, client: ClientState): void {
+    let pending = client.staleCloses;
+    if (client.writer) {
+      client.writer.close().catch(SSEServer.noop);
+      pending++;
+    }
+    if (pending > 0) {
+      this.orphanedCloses.set(clientId, (this.orphanedCloses.get(clientId) ?? 0) + pending);
+    }
+    this.clients.delete(clientId);
   }
 }

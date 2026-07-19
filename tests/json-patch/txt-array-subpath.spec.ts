@@ -18,27 +18,27 @@ describe('@txt at array-element sub-paths', () => {
 
   describe('against concurrent add', () => {
     it('shifts up when an element is inserted at a lower index', () => {
-      expect(transformPatch(state, [{ op: 'add', path: '/list/0', value: el('n', 'new') }], [txt('/list/1/text')])).toEqual(
-        [txt('/list/2/text')]
-      );
+      expect(
+        transformPatch(state, [{ op: 'add', path: '/list/0', value: el('n', 'new') }], [txt('/list/1/text')])
+      ).toEqual([txt('/list/2/text')]);
     });
 
     it('shifts up when an element is inserted at the same index', () => {
-      expect(transformPatch(state, [{ op: 'add', path: '/list/1', value: el('n', 'new') }], [txt('/list/1/text')])).toEqual(
-        [txt('/list/2/text')]
-      );
+      expect(
+        transformPatch(state, [{ op: 'add', path: '/list/1', value: el('n', 'new') }], [txt('/list/1/text')])
+      ).toEqual([txt('/list/2/text')]);
     });
 
     it('stays put when an element is inserted at a higher index', () => {
-      expect(transformPatch(state, [{ op: 'add', path: '/list/2', value: el('n', 'new') }], [txt('/list/1/text')])).toEqual(
-        [txt('/list/1/text')]
-      );
+      expect(
+        transformPatch(state, [{ op: 'add', path: '/list/2', value: el('n', 'new') }], [txt('/list/1/text')])
+      ).toEqual([txt('/list/1/text')]);
     });
 
     it('stays put when an element is appended', () => {
-      expect(transformPatch(state, [{ op: 'add', path: '/list/4', value: el('n', 'new') }], [txt('/list/1/text')])).toEqual(
-        [txt('/list/1/text')]
-      );
+      expect(
+        transformPatch(state, [{ op: 'add', path: '/list/4', value: el('n', 'new') }], [txt('/list/1/text')])
+      ).toEqual([txt('/list/1/text')]);
     });
   });
 
@@ -126,7 +126,9 @@ describe('@txt at array-element sub-paths', () => {
 
   describe('apply', () => {
     it('composes onto existing `{ ops }` content at an array-element sub-path', () => {
-      const result = applyPatch(state, [{ op: '@txt', path: '/list/1/text', value: [{ insert: 'x' }] }]) as typeof state;
+      const result = applyPatch(state, [
+        { op: '@txt', path: '/list/1/text', value: [{ insert: 'x' }] },
+      ]) as typeof state;
       expect(result.list[1].text).toEqual({ ops: [{ insert: 'xbbb\n' }] });
       expect(result.list[0]).toBe(state.list[0]); // untouched siblings keep identity
     });

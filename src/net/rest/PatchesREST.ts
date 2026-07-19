@@ -20,7 +20,6 @@ import type { ConnectionState } from '../protocol/types.js';
 import { onlineState } from '../websocket/onlineState.js';
 import { normalizeIds } from './utils.js';
 
-const SESSION_STORAGE_KEY = 'patches-clientId';
 const REQUEST_TIMEOUT_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 30_000;
 /**
@@ -61,8 +60,11 @@ const SUBSCRIBE_RETRY_BASE_DELAY_MS = 500;
  */
 export interface PatchesRESTOptions {
   /**
-   * Explicit client ID. If not provided, restored from sessionStorage (when available)
-   * or generated via createId(). Persisted to sessionStorage automatically.
+   * Explicit client ID. If not provided, a random id is generated per instance.
+   * Sent as a `clientId` query parameter on mutating requests so the server can
+   * exclude this client from SSE notifications about its own commits/deletes, so
+   * it must be unique per live connection: two connected clients sharing an id
+   * would each be excluded from the other's changes.
    */
   clientId?: string;
 
@@ -86,6 +88,15 @@ export interface PatchesRESTOptions {
 export class PatchesREST implements PatchesConnection {
   /** The client ID used for SSE connection and subscription management. */
   readonly clientId: string;
+  /**
+   * `clientId` percent-encoded for URLs. Every carrier — the `/events/`,
+   * `/subscriptions/`, and `/signal/` paths and the mutation query param —
+   * must use the same encoding: the server keys the SSE stream on the decoded
+   * path id and excludes the sender by exact match against the decoded query
+   * id, so an asymmetry (e.g. a raw `#` truncating the path) would silently
+   * break sender exclusion for caller-supplied ids.
+   */
+  private readonly _encodedClientId: string;
 
   // --- Public Signals ---
 
@@ -125,14 +136,10 @@ export class PatchesREST implements PatchesConnection {
     this._url = url.replace(/\/$/, ''); // Strip trailing slash
     this.options = options ?? {};
 
-    // Resolve clientId: explicit > sessionStorage > random
-    const storage = typeof globalThis.sessionStorage !== 'undefined' ? globalThis.sessionStorage : undefined;
-    this.clientId = this.options.clientId ?? storage?.getItem(SESSION_STORAGE_KEY) ?? createId(22);
-    try {
-      storage?.setItem(SESSION_STORAGE_KEY, this.clientId);
-    } catch {
-      // sessionStorage may throw in private browsing or when full
-    }
+    // Per-instance, never persisted: sessionStorage survives Duplicate Tab, and
+    // two live clients sharing an id would miss each other's changes.
+    this.clientId = this.options.clientId ?? createId(22);
+    this._encodedClientId = encodeURIComponent(this.clientId);
   }
 
   // --- URL ---
@@ -170,7 +177,7 @@ export class PatchesREST implements PatchesConnection {
     this._setState('connecting');
 
     return new Promise<void>((resolve, reject) => {
-      const es = new EventSource(`${this._url}/events/${this.clientId}`);
+      const es = new EventSource(`${this._url}/events/${this._encodedClientId}`);
       this.eventSource = es;
       let settled = false;
 
@@ -360,7 +367,7 @@ export class PatchesREST implements PatchesConnection {
       }
       let result: { docIds?: unknown; denied?: unknown };
       try {
-        result = await this._fetch(`/subscriptions/${this.clientId}`, {
+        result = await this._fetch(`/subscriptions/${this._encodedClientId}`, {
           method: 'POST',
           body: { docIds: missing },
         });
@@ -411,7 +418,7 @@ export class PatchesREST implements PatchesConnection {
   }
 
   async unsubscribe(ids: string | string[]): Promise<void> {
-    await this._fetch(`/subscriptions/${this.clientId}`, {
+    await this._fetch(`/subscriptions/${this._encodedClientId}`, {
       method: 'DELETE',
       body: { docIds: normalizeIds(ids) },
     });
@@ -532,7 +539,7 @@ export class PatchesREST implements PatchesConnection {
   async sendSignal(raw: string): Promise<void> {
     if (this._state !== 'connected') return;
     const headers = await this._getHeaders();
-    const response = await globalThis.fetch(`${this._url}/signal/${this.clientId}`, {
+    const response = await globalThis.fetch(`${this._url}/signal/${this._encodedClientId}`, {
       method: 'POST',
       credentials: 'include',
       headers: {
@@ -651,9 +658,17 @@ export class PatchesREST implements PatchesConnection {
     const method = init?.method ?? 'GET';
     const hasBody = init?.body !== undefined;
 
+    // Mutations carry clientId so the server can exclude the sender from its own
+    // SSE fan-out; GETs omit it (see docs/sse-rest.md). String append, not the URL
+    // API: this._url may be a relative base.
+    let url = `${this._url}${path}`;
+    if (method !== 'GET') {
+      url += `${url.includes('?') ? '&' : '?'}clientId=${this._encodedClientId}`;
+    }
+
     let response: Response;
     try {
-      response = await globalThis.fetch(`${this._url}${path}`, {
+      response = await globalThis.fetch(url, {
         method,
         credentials: 'include',
         headers: {

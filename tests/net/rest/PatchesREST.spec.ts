@@ -571,7 +571,7 @@ describe('PatchesREST', () => {
       expect(result).toEqual(['doc1']);
 
       const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
-      expect(url).toBe('https://api.example.com/subscriptions/test-client-123');
+      expect(url).toBe('https://api.example.com/subscriptions/test-client-123?clientId=test-client-123');
       expect(init?.method).toBe('POST');
       expect(JSON.parse(init?.body as string)).toEqual({ docIds: ['doc1'] });
     });
@@ -589,7 +589,7 @@ describe('PatchesREST', () => {
       await rest.unsubscribe(['doc1']);
 
       const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
-      expect(url).toBe('https://api.example.com/subscriptions/test-client-123');
+      expect(url).toBe('https://api.example.com/subscriptions/test-client-123?clientId=test-client-123');
       expect(init?.method).toBe('DELETE');
     });
 
@@ -626,7 +626,7 @@ describe('PatchesREST', () => {
       const result = await rest.commitChanges('doc1', [{ id: 'c1', ops: [] }]);
 
       const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
-      expect(url).toBe('https://api.example.com/docs/doc1/_changes');
+      expect(url).toBe('https://api.example.com/docs/doc1/_changes?clientId=test-client-123');
       expect(init?.method).toBe('POST');
       expect(result).toEqual(committed);
     });
@@ -636,8 +636,58 @@ describe('PatchesREST', () => {
       await rest.deleteDoc('doc1');
 
       const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
-      expect(url).toBe('https://api.example.com/docs/doc1');
+      expect(url).toBe('https://api.example.com/docs/doc1?clientId=test-client-123');
       expect(init?.method).toBe('DELETE');
+    });
+
+    it('should append clientId to a relative base URL', async () => {
+      const relative = new PatchesREST('/api', { clientId: 'test-client-123' });
+      globalThis.fetch = mockFetchResponse({ changes: [] });
+      await relative.commitChanges('doc1', [{ id: 'c1', ops: [] }]);
+
+      const [url] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('/api/docs/doc1/_changes?clientId=test-client-123');
+    });
+
+    it('should send the generated clientId when none is configured', async () => {
+      const generated = new PatchesREST('https://api.example.com');
+      globalThis.fetch = mockFetchResponse({ changes: [] });
+      await generated.commitChanges('doc1', [{ id: 'c1', ops: [] }]);
+
+      const [url] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(new URL(url as string).searchParams.get('clientId')).toBe(generated.clientId);
+    });
+
+    it('should not send clientId on GETs so they stay CORS-simple (no preflight)', async () => {
+      globalThis.fetch = mockFetchResponse({ doc: {} });
+      await rest.getDoc('doc1');
+
+      const [url] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(new URL(url as string).searchParams.has('clientId')).toBe(false);
+    });
+
+    it('should mint a fresh clientId per instance (never shared via storage)', () => {
+      const a = new PatchesREST('https://api.example.com');
+      const b = new PatchesREST('https://api.example.com');
+      expect(a.clientId).not.toBe(b.clientId);
+    });
+
+    it('should percent-encode the clientId identically in path and query', async () => {
+      // The server keys the SSE stream on the decoded path id and excludes the
+      // sender by exact match against the decoded query id, so every carrier
+      // must encode the same way — a raw '#' would truncate the path id and
+      // silently break sender exclusion.
+      const special = new PatchesREST('https://api.example.com', { clientId: 'tab#7 x' });
+      const p = special.connect();
+      MockEventSource.latest.simulateOpen();
+      await p;
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/tab%237%20x');
+
+      globalThis.fetch = mockFetchResponse({ docIds: ['doc1'] });
+      await special.subscribe(['doc1']);
+      const [url] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/subscriptions/tab%237%20x?clientId=tab%237%20x');
+      special.disconnect();
     });
 
     it('should throw StatusError on non-OK response', async () => {
@@ -942,7 +992,7 @@ describe('PatchesREST', () => {
       globalThis.fetch = mockFetchResponse('version-123');
       await rest.createVersion('doc1', { name: 'v1' });
       const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
-      expect(url).toBe('https://api.example.com/docs/doc1/_versions');
+      expect(url).toBe('https://api.example.com/docs/doc1/_versions?clientId=test-client-123');
       expect(init?.method).toBe('POST');
     });
 
@@ -971,7 +1021,7 @@ describe('PatchesREST', () => {
       globalThis.fetch = mockFetchResponse(undefined, 204);
       await rest.updateVersion('doc1', 'v1', { name: 'Updated' });
       const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
-      expect(url).toBe('https://api.example.com/docs/doc1/_versions/v1');
+      expect(url).toBe('https://api.example.com/docs/doc1/_versions/v1?clientId=test-client-123');
       expect(init?.method).toBe('PUT');
     });
   });
@@ -1001,7 +1051,7 @@ describe('PatchesREST', () => {
       globalThis.fetch = mockFetchResponse('branch-id');
       await rest.createBranch('doc1', 5, { name: 'Feature' });
       const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
-      expect(url).toBe('https://api.example.com/docs/doc1/_branches');
+      expect(url).toBe('https://api.example.com/docs/doc1/_branches?clientId=test-client-123');
       expect(init?.method).toBe('POST');
       expect(JSON.parse(init?.body as string)).toEqual({ branchedAtRev: 5, name: 'Feature' });
     });
@@ -1010,7 +1060,7 @@ describe('PatchesREST', () => {
       globalThis.fetch = mockFetchResponse({ ok: true });
       await rest.updateBranch('doc1', 'branch-abc', { name: 'Renamed' });
       const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
-      expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch-abc');
+      expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch-abc?clientId=test-client-123');
       expect(init?.method).toBe('PUT');
       expect(JSON.parse(init?.body as string)).toEqual({ name: 'Renamed' });
     });
@@ -1019,7 +1069,7 @@ describe('PatchesREST', () => {
       globalThis.fetch = mockFetchResponse(undefined, 204);
       await rest.deleteBranch('doc1', 'branch-abc');
       const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
-      expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch-abc');
+      expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch-abc?clientId=test-client-123');
       expect(init?.method).toBe('DELETE');
     });
 
@@ -1028,7 +1078,7 @@ describe('PatchesREST', () => {
       globalThis.fetch = mockFetchResponse({ changes: committed });
       const result = await rest.mergeBranch('doc1', 'branch-abc');
       const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
-      expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch-abc/_merge');
+      expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch-abc/_merge?clientId=test-client-123');
       expect(init?.method).toBe('POST');
       expect(result).toEqual(committed);
     });
@@ -1042,7 +1092,7 @@ describe('PatchesREST', () => {
       globalThis.fetch = mockFetchResponse(undefined, 204);
       await rest.deleteBranch('doc1', 'branch/with/slashes');
       const [url] = vi.mocked(globalThis.fetch).mock.calls[0];
-      expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch%2Fwith%2Fslashes');
+      expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch%2Fwith%2Fslashes?clientId=test-client-123');
     });
   });
 });

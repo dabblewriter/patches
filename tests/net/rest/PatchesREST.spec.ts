@@ -672,6 +672,24 @@ describe('PatchesREST', () => {
       expect(a.clientId).not.toBe(b.clientId);
     });
 
+    it('should percent-encode the clientId identically in path and query', async () => {
+      // The server keys the SSE stream on the decoded path id and excludes the
+      // sender by exact match against the decoded query id, so every carrier
+      // must encode the same way — a raw '#' would truncate the path id and
+      // silently break sender exclusion.
+      const special = new PatchesREST('https://api.example.com', { clientId: 'tab#7 x' });
+      const p = special.connect();
+      MockEventSource.latest.simulateOpen();
+      await p;
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/tab%237%20x');
+
+      globalThis.fetch = mockFetchResponse({ docIds: ['doc1'] });
+      await special.subscribe(['doc1']);
+      const [url] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/subscriptions/tab%237%20x?clientId=tab%237%20x');
+      special.disconnect();
+    });
+
     it('should throw StatusError on non-OK response', async () => {
       globalThis.fetch = vi.fn().mockResolvedValue({
         ok: false,

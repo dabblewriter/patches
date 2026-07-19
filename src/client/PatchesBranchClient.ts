@@ -1,5 +1,5 @@
 import { store, type Store } from 'easy-signal';
-import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
+import { breakChangesIntoBatches } from '../algorithms/ot/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
 import type { BranchAPI } from '../net/protocol/types.js';
 import type { Branch, Change, CreateBranchMetadata, EditableBranchMetadata, ListBranchesOptions } from '../types.js';
@@ -169,15 +169,19 @@ export class PatchesBranchClient {
       committedAt: 0,
     });
 
-    // Break the change into multiple if it exceeds the storage size limit
-    let initChanges = [rootReplace];
+    // Pre-split the seed the way PatchesSync will commit it on the wire — by BOTH the
+    // per-change storage limit (possibly a compressed measure) AND the uncompressed payload
+    // limit — so the pending changes persisted below are flush-stable: a flush that re-split
+    // the seed would renumber it under a frozen `contentStartRev`, and a later merge would
+    // replay the seed's tail into the source document, duplicating its content.
+    // `maxPayloadBytes` is resolved the same way PatchesSync resolves it (docOptions, else a
+    // 1MB default) so the two splits agree.
     const options = this.patches.docOptions;
-    if (options.maxStorageBytes) {
-      initChanges = breakChanges(initChanges, options.maxStorageBytes, options.sizeCalculator);
-    }
-
-    // contentStartRev is the first revision after all init changes
-    const contentStartRev = initChanges[initChanges.length - 1].rev + 1;
+    const initChanges = breakChangesIntoBatches([rootReplace], {
+      maxPayloadBytes: options.maxPayloadBytes,
+      maxStorageBytes: options.maxStorageBytes,
+      sizeCalculator: options.sizeCalculator,
+    }).flat();
 
     // Validate algorithm exists before persisting anything
     const algorithmName = this.options?.algorithm ?? this.patches.defaultAlgorithm;
@@ -186,17 +190,30 @@ export class PatchesBranchClient {
       throw new Error(`Algorithm '${algorithmName}' not found`);
     }
 
-    // Create branch via the API (store saves with pendingOp: 'create')
-    await this.api.createBranch(this.id, rev, { ...metadata, contentStartRev });
-
     try {
       // Track the branch document through the standard pipeline
       await this.patches.trackDocs([branchDocId], algorithmName);
 
-      // Save initial changes as pending through the algorithm's store
+      // Persist the seed as pending changes, then derive `contentStartRev` from the
+      // revisions the algorithm ACTUALLY assigned. The algorithm applies its own storage
+      // split with its own options, so predicting the final revision span from `docOptions`
+      // desyncs the floor whenever the two configs disagree — and an undercounted floor
+      // makes a merge replay the seed's tail, duplicating the document's content. The
+      // persisted revs are the truth.
+      let lastSeedRev = 0;
       for (const change of initChanges) {
-        await algorithm.handleDocChange(branchDocId, change.ops, undefined, {});
+        const persisted = await algorithm.handleDocChange(branchDocId, change.ops, undefined, {});
+        lastSeedRev = persisted[persisted.length - 1]?.rev ?? lastSeedRev;
       }
+      if (!lastSeedRev) {
+        throw new Error('Branch seeding persisted no changes');
+      }
+
+      // contentStartRev is the first revision after the persisted seed
+      const contentStartRev = lastSeedRev + 1;
+
+      // Create branch via the API (store saves with pendingOp: 'create')
+      await this.api.createBranch(this.id, rev, { ...metadata, contentStartRev });
     } catch (err) {
       // Rollback: remove saved branch meta and untrack doc so we don't leave inconsistent state
       if (this.isOffline) {

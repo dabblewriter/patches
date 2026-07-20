@@ -54,6 +54,20 @@ export interface SSEEventStore {
   replay(clientId: string, lastEventId: string): Promise<SSEReplayResult>;
 
   /**
+   * Return the client's current resume cursor — the id a fresh connection should
+   * anchor to so a later reconnect (or a cross-tab successor) resumes from here
+   * instead of full-syncing, even when the client never received an event. The
+   * store MUST return an id its own {@link replay} accepts as an up-to-date cursor
+   * (an empty continuation), minting a durable marker when none exists yet. Return
+   * null when no cursor can be provided (degraded): the server then sends the
+   * `connected` frame without an id and the client cold-syncs, exactly as before.
+   *
+   * Optional — a store that omits it disables the connect-time anchor, so clients
+   * only ever obtain a cursor from a real delivered event.
+   */
+  currentId?(clientId: string): Promise<string | null>;
+
+  /**
    * Record subscriptions so a later instance can rehydrate fan-out routing.
    *
    * Contract for add/remove (the server serializes them per client, so they
@@ -159,6 +173,12 @@ export class InMemorySSEEventStore implements SSEEventStore {
     if (client) client.events = client.events.filter(e => e.id > lastId);
     const events = (client?.events ?? []).map(({ id, event, data }) => ({ id: String(id), event, data }));
     return { type: 'events', events };
+  }
+
+  async currentId(clientId: string): Promise<string | null> {
+    // The last id this client was assigned, or "0" (one below the first real id,
+    // 1) when it has none — replay() accepts either as a verified-current cursor.
+    return String((this.clients.get(clientId)?.nextEventId ?? 1) - 1);
   }
 
   async addSubscriptions(clientId: string, docIds: string[]): Promise<void> {

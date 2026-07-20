@@ -17,6 +17,19 @@ describe('InMemorySSEEventStore', () => {
     expect(await store.append('c2', 'e', 'd')).toBe('1');
   });
 
+  it('currentId returns "0" for a fresh client and the last id after appends, both replay-current', async () => {
+    const store = new InMemorySSEEventStore();
+    // Fresh: one below the first real id (1) — replay accepts it as a verified-current cursor.
+    expect(await store.currentId('c1')).toBe('0');
+    expect(await store.replay('c1', '0')).toEqual({ type: 'events', events: [] });
+
+    await store.append('c1', 'e', 'a');
+    await store.append('c1', 'e', 'b');
+    expect(await store.currentId('c1')).toBe('2');
+    // Resuming from the current id is an empty continuation, never a resync.
+    expect(await store.replay('c1', '2')).toEqual({ type: 'events', events: [] });
+  });
+
   it('should replay only events after the cursor', async () => {
     const store = new InMemorySSEEventStore();
     await store.append('c1', 'e', 'a');

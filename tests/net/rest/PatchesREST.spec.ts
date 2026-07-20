@@ -172,6 +172,30 @@ describe('PatchesREST', () => {
       expect(rest.resumedStream).toBe(false);
     });
 
+    it('adopts the cursor and server info from the connected anchor frame', async () => {
+      const connectPromise = rest.connect();
+      MockEventSource.latest.simulateOpen();
+      await connectPromise;
+
+      expect(rest.lastEventId).toBeUndefined();
+      expect(rest.serverInfo).toBeUndefined();
+
+      // The anchor rides every connect; its id becomes the resume cursor before any change arrives.
+      MockEventSource.latest.simulateEvent('connected', JSON.stringify({ version: '0.24.0' }), 'c5');
+      expect(rest.lastEventId).toBe('c5');
+      expect(rest.serverInfo).toEqual({ version: '0.24.0' });
+    });
+
+    it('adopts the re-anchor id from a resync frame so the next reconnect verifies', async () => {
+      const resumeConnect = rest.connect('42');
+      MockEventSource.latest.simulateOpen();
+      await resumeConnect;
+
+      MockEventSource.latest.simulateEvent('resync', '', 'R9');
+      expect(rest.lastEventId).toBe('R9');
+      expect(rest.resumedStream).toBe(false);
+    });
+
     it('should resolve only after onopen fires', async () => {
       let resolved = false;
       const connectPromise = rest.connect().then(() => {

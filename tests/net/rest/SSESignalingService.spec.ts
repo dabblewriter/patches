@@ -2,16 +2,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SSEServer } from '../../../src/net/rest/SSEServer';
 import { SSESignalingService } from '../../../src/net/rest/SSESignalingService';
 
-/** Helper: read `count` chunks from a stream, skipping the initial `retry:` line. */
+/**
+ * Helper: read `count` payload chunks from a stream, skipping the initial `retry:`
+ * line and the `connected` anchor frame that now rides every connect.
+ */
 async function readChunks(stream: ReadableStream<Uint8Array>, count: number): Promise<string[]> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   const out: string[] = [];
   await reader.read(); // skip retry: 5000\n\n
-  for (let i = 0; i < count; i++) {
+  while (out.length < count) {
     const { done, value } = await reader.read();
     if (done) break;
-    out.push(decoder.decode(value));
+    const chunk = decoder.decode(value);
+    if (chunk.includes('event: connected')) continue;
+    out.push(chunk);
   }
   reader.releaseLock();
   return out;

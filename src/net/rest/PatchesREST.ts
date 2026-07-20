@@ -129,6 +129,8 @@ export class PatchesREST implements PatchesConnection {
   private _lastEventId: string | undefined;
   /** Whether the currently open stream was opened with a resume cursor (see `resumedStream`). */
   private _streamResumed = false;
+  /** Opaque info from the server's `connected` frame (e.g. version); undefined until connected. */
+  private _serverInfo: unknown;
   /** Interval handle for the half-open-stream watchdog; null while not connected. */
   private livenessTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   /** Pending reconnect attempt scheduled after a fatal error / teardown; null when none. */
@@ -158,9 +160,22 @@ export class PatchesREST implements PatchesConnection {
 
   // --- Connection State ---
 
-  /** Id of the last id-bearing SSE frame received, or undefined before the first one. */
+  /**
+   * Id of the last id-bearing SSE frame received, or undefined before the first one.
+   * The server's `connected` anchor frame sets it at stream start, so a client holds
+   * a resume cursor even before any change arrives.
+   */
   get lastEventId(): string | undefined {
     return this._lastEventId;
+  }
+
+  /**
+   * Opaque payload the server sent on the `connected` frame (e.g. its version), or
+   * undefined before the stream connects. Informational — the resume cursor, not
+   * this, is what the sync layer depends on.
+   */
+  get serverInfo(): unknown {
+    return this._serverInfo;
   }
 
   /**
@@ -326,9 +341,28 @@ export class PatchesREST implements PatchesConnection {
         this.onSignal.emit(e.data);
       });
 
-      es.addEventListener('resync', () => {
+      es.addEventListener('connected', (e: MessageEvent) => {
+        this._noteTraffic();
+        // The server's anchor frame at stream start. Its id is our resume cursor
+        // even before any change arrives, so a cross-tab successor can resume from
+        // it (see `lastEventId`). Data is opaque server info — surfaced, not required.
+        if (e.lastEventId) this._lastEventId = e.lastEventId;
+        if (e.data) {
+          try {
+            this._serverInfo = JSON.parse(e.data);
+          } catch {
+            // Non-JSON server info isn't worth surfacing; the cursor is what matters.
+          }
+        }
+      });
+
+      es.addEventListener('resync', (e: MessageEvent) => {
         this._noteTraffic();
         if (!this.shouldBeConnected) return;
+        // Adopt the server's re-anchor id (when present): it moves our cursor into
+        // the store's current id space so the NEXT reconnect verifies from here
+        // instead of resyncing again. Without it the cursor would stay stale.
+        if (e.lastEventId) this._lastEventId = e.lastEventId;
         // Server's buffer expired — trigger a full re-sync by cycling state.
         // PatchesSync listens to onStateChange and calls syncAllKnownDocs on 'connected'.
         // Clear the resume flag first: the re-anchor is a cold catch-up, not a replay, so

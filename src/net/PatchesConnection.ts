@@ -24,9 +24,18 @@ export interface PatchesConnection extends PatchesAPI {
 
   /**
    * The id of the last event received on the current stream, or undefined before the
-   * first event. Persisted cross-tab so a successor can resume from it (see `connect`).
+   * first event. The server's `connected` anchor frame sets it at stream start, so a
+   * client holds a cursor even before any change arrives. Persisted cross-tab so a
+   * successor can resume from it (see `connect`).
    */
   readonly lastEventId?: string;
+
+  /**
+   * Opaque payload the server sent on the `connected` frame (e.g. its version), or
+   * undefined before the stream connects. Informational only. Transports without a
+   * connect-time anchor (WebSocket) leave it undefined.
+   */
+  readonly serverInfo?: unknown;
 
   /**
    * Whether the currently open stream was opened as a resume (with a `lastEventId`

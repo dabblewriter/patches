@@ -15,9 +15,11 @@ export interface OTClientStore extends PatchesStore {
    * Used during sync to resend unconfirmed operations.
    *
    * @param docId Document identifier
+   * @param options.startAfterRev Only return pending changes with rev > startAfterRev (a ranged
+   *   read for foreign-mint deltas; no state materialization)
    * @returns Array of pending changes in chronological order
    */
-  getPendingChanges(docId: string): Promise<Change[]>;
+  getPendingChanges(docId: string, options?: { startAfterRev?: number }): Promise<Change[]>;
 
   /**
    * Appends new pending changes to the document's local change queue.
@@ -63,11 +65,22 @@ export interface OTClientStore extends PatchesStore {
    * Implementations must ensure both operations complete together (single transaction
    * for databases) to prevent inconsistent state if the app crashes mid-operation.
    *
+   * When `pendingTailRev` is supplied, the write is conflict-safe: if the current pending queue
+   * holds any change with rev > pendingTailRev (a foreign mint that landed after the caller's
+   * rebase read), the store makes no changes and returns 'conflict' so the caller can re-read
+   * and rebase it in. Omitting it keeps the unconditional replace (back-compat), returning void.
+   *
    * @param docId Document identifier
    * @param serverChanges Changes confirmed by the server to add to committed history
    * @param rebasedPendingChanges Pending changes after OT rebasing (replaces all existing pending)
+   * @param pendingTailRev Max pending rev the caller's rebase input covered (committedRev when empty)
    */
-  applyServerChanges(docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]): Promise<void>;
+  applyServerChanges(
+    docId: string,
+    serverChanges: Change[],
+    rebasedPendingChanges: Change[],
+    pendingTailRev?: number
+  ): Promise<void | 'conflict'>;
 
   /**
    * Atomically move one pending change into quarantine and replace the pending queue with
@@ -82,18 +95,25 @@ export interface OTClientStore extends PatchesStore {
    * `poison.id` isn't in the current pending queue (already committed, already ejected, or a
    * store without the quarantine object store), so a duplicate ejection is a safe no-op.
    *
+   * When `pendingTailRev` is supplied and the current pending queue holds any change with rev >
+   * pendingTailRev (a foreign mint that landed after the caller computed the ejection), the store
+   * makes no changes and returns 'conflict' so the caller can recompute against the fresh queue.
+   *
    * @param docId          Document identifier
    * @param poison         The change to quarantine (removed from pending)
    * @param reason         Human-readable rejection reason, stored on the quarantine entry
    * @param rebasedPending The replacement pending queue (poison gone, successors rebased)
-   * @returns The quarantined entry, or null when `poison.id` no longer matches a pending change.
+   * @param pendingTailRev Max pending rev the caller's ejection input covered (rev when empty)
+   * @returns The quarantined entry, null when `poison.id` no longer matches a pending change, or
+   *   'conflict' when a foreign mint invalidated the caller's ejection.
    */
   quarantinePendingChange(
     docId: string,
     poison: Change,
     reason: string,
-    rebasedPending: Change[]
-  ): Promise<QuarantinedChange | null>;
+    rebasedPending: Change[],
+    pendingTailRev?: number
+  ): Promise<QuarantinedChange | null | 'conflict'>;
 
   /** List quarantined changes for one doc, or all docs when docId is omitted. */
   listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]>;

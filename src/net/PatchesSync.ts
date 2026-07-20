@@ -6,6 +6,7 @@ import { breakChangesIntoBatches, type SizeCalculator } from '../algorithms/ot/s
 import { BaseDoc } from '../client/BaseDoc.js';
 import type { BranchClientStore } from '../client/BranchClientStore.js';
 import type { ClientAlgorithm } from '../client/ClientAlgorithm.js';
+import type { PatchesDoc } from '../client/PatchesDoc.js';
 import { Patches } from '../client/Patches.js';
 import type { AlgorithmName, TrackedDoc } from '../client/PatchesStore.js';
 import { isDocLoaded } from '../shared/utils.js';
@@ -556,7 +557,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     let pending: Change[] | null | undefined;
     try {
       // Use algorithm to get pending changes to send
-      pending = await algorithm.getPendingToSend(docId);
+      pending = await algorithm.getPendingToSend(docId, doc as PatchesDoc<any> | undefined);
 
       if (pending && pending.length > 0) {
         await this.flushDoc(docId, pending);
@@ -858,7 +859,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     try {
       if (!pending) {
-        pending = (await algorithm.getPendingToSend(docId)) ?? [];
+        pending = (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId) as PatchesDoc<any>)) ?? [];
       }
       if (!pending.length) {
         return; // Nothing to flush
@@ -974,7 +975,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         }
 
         // Fetch remaining pending for next batch or check completion
-        pending = (await algorithm.getPendingToSend(docId)) ?? [];
+        pending = (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId) as PatchesDoc<any>)) ?? [];
       }
 
       const stillHasPending = await algorithm.hasPending(docId);
@@ -1104,12 +1105,26 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this._initDocSyncState(docId, {});
     }
 
+    // Durable tip BEFORE applying: onServerCommit fires only for changes that become newly
+    // durable now. A re-delivery carries revs already applied — DAB-773 echoes every flushed
+    // commit back to its sender, and catchup can overlap a broadcast — and applyServerChanges
+    // drops those, so emitting the raw batch would re-fire the same rev range and a per-change
+    // consumer (word counts, journal drain) would double-count.
+    const priorRev =
+      (doc as { committedRev?: number } | null | undefined)?.committedRev ??
+      this.docStates.state[docId]?.committedRev ??
+      0;
+
     // Delegate to algorithm - it handles store updates and doc updates
     await algorithm.applyServerChanges(docId, serverChanges, doc);
 
     if (serverChanges.length > 0) {
       const lastRev = serverChanges[serverChanges.length - 1].rev;
       this._updateDocSyncState(docId, { committedRev: lastRev });
+      // The one choke point covering every path where server-committed changes became locally
+      // durable (flush echoes, broadcasts, catchup, merges).
+      const newlyDurable = serverChanges.filter(c => c.rev > priorRev);
+      if (newlyDurable.length > 0) this.patches.onServerCommit.emit(docId, newlyDurable);
     }
   }
 
@@ -1288,7 +1303,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     const algorithm = this._getAlgorithm(docId);
 
     // Get pending changes before cleanup so app can handle them
-    const pendingChanges = (await algorithm.getPendingToSend(docId)) ?? [];
+    const pendingChanges =
+      (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId) as PatchesDoc<any>)) ?? [];
 
     // Close doc if open
     const doc = this.patches.getOpenDoc(docId);

@@ -59,10 +59,9 @@ export class LWWAlgorithm implements ClientAlgorithm {
     ops: JSONPatchOp[],
     doc: PatchesDoc<T> | undefined,
     metadata: Record<string, any>,
-    // LWW resolves by timestamp+path and is not part of the stable-id retry path; accept the
-    // params to satisfy the ClientAlgorithm interface but ignore them.
-    _id?: string,
-    _isRetry?: boolean
+    // LWW resolves by timestamp+path and is not part of the stable-id path; accept the param to
+    // satisfy the ClientAlgorithm interface but ignore it.
+    _id?: string
   ): Promise<Change[]> {
     if (ops.length === 0) return [];
 
@@ -124,7 +123,7 @@ export class LWWAlgorithm implements ClientAlgorithm {
     return pendingOps.length > 0;
   }
 
-  async getPendingToSend(docId: string): Promise<Change[] | null> {
+  async getPendingToSend(docId: string, _doc?: PatchesDoc<any>): Promise<Change[] | null> {
     // Under the doc lock: saveSendingChange clears ALL pending ops, so an op minted by a
     // concurrent handleDocChange between the read and the clear would be silently lost.
     return this._withDocLock(docId, async () => {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OTAlgorithm } from '../../src/client/OTAlgorithm';
 import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
 import { createChange } from '../../src/data/change';
@@ -57,48 +57,77 @@ describe('OTAlgorithm.getPendingToSend baseRev normalization', () => {
     expect(await algorithm.getPendingToSend('doc1')).toBeNull();
   });
 
-  describe('already-committed stragglers (DAB-607)', () => {
-    // A raced pending write can re-queue a change after its echo already advanced
-    // committedRev and cleared it. Re-stamping and re-sending it would commit a duplicate:
-    // the advanced baseRev is past the original commit, outside the server's
-    // `startAfter: baseRev` id dedup. The send choke point must drop it, not heal it.
-    const ops = [{ op: 'replace', path: '/title', value: 'a' }] as any;
+  // The DAB-607 already-committed-strand drop at the send choke point is gone: a strand
+  // (a re-queued copy of an already-committed change) can no longer form. In-txn rev mint
+  // (R1) and conflict-safe replace (R2) close the raced pending write that produced it, and
+  // the server's change-id dedup backstops any resend. Its coverage is removed, not ported.
+});
 
-    it('drops a stranded copy of its own committed change instead of re-sending it', async () => {
-      const stranded = createChange(1794, 1795, ops);
-      const committedCopy = { ...stranded, committedAt: 1234 };
-      // Echo applied (committedRev → 1795) but the stale pending write re-stranded the copy.
-      await store.applyServerChanges('doc1', [committedCopy], [stranded]);
+/**
+ * With an open doc, getPendingToSend trusts the doc for pending (no state materialization) and
+ * only does a ranged store read past the doc's tail to fold in a foreign tab's mint (R3a).
+ */
+describe('OTAlgorithm.getPendingToSend — open doc (R3a)', () => {
+  let store: OTInMemoryStore;
+  let algorithm: OTAlgorithm;
 
-      expect(await algorithm.getPendingToSend('doc1')).toBeNull();
-      // The strand is gone from the store too, not just the outgoing batch.
-      expect(await store.getPendingChanges('doc1')).toEqual([]);
-    });
+  beforeEach(async () => {
+    store = new OTInMemoryStore();
+    algorithm = new OTAlgorithm(store);
+    await store.trackDocs(['doc1']);
+    await store.saveDoc('doc1', { state: {}, rev: 10 });
+  });
 
-    it('keeps fresh pending changes while dropping the stranded one', async () => {
-      const stranded = createChange(1794, 1795, ops);
-      const committedCopy = { ...stranded, committedAt: 1234 };
-      const fresh = createChange(1795, 1796, [{ op: 'replace', path: '/title', value: 'ab' }]);
-      await store.applyServerChanges('doc1', [committedCopy], [stranded, fresh]);
+  it('returns the open doc pending without materializing store state', async () => {
+    const p1 = createChange(10, 11, [{ op: 'add', path: '/a', value: 1 }]);
+    const p2 = createChange(10, 12, [{ op: 'add', path: '/b', value: 2 }]);
+    const doc = { getPendingChanges: () => [p1, p2], committedRev: 10 };
+    const getDocSpy = vi.spyOn(store, 'getDoc');
 
-      const pending = await algorithm.getPendingToSend('doc1');
+    const pending = await algorithm.getPendingToSend('doc1', doc as any);
 
-      expect(pending!.map(c => c.id)).toEqual([fresh.id]);
-      expect(pending![0].baseRev).toBe(1795);
-      expect((await store.getPendingChanges('doc1')).map(c => c.id)).toEqual([fresh.id]);
-    });
+    expect(pending!.map(c => c.id)).toEqual([p1.id, p2.id]);
+    expect(getDocSpy).not.toHaveBeenCalled(); // no state materialization on the send path
+  });
 
-    it('still re-stamps a stale straggler that was never committed', async () => {
-      // Same stale-baseRev signature but no committed copy: not a strand, so the
-      // existing heal-and-send path applies.
-      const straggler = createChange(1791, 1795, ops);
-      await store.savePendingChanges('doc1', [straggler]);
+  it('appends a foreign mint past the in-memory tail from the ranged store read', async () => {
+    const p1 = createChange(10, 11, [{ op: 'add', path: '/a', value: 1 }]);
+    await store.savePendingChanges('doc1', [p1]); // store + doc agree on rev 11
+    // A foreign tab minted straight into the shared store (re-stamped to rev 12); the doc
+    // hasn't seen it yet.
+    const foreign = createChange(10, 12, [{ op: 'add', path: '/foreign', value: 9 }]);
+    await store.savePendingChanges('doc1', [foreign]);
+    const doc = { getPendingChanges: () => [p1], committedRev: 10 };
 
-      const pending = await algorithm.getPendingToSend('doc1');
+    const pending = await algorithm.getPendingToSend('doc1', doc as any);
 
-      expect(pending).toHaveLength(1);
-      expect(pending![0].id).toBe(straggler.id);
-      expect(pending![0].baseRev).toBe(1794);
-    });
+    expect(pending!.map(c => c.id)).toEqual([p1.id, foreign.id]);
+    expect(foreign.rev).toBe(12);
+  });
+
+  it('does not re-append a foreign row already at or below the in-memory tail', async () => {
+    const p1 = createChange(10, 11, [{ op: 'add', path: '/a', value: 1 }]);
+    const p2 = createChange(10, 12, [{ op: 'add', path: '/b', value: 2 }]);
+    // The store holds the same two revs the doc already knows — the ranged read (rev > 12)
+    // returns nothing, so no duplicates fold in.
+    await store.savePendingChanges('doc1', [{ ...p1 }, { ...p2 }]);
+    const doc = { getPendingChanges: () => [p1, p2], committedRev: 10 };
+
+    const pending = await algorithm.getPendingToSend('doc1', doc as any);
+
+    expect(pending!.map(c => c.id)).toEqual([p1.id, p2.id]);
+  });
+
+  it('does not duplicate the doc pending when a custom store ignores startAfterRev', async () => {
+    const p1 = createChange(10, 11, [{ op: 'add', path: '/a', value: 1 }]);
+    const p2 = createChange(10, 12, [{ op: 'add', path: '/b', value: 2 }]);
+    const doc = { getPendingChanges: () => [p1, p2], committedRev: 10 };
+    // A store implemented against the pre-R3a signature ignores the ranged option and returns the
+    // whole pending queue; the id filter must keep the doc's own pending from folding in twice.
+    store.getPendingChanges = (async () => [p1, p2]) as typeof store.getPendingChanges;
+
+    const pending = await algorithm.getPendingToSend('doc1', doc as any);
+
+    expect(pending!.map(c => c.id)).toEqual([p1.id, p2.id]);
   });
 });

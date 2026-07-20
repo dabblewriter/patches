@@ -1,3 +1,4 @@
+import { signal } from 'easy-signal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Patches } from '../../src/client/Patches';
 import type { AlgorithmName, TrackedDoc } from '../../src/client/PatchesStore';
@@ -89,6 +90,7 @@ describe('PatchesSync', () => {
       onUntrackDocs: vi.fn(),
       onDeleteDoc: vi.fn(),
       onChange: vi.fn(),
+      onServerCommit: signal<(docId: string, changes: Change[]) => void>(),
     };
 
     // Mock PatchesWebSocket
@@ -546,6 +548,16 @@ describe('PatchesSync', () => {
 
       expect(syncDocSpy).not.toHaveBeenCalled();
       expect(onError).toHaveBeenCalledWith(otherErr, { docId: 'doc1' });
+    });
+
+    it('emits onServerCommit when a broadcast delivers server changes', async () => {
+      const emitted: Array<[string, Change[]]> = [];
+      mockPatches.onServerCommit((docId: string, changes: Change[]) => emitted.push([docId, changes]));
+      const changes: Change[] = [{ id: 'c', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 }];
+
+      await sync['_receiveCommittedChanges']('doc1', changes);
+
+      expect(emitted).toEqual([['doc1', changes]]);
     });
   });
 
@@ -1555,6 +1567,51 @@ describe('PatchesSync', () => {
 
       expect(sync.docStates.state['doc1']?.committedRev).toBe(6);
     });
+
+    it('emits onServerCommit(docId, serverChanges) once server changes are durably applied', async () => {
+      const emitted: Array<[string, Change[]]> = [];
+      mockPatches.onServerCommit((docId: string, changes: Change[]) => emitted.push([docId, changes]));
+      const serverChanges: Change[] = [{ id: 'c1', rev: 6, baseRev: 5, ops: [], createdAt: 0, committedAt: 0 }];
+
+      await sync['_applyServerChangesToDoc']('doc1', serverChanges);
+
+      expect(emitted).toEqual([['doc1', serverChanges]]);
+    });
+
+    it('does not emit onServerCommit for an empty batch', async () => {
+      const emitted: Array<[string, Change[]]> = [];
+      mockPatches.onServerCommit((docId: string, changes: Change[]) => emitted.push([docId, changes]));
+
+      await sync['_applyServerChangesToDoc']('doc1', []);
+
+      expect(emitted).toEqual([]);
+    });
+
+    it('does not re-emit onServerCommit for a re-delivered (already-durable) rev', async () => {
+      // DAB-773 echoes every flushed commit back to its sender, and catchup can overlap a
+      // broadcast, so the same rev is delivered more than once. Only newly-durable revs fire.
+      sync['_initDocSyncState']('doc1', { committedRev: 6 });
+      const emitted: Array<[string, Change[]]> = [];
+      mockPatches.onServerCommit((docId: string, changes: Change[]) => emitted.push([docId, changes]));
+
+      await sync['_applyServerChangesToDoc']('doc1', [
+        { id: 'c1', rev: 6, baseRev: 5, ops: [], createdAt: 0, committedAt: 0 },
+      ]);
+
+      expect(emitted).toEqual([]);
+    });
+
+    it('emits onServerCommit only for the newly-durable revs in a mixed batch', async () => {
+      sync['_initDocSyncState']('doc1', { committedRev: 6 });
+      const emitted: Array<[string, Change[]]> = [];
+      mockPatches.onServerCommit((docId: string, changes: Change[]) => emitted.push([docId, changes]));
+      const stale: Change = { id: 'c1', rev: 6, baseRev: 5, ops: [], createdAt: 0, committedAt: 0 };
+      const fresh: Change = { id: 'c2', rev: 7, baseRev: 6, ops: [], createdAt: 0, committedAt: 0 };
+
+      await sync['_applyServerChangesToDoc']('doc1', [stale, fresh]);
+
+      expect(emitted).toEqual([['doc1', [fresh]]]);
+    });
   });
 
   describe('connection state handling', () => {
@@ -2461,9 +2518,9 @@ describe('PatchesSync', () => {
 
       await Promise.all([syncPromise1, syncPromise2]);
 
-      // Sync now calls algorithm.getPendingToSend, not store.getPendingChanges
-      expect(mockAlgorithm.getPendingToSend).toHaveBeenCalledWith('doc1');
-      expect(mockAlgorithm.getPendingToSend).toHaveBeenCalledWith('doc2');
+      // Sync now calls algorithm.getPendingToSend(docId, openDoc) — getOpenDoc returns null here.
+      expect(mockAlgorithm.getPendingToSend).toHaveBeenCalledWith('doc1', null);
+      expect(mockAlgorithm.getPendingToSend).toHaveBeenCalledWith('doc2', null);
     });
   });
 

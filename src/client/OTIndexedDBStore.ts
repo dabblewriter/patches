@@ -214,6 +214,13 @@ export class OTIndexedDBStore implements OTClientStore {
   /**
    * Append an array of local changes to the pending queue.
    * Called *before* you attempt to send them to the server.
+   *
+   * `rev` is assigned INSIDE this transaction from the doc's stored tail (max of committedRev
+   * and any existing pending rev), re-stamping the incoming changes to tail+1, tail+2, … in
+   * place. IndexedDB serializes same-store readwrite transactions, so two contexts racing a
+   * mint over the shared database each read the other's row and number past it instead of
+   * clobbering at the [docId, rev] key. `rev` is only the pending-queue ordering key; `baseRev`
+   * and `id` are untouched.
    */
   @blockable
   async savePendingChanges(docId: string, changes: Change[]): Promise<void> {
@@ -229,6 +236,11 @@ export class OTIndexedDBStore implements OTClientStore {
       console.warn(`Revived document ${docId} by saving pending changes.`);
     }
 
+    const existing = await pendingChanges.getAll<StoredChange>([docId, 0], [docId, Infinity]);
+    let tail = docMeta.committedRev;
+    for (const change of existing) if (change.rev > tail) tail = change.rev;
+    for (let i = 0; i < changes.length; i++) changes[i].rev = tail + 1 + i;
+
     await Promise.all(changes.map(change => pendingChanges.put<StoredChange>({ ...change, docId })));
     await tx.complete();
   }
@@ -236,12 +248,15 @@ export class OTIndexedDBStore implements OTClientStore {
   /**
    * Read back all pending changes for this docId (in order).
    * @param docId - The ID of the document to get the pending changes for.
+   * @param options.startAfterRev - Only return pending changes with rev > startAfterRev (a
+   *   ranged read for foreign-mint deltas; no state materialization).
    * @returns The pending changes.
    */
   @blockable
-  async getPendingChanges(docId: string): Promise<Change[]> {
+  async getPendingChanges(docId: string, options?: { startAfterRev?: number }): Promise<Change[]> {
     const [tx, pendingChanges] = await this.db.transaction(['pendingChanges'], 'readonly');
-    const result = await pendingChanges.getAll<Change>([docId, 0], [docId, Infinity]);
+    const lower = (options?.startAfterRev ?? -1) + 1;
+    const result = await pendingChanges.getAll<Change>([docId, lower], [docId, Infinity]);
     await tx.complete();
     return result;
   }
@@ -301,8 +316,9 @@ export class OTIndexedDBStore implements OTClientStore {
     docId: string,
     poison: Change,
     reason: string,
-    rebasedPending: Change[]
-  ): Promise<QuarantinedChange | null> {
+    rebasedPending: Change[],
+    pendingTailRev?: number
+  ): Promise<QuarantinedChange | null | 'conflict'> {
     if (!(await this.db.hasStore('quarantinedChanges'))) {
       throw new Error(
         `Cannot eject change ${poison.id} from doc ${docId}: the 'quarantinedChanges' store is missing ` +
@@ -316,6 +332,12 @@ export class OTIndexedDBStore implements OTClientStore {
     );
 
     const pending = await pendingChanges.getAll<StoredChange>([docId, 0], [docId, Infinity]);
+    // A foreign mint landing since the caller computed the ejection would be wiped by the
+    // replace below; bail so the caller recomputes against the fresh queue.
+    if (pendingTailRev !== undefined && pending.some(change => change.rev > pendingTailRev)) {
+      await tx.complete();
+      return 'conflict';
+    }
     if (!pending.some(change => change.id === poison.id)) {
       await tx.complete();
       return null;
@@ -362,11 +384,26 @@ export class OTIndexedDBStore implements OTClientStore {
    * @param rebasedPendingChanges - Pending changes after OT rebasing
    */
   @blockable
-  async applyServerChanges(docId: string, serverChanges: Change[], rebasedPendingChanges: Change[]): Promise<void> {
+  async applyServerChanges(
+    docId: string,
+    serverChanges: Change[],
+    rebasedPendingChanges: Change[],
+    pendingTailRev?: number
+  ): Promise<void | 'conflict'> {
     const [tx, committedChangesStore, pendingChangesStore, snapshots, docsStore] = await this.db.transaction(
       ['committedChanges', 'pendingChanges', 'snapshots', 'docs'],
       'readwrite'
     );
+
+    // A foreign mint landing between the caller's rebase read and this write would be silently
+    // wiped by the delete-and-replace below; bail so the caller re-reads and rebases it in.
+    if (pendingTailRev !== undefined) {
+      const currentPending = await pendingChangesStore.getAll<StoredChange>([docId, 0], [docId, Infinity]);
+      if (currentPending.some(change => change.rev > pendingTailRev)) {
+        await tx.complete();
+        return 'conflict';
+      }
+    }
 
     // Save committed changes, dropping already-applied revs — duplicated deliveries
     // (echo, re-broadcast, catchup overlapping a broadcast) would otherwise resurrect

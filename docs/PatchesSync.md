@@ -101,9 +101,10 @@ When the server sends changes (from other users or confirmations):
 1. `PatchesSync` receives the changes via WebSocket
 2. It gets the appropriate algorithm for the document (OT or LWW)
 3. The algorithm applies the changes, handling any rebasing or conflict resolution
-4. The store is updated with committed changes
-5. Any open [PatchesDoc](PatchesDoc.md) instances get the new state
+4. The committed changes are persisted and any pending changes rebased, in one conflict-checked transaction
+5. Any open [PatchesDoc](PatchesDoc.md) instances get the new state (the algorithm trusts the open doc rather than reloading it)
 6. Your UI updates via the document's event system
+7. Once the changes are durable, `PatchesSync` emits [`patches.onServerCommit`](Patches.md#events)
 
 ### Conflict Resolution
 

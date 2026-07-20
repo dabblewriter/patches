@@ -45,9 +45,12 @@ export class PatchesWebSocket extends PatchesClient implements PatchesConnection
 
   /**
    * Establishes a connection to the Patches server.
+   * @param _lastEventId Ignored — the WebSocket transport has no resumable event
+   *   stream to replay from; it re-syncs on every (re)connect. Accepted only to
+   *   satisfy the shared PatchesConnection interface (SSE uses it).
    * @returns A promise that resolves when the connection is established
    */
-  async connect(): Promise<void> {
+  async connect(_lastEventId?: string): Promise<void> {
     await this.transport.connect();
   }
 

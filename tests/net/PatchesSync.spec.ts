@@ -110,6 +110,7 @@ describe('PatchesSync', () => {
       onStateChange: vi.fn(),
       onChangesCommitted: vi.fn(),
       onDocDeleted: vi.fn(),
+      resumedStream: false,
     };
 
     // Mock constructors - use function expressions for Vitest 4 compatibility
@@ -251,6 +252,51 @@ describe('PatchesSync', () => {
       expect(mockWebSocket.connect).toHaveBeenCalled();
     });
 
+    it('forwards a resume cursor and runs resume mode when the transport opened a resumed stream', async () => {
+      const syncAllSpy = vi.spyOn(sync as any, 'syncAllKnownDocs').mockResolvedValue(undefined);
+
+      // The transport reports it actually opened a resumed stream (server is replaying).
+      mockWebSocket.resumedStream = true;
+      await sync.connect('42');
+      expect(mockWebSocket.connect).toHaveBeenCalledWith('42');
+
+      sync['_handleConnectionChange']('connected');
+      expect(syncAllSpy).toHaveBeenCalledWith({ resume: true });
+
+      // A follow-up connected once the transport no longer marks the stream as resumed
+      // (the server's resync re-anchor clears it, as does a plain cold reconnect) runs a
+      // full cold sync.
+      syncAllSpy.mockClear();
+      mockWebSocket.resumedStream = false;
+      sync['_handleConnectionChange']('disconnected');
+      sync['_handleConnectionChange']('connected');
+      expect(syncAllSpy).toHaveBeenCalledWith({ resume: false });
+    });
+
+    it('a cold connect runs the next connected pass in full mode', async () => {
+      const syncAllSpy = vi.spyOn(sync as any, 'syncAllKnownDocs').mockResolvedValue(undefined);
+
+      await sync.connect();
+      sync['_handleConnectionChange']('connected');
+
+      expect(syncAllSpy).toHaveBeenCalledWith({ resume: false });
+    });
+
+    it('a cursor the transport did not resume (offline defer) does not leak resume into a later cold connected', async () => {
+      const syncAllSpy = vi.spyOn(sync as any, 'syncAllKnownDocs').mockResolvedValue(undefined);
+
+      // The app passes a cursor, but the transport deferred (e.g. offline) and never
+      // opened a resumed stream, so it reports resumedStream=false. The eventual cold
+      // reconnect's connected must run a full sync — not a resume pass over a stream the
+      // server never replayed.
+      mockWebSocket.resumedStream = false;
+      await sync.connect('42');
+      expect(mockWebSocket.connect).toHaveBeenCalledWith('42');
+
+      sync['_handleConnectionChange']('connected');
+      expect(syncAllSpy).toHaveBeenCalledWith({ resume: false });
+    });
+
     it('should handle connection errors', async () => {
       const error = new Error('Connection failed');
       mockWebSocket.connect.mockRejectedValue(error);
@@ -331,6 +377,55 @@ describe('PatchesSync', () => {
       await sync['syncAllKnownDocs']();
 
       expect(syncDocSpy).not.toHaveBeenCalled();
+    });
+
+    it('resume: skips re-subscribe and per-doc pull for clean docs, never flashing syncing', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'doc2', committedRev: 5 },
+      ] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      sync['updateState']({ syncStatus: 'synced' });
+      const seen: string[] = [];
+      sync.subscribe(s => seen.push(s.syncStatus), false);
+
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      expect(mockWebSocket.subscribe).not.toHaveBeenCalled();
+      expect(syncDocSpy).not.toHaveBeenCalled();
+      expect(sync.state.syncStatus).toBe('synced');
+      expect(seen).not.toContain('syncing');
+    });
+
+    it('resume: flushes only docs with local pending', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'doc2', committedRev: 5 },
+      ] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockImplementation(async (id: string) => id === 'doc1');
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      // Only the pending doc is (re)subscribed — clean docs ride the server-restored subs.
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc1']);
+      expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+      expect(syncDocSpy).not.toHaveBeenCalledWith('doc2');
+      expect(sync.state.syncStatus).toBe('synced');
+    });
+
+    it('resume: defers tombstone deletes to the next cold sync', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'doc2', deleted: true, committedRev: 5 },
+      ] as TrackedDoc[]);
+      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      expect(mockWebSocket.deleteDoc).not.toHaveBeenCalled();
     });
 
     it('should keep docs tracked concurrently during the rebuild window', async () => {

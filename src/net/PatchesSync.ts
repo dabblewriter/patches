@@ -274,9 +274,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   /**
    * Connects to the server and starts syncing if online. If not online, it will wait for online state.
    */
-  async connect(): Promise<void> {
+  async connect(lastEventId?: string): Promise<void> {
+    // Forward the resume cursor to the transport. Whether the next `connected` pass
+    // actually runs in resume mode is decided from `connection.resumedStream` (what the
+    // transport did), not from the cursor being passed here (what the caller intended) —
+    // so an offline defer or an already-connected no-op can't leak a resume into a later
+    // cold reconnect. See `_handleConnectionChange`.
     try {
-      await this.connection.connect();
+      await this.connection.connect(lastEventId);
     } catch (err) {
       console.error('PatchesSync connection failed:', err);
       const error = err instanceof Error ? err : new Error(String(err));
@@ -410,10 +415,18 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
   /**
    * Syncs all known docs when initially connected.
+   *
+   * `resume` (a successor tab reconnecting with the predecessor's event cursor): the
+   * server is replaying the committed gap over the stream and restored this client's
+   * subscriptions server-side, so this pass skips the re-subscribe and the per-doc
+   * re-pull and only flushes docs still holding local pending. It stays on 'synced'
+   * unless there is pending to flush, so a clean hand-off never flashes 'syncing'. A
+   * cold connect (`resume` false) subscribes, syncs, and processes tombstones as before.
    */
-  protected async syncAllKnownDocs(): Promise<void> {
+  protected async syncAllKnownDocs(opts?: { resume?: boolean }): Promise<void> {
+    const resume = opts?.resume ?? false;
     if (!this.state.connected) return;
-    this.updateState({ syncStatus: 'syncing' });
+    if (!resume) this.updateState({ syncStatus: 'syncing' });
 
     this._untrackedDuringResync = new Set();
     try {
@@ -486,10 +499,20 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // Docs tracked during the window were already subscribed + synced by _handleDocsTracked
       const syncIds = activeDocIds.filter(id => tracked.has(id));
 
-      // Subscribe to active docs
-      if (syncIds.length > 0) {
+      // On resume the replay covers clean docs, so sync only those still holding local
+      // pending (a mint a predecessor or this tab persisted but never flushed). A cold
+      // connect syncs every doc. hasPending was just read into syncedEntries above.
+      const flushIds = resume ? syncIds.filter(id => syncedEntries[id]?.hasPending) : syncIds;
+
+      // Cold connect subscribes everything. A resume subscribes only the docs it will flush
+      // — one may have been created offline and never subscribed by the predecessor, so it
+      // needs a subscription to receive future changes; clean docs ride the subscriptions
+      // the server restored from its own store (2h TTL) when the stream reopened, so
+      // re-POSTing them would just add the round-trips a hand-off is meant to avoid.
+      const subscribeCandidates = resume ? flushIds : syncIds;
+      if (subscribeCandidates.length > 0) {
         try {
-          const subscribeIds = this._filterSubscribeIds(syncIds);
+          const subscribeIds = this._filterSubscribeIds(subscribeCandidates);
           if (subscribeIds.length) {
             await this.connection.subscribe(subscribeIds);
           }
@@ -499,24 +522,29 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         }
       }
 
-      // Sync each active doc
-      const activeSyncPromises = syncIds.map((id: string) => this.syncDoc(id));
+      if (resume && flushIds.length) this.updateState({ syncStatus: 'syncing' });
 
-      // Attempt to delete docs marked with tombstones
-      const deletePromises = deletedDocs.map(async ({ docId }) => {
-        try {
-          console.info(`Attempting server delete for tombstoned doc: ${docId}`);
-          await this.connection.deleteDoc(docId);
-          // If server delete succeeds, remove tombstone and all data locally
-          const algorithm = this._getAlgorithm(docId);
-          await algorithm.confirmDeleteDoc(docId);
-          console.info(`Successfully deleted and untracked doc: ${docId}`);
-        } catch (err) {
-          // If server delete fails (e.g., offline, already deleted), keep tombstone for retry
-          console.warn(`Server delete failed for ${docId}, keeping tombstone:`, err);
-          this.onError.emit(err as Error, { docId });
-        }
-      });
+      // Sync each active doc
+      const activeSyncPromises = flushIds.map((id: string) => this.syncDoc(id));
+
+      // Attempt to delete docs marked with tombstones — deferred to the next cold sync on
+      // resume (rare, and the predecessor most likely already pushed the delete).
+      const deletePromises = resume
+        ? []
+        : deletedDocs.map(async ({ docId }) => {
+            try {
+              console.info(`Attempting server delete for tombstoned doc: ${docId}`);
+              await this.connection.deleteDoc(docId);
+              // If server delete succeeds, remove tombstone and all data locally
+              const algorithm = this._getAlgorithm(docId);
+              await algorithm.confirmDeleteDoc(docId);
+              console.info(`Successfully deleted and untracked doc: ${docId}`);
+            } catch (err) {
+              // If server delete fails (e.g., offline, already deleted), keep tombstone for retry
+              console.warn(`Server delete failed for ${docId}, keeping tombstone:`, err);
+              this.onError.emit(err as Error, { docId });
+            }
+          });
 
       // Wait for all sync and delete operations
       await Promise.all([...activeSyncPromises, ...deletePromises]);
@@ -1164,8 +1192,12 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.updateState({ connected: isConnected, syncStatus: newSyncStatus });
 
     if (isConnected) {
-      // Sync everything on connect/reconnect
-      void this.syncAllKnownDocs();
+      // A resumed stream (opened with a cursor) trusts the server's replay for the gap and
+      // only flushes local pending; a cold connect re-syncs everything. The transport is the
+      // authority: `resumedStream` is true only for a stream actually opened with the cursor,
+      // and a server `resync` re-anchor clears it, so that follow-up `connected` full-syncs.
+      const resume = this.connection.resumedStream ?? false;
+      void this.syncAllKnownDocs({ resume });
     } else if (!isConnecting) {
       // Drop pending retries — the next reconnect's syncAllKnownDocs re-syncs everything.
       this._clearAllSyncRetries();

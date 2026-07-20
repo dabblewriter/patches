@@ -23,9 +23,8 @@ const CHANGE_RETRY_MAX_MS = 30_000;
 
 /**
  * Length of the stable change id minted per captured change (base-62). Stable
- * across retries so id-based idempotency layers (OTAlgorithm._findChangeById,
- * server commit dedup) recognize a re-submission of a change whose first attempt
- * MAY have landed, instead of committing a duplicate.
+ * across retries so the server's commit dedup recognizes a re-submission of a
+ * change whose first attempt MAY have landed, instead of committing a duplicate.
  */
 const STABLE_CHANGE_ID_LENGTH = 12;
 
@@ -116,6 +115,11 @@ export class Patches {
    */
   readonly onError =
     signal<(error: Error, context?: { docId?: string; willRetry?: boolean; attempt?: number }) => void>();
+  /**
+   * Fires after server-committed changes are durably applied to the local store, carrying only
+   * the changes newly durable on this delivery — a re-delivered rev (echo, catchup/broadcast
+   * overlap) is filtered out, so a per-change consumer sees each committed change exactly once.
+   */
   readonly onServerCommit = signal<(docId: string, changes: Change[]) => void>();
   readonly onTrackDocs = signal<(docIds: string[], algorithmName: AlgorithmName) => void>();
   readonly onUntrackDocs = signal<(docIds: string[]) => void>();
@@ -673,18 +677,19 @@ export class Patches {
    *   hiccup): the write MAY have landed (or may land on a later attempt), and
    *   nothing rejected it — discarding the ops would silently delete the user's
    *   un-persisted work. The ops stay applied (and queued in `_optimisticOps`)
-   *   and the submit is re-issued with backoff. Every attempt carries the same
-   *   stable change id, so id-based idempotency (OTAlgorithm._findChangeById,
-   *   server commit dedup) makes the re-submission exactly-once.
+   *   and the submit is re-issued with backoff. Re-submitting cannot duplicate:
+   *   a rejected IndexedDB transaction is atomic, so a failed savePendingChanges
+   *   persisted nothing; the stable change id also backstops the server's commit
+   *   dedup for the ambiguous case where the write did land.
    *
    * The retry runs inside the per-doc change queue, so later changes wait behind
    * it in capture order — required for OT correctness (their ops assume this
    * change's ops are already in the doc frame). While the backoff sleeps, server
    * changes still rebase the kept ops in place (OTDoc._rebaseOptimisticOps holds
    * the same array reference), so the eventual re-mint packages correctly-based
-   * ops. If the change is confirmed through another path while waiting (e.g. a
-   * hub broadcast of a persisted-but-timed-out change), the optimistic entry is
-   * shifted off the queue and the retry loop detects that and stops.
+   * ops. If the change is confirmed through another path while waiting, the
+   * optimistic entry is shifted off the queue and the retry loop detects that
+   * and stops.
    */
   private async _processDocChange<T extends object>(
     docId: string,
@@ -698,7 +703,7 @@ export class Patches {
     const baseDoc = doc as unknown as BaseDoc<T> | undefined;
     for (let attempt = 0; ; attempt++) {
       try {
-        await algorithm.handleDocChange(docId, ops, doc, metadata, stableId, attempt > 0);
+        await algorithm.handleDocChange(docId, ops, doc, metadata, stableId);
         this.onChange.emit(docId);
         return;
       } catch (err) {

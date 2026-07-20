@@ -553,14 +553,14 @@ describe('Patches', () => {
       await patches.submitDocChange('doc1', ops);
 
       expect(mockDoc._applyOptimistic).toHaveBeenCalledWith(ops);
-      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {}, expect.any(String), false);
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {}, expect.any(String));
     });
 
     it('passes undefined doc when the doc is not open', async () => {
       const ops = [{ op: 'add' as const, path: '/x', value: 1 }];
       await patches.submitDocChange('doc1', ops);
 
-      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, undefined, {}, expect.any(String), false);
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, undefined, {}, expect.any(String));
     });
 
     it('is a no-op for empty ops', async () => {
@@ -663,7 +663,7 @@ describe('Patches', () => {
       const ops = [{ op: 'add' as const, path: '/test', value: 'value' }];
       await (patches as any)._handleDocChange('doc1', ops, mockDoc, mockAlgorithm, {});
 
-      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {}, expect.any(String), false);
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {}, expect.any(String));
       expect(onChangeSpy).toHaveBeenCalledWith('doc1');
     });
 
@@ -707,8 +707,8 @@ describe('Patches', () => {
 
         expect(mockAlgorithm.handleDocChange).toHaveBeenCalledTimes(2);
         const [first, second] = vi.mocked(mockAlgorithm.handleDocChange).mock.calls;
-        expect(first).toEqual(['doc1', ops, mockDoc, {}, expect.any(String), false]);
-        expect(second).toEqual(['doc1', ops, mockDoc, {}, first[4], true]); // same stable id, isRetry
+        expect(first).toEqual(['doc1', ops, mockDoc, {}, expect.any(String)]);
+        expect(second).toEqual(['doc1', ops, mockDoc, {}, first[4]]); // same stable id; a failed save persisted nothing
         expect(mockDoc.rollbackOptimistic).not.toHaveBeenCalled();
       } finally {
         vi.useRealTimers();
@@ -774,7 +774,7 @@ describe('Patches', () => {
       const ops = [{ op: 'add' as const, path: '/test', value: 'value' }];
       await capturedChangeHandler(ops);
 
-      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {}, expect.any(String), false);
+      expect(mockAlgorithm.handleDocChange).toHaveBeenCalledWith('doc1', ops, mockDoc, {}, expect.any(String));
     });
   });
 

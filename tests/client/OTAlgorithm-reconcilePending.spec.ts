@@ -125,7 +125,8 @@ describe('OTAlgorithm.reconcilePending — atomic replacement', () => {
     expect(dropSpy).not.toHaveBeenCalled();
     expect(saveSpy).not.toHaveBeenCalled();
     expect(atomicSpy).toHaveBeenCalledTimes(1);
-    expect(atomicSpy).toHaveBeenCalledWith('doc1', [foreign], expect.any(Array));
+    // Fourth arg is the pendingTailRev the conflict-safe replace guards on (R2).
+    expect(atomicSpy).toHaveBeenCalledWith('doc1', [foreign], expect.any(Array), expect.any(Number));
     expect((await store.getPendingChanges('doc1'))[0].ops).toEqual([{ op: 'add', path: '/list/3', value: 'mine' }]);
   });
 

@@ -55,8 +55,8 @@ class MockEventSource {
     this.onerror?.({});
   }
 
-  simulateEvent(type: string, data: string) {
-    const event = { data, lastEventId: '' };
+  simulateEvent(type: string, data: string, lastEventId = '') {
+    const event = { data, lastEventId };
     const listeners = this.listeners.get(type) ?? [];
     for (const listener of listeners) {
       listener(event);
@@ -123,6 +123,28 @@ describe('PatchesREST', () => {
       await connectPromise;
 
       expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123');
+    });
+
+    it('appends a resume cursor as a query param when connecting with a lastEventId', async () => {
+      const connectPromise = rest.connect('42');
+      MockEventSource.latest.simulateOpen();
+      await connectPromise;
+
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?lastEventId=42');
+      // The cursor is seeded even before the first replayed frame arrives.
+      expect(rest.lastEventId).toBe('42');
+    });
+
+    it('tracks lastEventId from id-bearing frames', async () => {
+      const connectPromise = rest.connect();
+      MockEventSource.latest.simulateOpen();
+      await connectPromise;
+
+      expect(rest.lastEventId).toBeUndefined();
+      MockEventSource.latest.simulateEvent('changesCommitted', JSON.stringify({ docId: 'd', changes: [] }), '7');
+      expect(rest.lastEventId).toBe('7');
+      MockEventSource.latest.simulateEvent('docDeleted', JSON.stringify({ docId: 'd' }), '9');
+      expect(rest.lastEventId).toBe('9');
     });
 
     it('should resolve only after onopen fires', async () => {

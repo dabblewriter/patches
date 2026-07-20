@@ -125,6 +125,8 @@ export class PatchesREST implements PatchesConnection {
   private onlineUnsubscriber: Unsubscriber | null = null;
   /** Timestamp (ms) of the last SSE frame received (event or heartbeat). 0 until first open. */
   private _lastEventAt = 0;
+  /** Id of the last id-bearing SSE frame received; the resume cursor (see `lastEventId`). */
+  private _lastEventId: string | undefined;
   /** Interval handle for the half-open-stream watchdog; null while not connected. */
   private livenessTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   /** Pending reconnect attempt scheduled after a fatal error / teardown; null when none. */
@@ -154,6 +156,11 @@ export class PatchesREST implements PatchesConnection {
 
   // --- Connection State ---
 
+  /** Id of the last id-bearing SSE frame received, or undefined before the first one. */
+  get lastEventId(): string | undefined {
+    return this._lastEventId;
+  }
+
   /** Current connection state of the underlying SSE stream. */
   get state(): ConnectionState {
     return this._state;
@@ -161,7 +168,7 @@ export class PatchesREST implements PatchesConnection {
 
   // --- Connection Lifecycle ---
 
-  connect(): Promise<void> {
+  connect(lastEventId?: string): Promise<void> {
     this.shouldBeConnected = true;
     this._ensureOnlineOfflineListeners();
 
@@ -176,8 +183,16 @@ export class PatchesREST implements PatchesConnection {
 
     this._setState('connecting');
 
+    // EventSource cannot set a `Last-Event-ID` request header on a freshly
+    // constructed instance (the browser only sends it on its own auto-reconnect),
+    // so a caller-supplied resume cursor rides as a query param the server reads
+    // as a `Last-Event-ID` equivalent. Seed `_lastEventId` too, so a resume that
+    // yields no frames before the next hand-off still carries the cursor forward.
+    if (lastEventId) this._lastEventId = lastEventId;
+    const resumeQuery = lastEventId ? `?lastEventId=${encodeURIComponent(lastEventId)}` : '';
+
     return new Promise<void>((resolve, reject) => {
-      const es = new EventSource(`${this._url}/events/${this._encodedClientId}`);
+      const es = new EventSource(`${this._url}/events/${this._encodedClientId}${resumeQuery}`);
       this.eventSource = es;
       let settled = false;
 
@@ -250,6 +265,7 @@ export class PatchesREST implements PatchesConnection {
       // reconnect resync.
       es.addEventListener('changesCommitted', (e: MessageEvent) => {
         this._noteTraffic();
+        if (e.lastEventId) this._lastEventId = e.lastEventId;
         let parsed: { docId?: unknown; changes?: unknown; options?: CommitChangesOptions };
         try {
           parsed = JSON.parse(e.data) ?? {};
@@ -271,6 +287,7 @@ export class PatchesREST implements PatchesConnection {
 
       es.addEventListener('docDeleted', (e: MessageEvent) => {
         this._noteTraffic();
+        if (e.lastEventId) this._lastEventId = e.lastEventId;
         let parsed: { docId?: unknown };
         try {
           parsed = JSON.parse(e.data) ?? {};

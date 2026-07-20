@@ -10,8 +10,20 @@ export interface PatchesConnection extends PatchesAPI {
   /** The server URL. Readable and writable — setting while connected triggers reconnection. */
   url: string;
 
-  /** Establish the connection to the server. */
-  connect(): Promise<void>;
+  /**
+   * Establish the connection to the server. `lastEventId`, when supplied, asks the
+   * server to resume the event stream after that id (SSE replay) instead of a cold
+   * start — the successor of a closed leader tab passes the predecessor's last id so
+   * the gap is replayed rather than re-synced. Transports without a resumable stream
+   * (WebSocket) ignore it.
+   */
+  connect(lastEventId?: string): Promise<void>;
+
+  /**
+   * The id of the last event received on the current stream, or undefined before the
+   * first event. Persisted cross-tab so a successor can resume from it (see `connect`).
+   */
+  readonly lastEventId?: string;
 
   /** Tear down the connection. */
   disconnect(): void;

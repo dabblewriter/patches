@@ -57,14 +57,20 @@ export interface ClientAlgorithm {
    * @param id Optional caller-supplied stable change id. Lets an upstream caller mint the id once
    *   so a retried submit reuses it; the server dedups resubmitted commits by change id. OT mints
    *   with this id.
-   * @returns The changes created (for broadcast to other tabs)
+   * @param isRetry True when this submit is a retry of an earlier ambiguous failure. With `id`,
+   *   OT pre-scans for an already-landed copy of the batch and returns it instead of re-minting.
+   *   LWW ignores it: a retry re-consolidates, which double-counts a landed `@inc`.
+   * @returns The changes created (for broadcast to other tabs). On a retry hit, the landed
+   *   copies instead — committed copies (`committedAt > 0`) if a flush already committed them,
+   *   which must not be re-broadcast as fresh mints.
    */
   handleDocChange<T extends object>(
     docId: string,
     ops: JSONPatchOp[],
     doc: PatchesDoc<T> | undefined,
     metadata: Record<string, any>,
-    id?: string
+    id?: string,
+    isRetry?: boolean
   ): Promise<Change[]>;
 
   /**

@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OTIndexedDBStore } from '../../src/client/OTIndexedDBStore';
+import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
 import { createChange } from '../../src/data/change';
 import type { Change } from '../../src/types';
 
@@ -64,6 +65,55 @@ describe('OTIndexedDBStore duplicate delivery (real store over fake-indexeddb)',
     expect(snap2?.rev).toBe(400);
   });
 
+  it('a retried save with an id already pending appends nothing (ambiguous-failure retry)', async () => {
+    const change = createChange(0, 1, [{ op: 'add', path: '/a', value: 1 }]);
+    await store.savePendingChanges(docId, [change]);
+    const retry = { ...change, rev: 99 };
+    await store.savePendingChanges(docId, [retry]);
+
+    const pending = await store.getPendingChanges(docId);
+    expect(pending).toHaveLength(1);
+    expect(retry.rev).toBe(pending[0].rev); // rev synced onto the retried object
+  });
+
+  it('a re-saved split batch dedups every derived-id piece', async () => {
+    // Split pieces after the first carry ids derived from the stable id (`cid-s~2`, ...), so
+    // the per-row id dedup has to cover the whole batch — otherwise a re-split appends
+    // pieces 2..N again under ids the first save already stored.
+    const first = [
+      createChange(0, 1, [{ op: 'add', path: '/a', value: 1 }], {}, 'cid-s'),
+      createChange(0, 2, [{ op: 'add', path: '/b', value: 2 }], {}, 'cid-s~2'),
+    ];
+    await store.savePendingChanges(docId, first);
+
+    const retry = [
+      createChange(0, 1, [{ op: 'add', path: '/a', value: 1 }], {}, 'cid-s'),
+      createChange(0, 2, [{ op: 'add', path: '/b', value: 2 }], {}, 'cid-s~2'),
+    ];
+    await store.savePendingChanges(docId, retry);
+
+    const pending = await store.getPendingChanges(docId);
+    expect(pending).toHaveLength(2);
+    expect(pending.map(c => c.id)).toEqual(['cid-s', 'cid-s~2']);
+    expect(retry.map(c => c.rev)).toEqual(pending.map(c => c.rev)); // revs synced onto the retried objects
+  });
+
+  it('a fully-deduped save does not revive a tombstone', async () => {
+    const change = createChange(0, 1, [{ op: 'add', path: '/a', value: 1 }]);
+    await store.savePendingChanges(docId, [change]);
+    await store.deleteDoc(docId);
+    // A delete raced ahead of a retry whose original write landed: restore the landed row under
+    // the tombstone, then retry — the dedup must return before flipping `deleted` back off.
+    const [tx, pendingChanges] = await store.db.transaction(['pendingChanges'], 'readwrite');
+    await pendingChanges.put({ ...change, docId });
+    await tx.complete();
+
+    await store.savePendingChanges(docId, [{ ...change }]);
+
+    const docs = await store.listDocs(true);
+    expect(docs.find(d => d.docId === docId)?.deleted).toBe(true);
+  });
+
   it('excludes a stray row at the snapshot rev from rebuilds', async () => {
     await store.saveDoc(docId, { state: { list: [1] }, rev: 1 });
 
@@ -75,5 +125,42 @@ describe('OTIndexedDBStore duplicate delivery (real store over fake-indexeddb)',
     const snap = await store.getDoc(docId);
     expect((snap?.state as any).list).toEqual([1]);
     expect(snap?.rev).toBe(1);
+  });
+});
+
+describe('OTInMemoryStore savePendingChanges retry dedup (mirrors OTIndexedDBStore)', () => {
+  it('skips ids already pending, syncing the landed rev onto the retried object', async () => {
+    const store = new OTInMemoryStore();
+    await store.saveDoc(docId, { state: {}, rev: 0 });
+    const a = createChange(0, 1, [{ op: 'add', path: '/a', value: 1 }]);
+    await store.savePendingChanges(docId, [a]);
+
+    const retry = { ...a, rev: 99 };
+    await store.savePendingChanges(docId, [retry]);
+
+    const pending = await store.getPendingChanges(docId);
+    expect(pending.map(c => c.id)).toEqual([a.id]);
+    expect(retry.rev).toBe(pending[0].rev);
+  });
+
+  it('dedups every derived-id piece of a re-saved split batch', async () => {
+    const store = new OTInMemoryStore();
+    await store.saveDoc(docId, { state: {}, rev: 0 });
+    const first = [
+      createChange(0, 1, [{ op: 'add', path: '/a', value: 1 }], {}, 'cid-s'),
+      createChange(0, 2, [{ op: 'add', path: '/b', value: 2 }], {}, 'cid-s~2'),
+    ];
+    await store.savePendingChanges(docId, first);
+
+    const retry = [
+      createChange(0, 1, [{ op: 'add', path: '/a', value: 1 }], {}, 'cid-s'),
+      createChange(0, 2, [{ op: 'add', path: '/b', value: 2 }], {}, 'cid-s~2'),
+    ];
+    await store.savePendingChanges(docId, retry);
+
+    const pending = await store.getPendingChanges(docId);
+    expect(pending).toHaveLength(2);
+    expect(pending.map(c => c.id)).toEqual(['cid-s', 'cid-s~2']);
+    expect(retry.map(c => c.rev)).toEqual(pending.map(c => c.rev));
   });
 });

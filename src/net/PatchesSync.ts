@@ -172,6 +172,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       patches.onUntrackDocs(this._handleDocsUntracked.bind(this)),
       patches.onDeleteDoc(this._handleDocDeleted.bind(this)),
       patches.onChange(this._handleDocChange.bind(this)),
+      patches.onDocLoadFailed(this._handleDocLoadFailed.bind(this)),
     ];
   }
 
@@ -197,6 +198,17 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   private _ejectionCounts = new Map<string, number>();
   /** Docs whose persisted quarantine entries were re-surfaced this session (see `_resurfaceQuarantined`). */
   private _quarantineResurfaced = new Set<string>();
+  /**
+   * Poison failures handed to sync out-of-band (openDoc materialization, a delivery whose doc
+   * apply failed after the store write landed — armed at the `_applyServerChangesToDoc` choke
+   * point, so broadcasts, flush echoes, merges, and reload drains are all covered). syncDoc
+   * reads an entry inside its serial gate and throws it into its own ApplyChangesError
+   * recovery — the snapshot reload — so recovery is serialized against flushes and gets the
+   * full retry ladder. The entry is cleared only when that reload succeeds (or the doc
+   * untracks/deletes): a transient reload failure keeps it armed for the ladder's next pass.
+   * An entry armed while disconnected waits for the reconnect's syncAllKnownDocs.
+   */
+  private _pendingLoadFailures = new Map<string, Error>();
 
   /**
    * Gets the algorithm for a document. Uses the open doc's algorithm if available,
@@ -546,6 +558,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     }
     let pending: Change[] | null | undefined;
     try {
+      // An out-of-band poison failure for this doc: throw it here, inside the serial gate, so
+      // the ApplyChangesError recovery below runs serialized against any concurrent flush or
+      // reload for this doc, with the full retry ladder — never as a raw reload from the
+      // delivery or openDoc path, which would race an in-flight flush and rewind committedRev
+      // past commits its echo just installed. The flag is cleared only when the recovery
+      // reload SUCCEEDS: consuming it here would orphan the poison on a transient reload
+      // failure (the ladder's next pass would find no flag and no-op past the corruption).
+      const poison = this._pendingLoadFailures.get(docId);
+      if (poison) throw poison;
+
       // Use algorithm to get pending changes to send
       pending = await algorithm.getPendingToSend(docId, doc as PatchesDoc<any> | undefined);
 
@@ -593,12 +615,17 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         this.onError.emit(failure, { docId });
         try {
           await this._reloadDocFromServer(docId, algorithm);
+          this._pendingLoadFailures.delete(docId);
           this._updateDocSyncState(docId, { syncStatus: 'synced' });
           this._clearSyncRetry(docId);
           this._surfacedSyncErrors.delete(docId);
           if (baseDoc) {
             baseDoc.updateSyncStatus('synced');
           }
+          // The recovery pass never reached the flush: reconcile can leave surviving pending
+          // (e.g. offline edits predating the poison) stranded at 'synced' + hasPending. Queue
+          // exactly one follow-up run (serialGate) to send them, as the eject path does.
+          if (await algorithm.hasPending(docId)) void this.syncDoc(docId);
           return;
         } catch (reloadErr) {
           if (this._isDocDeletedError(reloadErr)) {
@@ -754,6 +781,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         // refresh the flag so the doc doesn't read as having unsynced work indefinitely.
         ...(reconciled ? { hasPending: await algorithm.hasPending(docId) } : undefined),
       });
+      // Commits made durable BY this reload also pass through onServerCommit — recovery installs
+      // them via reconcilePending/saveDoc, never _applyServerChangesToDoc, and a consumer keyed
+      // on the signal would otherwise silently miss every commit recovery delivers. What we hold
+      // as Change objects is committedTail (fetched for reconciliation) or the envelope's own
+      // tail; changes subsumed into the snapshot body before the client ever saw them are not
+      // re-emittable (see the onServerCommit JSDoc).
+      const durableTail = (committedTail.length > 0 ? committedTail : (installedChanges ?? [])).filter(
+        c => c.rev > baseRev
+      );
+      if (durableTail.length > 0) this.patches.onServerCommit.emit(docId, durableTail);
       // Re-read the snapshot from the algorithm's store so it includes any pending
       // changes the store kept across saveDoc. Passing `changes: []` here would let
       // doc.import() wipe in-memory pending state (OTDoc._pendingChanges) and LWW
@@ -819,7 +856,21 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     const lastRev = mergeChanges[mergeChanges.length - 1].rev;
     if (committedRev >= lastRev) return; // already applied (echo / re-broadcast)
     if (committedRev === firstRev - 1) {
-      await this._applyServerChangesToDoc(docId, mergeChanges);
+      try {
+        await this._applyServerChangesToDoc(docId, mergeChanges);
+      } catch (err) {
+        // A merge change failing the open doc's apply armed the poison flag in
+        // _applyServerChangesToDoc; run the gated snapshot recovery here — no other
+        // library-side consumer sits above this public API — then surface the failure.
+        if (err instanceof ApplyChangesError && this.trackedDocs.has(docId)) {
+          try {
+            await this.syncDoc(docId);
+          } catch (syncErr) {
+            this.onError.emit(syncErr as Error, { docId });
+          }
+        }
+        throw err;
+      }
     } else {
       await this.syncDoc(docId); // gap from a concurrent commit → pull the authoritative tail
     }
@@ -1021,13 +1072,12 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // Two recoverable failure classes land here. Without recovery the batch is dropped and
       // `committedRev` freezes silently, so the client stops converging while believing it is
       // up to date.
+      // - ApplyChangesError: a change in the batch failed to apply (corrupt change or diverged
+      //   local state). `_applyServerChangesToDoc` armed the poison flag; syncDoc, inside its
+      //   serial gate, throws it into its snapshot-reload recovery.
       // - MissingChangesError: a non-contiguous server change (we missed an earlier event — a
       //   transient SSE drop the browser's replay didn't fully cover). syncDoc pulls the
       //   authoritative tail via getChangesSince, mirroring applyMergeChanges' gap fallback.
-      // - ApplyChangesError: a change in the batch failed to apply (corrupt change or diverged
-      //   local state). syncDoc's own ApplyChangesError fallback reloads the authoritative
-      //   snapshot when the refetched tail can't be applied either, and emits onError for
-      //   telemetry — a failed apply is a corruption signal, unlike a benign gap.
       if (this._isMissingChangesGap(err) || err instanceof ApplyChangesError) {
         try {
           await this.syncDoc(docId);
@@ -1039,6 +1089,21 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       }
       this.onError.emit(err as Error, { docId });
     }
+  }
+
+  /**
+   * A doc failed to materialize from its local store (Patches.onDocLoadFailed): a committed
+   * change persisted by the receive path (which trusts rev arithmetic and, for closed docs,
+   * never applies) turned out to be unappliable. Incremental catch-up can never re-detect it —
+   * committedRev already advanced past it — so arm the poison flag and kick a sync; syncDoc
+   * throws the flag into its snapshot recovery inside its serial gate (cleared when the reload
+   * succeeds). When disconnected the kick no-ops and the armed flag waits for the reconnect's
+   * syncAllKnownDocs.
+   */
+  private async _handleDocLoadFailed(docId: string, error: Error): Promise<void> {
+    if (!this.trackedDocs.has(docId)) return;
+    this._pendingLoadFailures.set(docId, error);
+    await this.syncDoc(docId);
   }
 
   /** True when an error is the revision-gap thrown by applyCommittedChanges. */
@@ -1099,21 +1164,51 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // durable now. A re-delivery carries revs already applied — DAB-773 echoes every flushed
     // commit back to its sender, and catchup can overlap a broadcast — and applyServerChanges
     // drops those, so emitting the raw batch would re-fire the same rev range and a per-change
-    // consumer (word counts, journal drain) would double-count.
-    const priorRev =
-      (doc as { committedRev?: number } | null | undefined)?.committedRev ??
-      this.docStates.state[docId]?.committedRev ??
-      0;
+    // consumer (word counts, journal drain) would double-count. Max of both sources: a torn
+    // reload can leave the open doc a frame BEHIND the store (never ahead), and a stale-low
+    // priorRev would re-emit revs already delivered. The docStates component is re-read again
+    // at emit time (`emitFloor`): the delivery paths aren't serialized against each other, so
+    // an echo and a broadcast of the same revs can both be in flight — whichever finishes its
+    // apply first emits and raises docStates, and the loser's re-read filters the revs out.
+    const priorRev = Math.max(
+      (doc as { committedRev?: number } | null | undefined)?.committedRev ?? 0,
+      this.docStates.state[docId]?.committedRev ?? 0
+    );
 
     // Delegate to algorithm - it handles store updates and doc updates
-    await algorithm.applyServerChanges(docId, serverChanges, doc);
+    try {
+      await algorithm.applyServerChanges(docId, serverChanges, doc);
+    } catch (err) {
+      if (err instanceof ApplyChangesError) {
+        // Arm the poison flag at the choke point so every delivery path — broadcast, flush
+        // echo, merge, reload drain — routes into syncDoc's gated snapshot recovery. The store
+        // write lands BEFORE the doc apply, so committedRev has already advanced past the
+        // poison and incremental catch-up alone would no-op.
+        if (this.trackedDocs.has(docId)) this._pendingLoadFailures.set(docId, err);
+        // A doc-apply failure usually leaves the batch durable — and the recovery reload's
+        // baseRev then already includes these revs, so its emit can never cover them. Emit
+        // what actually landed (checked against the store, never assumed) before rethrowing.
+        if (serverChanges.length > 0) {
+          const landedRev = await algorithm.getCommittedRev(docId);
+          const emitFloor = Math.max(priorRev, this.docStates.state[docId]?.committedRev ?? 0);
+          const landed = serverChanges.filter(c => c.rev > emitFloor && c.rev <= landedRev);
+          if (landed.length > 0) {
+            this._updateDocSyncState(docId, { committedRev: landedRev });
+            this.patches.onServerCommit.emit(docId, landed);
+          }
+        }
+      }
+      throw err;
+    }
 
     if (serverChanges.length > 0) {
       const lastRev = serverChanges[serverChanges.length - 1].rev;
+      const emitFloor = Math.max(priorRev, this.docStates.state[docId]?.committedRev ?? 0);
       this._updateDocSyncState(docId, { committedRev: lastRev });
-      // The one choke point covering every path where server-committed changes became locally
-      // durable (flush echoes, broadcasts, catchup, merges).
-      const newlyDurable = serverChanges.filter(c => c.rev > priorRev);
+      // The choke point for every incremental path where server-committed changes became locally
+      // durable (flush echoes, broadcasts, catchup, merges); _reloadDocFromServer emits for the
+      // snapshot-recovery path.
+      const newlyDurable = serverChanges.filter(c => c.rev > emitFloor);
       if (newlyDurable.length > 0) this.patches.onServerCommit.emit(docId, newlyDurable);
     }
   }
@@ -1260,6 +1355,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this._untrackedDuringResync?.add(id);
       this._clearSyncRetry(id);
       this._surfacedSyncErrors.delete(id);
+      this._pendingLoadFailures.delete(id);
     });
     batch(() => {
       existingIds.forEach(id => this._updateDocSyncState(id, undefined));
@@ -1307,6 +1403,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._untrackedDuringResync?.add(docId);
     this._clearSyncRetry(docId);
     this._surfacedSyncErrors.delete(docId);
+    this._pendingLoadFailures.delete(docId);
     this._updateDocSyncState(docId, undefined);
     await algorithm.confirmDeleteDoc(docId);
 

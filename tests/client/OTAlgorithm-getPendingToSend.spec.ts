@@ -64,8 +64,10 @@ describe('OTAlgorithm.getPendingToSend baseRev normalization', () => {
 });
 
 /**
- * With an open doc, getPendingToSend trusts the doc for pending (no state materialization) and
- * only does a ranged store read past the doc's tail to fold in a foreign tab's mint (R3a).
+ * With an open doc, getPendingToSend unions the FULL store queue with the doc's in-memory
+ * pending, store rows winning by id (no state materialization). R1 mints from the shared store
+ * tail, so a foreign tab's row can land BELOW the open doc's pending tail — a doc-tail-anchored
+ * ranged read would structurally miss it.
  */
 describe('OTAlgorithm.getPendingToSend — open doc (R3a)', () => {
   let store: OTInMemoryStore;
@@ -90,7 +92,7 @@ describe('OTAlgorithm.getPendingToSend — open doc (R3a)', () => {
     expect(getDocSpy).not.toHaveBeenCalled(); // no state materialization on the send path
   });
 
-  it('appends a foreign mint past the in-memory tail from the ranged store read', async () => {
+  it('includes a foreign mint past the in-memory tail from the store queue', async () => {
     const p1 = createChange(10, 11, [{ op: 'add', path: '/a', value: 1 }]);
     await store.savePendingChanges('doc1', [p1]); // store + doc agree on rev 11
     // A foreign tab minted straight into the shared store (re-stamped to rev 12); the doc
@@ -105,11 +107,9 @@ describe('OTAlgorithm.getPendingToSend — open doc (R3a)', () => {
     expect(foreign.rev).toBe(12);
   });
 
-  it('does not re-append a foreign row already at or below the in-memory tail', async () => {
+  it('does not duplicate a change present in both the store and the doc', async () => {
     const p1 = createChange(10, 11, [{ op: 'add', path: '/a', value: 1 }]);
     const p2 = createChange(10, 12, [{ op: 'add', path: '/b', value: 2 }]);
-    // The store holds the same two revs the doc already knows — the ranged read (rev > 12)
-    // returns nothing, so no duplicates fold in.
     await store.savePendingChanges('doc1', [{ ...p1 }, { ...p2 }]);
     const doc = { getPendingChanges: () => [p1, p2], committedRev: 10 };
 
@@ -118,16 +118,33 @@ describe('OTAlgorithm.getPendingToSend — open doc (R3a)', () => {
     expect(pending!.map(c => c.id)).toEqual([p1.id, p2.id]);
   });
 
-  it('does not duplicate the doc pending when a custom store ignores startAfterRev', async () => {
-    const p1 = createChange(10, 11, [{ op: 'add', path: '/a', value: 1 }]);
-    const p2 = createChange(10, 12, [{ op: 'add', path: '/b', value: 2 }]);
-    const doc = { getPendingChanges: () => [p1, p2], committedRev: 10 };
-    // A store implemented against the pre-R3a signature ignores the ranged option and returns the
-    // whole pending queue; the id filter must keep the doc's own pending from folding in twice.
-    store.getPendingChanges = (async () => [p1, p2]) as typeof store.getPendingChanges;
+  it('includes a foreign row BELOW the doc tail (foreign tab minted first)', async () => {
+    // Tab B minted X first (store rev 1), then this tab minted Y (store rev 2). This doc only
+    // knows Y — a ranged read past the doc's tail (rev > 2) would never see X, so the flush
+    // would send Y alone and the next flush would ship X at a stale frame.
+    await store.saveDoc('doc1', { state: {}, rev: 0 });
+    const foreignX = createChange(0, 1, [{ op: 'add', path: '/items/3', value: 'X' }]);
+    const ourY = createChange(0, 1, [{ op: 'add', path: '/items/0', value: 'Y' }]);
+    await store.savePendingChanges('doc1', [foreignX]);
+    await store.savePendingChanges('doc1', [ourY]); // re-stamped to rev 2
+    const doc = { getPendingChanges: () => [ourY], committedRev: 0 };
 
     const pending = await algorithm.getPendingToSend('doc1', doc as any);
 
-    expect(pending!.map(c => c.id)).toEqual([p1.id, p2.id]);
+    expect(pending!.map(c => c.id)).toEqual([foreignX.id, ourY.id]);
+  });
+
+  it('ships the store row, not the doc in-memory copy, when both hold the same id', async () => {
+    // A receive rebased the store's copy of p1 in place (same rev, transformed ops). The doc's
+    // in-memory copy is stale; the flush must carry the store's rebased ops.
+    const p1 = createChange(10, 11, [{ op: 'add', path: '/items/0', value: 'stale' }]);
+    const rebasedP1 = { ...p1, ops: [{ op: 'add' as const, path: '/items/2', value: 'stale' }] };
+    await store.savePendingChanges('doc1', [rebasedP1]);
+    const doc = { getPendingChanges: () => [p1], committedRev: 10 };
+
+    const pending = await algorithm.getPendingToSend('doc1', doc as any);
+
+    expect(pending).toHaveLength(1);
+    expect(pending![0].ops).toEqual(rebasedP1.ops);
   });
 });

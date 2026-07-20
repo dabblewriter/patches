@@ -15,21 +15,29 @@ export interface OTClientStore extends PatchesStore {
    * Used during sync to resend unconfirmed operations.
    *
    * @param docId Document identifier
-   * @param options.startAfterRev Only return pending changes with rev > startAfterRev (a ranged
-   *   read for foreign-mint deltas; no state materialization)
    * @returns Array of pending changes in chronological order
    */
-  getPendingChanges(docId: string, options?: { startAfterRev?: number }): Promise<Change[]>;
+  getPendingChanges(docId: string): Promise<Change[]>;
 
   /**
    * Appends new pending changes to the document's local change queue.
    *
    * Adds changes to the end of the pending changes list without replacing existing ones.
    * Called when the user makes local edits that haven't been sent to the server yet.
-   * Changes should have sequential revision numbers starting after the last pending change.
+   *
+   * R1 (in-transaction rev mint): the store — not the caller — assigns each change's `rev`,
+   * inside the same transaction that persists it, numbering from max(committedRev, current
+   * pending tail) and re-stamping the passed objects in place. The caller's revs are
+   * provisional. This is the sole cross-context sequencer: two contexts minting concurrently
+   * over a shared database each number past the other's row instead of clobbering the
+   * [docId, rev] key. `baseRev` and `id` are never touched.
+   *
+   * Implementations must also dedup by stable change id: an incoming change whose id is already
+   * pending (a retried submit whose earlier write landed) is skipped, and a fully-deduped call
+   * persists nothing — in particular, it must not revive a deletion tombstone.
    *
    * @param docId Document identifier
-   * @param changes Array of new changes to append
+   * @param changes Array of new changes to append (revs re-stamped in place)
    */
   savePendingChanges(docId: string, changes: Change[]): Promise<void>;
 

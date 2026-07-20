@@ -221,12 +221,34 @@ export class OTIndexedDBStore implements OTClientStore {
    * mint over the shared database each read the other's row and number past it instead of
    * clobbering at the [docId, rev] key. `rev` is only the pending-queue ordering key; `baseRev`
    * and `id` are untouched.
+   *
+   * Dedup by stable change id, also inside the transaction: a submit retried after an ambiguous
+   * failure (the write may have landed) must not persist a second row with the same id —
+   * rebaseChanges splices only the first id match, so a duplicate's survivor would be re-stamped
+   * behind its own commit and resent forever. An id already pending is skipped (its rev synced
+   * onto the passed object). A fully-deduped call persists nothing — and must not revive a
+   * tombstone. (The batch-level retry guard lives in OTAlgorithm._findChangeById; this per-row
+   * net exists so any direct caller is idempotent too.)
    */
   @blockable
   async savePendingChanges(docId: string, changes: Change[]): Promise<void> {
+    if (changes.length === 0) return;
     const [tx, pendingChanges, docsStore] = await this.db.transaction(['pendingChanges', 'docs'], 'readwrite');
 
     let docMeta = await docsStore.get<TrackedDoc>(docId);
+    const existing = await pendingChanges.getAll<StoredChange>([docId, 0], [docId, Infinity]);
+
+    const existingById = new Map(existing.map(c => [c.id, c]));
+    const toSave = changes.filter(c => {
+      const landed = existingById.get(c.id);
+      if (landed) c.rev = landed.rev;
+      return !landed;
+    });
+    if (toSave.length === 0) {
+      await tx.complete();
+      return;
+    }
+
     if (!docMeta) {
       docMeta = { docId, committedRev: 0, algorithm: 'ot' };
       await docsStore.put(docMeta);
@@ -236,27 +258,23 @@ export class OTIndexedDBStore implements OTClientStore {
       console.warn(`Revived document ${docId} by saving pending changes.`);
     }
 
-    const existing = await pendingChanges.getAll<StoredChange>([docId, 0], [docId, Infinity]);
     let tail = docMeta.committedRev;
     for (const change of existing) if (change.rev > tail) tail = change.rev;
-    for (let i = 0; i < changes.length; i++) changes[i].rev = tail + 1 + i;
+    for (let i = 0; i < toSave.length; i++) toSave[i].rev = tail + 1 + i;
 
-    await Promise.all(changes.map(change => pendingChanges.put<StoredChange>({ ...change, docId })));
+    await Promise.all(toSave.map(change => pendingChanges.put<StoredChange>({ ...change, docId })));
     await tx.complete();
   }
 
   /**
    * Read back all pending changes for this docId (in order).
    * @param docId - The ID of the document to get the pending changes for.
-   * @param options.startAfterRev - Only return pending changes with rev > startAfterRev (a
-   *   ranged read for foreign-mint deltas; no state materialization).
    * @returns The pending changes.
    */
   @blockable
-  async getPendingChanges(docId: string, options?: { startAfterRev?: number }): Promise<Change[]> {
+  async getPendingChanges(docId: string): Promise<Change[]> {
     const [tx, pendingChanges] = await this.db.transaction(['pendingChanges'], 'readonly');
-    const lower = (options?.startAfterRev ?? -1) + 1;
-    const result = await pendingChanges.getAll<Change>([docId, lower], [docId, Infinity]);
+    const result = await pendingChanges.getAll<Change>([docId, 0], [docId, Infinity]);
     await tx.complete();
     return result;
   }

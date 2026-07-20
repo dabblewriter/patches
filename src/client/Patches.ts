@@ -1,5 +1,6 @@
 import { createId } from 'crypto-id';
 import { type Unsubscriber, signal } from 'easy-signal';
+import { ApplyChangesError } from '../algorithms/ot/shared/applyChanges.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import { isRejectionError } from '../net/error.js';
 import type { Change, PatchesSnapshot, QuarantinedChange } from '../types.js';
@@ -118,9 +119,22 @@ export class Patches {
   /**
    * Fires after server-committed changes are durably applied to the local store, carrying only
    * the changes newly durable on this delivery — a re-delivered rev (echo, catchup/broadcast
-   * overlap) is filtered out, so a per-change consumer sees each committed change exactly once.
+   * overlap) is filtered out, so a per-change consumer sees each committed change at most once.
+   *
+   * Not a complete change log: a snapshot reload (recovery, long-offline catch-up) can install
+   * commits the client never received as individual Change objects — those subsumed into the
+   * snapshot body are not re-emittable and never fire. Consumers needing every committed change
+   * must read the server's change log; consumers here get each delivered change exactly once.
    */
   readonly onServerCommit = signal<(docId: string, changes: Change[]) => void>();
+  /**
+   * Fires when opening a doc fails because its persisted snapshot won't materialize — a
+   * committed change no longer applies (the closed-doc receive path trusts rev arithmetic and
+   * persists without applying, so a poison change surfaces here, on first open). Locally
+   * unrecoverable but server-recoverable: PatchesSync listens and reloads the authoritative
+   * snapshot. The failing openDoc still rejects; a retry after the heal succeeds.
+   */
+  readonly onDocLoadFailed = signal<(docId: string, error: Error) => void>();
   readonly onTrackDocs = signal<(docIds: string[], algorithmName: AlgorithmName) => void>();
   readonly onUntrackDocs = signal<(docIds: string[]) => void>();
   readonly onDeleteDoc = signal<(docId: string) => void>();
@@ -385,6 +399,12 @@ export class Patches {
         baseDoc.import(pending as PatchesSnapshot<any>);
       }
     } catch (err) {
+      // A snapshot that fails to materialize is a corruption signal, not an open-time race:
+      // surface it on onDocLoadFailed so a sync layer can reload the authoritative snapshot,
+      // then rethrow — this open still fails; a retry after the heal succeeds. Pre-tracked
+      // only: for a doc this open just tracked, the unwind below untracks it again, and a
+      // heal racing that unwind would resurrect store rows for an untracked doc.
+      if (err instanceof ApplyChangesError && wasTracked) this.onDocLoadFailed.emit(docId, err);
       // If we added this doc to the tracked set during this open, unwind the
       // trackDocs side-effects (in-memory set, algorithm.store, onTrackDocs subscribers)
       // so a failed open doesn't leave a tracked-but-unopened doc behind. If untrack
@@ -614,6 +634,7 @@ export class Patches {
     this.onUntrackDocs.clear();
     this.onTrackDocs.clear();
     this.onServerCommit.clear();
+    this.onDocLoadFailed.clear();
     this.onError.clear();
   }
 
@@ -678,9 +699,15 @@ export class Patches {
    *   nothing rejected it — discarding the ops would silently delete the user's
    *   un-persisted work. The ops stay applied (and queued in `_optimisticOps`)
    *   and the submit is re-issued with backoff. Re-submitting cannot duplicate:
-   *   a rejected IndexedDB transaction is atomic, so a failed savePendingChanges
-   *   persisted nothing; the stable change id also backstops the server's commit
-   *   dedup for the ambiguous case where the write did land.
+   *   a rejected IndexedDB transaction is atomic (a failed savePendingChanges
+   *   persisted nothing), and for the ambiguous case where the write DID land
+   *   (an external store acking after its caller timed out), the retry passes
+   *   isRetry so OT pre-scans by the stable change id and returns the landed
+   *   batch instead of re-minting; savePendingChanges also dedups already-pending
+   *   ids in-transaction as a second net. The server's write-time change-id guard
+   *   backstops the remaining sliver (the landed batch committed and compacted
+   *   before the retry ran). LWW has neither net: a retry re-consolidates, which
+   *   double-counts a landed `@inc` (idempotent for the other combinables).
    *
    * The retry runs inside the per-doc change queue, so later changes wait behind
    * it in capture order — required for OT correctness (their ops assume this
@@ -703,7 +730,7 @@ export class Patches {
     const baseDoc = doc as unknown as BaseDoc<T> | undefined;
     for (let attempt = 0; ; attempt++) {
       try {
-        await algorithm.handleDocChange(docId, ops, doc, metadata, stableId);
+        await algorithm.handleDocChange(docId, ops, doc, metadata, stableId, attempt > 0);
         this.onChange.emit(docId);
         return;
       } catch (err) {

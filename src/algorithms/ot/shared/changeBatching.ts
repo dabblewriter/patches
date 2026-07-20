@@ -158,10 +158,10 @@ function breakSingleChange(orig: Change, maxBytes: number, sizeCalculator?: Size
   let rev = orig.rev;
 
   const finish = () => {
-    // The first piece keeps the original change's id: retries look the change up by its
-    // caller-supplied stable id, and the id must survive splitting for that linkage to hold
-    if (byOps.length > 0) byOps[0] = { ...byOps[0], id: orig.id };
-    return byOps;
+    // The first piece keeps the original change's id and later pieces derive theirs from it
+    // (`id~2`, `id~3`, ...): retries and store-level id dedup can then recognize the whole
+    // landed batch by the caller-supplied stable id, not just its first piece.
+    return byOps.map((piece, i) => ({ ...piece, id: i === 0 ? orig.id : `${orig.id}~${i + 1}` }));
   };
 
   const flush = () => {

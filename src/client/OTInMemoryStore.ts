@@ -36,10 +36,8 @@ export class OTInMemoryStore implements OTClientStore {
     };
   }
 
-  async getPendingChanges(docId: string, options?: { startAfterRev?: number }): Promise<Change[]> {
-    const pending = this.docs.get(docId)?.pending ?? [];
-    const startAfter = options?.startAfterRev ?? -1;
-    return pending.filter(change => change.rev > startAfter);
+  async getPendingChanges(docId: string): Promise<Change[]> {
+    return [...(this.docs.get(docId)?.pending ?? [])];
   }
 
   async getCommittedRev(docId: string): Promise<number> {
@@ -71,13 +69,26 @@ export class OTInMemoryStore implements OTClientStore {
 
   // rev is assigned from the doc's stored tail (committedRev or max pending rev) and re-stamped
   // in place, mirroring OTIndexedDBStore's in-transaction mint — rev is only the ordering key.
+  // Ids already pending are skipped (retry dedup) and a tombstone revives on a real save,
+  // both mirroring OTIndexedDBStore.
   async savePendingChanges(docId: string, changes: Change[]): Promise<void> {
     const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
+    const pendingById = new Map(buf.pending.map(c => [c.id, c]));
+    const toSave = changes.filter(c => {
+      const landed = pendingById.get(c.id);
+      if (landed) c.rev = landed.rev;
+      return !landed;
+    });
+    if (toSave.length === 0) return;
     if (!this.docs.has(docId)) this.docs.set(docId, buf);
+    if (buf.deleted) {
+      buf.deleted = undefined;
+      console.warn(`Revived document ${docId} by saving pending changes.`);
+    }
     let tail = buf.committed.at(-1)?.rev ?? buf.snapshot?.rev ?? 0;
     for (const change of buf.pending) if (change.rev > tail) tail = change.rev;
-    for (let i = 0; i < changes.length; i++) changes[i].rev = tail + 1 + i;
-    buf.pending.push(...changes);
+    for (let i = 0; i < toSave.length; i++) toSave[i].rev = tail + 1 + i;
+    buf.pending.push(...toSave);
   }
 
   async applyServerChanges(

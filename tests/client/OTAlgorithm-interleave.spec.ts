@@ -52,6 +52,81 @@ describe('OTAlgorithm receive-vs-mint interleave (real OTIndexedDBStore)', () =>
     expect(paths).toContain('/local'); // the rebased local change survived
     expect(paths).toContain('/typed'); // the concurrently-typed change survived
   });
+
+  it('a delete fired during an in-flight mint keeps its tombstone (no revive)', async () => {
+    // store.deleteDoc takes no pendingTailRev — it is outside R2 — so only the per-doc lock
+    // orders it against a mint whose savePendingChanges is still in flight. Without the lock the
+    // delete's tombstone lands first and the mint's write revives it, cancelling the queued
+    // server delete permanently and leaving an orphan pending row.
+    const originalSave = store.savePendingChanges.bind(store);
+    let releaseMint!: () => void;
+    const mintParked = new Promise<void>(resolve => (releaseMint = resolve));
+    store.savePendingChanges = async (docId, changes) => {
+      await mintParked;
+      return originalSave(docId, changes);
+    };
+
+    const mint = algorithm.handleDocChange('doc1', [{ op: 'add', path: '/x', value: 1 }], undefined, {});
+    const del = algorithm.deleteDoc('doc1');
+    await new Promise(resolve => setTimeout(resolve, 0)); // unlocked, the delete completes here
+    releaseMint();
+    await Promise.all([mint, del]);
+
+    const docs = await store.listDocs(true);
+    expect(docs.find(d => d.docId === 'doc1')?.deleted).toBe(true);
+    expect(await store.getPendingChanges('doc1')).toEqual([]);
+  });
+});
+
+/**
+ * R2's rev-only conflict predicate cannot see a rev-neutral receive: a commit echo is
+ * one-in-one-out (rebaseChanges renumbers survivors from lastServerRev + 1), leaving the
+ * pending tail exactly where it was. Only the per-doc lock orders the replace-style callers
+ * against a receive on the same instance — without it the replace's write reverts the receive,
+ * resurrecting the committed change into pending and leaving the splits a frame stale.
+ */
+describe('OTAlgorithm replace-vs-receive interleave (rev-neutral echo)', () => {
+  let store: OTInMemoryStore;
+  let algorithm: OTAlgorithm;
+
+  beforeEach(async () => {
+    store = new OTInMemoryStore();
+    algorithm = new OTAlgorithm(store);
+    await store.trackDocs(['doc1']);
+    await store.saveDoc('doc1', { state: {}, rev: 4 });
+  });
+
+  it('a commit echo landing mid-replace is not reverted by the replace', async () => {
+    // Pending [S (sent, unacked), C]; a flush split C into two pieces; the echo committing S
+    // arrives while the replace is between its reads and its write.
+    const s = createChange(4, 5, [{ op: 'add', path: '/s', value: 1 }]);
+    const c = createChange(4, 6, [{ op: 'add', path: '/c', value: 2 }]);
+    await store.savePendingChanges('doc1', [s, c]);
+    const split1 = createChange(4, 6, [{ op: 'add', path: '/c1', value: 2 }]);
+    const split2 = createChange(4, 7, [{ op: 'add', path: '/c2', value: 2 }]);
+
+    // Park the replace's conflict-checked write (recognizable: no server changes) so the echo
+    // can try to land inside the replace's read-write window.
+    const originalApply = store.applyServerChanges.bind(store);
+    let releaseReplace!: () => void;
+    const replaceParked = new Promise<void>(resolve => (releaseReplace = resolve));
+    store.applyServerChanges = async (docId, serverChanges, rebased, tailRev) => {
+      if (serverChanges.length === 0) await replaceParked;
+      return originalApply(docId, serverChanges, rebased, tailRev);
+    };
+
+    const replace = algorithm.replacePendingChanges('doc1', [s, c], [s, split1, split2]);
+    await new Promise(resolve => setTimeout(resolve, 0)); // let the replace reach its write
+    const receive = algorithm.applyServerChanges('doc1', [{ ...s }], undefined);
+    await new Promise(resolve => setTimeout(resolve, 0)); // give the echo its chance to interleave
+    releaseReplace();
+    await Promise.all([replace, receive]);
+
+    expect(await store.getCommittedRev('doc1')).toBe(5);
+    const pending = await store.getPendingChanges('doc1');
+    expect(pending.map(ch => ch.id)).toEqual([split1.id, split2.id]); // S committed, never resurrected
+    expect(new Set(pending.map(ch => ch.baseRev))).toEqual(new Set([5])); // splits in the echo's frame
+  });
 });
 
 // Finding #29 (mint half): a receive processed between change() and its queued mint

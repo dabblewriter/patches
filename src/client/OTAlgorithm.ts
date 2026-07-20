@@ -22,6 +22,14 @@ import type { TrackedDoc } from './PatchesStore.js';
 const APPLY_CONFLICT_RETRIES = 10;
 
 /**
+ * How far below committedRev the retry pre-scan looks for an already-committed copy of a
+ * retried change id (see {@link OTAlgorithm._findChangeById}). The retry window is seconds,
+ * so the commit that raced it sits within a handful of revs; 200 matches the store's
+ * snapshot-compaction interval — older rows may be compacted away regardless.
+ */
+const RECENT_COMMITTED_ID_WINDOW = 200;
+
+/**
  * OT (Operational Transformation) algorithm implementation.
  *
  * OT uses revision-based history and rebasing for concurrent edits.
@@ -40,11 +48,11 @@ export class OTAlgorithm implements ClientAlgorithm {
   protected readonly _options: PatchesDocOptions;
 
   /**
-   * Minimal per-doc mutex, kept at exactly the mint-vs-receive seam (see {@link _withDocLock}).
+   * Per-doc mutex serializing this instance's pending-queue mutators (see {@link _withDocLock}).
    * Cross-context safety is the store's job (R1 in-txn rev mint, R2 conflict-safe replace); this
-   * lock only closes the same-instance hole those rev-only contracts cannot express — a mint
-   * reading committedRev while a concurrent receive advances it (stale baseRev) or persisting ops
-   * the receive rebased away in place.
+   * lock closes the same-instance holes those rev-only contracts cannot express — a mint reading
+   * committedRev while a concurrent receive advances it, a rev-neutral receive invisible to R2's
+   * tail check, and a delete racing an in-flight mint (deleteDoc is outside R2 entirely).
    */
   private readonly _docLocks = new Map<string, Promise<unknown>>();
 
@@ -71,7 +79,8 @@ export class OTAlgorithm implements ClientAlgorithm {
     ops: JSONPatchOp[],
     doc: PatchesDoc<T> | undefined,
     metadata: Record<string, any>,
-    id?: string
+    id?: string,
+    isRetry?: boolean
   ): Promise<Change[]> {
     if (ops.length === 0) return [];
 
@@ -79,6 +88,27 @@ export class OTAlgorithm implements ClientAlgorithm {
       // Re-check under the lock: ops arrays are shared with the doc's optimistic queue, and a
       // receive-rebase that ran while we waited may have rebased them away.
       if (ops.length === 0) return [];
+
+      // Idempotent retry: if this caller-minted stable id was already accepted on a prior
+      // attempt (an external store acking after its caller timed out — a plain IndexedDB
+      // transaction is atomic and cannot land unacked), return the landed batch instead of
+      // re-minting. Split pieces carry ids derived from the stable id, so the whole batch is
+      // discoverable by prefix, and savePendingChanges is atomic, so a hit means all of it
+      // landed. Only runs on a retry — the first submit keeps its fast path.
+      if (isRetry && id) {
+        const existing = await this._findChangeById(docId, doc, id);
+        if (existing.length > 0) {
+          // A pending hit means the prior attempt landed the store write but threw before the
+          // doc apply: bring the open doc in line (append to its pending queue, shift its
+          // optimistic entry) exactly as the apply below would have — without it the commit
+          // echo reads as foreign and re-applies the user's own ops. A committed hit skips
+          // this; the echo / misaligned-import path owns the doc from there.
+          if (doc && !existing[0].committedAt && !(doc as OTDoc<T>).getPendingChanges().some(c => c.id === id)) {
+            (doc as OTDoc<T>).applyChanges(existing);
+          }
+          return existing;
+        }
+      }
 
       // Revision info from the open doc; else from the store (no state materialization).
       // Provisional only — savePendingChanges re-stamps rev in its own transaction from the
@@ -116,25 +146,15 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null> {
-    let batch: Change[];
-    if (doc) {
-      // Trust the open doc for pending; a ranged store read picks up any foreign tab's mints
-      // (rev past the doc's tail) and appends them raw. The serial flush and the commit echo
-      // rebase make that safe — the doc learns of them through the echo.
-      const otDoc = doc as OTDoc<any>;
-      const pending = otDoc.getPendingChanges();
-      const tail = pending[pending.length - 1]?.rev ?? otDoc.committedRev;
-      const delta = await this.store.getPendingChanges(docId, { startAfterRev: tail });
-      // Filter the delta against the doc's own pending by id: a custom store that ignores
-      // startAfterRev (back-compat) would return the whole queue, folding the doc's pending in
-      // twice — a duplicate commit the server's id dedup would otherwise have to catch.
-      const have = new Set(pending.map(c => c.id));
-      batch = [...pending, ...delta.filter(c => !have.has(c.id))];
-    } else {
-      batch = await this.store.getPendingChanges(docId);
-    }
-    if (batch.length === 0) return null;
-    return this._withConsistentBaseRev(docId, batch);
+    // Union the FULL store queue with the doc's in-memory pending, store rows winning by id.
+    // R1 mints from the shared store tail, so a foreign tab's row can land BELOW the open doc's
+    // pending tail — a doc-tail-anchored ranged read would never see it. Store rows are also the
+    // rebased truth: a receive that transformed a row in place (same rev) must ship the
+    // transformed ops, not the doc's stale in-memory copy. No state materialization either way.
+    const otDoc = doc as OTDoc<any> | undefined;
+    const { pending } = await this._collectPending(docId, otDoc, otDoc?.committedRev ?? 0);
+    if (pending.length === 0) return null;
+    return this._withConsistentBaseRev(docId, pending);
   }
 
   async applyServerChanges<T extends object>(
@@ -154,7 +174,9 @@ export class OTAlgorithm implements ClientAlgorithm {
       // more than once: SSE broadcast + HTTP ack, re-broadcast, catchup overlap), flagging a gap.
       // Rev arithmetic is the complete gap signal — no state materialization. The
       // MissingChangesError shape matches applyCommittedChanges', so PatchesSync still routes a
-      // gap to syncDoc recovery.
+      // gap to syncDoc recovery. The trade: on the closed-doc path an unappliable change persists
+      // undetected; detection is deferred to materialization (openDoc/getDoc throws
+      // ApplyChangesError → Patches.onDocLoadFailed → snapshot-reload heal) or to compaction.
       const buildFrame = (base: number) => {
         const newC: Change[] = [];
         const staleC: Change[] = [];
@@ -236,21 +258,26 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async replacePendingChanges(docId: string, oldChanges: Change[], newChanges: Change[]): Promise<void> {
-    const oldIds = new Set(oldChanges.map(c => c.id));
-    for (let attempt = 0; attempt < APPLY_CONFLICT_RETRIES; attempt++) {
-      // Preserve any changes minted after oldChanges was read, renumbered after the new queue.
-      // `newChanges` may be empty: splitting can collapse a pending set to nothing (e.g. an
-      // oversized @txt op whose delta carries no sendable ops) — clear the old pending and
-      // renumber any survivors straight off the committed rev then.
-      const committedRev = await this.store.getCommittedRev(docId);
-      const current = await this.store.getPendingChanges(docId);
-      const tailRev = current.length > 0 ? current[current.length - 1].rev : committedRev;
-      let rev = newChanges.length > 0 ? newChanges[newChanges.length - 1].rev : committedRev;
-      const mintedSince = current.filter(c => !oldIds.has(c.id)).map(c => ({ ...c, rev: ++rev }));
-      const result = await this.store.applyServerChanges(docId, [], [...newChanges, ...mintedSince], tailRev);
-      if (result !== 'conflict') return;
-    }
-    throw new Error(`replacePendingChanges for ${docId} did not converge after ${APPLY_CONFLICT_RETRIES} attempts`);
+    // Locked: R2's rev-only conflict check is blind to a rev-neutral receive on this instance
+    // (a commit echo is one-in-one-out, leaving the tail where it was), which would let this
+    // replace revert the receive and resurrect a committed change into pending.
+    return this._withDocLock(docId, async () => {
+      const oldIds = new Set(oldChanges.map(c => c.id));
+      for (let attempt = 0; attempt < APPLY_CONFLICT_RETRIES; attempt++) {
+        // Preserve any changes minted after oldChanges was read, renumbered after the new queue.
+        // `newChanges` may be empty: splitting can collapse a pending set to nothing (e.g. an
+        // oversized @txt op whose delta carries no sendable ops) — clear the old pending and
+        // renumber any survivors straight off the committed rev then.
+        const committedRev = await this.store.getCommittedRev(docId);
+        const current = await this.store.getPendingChanges(docId);
+        const tailRev = current.length > 0 ? current[current.length - 1].rev : committedRev;
+        let rev = newChanges.length > 0 ? newChanges[newChanges.length - 1].rev : committedRev;
+        const mintedSince = current.filter(c => !oldIds.has(c.id)).map(c => ({ ...c, rev: ++rev }));
+        const result = await this.store.applyServerChanges(docId, [], [...newChanges, ...mintedSince], tailRev);
+        if (result !== 'conflict') return;
+      }
+      throw new Error(`replacePendingChanges for ${docId} did not converge after ${APPLY_CONFLICT_RETRIES} attempts`);
+    });
   }
 
   async dropResolvedPending(docId: string, sentChanges: Change[], committedChanges: Change[]): Promise<number> {
@@ -267,23 +294,26 @@ export class OTAlgorithm implements ClientAlgorithm {
 
   async reconcilePending(docId: string, committedChanges: Change[]): Promise<void> {
     if (committedChanges.length === 0) return;
-    for (let attempt = 0; attempt < APPLY_CONFLICT_RETRIES; attempt++) {
-      const pending = await this.store.getPendingChanges(docId);
-      if (pending.length === 0) return;
-      const tailRev = pending[pending.length - 1].rev;
+    // Locked for the same rev-neutral-receive hole as replacePendingChanges.
+    return this._withDocLock(docId, async () => {
+      for (let attempt = 0; attempt < APPLY_CONFLICT_RETRIES; attempt++) {
+        const pending = await this.store.getPendingChanges(docId);
+        if (pending.length === 0) return;
+        const tailRev = pending[pending.length - 1].rev;
 
-      // rebaseChanges drops pending the server already committed (matched by id) and transforms
-      // the survivors into the tail's frame — a pure op transform that never applies the tail, so
-      // it is safe even when the local committed state is corrupt (which is why the
-      // snapshot-reload recovery calling this exists at all).
-      const rebased = rebaseChanges(committedChanges, pending);
+        // rebaseChanges drops pending the server already committed (matched by id) and transforms
+        // the survivors into the tail's frame — a pure op transform that never applies the tail, so
+        // it is safe even when the local committed state is corrupt (which is why the
+        // snapshot-reload recovery calling this exists at all).
+        const rebased = rebaseChanges(committedChanges, pending);
 
-      // Install the reconciled tail AND swap the pending queue in ONE store transaction, retrying
-      // if a foreign mint raced the replace (R2).
-      const result = await this.store.applyServerChanges(docId, committedChanges, rebased, tailRev);
-      if (result !== 'conflict') return;
-    }
-    throw new Error(`reconcilePending for ${docId} did not converge after ${APPLY_CONFLICT_RETRIES} attempts`);
+        // Install the reconciled tail AND swap the pending queue in ONE store transaction, retrying
+        // if a foreign mint raced the replace (R2).
+        const result = await this.store.applyServerChanges(docId, committedChanges, rebased, tailRev);
+        if (result !== 'conflict') return;
+      }
+      throw new Error(`reconcilePending for ${docId} did not converge after ${APPLY_CONFLICT_RETRIES} attempts`);
+    });
   }
 
   // --- Quarantine (poison-pill ejection) ---
@@ -352,79 +382,84 @@ export class OTAlgorithm implements ClientAlgorithm {
     doc?: PatchesDoc<any>,
     opts?: { onlyIfUnappliable?: boolean }
   ): Promise<QuarantinedChange | null> {
-    for (let attempt = 0; attempt < APPLY_CONFLICT_RETRIES; attempt++) {
-      const snapshot = await this.store.getDoc(docId);
-      if (!snapshot) return null;
+    // Locked: makes the re-corroboration below atomic with the ejection persist against
+    // same-instance receives — R2's rev-only check can't see a rev-neutral receive landing in
+    // the (wide) window between the caller's probe and this persist.
+    return this._withDocLock(docId, async () => {
+      for (let attempt = 0; attempt < APPLY_CONFLICT_RETRIES; attempt++) {
+        const snapshot = await this.store.getDoc(docId);
+        if (!snapshot) return null;
 
-      // Store tail read here, BEFORE the doc-only merge below. R2's conflict check in
-      // quarantinePendingChange compares it against the store's own pending rows, so a doc-only
-      // rev merged into snapshot.changes must not inflate it past the store tail — that would hide
-      // a foreign mint landing at store-tail+1, which the replace then wipes.
-      let tailRev = snapshot.rev;
-      for (const c of snapshot.changes) if (c.rev > tailRev) tailRev = c.rev;
+        // Store tail read here, BEFORE the doc-only merge below. R2's conflict check in
+        // quarantinePendingChange compares it against the store's own pending rows, so a doc-only
+        // rev merged into snapshot.changes must not inflate it past the store tail — that would hide
+        // a foreign mint landing at store-tail+1, which the replace then wipes.
+        let tailRev = snapshot.rev;
+        for (const c of snapshot.changes) if (c.rev > tailRev) tailRev = c.rev;
 
-      // Merge doc-only in-memory pending (a torn store write) so the import below can't drop a
-      // change that exists only in the open doc; it rides the rebase as a successor. Identity is
-      // the change id — the rev guard keeps a stale lower-frame copy the store rebased away from
-      // resurrecting.
-      if (doc) {
-        const otDoc = doc as OTDoc<any>;
-        const inMemoryPending = otDoc.getPendingChanges();
-        const latestRev = snapshot.changes[snapshot.changes.length - 1]?.rev ?? snapshot.rev;
-        const storedIds = new Set(snapshot.changes.map(change => change.id));
-        const newChanges = inMemoryPending.filter(change => change.rev > latestRev && !storedIds.has(change.id));
-        snapshot.changes.push(...newChanges);
-      }
-
-      // The auto-eject path re-corroborates here (its earlier verifyPendingChange probe ran
-      // outside any lock, and a broadcast may have rebased the queue since). Same failure posture
-      // as the probe: a frame we can't reconstruct means we can't corroborate, so don't eject.
-      if (opts?.onlyIfUnappliable) {
-        const index = snapshot.changes.findIndex(change => change.id === changeId);
-        if (index === -1) return null;
-        let preState;
-        try {
-          preState = applyChanges(snapshot.state, snapshot.changes.slice(0, index));
-        } catch {
-          return null;
+        // Merge doc-only in-memory pending (a torn store write) so the import below can't drop a
+        // change that exists only in the open doc; it rides the rebase as a successor. Identity is
+        // the change id — the rev guard keeps a stale lower-frame copy the store rebased away from
+        // resurrecting.
+        if (doc) {
+          const otDoc = doc as OTDoc<any>;
+          const inMemoryPending = otDoc.getPendingChanges();
+          const latestRev = snapshot.changes[snapshot.changes.length - 1]?.rev ?? snapshot.rev;
+          const storedIds = new Set(snapshot.changes.map(change => change.id));
+          const newChanges = inMemoryPending.filter(change => change.rev > latestRev && !storedIds.has(change.id));
+          snapshot.changes.push(...newChanges);
         }
-        try {
-          applyPatch(preState, snapshot.changes[index].ops, { strict: true, silent: true });
-          return null; // Applies cleanly now — no longer poison; a plain retry will commit it.
-        } catch {
-          // Still un-appliable — proceed with the ejection.
+
+        // The auto-eject path re-corroborates here (its earlier verifyPendingChange probe ran
+        // outside any lock, and a broadcast may have rebased the queue since). Same failure posture
+        // as the probe: a frame we can't reconstruct means we can't corroborate, so don't eject.
+        if (opts?.onlyIfUnappliable) {
+          const index = snapshot.changes.findIndex(change => change.id === changeId);
+          if (index === -1) return null;
+          let preState;
+          try {
+            preState = applyChanges(snapshot.state, snapshot.changes.slice(0, index));
+          } catch {
+            return null;
+          }
+          try {
+            applyPatch(preState, snapshot.changes[index].ops, { strict: true, silent: true });
+            return null; // Applies cleanly now — no longer poison; a plain retry will commit it.
+          } catch {
+            // Still un-appliable — proceed with the ejection.
+          }
         }
-      }
 
-      const ejection = computePendingEjection(snapshot.state, snapshot.rev, snapshot.changes, changeId);
-      if (!ejection) return null;
+        const ejection = computePendingEjection(snapshot.state, snapshot.rev, snapshot.changes, changeId);
+        if (!ejection) return null;
 
-      const quarantined = await this.store.quarantinePendingChange(
-        docId,
-        ejection.poison,
-        reason,
-        ejection.newPending,
-        tailRev
-      );
-      if (quarantined === 'conflict') continue;
-      if (!quarantined) return null;
+        const quarantined = await this.store.quarantinePendingChange(
+          docId,
+          ejection.poison,
+          reason,
+          ejection.newPending,
+          tailRev
+        );
+        if (quarantined === 'conflict') continue;
+        if (!quarantined) return null;
 
-      // The commit that named this change was rejected, so no server echo is coming for it.
-      // Rebuild the open doc from the post-ejection snapshot already in hand, immediately after
-      // the conflict-checked persist (same async frame) so a queued mint can't read the doc's
-      // stale poison-inclusive frame. import() (not applyChanges) because ejection doesn't
-      // advance committedRev. A rebuild failure must not mask the durable ejection: the entry is
-      // persisted and reported; the doc heals on its next import.
-      if (doc) {
-        try {
-          (doc as OTDoc<any>).import({ state: snapshot.state, rev: snapshot.rev, changes: ejection.newPending });
-        } catch (err) {
-          console.error(`Ejected change ${changeId} from doc ${docId}, but rebuilding the open doc failed:`, err);
+        // The commit that named this change was rejected, so no server echo is coming for it.
+        // Rebuild the open doc from the post-ejection snapshot already in hand, immediately after
+        // the conflict-checked persist (same async frame) so a queued mint can't read the doc's
+        // stale poison-inclusive frame. import() (not applyChanges) because ejection doesn't
+        // advance committedRev. A rebuild failure must not mask the durable ejection: the entry is
+        // persisted and reported; the doc heals on its next import.
+        if (doc) {
+          try {
+            (doc as OTDoc<any>).import({ state: snapshot.state, rev: snapshot.rev, changes: ejection.newPending });
+          } catch (err) {
+            console.error(`Ejected change ${changeId} from doc ${docId}, but rebuilding the open doc failed:`, err);
+          }
         }
+        return quarantined;
       }
-      return quarantined;
-    }
-    throw new Error(`ejectPendingChange for ${docId} did not converge after ${APPLY_CONFLICT_RETRIES} attempts`);
+      throw new Error(`ejectPendingChange for ${docId} did not converge after ${APPLY_CONFLICT_RETRIES} attempts`);
+    });
   }
 
   async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
@@ -454,7 +489,12 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async deleteDoc(docId: string): Promise<void> {
-    return this.store.deleteDoc(docId);
+    // Locked: store.deleteDoc takes no pendingTailRev and can never conflict — it is outside R2
+    // entirely — so this lock is the only thing keeping an in-flight mint's savePendingChanges
+    // from reviving the tombstone (cancelling the queued server delete permanently). The
+    // dangerous shape is a doc that is not open: Patches.deleteDoc only drains the change queue
+    // via closeDoc, which is skipped then.
+    return this._withDocLock(docId, () => this.store.deleteDoc(docId));
   }
 
   async confirmDeleteDoc(docId: string): Promise<void> {
@@ -468,12 +508,17 @@ export class OTAlgorithm implements ClientAlgorithm {
   // --- Private helpers ---
 
   /**
-   * Run `fn` exclusively per `docId`, FIFO. Kept at exactly one seam — mint (handleDocChange)
-   * vs receive (applyServerChanges) on this instance — which the store's rev-only contracts (R1
-   * in-txn mint, R2 conflict replace) cannot express: without it a mint reads committedRev while
-   * a concurrent receive advances it (stale baseRev) or persists ops the receive rebased away in
-   * place. Cross-context (multi-tab) safety is the store's, not this lock's — foreign tabs run
-   * their own instance. All other former call sites are unlocked; they rely on the R2 contract.
+   * Run `fn` exclusively per `docId`, FIFO. Held by every same-instance pending-queue mutator:
+   * mint (handleDocChange), receive (applyServerChanges), the replace-style callers
+   * (replacePendingChanges, reconcilePending, ejectPendingChange), and deleteDoc. The lock and
+   * R2 solve different problems: R2 catches a cross-context mint raising the store tail, but a
+   * rev-only watermark is blind to a rev-neutral receive on this instance (a commit echo is
+   * one-in-one-out) and to deleteDoc (no pendingTailRev at all) — the lock covers those.
+   * Cross-context (multi-tab) safety is the store's, not this lock's — foreign tabs run their
+   * own instance. Read-only probes (verifyPendingChange, getPendingToSend) stay unlocked, and
+   * untrackDocs is unlocked deliberately: eviction racing an in-flight mint should keep the
+   * minted row (the doc re-tracks on the next boot with the work intact), where ordering the
+   * mint first would delete it.
    */
   private _withDocLock<R>(docId: string, fn: () => Promise<R>): Promise<R> {
     const prior = this._docLocks.get(docId) ?? Promise.resolve();
@@ -537,6 +582,31 @@ export class OTAlgorithm implements ClientAlgorithm {
     let tailRev = committedRev;
     for (const c of storePending) if (c.rev > tailRev) tailRev = c.rev;
     return { pending, tailRev };
+  }
+
+  /**
+   * The already-persisted change(s) carrying a caller-minted stable id, if any: store pending
+   * first (the landed-but-unacked write — the store, not the open doc, is where an unacked
+   * write lands), then a bounded recent-committed scan (the write landed AND a flush committed
+   * it before the retry ran). Split pieces derive their ids from the stable id (`id~2`, ...),
+   * so the prefix match returns the whole batch in order.
+   */
+  private async _findChangeById<T extends object>(
+    docId: string,
+    doc: PatchesDoc<T> | undefined,
+    id: string
+  ): Promise<Change[]> {
+    const matchesId = (c: Change) => c.id === id || c.id.startsWith(`${id}~`);
+    const pending = await this.store.getPendingChanges(docId);
+    const fromPending = pending.filter(matchesId);
+    if (fromPending.length > 0) return fromPending;
+
+    if (!this.store.listChanges) return [];
+    const committedRev = doc ? (doc as OTDoc<T>).committedRev : await this.store.getCommittedRev(docId);
+    const recent = await this.store.listChanges(docId, {
+      startAfter: Math.max(0, committedRev - RECENT_COMMITTED_ID_WINDOW),
+    });
+    return recent.filter(matchesId);
   }
 
   /**

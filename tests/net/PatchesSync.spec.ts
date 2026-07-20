@@ -91,6 +91,7 @@ describe('PatchesSync', () => {
       onDeleteDoc: vi.fn(),
       onChange: vi.fn(),
       onServerCommit: signal<(docId: string, changes: Change[]) => void>(),
+      onDocLoadFailed: signal<(docId: string, error: Error) => void>(),
     };
 
     // Mock PatchesWebSocket
@@ -562,14 +563,19 @@ describe('PatchesSync', () => {
   });
 
   describe('apply-failure recovery (P-1)', () => {
-    it('falls back to syncDoc when a committed change fails to apply (ApplyChangesError)', async () => {
-      // A change that fails to apply must trigger recovery — silently skipping it would
-      // diverge this client from every other client that applied it, with zero signal.
+    it('recovers a committed change that fails to apply via the gated snapshot reload (ApplyChangesError)', async () => {
+      // The store write lands before the doc apply, so committedRev has already advanced past
+      // the poison — incremental catch-up alone would no-op and report synced. The poison flag
+      // routes recovery through syncDoc's serial gate, whose ApplyChangesError fallback pulls
+      // the authoritative snapshot.
+      sync['updateState']({ connected: true });
       const applyErr = new ApplyChangesError('c-bad', 6, 0, new Error('[op:add] invalid path'));
-      vi.spyOn(sync as any, '_applyServerChangesToDoc').mockRejectedValue(applyErr);
-      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      // Reject at the algorithm layer so the real _applyServerChangesToDoc catch runs — that
+      // choke point is where the poison flag is armed for every delivery path.
+      mockAlgorithm.applyServerChanges.mockRejectedValueOnce(applyErr);
       const onError = vi.fn();
       sync.onError(onError);
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       await expect(
         sync['_receiveCommittedChanges']('doc1', [
@@ -577,7 +583,52 @@ describe('PatchesSync', () => {
         ])
       ).resolves.toBeUndefined(); // recovered, not an unhandled rejection
 
-      expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+      expect(onError).toHaveBeenCalledWith(applyErr, { docId: 'doc1' }); // corruption telemetry
+      expect(mockWebSocket.getDoc).toHaveBeenCalledWith('doc1'); // authoritative snapshot pulled
+      expect(mockAlgorithm.store.saveDoc).toHaveBeenCalled();
+      expect(sync['_pendingLoadFailures'].has('doc1')).toBe(false); // flag consumed
+      consoleSpy.mockRestore();
+    });
+
+    it('reloads the authoritative snapshot when Patches reports a doc that failed to materialize', async () => {
+      sync['updateState']({ connected: true });
+      const onError = vi.fn();
+      sync.onError(onError);
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const loadErr = new ApplyChangesError('c-bad', 3, 0, new Error('bad op'));
+
+      mockPatches.onDocLoadFailed.emit('doc1', loadErr);
+      await vi.waitFor(() => expect(mockAlgorithm.store.saveDoc).toHaveBeenCalled());
+
+      expect(mockWebSocket.getDoc).toHaveBeenCalledWith('doc1');
+      expect(onError).toHaveBeenCalledWith(loadErr, { docId: 'doc1' });
+      consoleSpy.mockRestore();
+    });
+
+    it('arms the load-failure flag while disconnected so the reconnect sync heals it', async () => {
+      mockPatches.onDocLoadFailed.emit('doc1', new ApplyChangesError('c', 1, 0, new Error('x')));
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mockWebSocket.getDoc).not.toHaveBeenCalled(); // no reload while offline
+      expect(sync['_pendingLoadFailures'].has('doc1')).toBe(true); // waits for syncAllKnownDocs
+    });
+
+    it('emits onServerCommit for the landed prefix when the doc apply fails post-persist', async () => {
+      // The algorithm persists before applying to the doc; a doc-apply throw must not swallow
+      // the batch's durability signal — the recovery reload's baseRev already includes these
+      // revs, so its emit can never cover them.
+      const emitted: Array<[string, Change[]]> = [];
+      mockPatches.onServerCommit((docId: string, changes: Change[]) => emitted.push([docId, changes]));
+      const applyErr = new ApplyChangesError('c6', 6, 0, new Error('bad op'));
+      mockAlgorithm.applyServerChanges.mockRejectedValue(applyErr);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(6); // the store write landed
+      const batch: Change[] = [{ id: 'c6', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 }];
+
+      await expect(sync['_applyServerChangesToDoc']('doc1', batch)).rejects.toThrow(applyErr);
+
+      expect(emitted).toEqual([['doc1', batch]]);
+      expect(sync.docStates.state['doc1']?.committedRev).toBe(6);
     });
 
     it('syncDoc recovers from an ApplyChangesError during catch-up by reloading the authoritative snapshot', async () => {
@@ -629,6 +680,105 @@ describe('PatchesSync', () => {
       expect(onError).toHaveBeenCalledWith(applyErr, { docId: 'doc1' });
       expect(sync.docStates.state['doc1']?.syncStatus).toBe('error');
       consoleSpy.mockRestore();
+    });
+
+    it('keeps the poison flag armed when the recovery reload fails, so the next pass retries it', async () => {
+      // Consuming the flag on entry would orphan the poison: the ladder's next pass would find
+      // no flag and no-op past the corruption. It is cleared only when a reload SUCCEEDS.
+      sync['updateState']({ connected: true });
+      const applyErr = new ApplyChangesError('c-bad', 6, 0, new Error('bad op'));
+      mockAlgorithm.applyServerChanges.mockRejectedValueOnce(applyErr);
+      mockWebSocket.getDoc.mockRejectedValueOnce(new Error('network'));
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await sync['_receiveCommittedChanges']('doc1', [
+        { id: 'c-bad', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 },
+      ]);
+
+      expect(sync['_pendingLoadFailures'].has('doc1')).toBe(true);
+
+      // The next pass finds the flag still armed and heals the doc.
+      await sync['syncDoc']('doc1');
+
+      expect(sync['_pendingLoadFailures'].has('doc1')).toBe(false);
+      expect(mockAlgorithm.store.saveDoc).toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+
+    it('queues a follow-up flush when pending changes survive the recovery reload', async () => {
+      // The recovery pass throws the poison before it ever reaches getPendingToSend, so
+      // surviving pending (e.g. offline edits predating the poison) would sit at
+      // 'synced' + hasPending forever without the queued follow-up run.
+      sync['updateState']({ connected: true });
+      sync['_pendingLoadFailures'].set('doc1', new ApplyChangesError('c-bad', 6, 0, new Error('bad op')));
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      mockAlgorithm.hasPending.mockResolvedValue(true);
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await sync['syncDoc']('doc1');
+
+      expect(sync['_pendingLoadFailures'].has('doc1')).toBe(false); // reload succeeded
+      // Any getPendingToSend call can only come from the queued follow-up pass.
+      await vi.waitFor(() => expect(mockAlgorithm.getPendingToSend).toHaveBeenCalled());
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      consoleSpy.mockRestore();
+    });
+
+    it('applyMergeChanges routes a poison merge into gated recovery and rethrows', async () => {
+      // No other library-side consumer sits above this public API, so the recovery has to run
+      // here — but the caller still has to see the failure.
+      sync['updateState']({ connected: true });
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      const applyErr = new ApplyChangesError('m1', 6, 0, new Error('bad op'));
+      mockAlgorithm.applyServerChanges.mockRejectedValueOnce(applyErr);
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await expect(
+        sync.applyMergeChanges('doc1', [{ id: 'm1', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 }])
+      ).rejects.toBe(applyErr);
+
+      expect(mockWebSocket.getDoc).toHaveBeenCalledWith('doc1'); // gated recovery ran
+      expect(sync['_pendingLoadFailures'].has('doc1')).toBe(false); // and cleared the flag
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('onServerCommit emit floor (concurrent deliveries)', () => {
+    // Delivery paths aren't serialized against each other, so an echo and a broadcast of the
+    // same revs can both be in flight. Whichever finishes its apply first emits and raises
+    // docStates; the loser re-reads that floor at emit time and filters the revs out.
+    const batch: Change[] = [
+      { id: 'c6', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 },
+      { id: 'c7', rev: 7, baseRev: 6, ops: [], createdAt: 1, committedAt: 1 },
+    ];
+
+    it('suppresses a duplicate onServerCommit when a concurrent delivery already emitted the revs', async () => {
+      const emitted: Array<[string, Change[]]> = [];
+      mockPatches.onServerCommit((docId: string, changes: Change[]) => emitted.push([docId, changes]));
+      // The racing delivery finishes (and emits) while this apply is in flight.
+      mockAlgorithm.applyServerChanges.mockImplementationOnce(async () => {
+        sync['_updateDocSyncState']('doc1', { committedRev: 7 });
+        return [];
+      });
+
+      await sync['_applyServerChangesToDoc']('doc1', batch);
+
+      expect(emitted).toEqual([]);
+    });
+
+    it('suppresses the post-failure onServerCommit when a concurrent delivery already emitted the revs', async () => {
+      const emitted: Array<[string, Change[]]> = [];
+      mockPatches.onServerCommit((docId: string, changes: Change[]) => emitted.push([docId, changes]));
+      const applyErr = new ApplyChangesError('c6', 6, 0, new Error('bad op'));
+      mockAlgorithm.getCommittedRev.mockResolvedValue(7); // the store write landed
+      mockAlgorithm.applyServerChanges.mockImplementationOnce(async () => {
+        sync['_updateDocSyncState']('doc1', { committedRev: 7 });
+        throw applyErr;
+      });
+
+      await expect(sync['_applyServerChangesToDoc']('doc1', batch)).rejects.toBe(applyErr);
+
+      expect(emitted).toEqual([]);
     });
   });
 
@@ -1611,6 +1761,41 @@ describe('PatchesSync', () => {
       await sync['_applyServerChangesToDoc']('doc1', [stale, fresh]);
 
       expect(emitted).toEqual([['doc1', [fresh]]]);
+    });
+
+    it('does not re-emit for a re-delivery when a torn reload left the open doc behind the store', async () => {
+      // The open doc can sit a frame BEHIND the store (never ahead) after a torn reload; the
+      // newly-durable filter must take the max of both sources or a re-delivery overlapping
+      // that window re-fires revs already emitted.
+      sync['_initDocSyncState']('doc1', { committedRev: 6 });
+      mockPatches.getOpenDoc.mockReturnValue({ committedRev: 5 });
+      const emitted: Array<[string, Change[]]> = [];
+      mockPatches.onServerCommit((docId: string, changes: Change[]) => emitted.push([docId, changes]));
+      const redelivered: Change = { id: 'c1', rev: 6, baseRev: 5, ops: [], createdAt: 0, committedAt: 0 };
+      const fresh: Change = { id: 'c2', rev: 7, baseRev: 6, ops: [], createdAt: 0, committedAt: 0 };
+
+      await sync['_applyServerChangesToDoc']('doc1', [redelivered]);
+      await sync['_applyServerChangesToDoc']('doc1', [redelivered, fresh]);
+
+      expect(emitted).toEqual([['doc1', [fresh]]]);
+    });
+
+    it('emits onServerCommit for changes made durable by a snapshot reload', async () => {
+      // Recovery installs commits via reconcilePending/saveDoc, never _applyServerChangesToDoc;
+      // the reload path must emit them itself or signal consumers silently miss every commit
+      // recovery delivers.
+      const emitted: Array<[string, Change[]]> = [];
+      mockPatches.onServerCommit((docId: string, changes: Change[]) => emitted.push([docId, changes]));
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      const tail: Change[] = [
+        { id: 'c6', rev: 6, baseRev: 5, ops: [], createdAt: 1, committedAt: 1 },
+        { id: 'c7', rev: 7, baseRev: 6, ops: [], createdAt: 1, committedAt: 1 },
+      ];
+      mockWebSocket.getDoc.mockResolvedValue({ state: {}, rev: 5, changes: tail });
+
+      await sync['_reloadDocFromServer']('doc1', mockAlgorithm);
+
+      expect(emitted).toEqual([['doc1', tail]]);
     });
   });
 

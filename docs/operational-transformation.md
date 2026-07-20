@@ -140,13 +140,15 @@ The server also broadcasts Alice's change to all other clients (including Bob).
 
 ### 5. Clients Apply Updates
 
-When server changes arrive, `PatchesSync` hands them to the store's `applyServerChanges`, passing the open doc if there is one:
+When server changes arrive, `PatchesSync` hands them to the algorithm's `applyServerChanges`, passing the open doc if there is one. The algorithm rebases pending and persists through the store (whose own `applyServerChanges` takes the rebased pending changes, not the doc). `onServerCommit` is then emitted with only the newly durable changes — a re-delivered rev (echo, catchup/broadcast overlap) is filtered out:
 
 ```typescript
 // In PatchesSync when server changes arrive
 const doc = patches.getOpenDoc(docId);
-const rebasedPending = await store.applyServerChanges(docId, serverChanges, doc);
-patches.onServerCommit.emit(docId, serverChanges);
+const priorRev = Math.max(doc?.committedRev ?? 0, docStates[docId]?.committedRev ?? 0);
+await algorithm.applyServerChanges(docId, serverChanges, doc);
+const newlyDurable = serverChanges.filter(c => c.rev > priorRev);
+if (newlyDurable.length > 0) patches.onServerCommit.emit(docId, newlyDurable);
 ```
 
 There is no separate `getDoc` reload. When a doc is open the algorithm **trusts it** as the live source of truth: it detects gaps by rev arithmetic (no state materialization), applies the server changes, and rebases the doc's pending changes against them in the same transaction. The store is a durability log and a cross-tab mailbox, not a snapshot to reload on every frame.

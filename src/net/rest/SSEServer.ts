@@ -66,6 +66,12 @@ export interface SSEServerOptions {
    * since heartbeats bypass the pipeline. Default: 10000.
    */
   storeTimeoutMs?: number;
+  /**
+   * Opaque payload for the id-bearing `connected` frame sent at the start of every
+   * stream (see connect()). Serialized once at construction; the client may read it
+   * (e.g. a server version) but never needs to. Default: `{}`.
+   */
+  connectedData?: unknown;
 }
 
 /**
@@ -130,11 +136,13 @@ export class SSEServer {
   private storeTimeoutMs: number;
   private auth?: AuthorizationProvider;
   private eventStore: SSEEventStore;
+  private connectedData: string;
 
   constructor(options?: SSEServerOptions) {
     this.heartbeatIntervalMs = options?.heartbeatIntervalMs ?? 30_000;
     this.bufferTTLMs = options?.bufferTTLMs ?? 300_000;
     this.storeTimeoutMs = options?.storeTimeoutMs ?? 10_000;
+    this.connectedData = JSON.stringify(options?.connectedData ?? {});
     this.auth = options?.auth;
     this.eventStore =
       options?.eventStore ??
@@ -151,6 +159,10 @@ export class SSEServer {
   /**
    * Opens an SSE connection for a client. Returns a ReadableStream that the
    * framework pipes to the HTTP response.
+   *
+   * Every stream opens with an id-bearing `connected` frame carrying the client's
+   * current cursor (from the store's `currentId`), so even a client that never
+   * receives an event holds a position to resume from later.
    *
    * If `lastEventId` is provided (from the Last-Event-ID header on reconnect),
    * the event store decides continuity: a verified continuation is replayed,
@@ -226,6 +238,21 @@ export class SSEServer {
       // authoritative.
       this.eventStore.loadSubscriptions(clientId).catch(SSEServer.noop);
     }
+
+    // Anchor the client's resume cursor: emit an id-bearing `connected` frame
+    // carrying the client's current stream position, so a later reconnect (or a
+    // cross-tab successor) resumes from here instead of full-syncing — even a
+    // client that never receives an event walks away with a cursor. Enqueued
+    // BEFORE any replay so replayed events (higher ids) advance the cursor past
+    // this floor, never the reverse. A store without currentId, or a degraded
+    // one, yields an id-less frame and the client cold-syncs, exactly as before.
+    this._enqueue(client, async () => {
+      const id = this.eventStore.currentId
+        ? await this._guardStoreCall(this.eventStore.currentId(clientId), null)
+        : null;
+      if (client.writer !== writer) return;
+      this._writeFrame(writer, client.encoder, id, 'connected', this.connectedData);
+    });
 
     if (lastEventId) {
       this._enqueue(client, async () => {

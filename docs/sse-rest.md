@@ -333,6 +333,20 @@ This is where SSE + REST actually shines compared to WebSocket.
 
 The cursor reaches the server two ways. The browser's own auto-reconnect sends the `Last-Event-ID` header — but only on the same `EventSource` instance. A freshly constructed `EventSource` can't set that header at all, so a caller-supplied cursor (see [Cross-Tab Hand-Off](#cross-tab-hand-off)) rides as a `?lastEventId=` query param instead, which the server reads as a header equivalent. Header wins when both are present — it's always the fresher of the two.
 
+### The Connected Anchor
+
+There's a hole in "EventSource remembers the last id it received": what if it never receives one? Ids ride `changesCommitted` and `docDeleted` frames. A client that only ever _sends_ edits — the sole editor of its own docs, with its own commits excluded from its own stream — gets zero id-bearing frames and holds no cursor. Its hand-off then full-syncs every time, because there's nothing to hand off.
+
+So every stream opens with a `connected` frame carrying the client's current cursor, which the store mints when the client has no history yet:
+
+```
+id: 1784516082085-0
+event: connected
+data: {"version":"3.15.0"}
+```
+
+Now the cursor is set the moment the stream opens, before any change arrives. `PatchesREST` exposes it as `lastEventId` (the resume cursor) and the frame's `data` as `serverInfo` (opaque — the server puts whatever it likes there; Pup sends its version). The store decides what the id is via `SSEEventStore.currentId`: it must be one a later `replay` accepts as up-to-date, so resuming from it is an empty continuation, not a resync. A store that omits `currentId`, or a degraded call, yields an id-less `connected` frame and the client cold-syncs — exactly as before.
+
 ### The Three Tiers
 
 | Scenario            | Duration | What happens                                                             |

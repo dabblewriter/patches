@@ -2,17 +2,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SSEEventStore, SSEReplayResult } from '../../../src/net/rest/SSEEventStore';
 import { SSEServer } from '../../../src/net/rest/SSEServer';
 
-/** Helper: read chunks from a ReadableStream, skipping the initial retry message. */
+/**
+ * Helper: read `count` payload chunks from a ReadableStream, skipping the initial
+ * retry message and the `connected` anchor frame that now rides every connect
+ * (filtered so a test's real-frame count and assertions are unaffected).
+ */
 async function readStream(stream: ReadableStream<Uint8Array>, count = 20): Promise<string[]> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   const chunks: string[] = [];
   // Skip the initial retry: message sent on connect
   await reader.read();
-  for (let i = 0; i < count; i++) {
+  while (chunks.length < count) {
     const { done, value } = await reader.read();
     if (done) break;
-    chunks.push(decoder.decode(value));
+    const chunk = decoder.decode(value);
+    if (chunk.includes('event: connected')) continue;
+    chunks.push(chunk);
   }
   reader.releaseLock();
   return chunks;
@@ -94,6 +100,68 @@ describe('SSEServer', () => {
       server.connect('client1');
       // Only one entry
       expect(server.getConnectionIds()).toEqual(['client1']);
+    });
+  });
+
+  describe('connected anchor', () => {
+    /** Read the connected frame (the chunk after retry) as a decoded string. */
+    async function readConnected(stream: ReadableStream<Uint8Array>): Promise<string> {
+      const reader = stream.getReader();
+      const decoder = new TextDecoder();
+      await reader.read(); // retry: 5000
+      const frame = decoder.decode((await reader.read()).value);
+      reader.releaseLock();
+      return frame;
+    }
+
+    it('opens every stream with an id-bearing connected frame from the store cursor', async () => {
+      const store = createStore({ currentId: vi.fn(async () => 'cur-42') });
+      const server = new SSEServer({ eventStore: store, connectedData: { version: '9.9.9' } });
+
+      const frame = await readConnected(server.connect('c1'));
+
+      expect(frame).toBe('id: cur-42\nevent: connected\ndata: {"version":"9.9.9"}\n\n');
+      expect(store.currentId).toHaveBeenCalledWith('c1');
+      server.destroy();
+    });
+
+    it('anchors a fresh client at the in-memory cursor "0"', async () => {
+      // Default server uses the in-memory store, whose currentId is "0" before any append.
+      expect(await readConnected(server.connect('c1'))).toBe('id: 0\nevent: connected\ndata: {}\n\n');
+    });
+
+    it('sends an id-less connected frame when the store has no currentId', async () => {
+      const server = new SSEServer({ eventStore: createStore() });
+      expect(await readConnected(server.connect('c1'))).toBe('event: connected\ndata: {}\n\n');
+      server.destroy();
+    });
+
+    it('sends an id-less connected frame when currentId degrades to null', async () => {
+      const store = createStore({ currentId: vi.fn(async () => null) });
+      const server = new SSEServer({ eventStore: store });
+      expect(await readConnected(server.connect('c1'))).toBe('event: connected\ndata: {}\n\n');
+      server.destroy();
+    });
+
+    it('sends the connected anchor before any replayed events', async () => {
+      const store = createStore({
+        currentId: vi.fn(async () => 'cur'),
+        replay: vi.fn(
+          async (): Promise<SSEReplayResult> => ({
+            type: 'events',
+            events: [{ id: 'e1', event: 'changesCommitted', data: '{}' }],
+          })
+        ),
+      });
+      const server = new SSEServer({ eventStore: store });
+      const stream = server.connect('c1', 'old');
+      const reader = stream.getReader();
+      const decoder = new TextDecoder();
+      await reader.read(); // retry
+      expect(decoder.decode((await reader.read()).value)).toContain('event: connected');
+      expect(decoder.decode((await reader.read()).value)).toContain('event: changesCommitted');
+      reader.releaseLock();
+      server.destroy();
     });
   });
 
@@ -439,6 +507,7 @@ describe('SSEServer', () => {
       const stream = server.connect('client1', '0');
       const reader = stream.getReader();
       await reader.read(); // skip retry: 5000\n\n
+      await reader.read(); // skip the connected anchor frame
 
       // No data should be queued on the stream. A pending read against an
       // empty stream should lose the race against an immediate microtask.
@@ -885,6 +954,7 @@ describe('SSEServer event store seam', () => {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     await reader.read(); // retry: 5000
+    await reader.read(); // connected anchor (id-less: this mock store has no currentId)
 
     expect(decoder.decode((await reader.read()).value)).toBe('id: r1\nevent: caughtUp\ndata: {}\n\n');
     expect(vi.mocked(store.loadSubscriptions).mock.invocationCallOrder[0]).toBeLessThan(

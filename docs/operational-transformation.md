@@ -140,32 +140,27 @@ The server also broadcasts Alice's change to all other clients (including Bob).
 
 ### 5. Clients Apply Updates
 
-This is where the `applyCommittedChanges` algorithm handles the complexity:
+When server changes arrive, `PatchesSync` hands them to the store's `applyServerChanges`, passing the open doc if there is one:
 
 ```typescript
 // In PatchesSync when server changes arrive
-const currentSnapshot = await store.getDoc(docId);
-const newSnapshot = applyCommittedChanges(currentSnapshot, serverChanges);
-
-// Update storage and notify open documents
-await store.applyServerChanges(docId, serverChanges);
-
 const doc = patches.getOpenDoc(docId);
-if (doc) {
-  doc.applyCommittedChanges(serverChanges, newSnapshot.changes);
-}
+const rebasedPending = await store.applyServerChanges(docId, serverChanges, doc);
+patches.onServerCommit.emit(docId, serverChanges);
 ```
+
+There is no separate `getDoc` reload. When a doc is open the algorithm **trusts it** as the live source of truth: it detects gaps by rev arithmetic (no state materialization), applies the server changes, and rebases the doc's pending changes against them in the same transaction. The store is a durability log and a cross-tab mailbox, not a snapshot to reload on every frame.
+
+Persisting the rebased pending is **conflict-checked**. The write only lands if the pending tail the store held still matches what the rebase started from. A foreign tab that minted in the meantime wins that slot, the store returns `'conflict'`, and the algorithm re-reads and rebases again (bounded retry, each pass anchored to a strictly larger tail so it converges). `onServerCommit` fires at this durable choke point: once it emits, the changes are on disk.
 
 Alice's `PatchesSync`:
 
-- Uses `applyCommittedChanges` to merge Bob's change with her pending changes
-- The algorithm calls `rebaseChanges` internally to transform her pending changes
-- Updates her `PatchesDoc` with the new state
+- Rebases Bob's change against her pending changes via `rebaseChanges`
+- Updates her open `PatchesDoc` in place
 
 Bob's `PatchesSync`:
 
-- Receives Alice's change and applies it normally
-- If he has pending changes, they get rebased automatically
+- Receives Alice's change; if he has pending changes, they get rebased automatically
 
 Both Alice and Bob see the same document, with both of their changes applied in the correct order.
 
@@ -332,7 +327,7 @@ interface BranchingStoreBackend {
 }
 ```
 
-Patches provides `InMemoryStore` for testing and simple use cases, and `IndexedDBStore` for browser-based client persistence. See [persist.md](persist.md) for details.
+Patches provides `InMemoryStore` for testing and simple use cases, and `IndexedDBStore` for browser-based client persistence. Both mint each pending change's `rev` **inside the persist transaction**, re-stamping it from the tail already on disk rather than from whatever the caller passed. This is the default: it keeps a doc open in two tabs from stamping the same rev twice, and is what makes the conflict-checked replace above safe. See [persist.md](persist.md) for details.
 
 ## How Transformation Works
 

@@ -218,6 +218,8 @@ Listen for important events from the `Patches` system:
 patches.onServerCommit((docId, changes) => {
   console.log(`Document ${docId} received ${changes.length} changes from server`);
 });
+// Fires at the durable choke point, not when changes land on the wire: by the time it
+// emits, the server changes are persisted and any open doc has been updated.
 
 // When there's an error (usually from sync operations)
 patches.onError((error, context) => {

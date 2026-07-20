@@ -386,25 +386,77 @@ describe('IndexedDBStore open() max-time guard', () => {
     expect(await second).toBeInstanceOf(StorageTimeoutError);
   });
 
-  it('a long-running upgrade stands the hard guard down instead of timing out', async () => {
+  /** Drives an open to `upgradeneeded` and hands back the request. */
+  function beginUpgrade(request: Record<string, any>) {
+    request.result = fakeDb();
+    request.transaction = { objectStore: () => ({ indexNames: { contains: () => true } }) };
+    request.onupgradeneeded({ target: request, oldVersion: 1 });
+    return request;
+  }
+
+  it('a long-running upgrade gets a longer budget than the normal open', async () => {
     const onSlowStorage = vi.fn();
     const store = new IndexedDBStore(`timeout-open-${dbSeq++}`, { onSlowStorage });
     const waiter = (store as unknown as { getDB(): Promise<IDBDatabase> }).getDB();
     const settled = settleFlag(waiter);
 
-    const request = openRequests[0];
-    request.result = fakeDb();
-    request.transaction = { objectStore: () => ({ indexNames: { contains: () => true } }) };
-    request.onupgradeneeded({ target: request, oldVersion: 1 });
+    const request = beginUpgrade(openRequests[0]);
 
-    // The upgrade transaction legitimately runs long (index builds); no timeout may fire.
-    await vi.advanceTimersByTimeAsync(60_000);
+    // The upgrade transaction legitimately runs long (index builds), so the 4s open budget
+    // must not apply — but it is not unlimited either.
+    await vi.advanceTimersByTimeAsync(20_000);
     expect(settled()).toBe(false);
     // The soft hook still reported the slow open.
     expect(onSlowStorage).toHaveBeenCalledTimes(1);
 
     request.onsuccess();
     expect(await waiter).toBe(request.result);
+  });
+
+  it('an upgrade that stalls forever rejects at the re-armed budget instead of hanging', async () => {
+    const store = new IndexedDBStore(`timeout-open-${dbSeq++}`, { onSlowStorage: () => undefined });
+    const waiter = (store as unknown as { getDB(): Promise<IDBDatabase> }).getDB();
+    const settled = settleFlag(waiter);
+    const result = waiter.catch((e: unknown) => e);
+
+    beginUpgrade(openRequests[0]);
+
+    // A blocked version change or a crashed backend leaves the upgrade transaction pending
+    // and fires nothing further. Clearing the hard timer outright (rather than re-arming it)
+    // is exactly the wedge the max-time guard exists to close.
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(settled()).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const err = (await result) as StorageTimeoutError;
+    expect(err).toBeInstanceOf(StorageTimeoutError);
+    expect(err.operation).toBe('open');
+    expect(err.elapsedMs).toBeGreaterThanOrEqual(30_000);
+  });
+
+  it('a hung deleteDatabase that reports blocked rejects with a descriptive Error, never null', async () => {
+    const realDelete = indexedDB.deleteDatabase;
+    const requests: Array<Record<string, any>> = [];
+    (indexedDB as unknown as { deleteDatabase: unknown }).deleteDatabase = () => {
+      // Real browsers fire `blocked` with a null `request.error` — nothing failed yet.
+      const request: Record<string, any> = { onsuccess: null, onerror: null, onblocked: null, error: null };
+      requests.push(request);
+      return request;
+    };
+    try {
+      const dbName = `timeout-open-${dbSeq++}`;
+      const store = new IndexedDBStore(dbName, { onSlowStorage: () => undefined });
+      const result = store.deleteDB().catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(0);
+
+      requests[0].onblocked();
+      const err = await result;
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain(dbName);
+      expect((err as Error).message).toMatch(/blocked/i);
+    } finally {
+      (indexedDB as unknown as { deleteDatabase: unknown }).deleteDatabase = realDelete;
+    }
   });
 
   it('setName during a hung open cancels the stale guard so the new connection stays healthy', async () => {

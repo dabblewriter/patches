@@ -54,8 +54,11 @@ function warnSlowStorage({ operation, storeNames, elapsedMs }: SlowStorageInfo):
 }
 
 interface StorageGuard {
-  /** Push the hard deadline out to a full `storageTimeoutMs` from now. No-op once settled. */
-  extend(): void;
+  /**
+   * Push the hard deadline out to `budgetMs` (default a full `storageTimeoutMs`) from now.
+   * No-op once settled.
+   */
+  extend(budgetMs?: number): void;
   /** Stand down the hard timer only (observable activity owns the deadline); the soft timer stays. */
   clearHard(): void;
   /** Settled: clear all timers; `extend()` becomes a no-op. */
@@ -96,10 +99,10 @@ function armStorageGuard(
     }
   };
   return {
-    extend() {
+    extend(budgetMs = timeoutMs) {
       if (done) return;
       clearHard();
-      hardTimer = setTimeout(fireHard, timeoutMs);
+      hardTimer = setTimeout(fireHard, budgetMs);
     },
     clearHard,
     clear() {
@@ -157,6 +160,16 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
    * that a stuck store surfaces as an error instead of a silent hang.
    */
   protected static readonly OPEN_BLOCKED_TIMEOUT_MS = 5_000;
+
+  /**
+   * How long an upgrade transaction may run before the open's waiters are rejected. An upgrade
+   * is observable progress and can legitimately outrun the normal open budget (index builds
+   * iterate every record), but "observable" is not "guaranteed to finish": a version change
+   * blocked by a peer that never closes, or a crashed storage backend, leaves the upgrade
+   * transaction pending and the open unsettled forever. Generous enough for a real index build,
+   * finite so a wedged upgrade still surfaces as an error instead of a silent hang.
+   */
+  protected static readonly OPEN_UPGRADE_TIMEOUT_MS = 30_000;
 
   protected db: IDBDatabase | null = null;
   /**
@@ -380,10 +393,13 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
 
     request.onupgradeneeded = event => {
       // An upgrade is observable progress, and its transaction may legitimately run long
-      // (index builds iterate every record): stand the hard deadline down like `blocked`
-      // does and let success/error settle the open.
+      // (index builds iterate every record), so the normal open budget is too tight. But
+      // standing the hard deadline down outright reopens the silent-hang class this guard
+      // exists to close: an upgrade transaction that stalls (a version change blocked by a
+      // peer that never closes, a crashed backend) settles nothing and leaves every waiter
+      // parked forever. Re-arm on a longer budget instead; success/error clears it.
       clearBlockedTimer();
-      guard.clearHard();
+      guard.extend(IndexedDBStore.OPEN_UPGRADE_TIMEOUT_MS);
       const db = (event.target as IDBOpenDBRequest).result;
       const transaction = (event.target as IDBOpenDBRequest).transaction!;
       const oldVersion = event.oldVersion;
@@ -474,13 +490,18 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
         guard.clear();
         resolve();
       };
+      // `request.error` is null on `blocked` (nothing failed yet) and can be null on `error`
+      // in real browsers, so never reject with it raw — a null rejection tells the caller
+      // nothing and defeats every `err.message` / `instanceof Error` check downstream.
+      const deleteError = (event: string) =>
+        toStorageError(request.error) ?? new Error(`IndexedDB deleteDatabase "${this.dbName}" ${event}`);
       request.onerror = () => {
         guard.clear();
-        reject(toStorageError(request.error));
+        reject(deleteError('failed'));
       };
       request.onblocked = () => {
         guard.clear();
-        reject(request.error);
+        reject(deleteError('blocked by another connection'));
       };
     });
   }

@@ -110,6 +110,7 @@ describe('PatchesSync', () => {
       onStateChange: vi.fn(),
       onChangesCommitted: vi.fn(),
       onDocDeleted: vi.fn(),
+      resumedStream: false,
     };
 
     // Mock constructors - use function expressions for Vitest 4 compatibility
@@ -251,18 +252,22 @@ describe('PatchesSync', () => {
       expect(mockWebSocket.connect).toHaveBeenCalled();
     });
 
-    it('forwards a resume cursor and runs the next connected pass in resume mode', async () => {
+    it('forwards a resume cursor and runs resume mode when the transport opened a resumed stream', async () => {
       const syncAllSpy = vi.spyOn(sync as any, 'syncAllKnownDocs').mockResolvedValue(undefined);
 
+      // The transport reports it actually opened a resumed stream (server is replaying).
+      mockWebSocket.resumedStream = true;
       await sync.connect('42');
       expect(mockWebSocket.connect).toHaveBeenCalledWith('42');
 
       sync['_handleConnectionChange']('connected');
       expect(syncAllSpy).toHaveBeenCalledWith({ resume: true });
 
-      // The flag is single-shot: a later reconnect (e.g. the server's resync re-anchor)
-      // runs a full cold sync.
+      // A follow-up connected once the transport no longer marks the stream as resumed
+      // (the server's resync re-anchor clears it, as does a plain cold reconnect) runs a
+      // full cold sync.
       syncAllSpy.mockClear();
+      mockWebSocket.resumedStream = false;
       sync['_handleConnectionChange']('disconnected');
       sync['_handleConnectionChange']('connected');
       expect(syncAllSpy).toHaveBeenCalledWith({ resume: false });
@@ -274,6 +279,21 @@ describe('PatchesSync', () => {
       await sync.connect();
       sync['_handleConnectionChange']('connected');
 
+      expect(syncAllSpy).toHaveBeenCalledWith({ resume: false });
+    });
+
+    it('a cursor the transport did not resume (offline defer) does not leak resume into a later cold connected', async () => {
+      const syncAllSpy = vi.spyOn(sync as any, 'syncAllKnownDocs').mockResolvedValue(undefined);
+
+      // The app passes a cursor, but the transport deferred (e.g. offline) and never
+      // opened a resumed stream, so it reports resumedStream=false. The eventual cold
+      // reconnect's connected must run a full sync — not a resume pass over a stream the
+      // server never replayed.
+      mockWebSocket.resumedStream = false;
+      await sync.connect('42');
+      expect(mockWebSocket.connect).toHaveBeenCalledWith('42');
+
+      sync['_handleConnectionChange']('connected');
       expect(syncAllSpy).toHaveBeenCalledWith({ resume: false });
     });
 

@@ -127,6 +127,8 @@ export class PatchesREST implements PatchesConnection {
   private _lastEventAt = 0;
   /** Id of the last id-bearing SSE frame received; the resume cursor (see `lastEventId`). */
   private _lastEventId: string | undefined;
+  /** Whether the currently open stream was opened with a resume cursor (see `resumedStream`). */
+  private _streamResumed = false;
   /** Interval handle for the half-open-stream watchdog; null while not connected. */
   private livenessTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   /** Pending reconnect attempt scheduled after a fatal error / teardown; null when none. */
@@ -161,6 +163,16 @@ export class PatchesREST implements PatchesConnection {
     return this._lastEventId;
   }
 
+  /**
+   * Whether the currently open stream was opened as a resume (with a `lastEventId`
+   * cursor). Set true only when an EventSource is actually opened with the cursor, and
+   * reset to false on every cold open and on a server `resync` re-anchor — so it always
+   * reflects the live stream, never a stale intent. See {@link PatchesConnection.resumedStream}.
+   */
+  get resumedStream(): boolean {
+    return this._streamResumed;
+  }
+
   /** Current connection state of the underlying SSE stream. */
   get state(): ConnectionState {
     return this._state;
@@ -190,6 +202,12 @@ export class PatchesREST implements PatchesConnection {
     // yields no frames before the next hand-off still carries the cursor forward.
     if (lastEventId) this._lastEventId = lastEventId;
     const resumeQuery = lastEventId ? `?lastEventId=${encodeURIComponent(lastEventId)}` : '';
+    // Record what this open actually is, so `resumedStream` reflects the live stream
+    // rather than a caller's intent: a cursor that reaches here opens a resumed stream;
+    // a cold connect (including every internal reconnect, which passes no cursor) clears
+    // it. The offline-defer and already-connected paths return above without opening, so
+    // they never flip this — the eventual cold reconnect sets it false.
+    this._streamResumed = !!lastEventId;
 
     return new Promise<void>((resolve, reject) => {
       const es = new EventSource(`${this._url}/events/${this._encodedClientId}${resumeQuery}`);
@@ -313,6 +331,9 @@ export class PatchesREST implements PatchesConnection {
         if (!this.shouldBeConnected) return;
         // Server's buffer expired — trigger a full re-sync by cycling state.
         // PatchesSync listens to onStateChange and calls syncAllKnownDocs on 'connected'.
+        // Clear the resume flag first: the re-anchor is a cold catch-up, not a replay, so
+        // the 'connected' re-emit below must drive a full sync, not a resume pass.
+        this._streamResumed = false;
         this._setState('disconnected');
         this._setState('connected');
       });

@@ -191,14 +191,6 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   private _syncRetryAttempts = new Map<string, number>();
   /** Doc ids untracked while `syncAllKnownDocs` rebuilds from a store snapshot (null when no rebuild in flight). */
   private _untrackedDuringResync: Set<string> | null = null;
-  /**
-   * Set by `connect(lastEventId)` and consumed by the next `connected` transition: the
-   * server is replaying the event gap after the cursor, so that first pass skips the
-   * per-doc re-pull and re-subscribe (subscriptions are restored server-side) and only
-   * flushes local pending. A server `resync` (cursor too old) re-enters `connected` with
-   * this already false, so the fallback full sync runs. See `_handleConnectionChange`.
-   */
-  private _resumeCursorPending = false;
   /** Per-doc buffers for committed-change broadcasts landing while `_reloadDocFromServer` is in flight. */
   private _reloadBuffers = new Map<string, Change[]>();
   /** Pending per-doc slow re-probe timers for docs the retry ladder gave up on (see `_scheduleSyncReprobe`). */
@@ -283,13 +275,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * Connects to the server and starts syncing if online. If not online, it will wait for online state.
    */
   async connect(lastEventId?: string): Promise<void> {
-    // Arm the resume BEFORE connecting: `connection.connect` can drive the `connected`
-    // transition synchronously, and `_handleConnectionChange` reads this flag there.
-    this._resumeCursorPending = !!lastEventId;
+    // Forward the resume cursor to the transport. Whether the next `connected` pass
+    // actually runs in resume mode is decided from `connection.resumedStream` (what the
+    // transport did), not from the cursor being passed here (what the caller intended) —
+    // so an offline defer or an already-connected no-op can't leak a resume into a later
+    // cold reconnect. See `_handleConnectionChange`.
     try {
       await this.connection.connect(lastEventId);
     } catch (err) {
-      this._resumeCursorPending = false;
       console.error('PatchesSync connection failed:', err);
       const error = err instanceof Error ? err : new Error(String(err));
       this.updateState({ connected: false, syncStatus: 'error', syncError: error });
@@ -1199,11 +1192,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.updateState({ connected: isConnected, syncStatus: newSyncStatus });
 
     if (isConnected) {
-      // A resume connect (cursor supplied) trusts the server's replay for the gap and
-      // only flushes local pending; a cold connect re-syncs everything. Consume the flag
-      // so a follow-up `connected` (e.g. the server's `resync` re-anchor) full-syncs.
-      const resume = this._resumeCursorPending;
-      this._resumeCursorPending = false;
+      // A resumed stream (opened with a cursor) trusts the server's replay for the gap and
+      // only flushes local pending; a cold connect re-syncs everything. The transport is the
+      // authority: `resumedStream` is true only for a stream actually opened with the cursor,
+      // and a server `resync` re-anchor clears it, so that follow-up `connected` full-syncs.
+      const resume = this.connection.resumedStream ?? false;
       void this.syncAllKnownDocs({ resume });
     } else if (!isConnecting) {
       // Drop pending retries — the next reconnect's syncAllKnownDocs re-syncs everything.

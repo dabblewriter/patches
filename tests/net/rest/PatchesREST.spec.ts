@@ -147,6 +147,31 @@ describe('PatchesREST', () => {
       expect(rest.lastEventId).toBe('9');
     });
 
+    it('reports resumedStream only for a stream opened with a cursor', async () => {
+      const coldConnect = rest.connect();
+      MockEventSource.latest.simulateOpen();
+      await coldConnect;
+      expect(rest.resumedStream).toBe(false);
+
+      rest.disconnect();
+
+      const resumeConnect = rest.connect('42');
+      MockEventSource.latest.simulateOpen();
+      await resumeConnect;
+      expect(rest.resumedStream).toBe(true);
+    });
+
+    it('clears resumedStream on a server resync re-anchor so the reconnect full-syncs', async () => {
+      const resumeConnect = rest.connect('42');
+      MockEventSource.latest.simulateOpen();
+      await resumeConnect;
+      expect(rest.resumedStream).toBe(true);
+
+      // Server buffer expired: the resync frame re-anchors the stream as a cold catch-up.
+      MockEventSource.latest.simulateEvent('resync', '');
+      expect(rest.resumedStream).toBe(false);
+    });
+
     it('should resolve only after onopen fires', async () => {
       let resolved = false;
       const connectPromise = rest.connect().then(() => {

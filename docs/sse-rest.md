@@ -77,6 +77,8 @@ To control the id yourself, pass `clientId` in the options. It must be unique pe
 const rest = new PatchesREST(url, { clientId });
 ```
 
+One sanctioned exception to "never share an id": a successor tab resuming a dead predecessor's stream adopts its clientId — see [Cross-Tab Hand-Off](#cross-tab-hand-off). The rule is one _live_ client per id; adoption after death is the point.
+
 ### Backward Compatibility with PatchesSync
 
 `PatchesSync` still accepts a URL string for WebSocket:
@@ -188,7 +190,10 @@ const app = new Hono();
 
 // SSE stream
 app.get('/events/:clientId', c => {
-  const stream = sse.connect(c.req.param('clientId'), c.req.header('Last-Event-ID') ?? undefined);
+  // Header first (the browser's own auto-reconnect), then the query param (a
+  // successor tab resuming — a fresh EventSource can't set the header).
+  const lastEventId = c.req.header('Last-Event-ID') ?? c.req.query('lastEventId') ?? undefined;
+  const stream = sse.connect(c.req.param('clientId'), lastEventId);
   // IMPORTANT: detect disconnect and tell SSEServer
   c.req.raw.signal.addEventListener('abort', () => {
     sse.disconnect(c.req.param('clientId'));
@@ -326,15 +331,44 @@ This is where SSE + REST actually shines compared to WebSocket.
 3. On reconnect, the browser automatically sends `Last-Event-ID` header
 4. The server replays buffered events from that point
 
+The cursor reaches the server two ways. The browser's own auto-reconnect sends the `Last-Event-ID` header — but only on the same `EventSource` instance. A freshly constructed `EventSource` can't set that header at all, so a caller-supplied cursor (see [Cross-Tab Hand-Off](#cross-tab-hand-off)) rides as a `?lastEventId=` query param instead, which the server reads as a header equivalent. Header wins when both are present — it's always the fresher of the two.
+
 ### The Three Tiers
 
 | Scenario            | Duration | What happens                                                             |
 | ------------------- | -------- | ------------------------------------------------------------------------ |
 | Network blip        | Seconds  | Buffer replay — seamless, zero round-trips                               |
 | Extended disconnect | Minutes  | Buffer replay if within TTL, else resync                                 |
+| Tab hand-off        | Seconds  | Successor tab resumes the predecessor's stream via `?lastEventId=`       |
 | Server restart      | Any      | Buffer is gone → `resync` event → full re-sync (same as WebSocket today) |
 
 Most real-world disconnects are tier 1. Phone loses signal for three seconds, laptop closes for a minute, tab gets backgrounded. Buffer replay handles all of these without re-fetching anything.
+
+### Cross-Tab Hand-Off
+
+Close the tab that's driving sync and another open tab takes over. Without a cursor, that successor does a full re-sync of every document — spinner, round-trips, the works — even though it missed a few seconds at most. With one, it resumes the stream where the predecessor left off.
+
+The client side is two properties and an argument:
+
+```typescript
+// Leader tab: persist the cursor where a successor can find it
+// (e.g. localStorage, stamped on pagehide/demotion).
+save({ clientId, lastEventId: rest.lastEventId });
+
+// Successor tab: adopt the predecessor's clientId AND cursor.
+const rest = new PatchesREST(url, { clientId });
+const sync = new PatchesSync(patches, rest);
+await sync.connect(lastEventId);
+```
+
+On a resumed connect, `PatchesSync` skips the re-subscribe and the per-doc re-pull — the server restored the client's subscriptions from its own store and replays the committed gap over the stream — and only flushes docs still holding local pending. A clean hand-off never flashes "syncing".
+
+Two contracts make this work:
+
+- **Same clientId.** The server keys its replay log and restored subscriptions by clientId. A successor connecting with a fresh clientId and an old cursor degrades safely to a full sync — but the resume silently never fires. This is the sanctioned exception to "never share client IDs" ([Client ID](#client-id)): the successor adopts the id only after the predecessor is gone, so there's never two live claimants.
+- **The transport is the authority.** `PatchesSync` consults `resumedStream` — whether the stream _actually_ opened with the cursor — not the cursor you passed. A cursor that never opened a resumed stream (the connect deferred offline, the transport was already connected) falls back to a full sync instead of trusting a replay that never happened.
+
+If the cursor is too old for the server's buffer, the server sends `resync` and the client full-syncs — the same fallback as every other tier. A hand-off can't invent a new failure mode; the worst case is the full re-sync you were getting anyway.
 
 ### Heartbeats
 

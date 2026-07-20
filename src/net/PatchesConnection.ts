@@ -14,8 +14,11 @@ export interface PatchesConnection extends PatchesAPI {
    * Establish the connection to the server. `lastEventId`, when supplied, asks the
    * server to resume the event stream after that id (SSE replay) instead of a cold
    * start — the successor of a closed leader tab passes the predecessor's last id so
-   * the gap is replayed rather than re-synced. Transports without a resumable stream
-   * (WebSocket) ignore it.
+   * the gap is replayed rather than re-synced. The cursor is only honored for the
+   * clientId that earned it: the server keys its replay log and restored subscriptions
+   * by clientId, so the successor must also connect with the predecessor's clientId. A
+   * fresh clientId with an old cursor degrades safely to a full sync (`resync`), but
+   * the resume never fires. Transports without a resumable stream (WebSocket) ignore it.
    */
   connect(lastEventId?: string): Promise<void>;
 

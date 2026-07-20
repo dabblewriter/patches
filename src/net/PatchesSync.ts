@@ -59,6 +59,16 @@ const EMPTY_DOC_STATE: DocSyncState = {
   isLoaded: false,
 };
 
+/**
+ * How long `_handleRemoteDocDeleted` waits on the app's `onRemoteDocDeleted` subscribers before
+ * giving up on them and proceeding. The await is deliberate — subscribers may be async and the
+ * app shelves the discarded pending changes there, so proceeding early risks losing them — but
+ * it runs inside the doc's serialized sync gate, so a subscriber that never settles would wedge
+ * that doc's sync forever. Long enough for a real shelf write (including a slow disk), short
+ * enough that a broken subscriber costs one doc a pause rather than its whole sync lifetime.
+ */
+export const REMOTE_DOC_DELETED_EMIT_TIMEOUT_MS = 10_000;
+
 // Backoff for retrying a doc that failed to sync transiently (see `syncDoc`).
 const SYNC_RETRY_BASE_MS = 1_000;
 const SYNC_RETRY_MAX_MS = 30_000;
@@ -1294,8 +1304,31 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._updateDocSyncState(docId, undefined);
     await algorithm.confirmDeleteDoc(docId);
 
-    // Notify application (with any pending changes that were lost)
-    await this.onRemoteDocDeleted.emit(docId, pendingChanges);
+    // Notify application (with any pending changes that were lost). Awaited so an app that
+    // shelves those changes has landed the write before we proceed, but bounded: subscribers
+    // are app code running inside this doc's sync gate, and one that never settles would wedge
+    // the doc permanently. On expiry, say so loudly and carry on.
+    await this._emitRemoteDocDeleted(docId, pendingChanges);
+  }
+
+  /** Emits `onRemoteDocDeleted`, bounded by {@link REMOTE_DOC_DELETED_EMIT_TIMEOUT_MS}. */
+  private async _emitRemoteDocDeleted(docId: string, pendingChanges: Change[]): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<'timeout'>(resolve => {
+      timer = setTimeout(() => resolve('timeout'), REMOTE_DOC_DELETED_EMIT_TIMEOUT_MS);
+    });
+    try {
+      const result = await Promise.race([this.onRemoteDocDeleted.emit(docId, pendingChanges), timeout]);
+      if (result === 'timeout') {
+        console.error(
+          `onRemoteDocDeleted subscribers for doc ${docId} did not settle within ` +
+            `${REMOTE_DOC_DELETED_EMIT_TIMEOUT_MS}ms; proceeding without them. ` +
+            `${pendingChanges.length} pending change(s) may not have been shelved.`
+        );
+      }
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**

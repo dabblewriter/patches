@@ -359,9 +359,13 @@ export class PatchesREST implements PatchesConnection {
       es.addEventListener('resync', (e: MessageEvent) => {
         this._noteTraffic();
         if (!this.shouldBeConnected) return;
-        // Adopt the server's re-anchor id (when present): it moves our cursor into
-        // the store's current id space so the NEXT reconnect verifies from here
-        // instead of resyncing again. Without it the cursor would stay stale.
+        // Adopt the server's re-anchor id: a pup `resync` rides a freshly minted
+        // marker id, moving our cursor into the store's current id space so the
+        // NEXT reconnect verifies from here instead of resyncing again. EventSource
+        // carries the last-seen id on every frame's `lastEventId` (it persists across
+        // frames per the SSE spec), so an id-less resync leaves the cursor at the last
+        // real id rather than clearing it — harmless: the next connect's `connected`
+        // anchor overwrites it with a verified-current cursor either way.
         if (e.lastEventId) this._lastEventId = e.lastEventId;
         // Server's buffer expired — trigger a full re-sync by cycling state.
         // PatchesSync listens to onStateChange and calls syncAllKnownDocs on 'connected'.

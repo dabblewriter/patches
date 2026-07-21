@@ -196,7 +196,23 @@ export class LWWAlgorithm implements ClientAlgorithm {
         effectiveChanges.push(change);
         cursor = Math.max(cursor, change.rev);
       }
-      if (effectiveChanges.length === 0) return [];
+      if (effectiveChanges.length === 0) {
+        // Follower fan-blindness heal. A SECOND context sharing this store can hold the doc
+        // open while a FIRST context (the writer) already advanced the shared store past the
+        // doc's watermark — the writer persists before it fans, so every fanned batch then
+        // stale-skips above and the open doc, whose in-memory state predates the store, would
+        // never catch up. Refresh it from the store (which folds committed + sending + pending,
+        // preserving local optimistic edits) rather than returning empty-handed. Never
+        // force-apply the stale batch itself — its old field values would regress newer
+        // committed fields. Guard on the doc being genuinely behind: committedRev is a
+        // server-only watermark (optimistic applies never advance it), so an own-echo
+        // re-delivery to an already-current doc can't trip this into a needless rebuild.
+        if (doc && doc.committedRev < committedRev) {
+          const snapshot = await this.loadDoc(docId);
+          if (snapshot) (doc as LWWDoc<T>).import(snapshot);
+        }
+        return [];
+      }
 
       // Apply server changes to store (preserves sendingChange and pendingOps)
       await this.store.applyServerChanges(docId, effectiveChanges);

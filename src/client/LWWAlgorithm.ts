@@ -208,8 +208,24 @@ export class LWWAlgorithm implements ClientAlgorithm {
         // server-only watermark (optimistic applies never advance it), so an own-echo
         // re-delivery to an already-current doc can't trip this into a needless rebuild.
         if (doc && doc.committedRev < committedRev) {
-          const snapshot = await this.loadDoc(docId);
-          if (snapshot) (doc as LWWDoc<T>).import(snapshot);
+          // Rebuild from committed-only state plus the local sending/pending layers so import
+          // re-applies each op exactly once. getDoc folds sending+pending INTO snapshot.state
+          // AND returns them in snapshot.changes, which import re-applies on top — idempotent
+          // for replace ops but doubling delta ops (@inc). The doubled value would then bake in
+          // when the commit echo pure-matches the in-flight key rebuilt from those changes.
+          const { state, rev } = await this.store.getCommittedState(docId);
+          const sending = await this.store.getSendingChange(docId);
+          const pendingOps = await this.store.getPendingOps(docId);
+          // Re-check after the awaits: a concurrent applySnapshot (outside this lock) may have
+          // advanced the doc to rev already, and import permits an equal-rev rebuild that would
+          // just emit needless churn.
+          if (rev > doc.committedRev) {
+            const changes: Change[] = [
+              ...(sending ? [sending] : []),
+              ...(pendingOps.length ? [createChange(rev, rev + 1, pendingOps)] : []),
+            ];
+            (doc as LWWDoc<T>).import({ state, rev, changes });
+          }
         }
         return [];
       }

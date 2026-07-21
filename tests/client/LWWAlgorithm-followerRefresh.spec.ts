@@ -69,6 +69,43 @@ describe('LWWAlgorithm follower fan-blindness heal', () => {
     expect(doc.state).toEqual({ a: 'v' });
   });
 
+  it('folds a pending delta op exactly once when healing (no double-apply through the echo)', async () => {
+    const store = new LWWInMemoryStore();
+    const writer = new LWWAlgorithm(store);
+    const follower = new LWWAlgorithm(store);
+    const doc = new LWWDoc<{ count?: number; foreign?: string }>(DOC);
+
+    // Follower mints a pending combinable op on the open doc (doc shows 5).
+    await follower.handleDocChange(DOC, [{ op: '@inc', path: '/count', value: 5 }], doc, {});
+    expect(doc.state).toEqual({ count: 5 });
+
+    // A foreign commit advances the shared store past the doc.
+    const foreign = committed(0, 1, [{ op: 'replace', path: '/foreign', value: 'x', ts: 1, rev: 1 }]);
+    await writer.applyServerChanges(DOC, [foreign], undefined);
+
+    // The fanned foreign commit stale-skips; the heal must apply the pending @inc once, not twice.
+    await follower.applyServerChanges(DOC, [foreign], doc);
+    expect(doc.state).toEqual({ foreign: 'x', count: 5 });
+    expect(doc.state).toEqual((await store.getDoc(DOC))!.state);
+
+    // Send the pending op, confirm it, then replay the server's echo of the same op. The echo
+    // pure-matches the in-flight key, so a doubled base state would silently persist here.
+    const toSend = await follower.getPendingToSend(DOC);
+    expect(toSend).toHaveLength(1);
+    const sent = toSend![0];
+    await follower.confirmSent(DOC, [sent]);
+    const echo = committed(
+      1,
+      2,
+      sent.ops.map(op => ({ ...op, rev: 2 })),
+      sent.id
+    );
+    await follower.applyServerChanges(DOC, [echo], doc);
+
+    expect(doc.state).toEqual({ foreign: 'x', count: 5 });
+    expect(doc.state).toEqual((await store.getDoc(DOC))!.state);
+  });
+
   it('preserves a local optimistic edit while healing in the foreign field', async () => {
     const store = new LWWInMemoryStore();
     const writer = new LWWAlgorithm(store);

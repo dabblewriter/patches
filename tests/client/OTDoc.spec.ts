@@ -336,6 +336,22 @@ describe('OTDoc — optimistic ops rebase over interleaved server changes', () =
     expect((doc as any)._optimisticOps).toEqual([]);
   });
 
+  it('keeps optimistic ops a non-conflicting foreign change leaves untransformed', () => {
+    // transformPatch returns its input array by IDENTITY when nothing needs
+    // transforming, so the rebased entry can alias the live optimistic array.
+    // The in-place refill must copy first — clearing the alias destroyed
+    // unconflicting in-flight ops entirely: state reverted, the mint sent
+    // nothing, and the typed text silently never reached the server (DAB-828).
+    doc.change(patch => patch.add('/items/-', 'X'));
+    const emittedOps = (doc.onChange.emit as any).mock.calls[0][0];
+
+    doc.applyChanges([makeChange('c-foreign', 1, 2, [{ op: 'add', path: '/other', value: 'Z' }], true)]);
+
+    expect(doc.state.items).toEqual(['a', 'b', 'c', 'X']);
+    expect(emittedOps).toEqual([{ op: 'add', path: '/items/-', value: 'X' }]);
+    expect((doc as any)._optimisticOps).toEqual([[{ op: 'add', path: '/items/-', value: 'X' }]]);
+  });
+
   it('leaves optimistic ops untouched on a pure echo of pending changes', () => {
     doc.change(patch => patch.add('/items/-', 'M'));
     const mintedOps = (doc.onChange.emit as any).mock.calls[0][0];

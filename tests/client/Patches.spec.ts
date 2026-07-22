@@ -536,7 +536,7 @@ describe('Patches', () => {
       expect(mockAlgorithm.handleDocChange).toHaveBeenCalledTimes(1);
       expect(mockDoc.rollbackOptimistic).toHaveBeenCalledTimes(1);
       expect(onErrorSpy).toHaveBeenCalledTimes(1);
-      expect(onErrorSpy.mock.calls[0][1]).toEqual({ docId: 'doc1', willRetry: false });
+      expect(onErrorSpy.mock.calls[0][1]).toEqual({ docId: 'doc1', willRetry: false, kind: 'rejection' });
 
       // A change made after the rollback processes normally.
       await capturedChangeHandler([{ op: 'add', path: '/c', value: 3 }]);
@@ -679,7 +679,7 @@ describe('Patches', () => {
       await (patches as any)._handleDocChange('doc1', ops, mockDoc, mockAlgorithm, {});
 
       expect(mockDoc.rollbackOptimistic).toHaveBeenCalledTimes(1);
-      expect(onErrorSpy).toHaveBeenCalledWith(error, { docId: 'doc1', willRetry: false });
+      expect(onErrorSpy).toHaveBeenCalledWith(error, { docId: 'doc1', willRetry: false, kind: 'rejection' });
     });
 
     it('should keep ops and retry (same stable id) on a transient failure', async () => {
@@ -700,7 +700,12 @@ describe('Patches', () => {
 
         // Failed once, nothing rolled back, error surfaced as retryable.
         expect(mockDoc.rollbackOptimistic).not.toHaveBeenCalled();
-        expect(onErrorSpy).toHaveBeenCalledWith(error, { docId: 'doc1', willRetry: true, attempt: 0 });
+        expect(onErrorSpy).toHaveBeenCalledWith(error, {
+          docId: 'doc1',
+          willRetry: true,
+          kind: 'environment',
+          attempt: 0,
+        });
 
         await vi.advanceTimersByTimeAsync(1000); // first backoff
         await processed;
@@ -710,6 +715,64 @@ describe('Patches', () => {
         expect(first).toEqual(['doc1', ops, mockDoc, {}, expect.any(String)]);
         expect(second).toEqual(['doc1', ops, mockDoc, {}, first[4]]); // same stable id; a failed save persisted nothing
         expect(mockDoc.rollbackOptimistic).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops retrying when the ops were rebased away to empty while the backoff slept', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        mockDoc._hasOptimisticEntry = vi.fn().mockReturnValue(true);
+
+        const error = new Error('Call timed out'); // ambiguous — would otherwise retry
+        vi.mocked(mockAlgorithm.handleDocChange).mockRejectedValueOnce(error);
+
+        const ops = [{ op: 'add' as const, path: '/text', value: 'value' }];
+        const processed = (patches as any)._handleDocChange('doc1', ops, mockDoc, mockAlgorithm, {});
+        await vi.advanceTimersByTimeAsync(0); // attempt 1 fails, backoff scheduled
+
+        // A server-change rebase empties the shared ops array in place before the retry wakes.
+        ops.length = 0;
+
+        await vi.advanceTimersByTimeAsync(1000);
+        await processed;
+
+        // No second submit — the rebased-to-empty guard short-circuits inside the bounded loop.
+        expect(mockAlgorithm.handleDocChange).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('latches the doc after the bounded retry budget is exhausted', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        mockDoc.rollbackOptimistic = vi.fn();
+        mockDoc._hasOptimisticEntry = vi.fn().mockReturnValue(true);
+        const onErrorSpy = vi.fn();
+        patches.onError(onErrorSpy);
+
+        const error = new Error('Call timed out');
+        vi.mocked(mockAlgorithm.handleDocChange).mockRejectedValue(error);
+
+        const ops = [{ op: 'add' as const, path: '/test', value: 'value' }];
+        const processed = (patches as any)._handleDocChange('doc1', ops, mockDoc, mockAlgorithm, {});
+        await vi.advanceTimersByTimeAsync(3000); // 0 + 1s + 2s backoffs
+        await processed;
+
+        expect(mockAlgorithm.handleDocChange).toHaveBeenCalledTimes(3); // initial + 2 retries
+        expect(mockDoc.rollbackOptimistic).not.toHaveBeenCalled(); // ops kept, never discarded
+        expect(patches.isWriteLatched('doc1')).toBe(true);
+        expect(onErrorSpy).toHaveBeenLastCalledWith(error, {
+          docId: 'doc1',
+          willRetry: false,
+          kind: 'environment',
+          attempt: 2,
+        });
       } finally {
         vi.useRealTimers();
       }

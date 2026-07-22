@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   isAbortError,
+  isDefectiveChangeError,
   isNetworkError,
   isStorageError,
   NetworkError,
@@ -350,6 +351,39 @@ describe('StatusError', () => {
       expect(wrapped).toBeInstanceOf(StorageError);
       expect((wrapped as StorageError).message).toBe('Unable to store record in object store');
       expect((wrapped as StorageError).cause).toBe(oldShape);
+    });
+  });
+
+  describe('isDefectiveChangeError', () => {
+    it('classifies the change-is-un-persistable DOMException names', () => {
+      expect(isDefectiveChangeError(new DOMException('could not be cloned', 'DataCloneError'))).toBe(true);
+      expect(isDefectiveChangeError(new DOMException('invalid key', 'DataError'))).toBe(true);
+      expect(isDefectiveChangeError(new DOMException('key already exists', 'ConstraintError'))).toBe(true);
+    });
+
+    it('classifies by name without an instanceof Error gate (cross-realm / structured-clone)', () => {
+      // A value that crossed a structured-clone/worker boundary keeps only name/message/stack,
+      // and a pre-Safari-12 DOMException is not an Error — a plain shape must still classify.
+      expect(isDefectiveChangeError({ name: 'DataCloneError', message: 'x is not cloneable' })).toBe(true);
+      const subclassed = new Error('non-cloneable value in change');
+      subclassed.name = 'DataCloneError';
+      expect(isDefectiveChangeError(subclassed)).toBe(true);
+    });
+
+    it('does NOT classify storage faults, rejections, aborts, or ordinary failures', () => {
+      // Storage faults are the environment failing to save a well-formed record — retryable,
+      // and deliberately disjoint from defective (a malformed record). The two must not overlap.
+      expect(isDefectiveChangeError(new DOMException('Unable to store record', 'UnknownError'))).toBe(false);
+      expect(isDefectiveChangeError(new DOMException('The quota has been exceeded.', 'QuotaExceededError'))).toBe(
+        false
+      );
+      expect(isStorageError(new DOMException('could not be cloned', 'DataCloneError'))).toBe(false);
+      expect(isDefectiveChangeError(new StatusError(403, 'Forbidden'))).toBe(false);
+      expect(isDefectiveChangeError(new DOMException('The transaction was aborted.', 'AbortError'))).toBe(false);
+      expect(isDefectiveChangeError(new Error('some transient failure'))).toBe(false);
+      expect(isDefectiveChangeError('DataCloneError')).toBe(false);
+      expect(isDefectiveChangeError(undefined)).toBe(false);
+      expect(isDefectiveChangeError(null)).toBe(false);
     });
   });
 

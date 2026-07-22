@@ -242,6 +242,43 @@ export function toStorageError(err: unknown): unknown {
 }
 
 /**
+ * The DOMException names a browser puts on a change whose OWN DATA can never be persisted —
+ * no environment, and no number of retries, will ever make the write succeed:
+ * - `DataCloneError` — IndexedDB's structured-clone step rejected a non-cloneable value inside
+ *   the change (a function, a live class instance, a DOM node, a Symbol).
+ * - `DataError` — a key or value violated IndexedDB's data rules (invalid key type/shape, a
+ *   value that isn't valid for the store's keyPath).
+ * - `ConstraintError` — the record structurally violates a uniqueness/keyPath constraint.
+ *
+ * These are deliberately NOT in {@link STORAGE_FAULT_NAMES}: a storage fault is the environment
+ * failing to save a WELL-FORMED record (retry may succeed once pressure lifts), whereas each of
+ * these means the record ITSELF is malformed. That is a bug in the code that produced the change,
+ * never a transient condition — which is exactly why the storage-fault doc-comment lists
+ * `ConstraintError`/`DataError` as programming errors it excludes.
+ */
+const DEFECTIVE_CHANGE_ERROR_NAMES: ReadonlySet<string> = new Set(['DataCloneError', 'DataError', 'ConstraintError']);
+
+/**
+ * True when a failure means THE CHANGE ITSELF can never be saved — its data is structurally
+ * un-persistable (a non-cloneable value, a key/shape violation), not the environment failing to
+ * save a well-formed one. See {@link DEFECTIVE_CHANGE_ERROR_NAMES}.
+ *
+ * This is a bug in the code that produced the change: every attempt throws the identical error,
+ * so retrying is provably useless and "working around" the value (silently dropping or mutating
+ * it to fit) is forbidden — it would corrupt the user's document without their knowledge. The
+ * only correct response is to fail the change loudly and let the app surface it.
+ *
+ * Matches purely by `name`, deliberately WITHOUT an `instanceof Error` gate — the same
+ * cross-realm/`DOMException` reasons documented on {@link isStorageError}: a raw WebKit
+ * `DOMException` is not an `Error` on old engines, and a value that crossed a
+ * structured-clone/worker boundary keeps only name/message/stack.
+ */
+export function isDefectiveChangeError(err: unknown): boolean {
+  const name = (err as { name?: unknown } | null | undefined)?.name;
+  return typeof name === 'string' && DEFECTIVE_CHANGE_ERROR_NAMES.has(name);
+}
+
+/**
  * Error rejected by the JSON-RPC client for protocol-level errors (negative
  * JSON-RPC codes like -32601). HTTP-style positive codes are rehydrated into
  * {@link StatusError} instead so callers can branch on `err.code` uniformly.

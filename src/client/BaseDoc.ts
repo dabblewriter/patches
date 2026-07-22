@@ -138,6 +138,18 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
   }
 
   /**
+   * Internal: a snapshot (shallow copy) of the optimistic FIFO queue, oldest first.
+   * Patches.retrySavingChanges() re-drives these through the submit path after clearing a
+   * write latch. The inner op arrays are the SAME references the live queue holds (and that
+   * {@link _hasOptimisticEntry} matches on), so a re-driven submit's confirmation shift and
+   * mid-retry guards line up with the real queue; the OUTER array is a copy so iterating it
+   * is safe while confirmations shift entries off the front.
+   */
+  _getOptimisticEntries(): JSONPatchOp[][] {
+    return [...this._optimisticOps];
+  }
+
+  /**
    * Returns the tail of Patches' in-flight change queue for this doc, or undefined
    * if there is no work pending. Wired by Patches.openDoc(); standalone docs (no
    * Patches) have no queue, so flush() short-circuits.

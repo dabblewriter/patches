@@ -91,6 +91,57 @@ describe('OTAlgorithm.applyServerChanges — interior-gap handling', () => {
     expect(doc.state).toEqual({ base: true, a: 1, b: 2, c: 3, d: 4 });
   });
 
+  it('catches an interior hole behind a root-replace catchup leading edge', async () => {
+    // The leading change is a root-replace catchup at a rev jump (100 → 105), exempted from the
+    // leading-edge gap check. But the tail skips 106, so the interior scan must still trip behind
+    // the exemption and route to recovery rather than writing the store and skipping content.
+    const batch = [
+      committed(createChange(100, 105, [{ op: 'replace', path: '', value: { base: true, snap: true } }])),
+      // 106 missing — the interior hole behind the exempted leading edge
+      committed(createChange(106, 107, [{ op: 'add', path: '/e', value: 5 }])),
+    ];
+    const err = await algorithm.applyServerChanges('doc1', batch, undefined).catch(e => e);
+    expect(err).toBeInstanceOf(MissingChangesError);
+    // Diagnostics point at the real hole (106 → 107), not the exempted leading edge; sinceRev
+    // stays the committed rev recovery must pull from.
+    expect(err).toMatchObject({ expectedRev: 106, gotRev: 107, sinceRev: 100 });
+    // Store not advanced past the hole.
+    expect(await store.getCommittedRev('doc1')).toBe(100);
+  });
+
+  it('rebuilds an open doc when the store re-anchor absorbs a partial-edge gap (non-empty newC)', async () => {
+    // Store is complete to rev 103 (a peer/writer persisted 101–103 densely).
+    await algorithm.applyServerChanges(
+      'doc1',
+      [
+        committed(createChange(100, 101, [{ op: 'add', path: '/a', value: 1 }])),
+        committed(createChange(101, 102, [{ op: 'add', path: '/b', value: 2 }])),
+        committed(createChange(102, 103, [{ op: 'add', path: '/c', value: 3 }])),
+      ],
+      undefined
+    );
+    expect(await store.getCommittedRev('doc1')).toBe(103);
+
+    // A follower doc is still at rev 100 and receives a gapped fan [101, 104]: 104 sits one past
+    // the store edge, so the store-rev re-check re-anchors the frame off 103 and the new-change
+    // frame becomes a NON-empty, internally-contiguous [104]. The gap check passes and the store
+    // write stays dense (committed advances 103 → 104), but the ORIGINAL batch [101, 104] is still
+    // non-contiguous, so the apply branch must re-scan serverChanges and take the store rebuild.
+    const doc = new OTDoc<Record<string, unknown>>('doc1', { state: { base: true }, rev: 100, changes: [] });
+    const gappedFan = [
+      committed(createChange(100, 101, [{ op: 'add', path: '/a', value: 1 }])),
+      // 102, 103 absent from the fan but present in the store
+      committed(createChange(103, 104, [{ op: 'add', path: '/d', value: 4 }])),
+    ];
+    await algorithm.applyServerChanges('doc1', gappedFan, doc);
+
+    // Store dense through 104, and the doc healed from it — caught up to 104 with the skipped
+    // content (b, c) present, not advanced past it.
+    expect(await store.getCommittedRev('doc1')).toBe(104);
+    expect(doc.committedRev).toBe(104);
+    expect(doc.state).toEqual({ base: true, a: 1, b: 2, c: 3, d: 4 });
+  });
+
   it('applies a contiguous fan incrementally (regression)', async () => {
     const doc = new OTDoc<Record<string, unknown>>('doc1', { state: { base: true }, rev: 100, changes: [] });
     await algorithm.applyServerChanges(

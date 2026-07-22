@@ -22,6 +22,21 @@ import type { TrackedDoc } from './PatchesStore.js';
 const APPLY_CONFLICT_RETRIES = 10;
 
 /**
+ * Index of the first change whose rev is not exactly one past its predecessor's — i.e. the first
+ * interior hole in a rev run — or -1 when the run is fully dense. Server revs are dense per doc, so
+ * any such gap in a committed batch is a delivery defect, not a legitimate sparse batch. Shared by
+ * the two rev-contiguity scans in this file (buildFrame's new-change frame and applyServerChanges'
+ * branch selector). OTDoc.applyChanges deliberately keeps its own inline scan as an independent
+ * last-line invariant that does not lean on this layer.
+ */
+function firstGapIndex(changes: Change[]): number {
+  for (let i = 1; i < changes.length; i++) {
+    if (changes[i].rev !== changes[i - 1].rev + 1) return i;
+  }
+  return -1;
+}
+
+/**
  * OT (Operational Transformation) algorithm implementation.
  *
  * OT uses revision-based history and rebasing for concurrent edits.
@@ -160,6 +175,10 @@ export class OTAlgorithm implements ClientAlgorithm {
         const staleC: Change[] = [];
         for (const change of serverChanges) (change.rev > base ? newC : staleC).push(change);
         let gap = false;
+        // The actual hole boundary for an INTERIOR gap, so the throw below can report the real
+        // missing revs. Undefined for a leading-edge gap, where newServerChanges[0].rev is already
+        // the right diagnostic.
+        let gapAt: { expected: number; got: number } | undefined;
         if (newC.length > 0 && newC[0].rev !== base + 1) {
           const first = newC[0];
           const isRootReplaceCatchup =
@@ -172,14 +191,13 @@ export class OTAlgorithm implements ClientAlgorithm {
         // an interior hole too so it routes to MissingChangesError recovery (or the store-rev
         // re-check below) rather than being written to the store and skipping content.
         if (!gap) {
-          for (let i = 1; i < newC.length; i++) {
-            if (newC[i].rev !== newC[i - 1].rev + 1) {
-              gap = true;
-              break;
-            }
+          const i = firstGapIndex(newC);
+          if (i !== -1) {
+            gap = true;
+            gapAt = { expected: newC[i - 1].rev + 1, got: newC[i].rev };
           }
         }
-        return { newC, staleC, gap };
+        return { newC, staleC, gap, gapAt };
       };
 
       // Trust the open doc's committedRev optimistically. The one case it is wrong is a torn
@@ -188,16 +206,24 @@ export class OTAlgorithm implements ClientAlgorithm {
       // re-check the store's committedRev (the authority) before declaring one; the aligned path
       // stays store-read-free.
       let committedRev = otDoc ? otDoc.committedRev : await this.store.getCommittedRev(docId);
-      let { newC: newServerChanges, staleC: staleServerChanges, gap } = buildFrame(committedRev);
+      let { newC: newServerChanges, staleC: staleServerChanges, gap, gapAt } = buildFrame(committedRev);
       if (gap && otDoc) {
         const storeRev = await this.store.getCommittedRev(docId);
         if (storeRev > committedRev) {
           committedRev = storeRev;
-          ({ newC: newServerChanges, staleC: staleServerChanges, gap } = buildFrame(committedRev));
+          ({ newC: newServerChanges, staleC: staleServerChanges, gap, gapAt } = buildFrame(committedRev));
         }
       }
       if (gap) {
-        throw new MissingChangesError(committedRev + 1, newServerChanges[0].rev, committedRev);
+        // sinceRev MUST stay committedRev — recovery pulls the tail from there and that is correct
+        // regardless of where the hole is. Only the diagnostic expected/got reflect the actual
+        // hole: an interior gap reports its real boundary (gapAt), a leading-edge gap the first
+        // new rev.
+        throw new MissingChangesError(
+          gapAt?.expected ?? committedRev + 1,
+          gapAt?.got ?? newServerChanges[0].rev,
+          committedRev
+        );
       }
 
       // Rebase pending and persist, retrying if a foreign mint raced the replace (R2). Each retry
@@ -229,17 +255,14 @@ export class OTAlgorithm implements ClientAlgorithm {
 
       if (otDoc) {
         // `serverChanges` is internally contiguous when the frame passed the gap check above,
-        // EXCEPT when a store-rev re-check absorbed an interior-gapped frame (newC emptied), in
-        // which case the original batch is still non-contiguous — verify it here so such a batch
-        // rebuilds from the store instead of advancing the in-memory watermark past skipped
-        // content via the incremental apply.
-        let contiguous = true;
-        for (let i = 1; i < serverChanges.length; i++) {
-          if (serverChanges[i].rev !== serverChanges[i - 1].rev + 1) {
-            contiguous = false;
-            break;
-          }
-        }
+        // EXCEPT when the store-rev re-check re-anchored the frame off a higher store rev and so
+        // absorbed an interior-gapped batch. That is broader than the newC-emptied case: if the
+        // store rev sits at the hole's trailing edge (store at 150 for a batch [148, 151]), the
+        // rebuilt frame passes with a NON-empty newC = [151] — leading edge clean off the store
+        // rev — yet the original batch [148, 151] is still non-contiguous. Re-scan the actual
+        // `serverChanges` array (not newC) here so either shape rebuilds from the store instead of
+        // advancing the in-memory watermark past skipped content via the incremental apply.
+        const contiguous = firstGapIndex(serverChanges) === -1;
         if (contiguous && otDoc.committedRev === serverChanges[0].rev - 1) {
           otDoc.applyChanges(changesToBroadcast);
         } else {

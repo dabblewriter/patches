@@ -232,6 +232,13 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // (committedRev == store rev) while its state is behind, which the reconciliation audit
       // cannot detect (it gates on store rev being strictly greater). Refuse it instead; the
       // OT receive path routes a non-contiguous batch to a full store rebuild.
+      //
+      // Deliberately a plain Error, NOT MissingChangesError: this is a last-line invariant that
+      // signals a CALLER bug (the algorithm layer must never hand this method a gapped committed
+      // batch), not a recoverable transport gap. A MissingChangesError here would route through
+      // PatchesSync's getChangesSince gap-recovery and mask the bug as a transient network hole.
+      // Nothing depends on the type today (OTAlgorithm is the only committed-path caller); the
+      // note is here so a future reader does not "fix" it into the recoverable class.
       for (let i = 1; i < serverChanges.length; i++) {
         if (serverChanges[i].rev !== serverChanges[i - 1].rev + 1) {
           throw new Error(

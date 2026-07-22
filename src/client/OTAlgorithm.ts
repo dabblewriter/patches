@@ -166,6 +166,19 @@ export class OTAlgorithm implements ClientAlgorithm {
             first.ops.length === 1 && first.ops[0].op === 'replace' && first.ops[0].path === '';
           gap = !isRootReplaceCatchup;
         }
+        // Interior contiguity: server revs are dense, so a hole *between* new changes (e.g.
+        // [148, 151] with 149/150 dropped by a partial fan) is a delivery defect, not a
+        // root-replace catchup. The first-element check above only sees the leading edge; catch
+        // an interior hole too so it routes to MissingChangesError recovery (or the store-rev
+        // re-check below) rather than being written to the store and skipping content.
+        if (!gap) {
+          for (let i = 1; i < newC.length; i++) {
+            if (newC[i].rev !== newC[i - 1].rev + 1) {
+              gap = true;
+              break;
+            }
+          }
+        }
         return { newC, staleC, gap };
       };
 
@@ -215,11 +228,24 @@ export class OTAlgorithm implements ClientAlgorithm {
       const changesToBroadcast = [...serverChanges, ...rebased];
 
       if (otDoc) {
-        if (otDoc.committedRev === serverChanges[0].rev - 1) {
+        // `serverChanges` is internally contiguous when the frame passed the gap check above,
+        // EXCEPT when a store-rev re-check absorbed an interior-gapped frame (newC emptied), in
+        // which case the original batch is still non-contiguous — verify it here so such a batch
+        // rebuilds from the store instead of advancing the in-memory watermark past skipped
+        // content via the incremental apply.
+        let contiguous = true;
+        for (let i = 1; i < serverChanges.length; i++) {
+          if (serverChanges[i].rev !== serverChanges[i - 1].rev + 1) {
+            contiguous = false;
+            break;
+          }
+        }
+        if (contiguous && otDoc.committedRev === serverChanges[0].rev - 1) {
           otDoc.applyChanges(changesToBroadcast);
         } else {
-          // Misaligned (root-replace catchup, or a stale re-delivery): rebuild from the store we
-          // just wrote — the only remaining getDoc in the receive path, paid on the rare path only.
+          // Misaligned (root-replace catchup, a stale re-delivery, or an interior-gapped batch):
+          // rebuild from the store — the complete, authoritative committed state — the only
+          // remaining getDoc in the receive path, paid on the rare path only.
           const snapshot = await this.loadDoc(docId);
           if (snapshot) otDoc.import(snapshot as PatchesSnapshot<T>);
         }

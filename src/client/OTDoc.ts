@@ -225,6 +225,21 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         throw new Error('Cannot apply committed changes to a doc that is not at the correct revision');
       }
 
+      // Committed revs are dense per doc, so an interior hole in this batch (e.g. [148, 151]
+      // with 149/150 dropped by a partial fan / self-echo exclusion) is always a delivery
+      // defect. Without this guard the present ops apply and `_committedRev` advances to the
+      // LAST rev, silently skipping the missing content — a doc that reads as caught up
+      // (committedRev == store rev) while its state is behind, which the reconciliation audit
+      // cannot detect (it gates on store rev being strictly greater). Refuse it instead; the
+      // OT receive path routes a non-contiguous batch to a full store rebuild.
+      for (let i = 1; i < serverChanges.length; i++) {
+        if (serverChanges[i].rev !== serverChanges[i - 1].rev + 1) {
+          throw new Error(
+            `Cannot apply committed changes with a gap at rev ${serverChanges[i - 1].rev} → ${serverChanges[i].rev}`
+          );
+        }
+      }
+
       // Pure echo: every server change confirms one of our own pending changes (no foreign
       // concurrent ops). The recomputed state is data-identical to the current state, so we
       // skip _recomputeState() to avoid emitting a redundant store update with a fresh object

@@ -337,6 +337,79 @@ describe('Patches change-submit retry (non-destructive rollback)', () => {
       expect(patches.isWriteLatched('doc1')).toBe(true); // re-latched
       expect(doc.state).toEqual({ text: 'hello' }); // still retained, never discarded
     });
+
+    it('drops the write latch on closeDoc so a reopened doc is not stuck latched', async () => {
+      setup();
+      vi.useFakeTimers();
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const saveSpy = vi.spyOn(store, 'savePendingChanges');
+      saveSpy.mockImplementation(async () => {
+        throw timeoutError();
+      });
+
+      const doc = await patches.openDoc<{ text?: string }>('doc1');
+      doc.change(patch => patch.add('/text', 'hello'));
+      await vi.advanceTimersByTimeAsync(3000); // 3 failed attempts → latch
+      expect(patches.isWriteLatched('doc1')).toBe(true);
+
+      // Close the latched doc (last ref) — its never-persisted optimistic ops go with it, so the
+      // latch must go too. A leaked latch would silently swallow every save after reopen.
+      vi.useRealTimers();
+      await patches.closeDoc('doc1');
+      expect(patches.isWriteLatched('doc1')).toBe(false);
+      expect(patches.writeLatchedDocs).toEqual([]);
+
+      // Reopen with a working store: a fresh edit must persist normally, not hit a stale latch.
+      saveSpy.mockRestore();
+      const reopened = await patches.openDoc<{ text?: string; again?: string }>('doc1');
+      expect(patches.isWriteLatched('doc1')).toBe(false);
+      reopened.change(patch => patch.add('/again', 'world'));
+      await reopened.flush();
+
+      expect(patches.isWriteLatched('doc1')).toBe(false);
+      const pending = await store.getPendingChanges('doc1');
+      expect(pending).toHaveLength(1);
+      expect(pending[0].ops).toEqual([{ op: 'add', path: '/again', value: 'world' }]);
+    });
+
+    it('re-drives a latched change under its original stable id (server dedup survives the latch)', async () => {
+      setup();
+      vi.useFakeTimers();
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const original = store.savePendingChanges.bind(store);
+      const seenIds: string[] = [];
+      let failSaves = true;
+      vi.spyOn(store, 'savePendingChanges').mockImplementation(async (id, changes) => {
+        for (const c of changes) seenIds.push(c.id);
+        if (failSaves) throw timeoutError();
+        return original(id, changes);
+      });
+
+      const doc = await patches.openDoc<{ text?: string }>('doc1');
+      doc.change(patch => patch.add('/text', 'hello'));
+      await vi.advanceTimersByTimeAsync(3000); // 3 failed attempts → latch
+      expect(patches.isWriteLatched('doc1')).toBe(true);
+
+      const idDuringFailures = seenIds[0];
+      expect(seenIds).toHaveLength(3); // one save call per bounded attempt
+      expect(seenIds.every(seen => seen === idDuringFailures)).toBe(true); // stable across the retries
+
+      // Store recovers; app resumes saving. The re-drive must reuse the SAME id, not mint a fresh
+      // one — otherwise a submit that had actually landed would double-commit under a new id.
+      failSaves = false;
+      seenIds.length = 0;
+      vi.useRealTimers();
+      await patches.retrySavingChanges('doc1');
+
+      const pending = await store.getPendingChanges('doc1');
+      expect(pending).toHaveLength(1);
+      expect(pending[0].id).toBe(idDuringFailures); // re-driven under the original stable id
+      expect(seenIds).toEqual([idDuringFailures]); // the recovering save used that same id
+    });
   });
 
   describe('LWW', () => {

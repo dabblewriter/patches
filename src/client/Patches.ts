@@ -128,6 +128,16 @@ export class Patches {
    * {@link retrySavingChanges}, which re-drives the retained optimistic ops through the submit path.
    */
   private _writeLatches: Map<string, Error> = new Map();
+  /**
+   * Per optimistic-entry stable change id (entry ops array → id). A change re-driven by
+   * {@link retrySavingChanges} after its write path was latched re-mints under the SAME id its
+   * failed submit used, so the server's id-based commit dedup still collapses the ambiguous case
+   * where a latched submit had actually landed — a fresh id would double-commit it. Keyed by the
+   * entry's ops array (stable by reference across in-place rebases — the same ref
+   * {@link BaseDoc._getOptimisticEntries} hands back), so it self-clears via GC once the entry is
+   * confirmed and dropped; no explicit teardown needed.
+   */
+  private _changeStableIds: WeakMap<JSONPatchOp[], string> = new WeakMap();
   /** Doc IDs whose openDoc() body is currently in flight (between createDoc and this.docs.set). */
   private _openingDocs: Set<string> = new Set();
   /** Single-slot, latest-wins snapshot stash for docs in `_openingDocs`. Drained on open completion. */
@@ -525,6 +535,13 @@ export class Patches {
       await drain;
       if (this._changeQueues.get(docId) === drain) this._changeQueues.delete(docId);
     }
+    // Drop any write latch with the doc. Done AFTER the drain so changes still queued during
+    // teardown keep hitting the latch's skip-and-return (rather than persisting against a doc being
+    // closed); once drained, the latch's retained optimistic ops live only in this in-memory doc
+    // (never persisted), so they go with it. A later openDoc must then start unlatched and persist
+    // normally instead of inheriting a stale latch that would silently skip every save. (close()
+    // clears all latches; this is the per-doc closeDoc / untrackDocs / deleteDoc teardown path.)
+    this._writeLatches.delete(docId);
     if (untrack) {
       await this.untrackDocs([docId]);
     }
@@ -779,8 +796,15 @@ export class Patches {
     algorithm: ClientAlgorithm,
     metadata: Record<string, any>
   ): Promise<void> {
-    // Minted once per captured change; stable across every retry of this submit.
-    const stableId = createId(STABLE_CHANGE_ID_LENGTH);
+    // Stable across every retry of this submit AND across a later retrySavingChanges re-drive of
+    // the same optimistic entry: keyed by the entry's ops array so the id survives the latch,
+    // keeping the server's commit dedup effective if a latched submit had actually landed (see
+    // {@link _changeStableIds}). A brand-new entry (including one typed while latched) mints fresh.
+    let stableId = this._changeStableIds.get(ops);
+    if (!stableId) {
+      stableId = createId(STABLE_CHANGE_ID_LENGTH);
+      this._changeStableIds.set(ops, stableId);
+    }
     const baseDoc = doc as unknown as BaseDoc<T> | undefined;
     for (let attempt = 0; ; attempt++) {
       try {
@@ -806,6 +830,9 @@ export class Patches {
 
         // 3) Ambiguous / environment failure — not a verdict on the ops. Retry bounded, then latch.
         if (attempt + 1 >= MAX_CHANGE_SUBMIT_ATTEMPTS) {
+          // Closing: don't repopulate the latch map close() just cleared — the instance and its
+          // optimistic ops are being discarded, and close() already parked the retry loops.
+          if (this._closed) return;
           // Exhausted: do NOT roll back (the ops may have landed or may yet land — discarding
           // would delete un-persisted work). Latch the write path so no further change on this
           // doc is minted/sent until the app retries; the ops stay applied optimistically.

@@ -242,6 +242,11 @@ whether the ops were kept for re-submission. There are three classes:
   working around the value is forbidden. The optimistic ops were **rolled back**; the app must
   alert the user (their edit could not be saved). This is the fix for the failure mode where a
   single non-cloneable change retried forever and silently blocked every later save.
+  > `DataError` / `ConstraintError` count as defective because the shipped `OTIndexedDBStore`
+  > (which `put`s and re-stamps `rev` in-transaction) never raises them transiently. A **custom**
+  > store that used `add` or a unique secondary index could raise a _transient_ `ConstraintError`;
+  > such a store must wrap that reject as a storage fault (see `toStorageError`) so it lands in the
+  > `environment` bucket and is retried, rather than being discarded here as defective.
 - **`environment`** — a transport/storage failure that is **not** a verdict on the ops (timeout,
   abort, network death, storage fault); the write may have landed or may land later. The ops are
   **kept applied** and re-submitted with backoff under the same stable change id (id-based dedup

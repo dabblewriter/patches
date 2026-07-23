@@ -32,6 +32,20 @@ export const DEFAULT_STORAGE_TIMEOUT_MS = 4000;
  * real stall. See the late-fire re-arm in {@link armStorageGuard}.
  */
 const LATE_FIRE_LATENESS_FACTOR = 2;
+/**
+ * Absolute backstop, in hard-timeout windows, on how long one transaction may keep deferring purely
+ * on OTHER transactions' activity (see {@link StorageActivityBeacon}) without ever settling one of
+ * its OWN requests. The connection-silence gate is unbounded by design — correct for a transaction
+ * merely queued behind a healthy write burst — but from inside the wrapper that case is
+ * indistinguishable from a transaction wedged at the HEAD of the queue while unrelated-scope
+ * transactions keep the connection observably alive; the latter would otherwise never settle its
+ * caller. Past this many windows without own progress it fires anyway, bounding that (exotic) wedge
+ * to a finite wait. Any own request settle resets the count, so a legitimately long-running bulk
+ * transaction that keeps settling requests is never capped. Deliberately generous: DAB-834's real
+ * queue-drain waits clustered at ~1 window, so a healthy queue wait never reaches this, while a
+ * false fire here is the very retry-storm class the beacon exists to prevent.
+ */
+const MAX_DEFER_WINDOWS = 30;
 
 /** Passed to `onSlowStorage` when an IndexedDB operation crosses the soft threshold without settling. */
 export interface SlowStorageInfo {
@@ -927,6 +941,11 @@ export class IDBTransactionWrapper {
     const beaconRef = this.beacon;
     const storeNames = () => Array.from(tx.objectStoreNames ?? []);
     const timeoutMs = options?.storageTimeoutMs ?? DEFAULT_STORAGE_TIMEOUT_MS;
+    // How many consecutive hard windows this transaction has ridden on connection-wide activity
+    // without settling a single one of its OWN requests. Reset by every own settle (see
+    // `extendDeadline`); bounds the beacon defer so a wedged-at-head transaction can't ride
+    // healthy sibling traffic forever. See {@link MAX_DEFER_WINDOWS}.
+    let deferWindows = 0;
     let guard!: StorageGuard;
     this.promise = new Promise((resolve, reject) => {
       // Max-time guard: some machines have transactions that never fire ANY of the settle
@@ -942,10 +961,14 @@ export class IDBTransactionWrapper {
         // mirroring extend-on-own-settle). Only fire once the ENTIRE connection has been silent
         // for the full window.
         const silentFor = Date.now() - beaconRef.lastSettleAt;
-        if (silentFor < timeoutMs) {
+        if (silentFor < timeoutMs && deferWindows < MAX_DEFER_WINDOWS) {
+          deferWindows++;
           guard.extend(timeoutMs - silentFor);
           return;
         }
+        // Either the whole connection has gone silent (a real stall), or we have ridden connection
+        // activity for MAX_DEFER_WINDOWS without settling any of our OWN requests (wedged at the
+        // head of the queue while unrelated transactions kept the connection alive). Both fire.
         guard.clear();
         // Reject BEFORE aborting so the typed timeout wins over the AbortError the abort
         // fires (the later onabort reject is a no-op on the settled promise).
@@ -983,6 +1006,9 @@ export class IDBTransactionWrapper {
     // own deadline; a settling request is progress, not a hang.
     this.extendDeadline = () => {
       beaconRef.lastSettleAt = Date.now();
+      // Own progress: this transaction is running, not wedged — reset the defer backstop so a later
+      // silent stretch starts its count fresh.
+      deferWindows = 0;
       guard.extend();
     };
     this.failure = new Promise<never>((_, reject) => this.promise.catch(reject));

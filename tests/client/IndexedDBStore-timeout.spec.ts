@@ -276,6 +276,45 @@ describe('IDBTransactionWrapper max-time guard', () => {
     expect(await result).toBeInstanceOf(StorageTimeoutError);
     expect(txA.abort).toHaveBeenCalledTimes(1);
   });
+
+  it('rides connection activity while queued, but the defer backstop still fires it eventually', async () => {
+    // The connection stays observably alive the whole time, but THIS transaction never settles a
+    // request of its own — the "wedged at the head while unrelated-scope work keeps flowing" case,
+    // which the unbounded connection-silence gate alone would let hang its caller forever.
+    const beacon = { lastSettleAt: Date.now() };
+    const txA = hungTx(['docs']);
+    const wrapperA = new IDBTransactionWrapper(
+      txA as unknown as IDBTransaction,
+      { onSlowStorage: () => undefined },
+      beacon
+    );
+    const result = wrapperA.complete().catch((e: unknown) => e);
+    const settledA = settleFlag(wrapperA.complete());
+
+    // Something settles every half-window, so the connection never goes silent for a full window.
+    const bumpAndAdvance = async () => {
+      beacon.lastSettleAt = Date.now();
+      await vi.advanceTimersByTimeAsync(2000);
+    };
+
+    // It defers on that activity instead of aborting at the first window (the beacon defer working)...
+    await bumpAndAdvance();
+    await bumpAndAdvance();
+    await bumpAndAdvance();
+    expect(settledA()).toBe(false);
+    expect(txA.abort).not.toHaveBeenCalled();
+
+    // ...but not forever: past the backstop it fires despite the still-active connection rather than
+    // hanging indefinitely. The bound guards against a regression to the old unbounded behavior.
+    let windows = 3;
+    while (!settledA() && windows < 200) {
+      await bumpAndAdvance();
+      windows++;
+    }
+    expect(settledA()).toBe(true);
+    expect(await result).toBeInstanceOf(StorageTimeoutError);
+    expect(txA.abort).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('IndexedDBStore open() max-time guard', () => {

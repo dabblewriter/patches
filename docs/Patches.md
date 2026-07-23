@@ -228,13 +228,53 @@ patches.onError((error, context) => {
 });
 ```
 
-For a failed change submit, `context.willRetry` distinguishes the two failure classes:
+### Change-submit failure classes
 
-- `willRetry: true` — the failure was transient or ambiguous (timeout, abort, network death,
-  store hiccup). The user's ops are **kept applied** and re-submitted with backoff under the
-  same stable change id (id-based dedup makes the retry idempotent). Show a "retrying" state.
-- `willRetry: false` — the server/store authoritatively rejected the change (terminal
-  `StatusError`: 401/402/403/404/410). The optimistic ops were rolled back; surface the error.
+For a failed change submit, `context.kind` classifies the failure and `context.willRetry` says
+whether the ops were kept for re-submission. There are three classes:
+
+- **`rejection`** (`willRetry: false`) — the server/store authoritatively refused the change
+  (terminal `StatusError`: 401/402/403/404/410). The optimistic ops were **rolled back**; surface
+  the error.
+- **`defective`** (`willRetry: false`) — the change's own data can never be persisted: a
+  non-cloneable value or a key/shape violation (`DataCloneError` / `DataError` / `ConstraintError`
+  out of IndexedDB). This is a bug in the code that produced the change, so retrying is useless and
+  working around the value is forbidden. The optimistic ops were **rolled back**; the app must
+  alert the user (their edit could not be saved). This is the fix for the failure mode where a
+  single non-cloneable change retried forever and silently blocked every later save.
+  > `DataError` / `ConstraintError` count as defective because the shipped `OTIndexedDBStore`
+  > (which `put`s and re-stamps `rev` in-transaction) never raises them transiently. A **custom**
+  > store that used `add` or a unique secondary index could raise a _transient_ `ConstraintError`;
+  > such a store must wrap that reject as a storage fault (see `toStorageError`) so it lands in the
+  > `environment` bucket and is retried, rather than being discarded here as defective.
+- **`environment`** — a transport/storage failure that is **not** a verdict on the ops (timeout,
+  abort, network death, storage fault); the write may have landed or may land later. The ops are
+  **kept applied** and re-submitted with backoff under the same stable change id (id-based dedup
+  makes the retry idempotent) up to a bounded number of attempts. While retrying, `willRetry: true`
+  — show a "retrying" state. If the attempts are exhausted the doc's **write path is latched**
+  (`willRetry: false`) with the ops still applied in memory: nothing more is minted or sent for
+  that doc until you call `retrySavingChanges`. This stops a broken storage environment from
+  silently swallowing just-typed words forever — the app is told, so it can tell the user.
+
+While a doc is latched, further changes stay applied optimistically (the user's text remains
+visible) but are not persisted; each emits `onError` with `latched: true`.
+
+### Recovering from a latched write path
+
+```typescript
+// True while the doc's write path is latched (bounded retries exhausted).
+if (patches.isWriteLatched(docId)) {
+  // Prompt the user, then, once you believe storage/connectivity has recovered:
+  await patches.retrySavingChanges(docId); // omit docId to retry every latched doc
+}
+
+// All currently latched docs (read-only snapshot):
+patches.writeLatchedDocs; // string[]
+```
+
+`retrySavingChanges` clears the latch and re-drives the doc's retained optimistic changes through
+the normal submit path, in capture order. If the environment is still broken the doc simply
+re-latches; if the server now authoritatively rejects, that change rolls back.
 
 ```typescript
 // When any document has pending changes ready to send

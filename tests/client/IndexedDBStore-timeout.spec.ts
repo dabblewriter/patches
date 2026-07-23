@@ -225,6 +225,96 @@ describe('IDBTransactionWrapper max-time guard', () => {
     expect(await hung).toBeInstanceOf(StorageTimeoutError);
     expect(tx.abort).toHaveBeenCalledTimes(1);
   });
+
+  it('a queued transaction with no own settles defers to connection activity, then times out once silent', async () => {
+    // The store hands every transaction the same beacon; model that with a shared object.
+    const beacon = { lastSettleAt: Date.now() };
+
+    // A: sits queued behind other work — none of ITS own requests ever settle.
+    const txA = hungTx(['docs']);
+    const wrapperA = new IDBTransactionWrapper(
+      txA as unknown as IDBTransaction,
+      { onSlowStorage: () => undefined },
+      beacon
+    );
+    const settledA = settleFlag(wrapperA.complete());
+
+    // B: a sibling transaction on the same connection whose requests keep settling.
+    const txB = hungTx(['docs']);
+    const pending: Array<() => void> = [];
+    txB.objectStore = () => ({
+      get: () => {
+        const req: Record<string, any> = { onsuccess: null, onerror: null, error: null, result: 'value' };
+        pending.push(() => req.onsuccess?.());
+        return req;
+      },
+    });
+    const wrapperB = new IDBTransactionWrapper(
+      txB as unknown as IDBTransaction,
+      { onSlowStorage: () => undefined },
+      beacon
+    );
+    const storeB = wrapperB.getStore('docs');
+
+    // Every 3s (inside the 4s window) B settles a request, keeping the connection observably
+    // alive. A's own 4s deadline elapses during this, but the beacon shows recent activity so it
+    // defers instead of aborting a healthy-but-queued transaction.
+    for (let i = 0; i < 4; i++) {
+      const request = storeB.get('key');
+      await vi.advanceTimersByTimeAsync(3000);
+      pending.shift()!();
+      expect(await request).toBe('value');
+      expect(settledA()).toBe(false);
+      expect(txA.abort).not.toHaveBeenCalled();
+    }
+
+    // B commits and the connection goes silent. Once the whole window passes with no activity
+    // anywhere on the connection, A finally times out and aborts.
+    txB.oncomplete!();
+    const result = wrapperA.complete().catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(await result).toBeInstanceOf(StorageTimeoutError);
+    expect(txA.abort).toHaveBeenCalledTimes(1);
+  });
+
+  it('rides connection activity while queued, but the defer backstop still fires it eventually', async () => {
+    // The connection stays observably alive the whole time, but THIS transaction never settles a
+    // request of its own — the "wedged at the head while unrelated-scope work keeps flowing" case,
+    // which the unbounded connection-silence gate alone would let hang its caller forever.
+    const beacon = { lastSettleAt: Date.now() };
+    const txA = hungTx(['docs']);
+    const wrapperA = new IDBTransactionWrapper(
+      txA as unknown as IDBTransaction,
+      { onSlowStorage: () => undefined },
+      beacon
+    );
+    const result = wrapperA.complete().catch((e: unknown) => e);
+    const settledA = settleFlag(wrapperA.complete());
+
+    // Something settles every half-window, so the connection never goes silent for a full window.
+    const bumpAndAdvance = async () => {
+      beacon.lastSettleAt = Date.now();
+      await vi.advanceTimersByTimeAsync(2000);
+    };
+
+    // It defers on that activity instead of aborting at the first window (the beacon defer working)...
+    await bumpAndAdvance();
+    await bumpAndAdvance();
+    await bumpAndAdvance();
+    expect(settledA()).toBe(false);
+    expect(txA.abort).not.toHaveBeenCalled();
+
+    // ...but not forever: past the backstop it fires despite the still-active connection rather than
+    // hanging indefinitely. The bound guards against a regression to the old unbounded behavior.
+    let windows = 3;
+    while (!settledA() && windows < 200) {
+      await bumpAndAdvance();
+      windows++;
+    }
+    expect(settledA()).toBe(true);
+    expect(await result).toBeInstanceOf(StorageTimeoutError);
+    expect(txA.abort).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('IndexedDBStore open() max-time guard', () => {
@@ -582,5 +672,83 @@ describe('max-time guard on real stores (fake-indexeddb, real timers)', () => {
     } finally {
       process.off('unhandledRejection', onRejection);
     }
+  });
+});
+
+// A suspended/throttled tab freezes the event loop, so on resume the hard timer can dispatch
+// grossly late (Sentry saw elapsed up to 20 minutes). These tests decouple the wall clock
+// (`Date.now`) from the fake timer clock so a timer can be made to fire far later than its
+// budget — exactly the background-tab artifact the re-arm exists to absorb.
+describe('IDBTransactionWrapper late-fire re-arm (suspended tab)', () => {
+  let now: number;
+
+  beforeEach(() => {
+    now = 1_000_000;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('re-arms once when the hard timer fires grossly late, then fires if still silent', async () => {
+    const tx = hungTx(['docs']);
+    const wrapper = new IDBTransactionWrapper(tx as unknown as IDBTransaction, { onSlowStorage: () => undefined });
+    const result = wrapper.complete().catch((e: unknown) => e);
+    const settled = settleFlag(wrapper.complete());
+
+    // The event loop was frozen for 60s; when the 4s hard timer finally dispatches it is grossly
+    // late (> 2x its budget), so it re-arms for a fresh full window instead of aborting.
+    now += 60_000;
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(settled()).toBe(false);
+    expect(tx.abort).not.toHaveBeenCalled();
+
+    // The re-armed window elapses on time with the connection still silent → it now fires.
+    now += 4000;
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(await result).toBeInstanceOf(StorageTimeoutError);
+    expect(tx.abort).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('IndexedDBStore open() late-fire re-arm (suspended tab)', () => {
+  const realOpen = indexedDB.open;
+  let openRequests: Array<Record<string, any>>;
+  let now: number;
+
+  beforeEach(() => {
+    now = 1_000_000;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    openRequests = [];
+    (indexedDB as unknown as { open: unknown }).open = () => {
+      const request: Record<string, any> = { onsuccess: null, onerror: null, onblocked: null, onupgradeneeded: null };
+      openRequests.push(request);
+      return request;
+    };
+  });
+  afterEach(() => {
+    (indexedDB as unknown as { open: unknown }).open = realOpen;
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('re-arms once when the open timer dispatches grossly late, then rejects if still hung', async () => {
+    const store = new IndexedDBStore(`late-open-${dbSeq++}`, { onSlowStorage: () => undefined });
+    const waiter = store.listDocs();
+    const settled = settleFlag(waiter);
+    const result = waiter.catch((e: unknown) => e);
+
+    now += 60_000;
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(settled()).toBe(false);
+
+    now += 4000;
+    await vi.advanceTimersByTimeAsync(4000);
+    const err = (await result) as StorageTimeoutError;
+    expect(err).toBeInstanceOf(StorageTimeoutError);
+    expect(err.operation).toBe('open');
   });
 });

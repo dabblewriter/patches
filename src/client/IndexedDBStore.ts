@@ -26,6 +26,26 @@ interface StoredBranch extends Branch {
 export const DEFAULT_SLOW_STORAGE_MS = 1000;
 /** Hard threshold: an operation still unsettled after this is rejected with {@link StorageTimeoutError}. */
 export const DEFAULT_STORAGE_TIMEOUT_MS = 4000;
+/**
+ * Multiplier over a hard timer's own budget past which a fire is treated as a suspended/throttled
+ * tab artifact (the event loop was frozen and the timer dispatched grossly late) rather than a
+ * real stall. See the late-fire re-arm in {@link armStorageGuard}.
+ */
+const LATE_FIRE_LATENESS_FACTOR = 2;
+/**
+ * Absolute backstop, in hard-timeout windows, on how long one transaction may keep deferring purely
+ * on OTHER transactions' activity (see {@link StorageActivityBeacon}) without ever settling one of
+ * its OWN requests. The connection-silence gate is unbounded by design — correct for a transaction
+ * merely queued behind a healthy write burst — but from inside the wrapper that case is
+ * indistinguishable from a transaction wedged at the HEAD of the queue while unrelated-scope
+ * transactions keep the connection observably alive; the latter would otherwise never settle its
+ * caller. Past this many windows without own progress it fires anyway, bounding that (exotic) wedge
+ * to a finite wait. Any own request settle resets the count, so a legitimately long-running bulk
+ * transaction that keeps settling requests is never capped. Deliberately generous: DAB-834's real
+ * queue-drain waits clustered at ~1 window, so a healthy queue wait never reaches this, while a
+ * false fire here is the very retry-storm class the beacon exists to prevent.
+ */
+const MAX_DEFER_WINDOWS = 30;
 
 /** Passed to `onSlowStorage` when an IndexedDB operation crosses the soft threshold without settling. */
 export interface SlowStorageInfo {
@@ -87,11 +107,36 @@ function armStorageGuard(
       elapsedMs: Date.now() - started,
     });
   }, options?.slowStorageMs ?? DEFAULT_SLOW_STORAGE_MS);
-  const fireHard = () => {
-    hardTimer = undefined;
-    onTimeout(Date.now() - started);
+
+  // The hard timer records when it was scheduled and for how long so `fireHard` can distinguish
+  // a real stall from a suspended/throttled tab that froze the event loop and dispatched the
+  // timer grossly late.
+  let hardTimer: ReturnType<typeof setTimeout> | undefined;
+  let hardScheduledAt = started;
+  let hardBudget = timeoutMs;
+  // A backgrounded tab freezes the event loop, so on resume BOTH our timer AND the IDB events it
+  // races dispatch late — and if our timer wins that race we would wrongly fire on a healthy
+  // operation (Sentry saw elapsed up to 20 minutes, a pure background artifact). When the timer
+  // fires far later than its budget, re-arm once for a fresh full window so the queued IDB events
+  // get a chance to dispatch first; a genuinely stalled operation stays silent through that window
+  // and fires next time. Reset by every `extend()` so each new segment of a long-lived operation
+  // gets its own grace across repeated suspensions.
+  let reArmedLate = false;
+  const scheduleHard = (budgetMs: number) => {
+    hardScheduledAt = Date.now();
+    hardBudget = budgetMs;
+    hardTimer = setTimeout(fireHard, budgetMs);
   };
-  let hardTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(fireHard, timeoutMs);
+  function fireHard() {
+    hardTimer = undefined;
+    if (!reArmedLate && Date.now() - hardScheduledAt > hardBudget * LATE_FIRE_LATENESS_FACTOR) {
+      reArmedLate = true;
+      scheduleHard(timeoutMs);
+      return;
+    }
+    onTimeout(Date.now() - started);
+  }
+  scheduleHard(timeoutMs);
   const clearHard = () => {
     if (hardTimer !== undefined) {
       clearTimeout(hardTimer);
@@ -102,7 +147,8 @@ function armStorageGuard(
     extend(budgetMs = timeoutMs) {
       if (done) return;
       clearHard();
-      hardTimer = setTimeout(fireHard, budgetMs);
+      reArmedLate = false;
+      scheduleHard(budgetMs);
     },
     clearHard,
     clear() {
@@ -127,6 +173,22 @@ function armStorageGuard(
  */
 function isConnectionClosingError(err: unknown): boolean {
   return err != null && (err as { name?: unknown }).name === 'InvalidStateError';
+}
+
+/**
+ * Connection-wide "last observable sign of storage life", shared by every transaction the store
+ * opens. IndexedDB serializes overlapping-scope readwrite transactions, and every save path
+ * touches the `docs` store, so under a write burst a perfectly healthy transaction can sit QUEUED
+ * for seconds with zero of its own requests settling. Its per-transaction guard measures the hard
+ * deadline from queue ENTRY, so on its own it would mistake that queue wait for a stalled backend
+ * and abort a write that was about to run — the false-failure/retry-storm class DAB-834 traces.
+ * The beacon lets a queued transaction see that OTHER transactions on the same connection are
+ * still settling requests (the backend is alive) and defer its own deadline until the WHOLE
+ * connection goes silent.
+ */
+interface StorageActivityBeacon {
+  /** `Date.now()` of the most recent request or transaction settle anywhere on the connection. */
+  lastSettleAt: number;
 }
 
 /**
@@ -191,6 +253,13 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
    */
   protected cancelOpenGuard?: () => void;
   protected requiredStores = new Set(['docs', 'snapshots', 'branches', 'quarantinedChanges']);
+  /**
+   * Shared connection-wide activity beacon handed to every {@link IDBTransactionWrapper} this
+   * store opens, so a queued-but-healthy transaction can tell a live-but-congested connection
+   * from a genuinely stalled one. See {@link StorageActivityBeacon}. Initialized to construction
+   * time so a first-ever transaction that never settles still times out on a silent connection.
+   */
+  protected storageBeacon: StorageActivityBeacon = { lastSettleAt: Date.now() };
 
   /**
    * Signal emitted during database upgrade, allowing algorithm-specific stores
@@ -510,7 +579,11 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     storeNames: string[],
     mode: IDBTransactionMode
   ): Promise<[IDBTransactionWrapper, ...IDBStoreWrapper[]]> {
-    const tx = new IDBTransactionWrapper(await this.beginTransaction(storeNames, mode), this.options);
+    const tx = new IDBTransactionWrapper(
+      await this.beginTransaction(storeNames, mode),
+      this.options,
+      this.storageBeacon
+    );
     const stores = storeNames.map(name => tx.getStore(name));
     return [tx, ...stores];
   }
@@ -857,16 +930,45 @@ export class IDBTransactionWrapper {
   protected failure: Promise<never>;
   /** Called by store wrappers on every request settle; a settling request is progress, not a hang. */
   protected extendDeadline: () => void;
+  /** Shared connection-wide activity beacon; see {@link StorageActivityBeacon}. */
+  protected beacon: StorageActivityBeacon;
 
-  constructor(tx: IDBTransaction, options?: StorageGuardOptions) {
+  constructor(tx: IDBTransaction, options?: StorageGuardOptions, beacon?: StorageActivityBeacon) {
     this.tx = tx;
+    // Direct construction (no owning store) still gets a private beacon so the guard logic stays
+    // uniform; a lone transaction's beacon is only ever bumped by its own settles.
+    this.beacon = beacon ?? { lastSettleAt: Date.now() };
+    const beaconRef = this.beacon;
     const storeNames = () => Array.from(tx.objectStoreNames ?? []);
+    const timeoutMs = options?.storageTimeoutMs ?? DEFAULT_STORAGE_TIMEOUT_MS;
+    // How many consecutive hard windows this transaction has ridden on connection-wide activity
+    // without settling a single one of its OWN requests. Reset by every own settle (see
+    // `extendDeadline`); bounds the beacon defer so a wedged-at-head transaction can't ride
+    // healthy sibling traffic forever. See {@link MAX_DEFER_WINDOWS}.
+    let deferWindows = 0;
     let guard!: StorageGuard;
     this.promise = new Promise((resolve, reject) => {
       // Max-time guard: some machines have transactions that never fire ANY of the settle
       // events below. Every request settle extends the hard deadline, so a bulk transaction
       // still making progress is never aborted; only a genuinely stalled one times out.
       guard = armStorageGuard(options, 'transaction', storeNames, elapsedMs => {
+        // The hard deadline is measured from queue ENTRY, not from when this transaction actually
+        // starts running: IndexedDB serializes overlapping-scope readwrite transactions, so a
+        // healthy transaction can sit queued for the full window with none of its OWN requests
+        // settling. Before treating that as a stall, consult the connection-wide beacon — if ANY
+        // transaction settled a request within the window, the backend is alive and this one is
+        // merely queued, so extend for the remaining silence and let the queue drain (unbounded,
+        // mirroring extend-on-own-settle). Only fire once the ENTIRE connection has been silent
+        // for the full window.
+        const silentFor = Date.now() - beaconRef.lastSettleAt;
+        if (silentFor < timeoutMs && deferWindows < MAX_DEFER_WINDOWS) {
+          deferWindows++;
+          guard.extend(timeoutMs - silentFor);
+          return;
+        }
+        // Either the whole connection has gone silent (a real stall), or we have ridden connection
+        // activity for MAX_DEFER_WINDOWS without settling any of our OWN requests (wedged at the
+        // head of the queue while unrelated transactions kept the connection alive). Both fire.
         guard.clear();
         // Reject BEFORE aborting so the typed timeout wins over the AbortError the abort
         // fires (the later onabort reject is a no-op on the settled promise).
@@ -877,11 +979,15 @@ export class IDBTransactionWrapper {
           // Connection already dead/finished; nothing left to abort.
         }
       });
+      // Every transaction settle is an observable sign the whole connection is alive — bump the
+      // beacon so a sibling transaction queued behind this one doesn't mistake its wait for a stall.
       tx.oncomplete = () => {
+        beaconRef.lastSettleAt = Date.now();
         guard.clear();
         resolve();
       };
       tx.onerror = () => {
+        beaconRef.lastSettleAt = Date.now();
         guard.clear();
         reject(toStorageError(tx.error));
       };
@@ -891,11 +997,20 @@ export class IDBTransactionWrapper {
       // same typed StorageError; a plain user/teardown AbortError passes through untouched (and
       // whichever of onerror/onabort fires first wins — the second reject is a no-op).
       tx.onabort = () => {
+        beaconRef.lastSettleAt = Date.now();
         guard.clear();
         reject(toStorageError(tx.error));
       };
     });
-    this.extendDeadline = () => guard.extend();
+    // Each request settle both bumps the connection-wide beacon and extends this transaction's
+    // own deadline; a settling request is progress, not a hang.
+    this.extendDeadline = () => {
+      beaconRef.lastSettleAt = Date.now();
+      // Own progress: this transaction is running, not wedged — reset the defer backstop so a later
+      // silent stretch starts its count fresh.
+      deferWindows = 0;
+      guard.extend();
+    };
     this.failure = new Promise<never>((_, reject) => this.promise.catch(reject));
     // The failure promise may have no racers when the transaction settles (or nobody ever
     // awaits complete()); swallow so it can't surface as an unhandled rejection.

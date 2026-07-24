@@ -368,6 +368,22 @@ describe('breakChangesIntoBatches', () => {
     });
   });
 
+  it('derives a batchId that is stable across calls, so a retry presents the same upload identity (DAB-837)', () => {
+    // A resend after a lost ack re-runs the batching; a re-minted batchId would defeat the
+    // server's own-upload exemption and strand the upload forever.
+    const changes = [createChange('1'), createChange('2')];
+    const singleChangeSize = getJSONByteSize({ ...changes[0], batchId: 'xxxxxxxxxxxx' });
+    const maxPayloadBytes = singleChangeSize + 10;
+
+    const first = breakChangesIntoBatches(changes, maxPayloadBytes);
+    const second = breakChangesIntoBatches(changes, maxPayloadBytes);
+
+    const ids = new Set([...first.flat(), ...second.flat()].map(c => c.batchId));
+    expect(ids.size).toBe(1);
+    // Derived from the queue head's persisted id — the one value both attempts share.
+    expect([...ids][0]).toBe(changes[0].id);
+  });
+
   it('should return single batch with empty array inside when given empty array', () => {
     const result = breakChangesIntoBatches([], 100);
 

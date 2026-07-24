@@ -774,8 +774,9 @@ describe('commitChanges', () => {
 
     vi.mocked(mockStore.getCurrentRev).mockResolvedValue(2);
     vi.mocked(mockStore.listChanges)
-      .mockResolvedValueOnce([]) // First call: reverse/limit for session check
-      .mockResolvedValueOnce([committedChange]); // Second call: committed changes
+      .mockResolvedValueOnce([]) // First call: oldest change for the own-upload probe (baseRev 0 on an existing doc)
+      .mockResolvedValueOnce([]) // Second call: reverse/limit for session check
+      .mockResolvedValueOnce([committedChange]); // Third call: committed changes
 
     await commitChanges(mockStore, 'doc1', incomingChanges, sessionTimeoutMillis);
 
@@ -830,8 +831,9 @@ describe('commitChanges', () => {
 
     vi.mocked(mockStore.getCurrentRev).mockResolvedValue(2);
     vi.mocked(mockStore.listChanges)
-      .mockResolvedValueOnce([]) // First call: reverse/limit for session check
-      .mockResolvedValueOnce([committedChange]); // Second call: committed changes
+      .mockResolvedValueOnce([]) // First call: oldest change for the own-upload probe (baseRev 0 on an existing doc)
+      .mockResolvedValueOnce([]) // Second call: reverse/limit for session check
+      .mockResolvedValueOnce([committedChange]); // Third call: committed changes
 
     const { transformIncomingChanges } = await import('../../../../src/algorithms/ot/server/transformIncomingChanges');
     vi.mocked(transformIncomingChanges).mockReturnValue([transformedChange]);

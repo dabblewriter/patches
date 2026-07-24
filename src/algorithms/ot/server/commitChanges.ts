@@ -73,6 +73,10 @@ export async function commitChanges(
   let baseRev = changes[0].baseRev ?? initialRev;
 
   let docReloadRequired: true | undefined;
+  // An upload resuming over its own committed prefix (see the baseRev-0 handling below). Read
+  // by the commit loop: the prefix rows are this sender's work from an earlier connection, so
+  // echo matching must not let the connection-identity veto disown them.
+  let uploadResume = false;
   if (initialRev > 0) {
     // Both exemptions below belong to the multi-batch upload that CREATED this doc: the root
     // creation op its first batch carries, and the baseRev 0 its later batches keep. Once that
@@ -81,7 +85,7 @@ export async function commitChanges(
     // rather than the batch's revs. Resolved lazily: normal commits (baseRev > 0, no root op)
     // never pay the read; each continuation batch of a genuine multi-batch upload pays one.
     let ownUpload: Promise<boolean> | undefined;
-    const isOwnUpload = () => (ownUpload ??= createdByBatch(store, docId, batchId));
+    const isOwnUpload = () => (ownUpload ??= createdByUpload(store, docId, batchId, changes));
     // A flush starts at rev 1, so rev > 1 at baseRev 0 means the head of this queue was already
     // resolved elsewhere — a continuation whether or not the flush split. Not keyed on batchId:
     // an unsplit tail carries none, and it must not slip into the rebase heal below. Historical
@@ -105,14 +109,31 @@ export async function commitChanges(
 
     if (changes[0].baseRev === 0) {
       if (!continuation) {
-        // Rebase explicit baseRev: 0 on existing docs to current revision.
-        // The caller signals docReloadRequired so the client knows to call getDoc.
-        docReloadRequired = true;
-        baseRev = initialRev;
-        for (const c of changes) {
-          c.baseRev = baseRev;
+        if (await isOwnUpload()) {
+          // The upload that created this doc re-sending from its head — a resend after a lost
+          // ack (the response died between the server committing batch 1 and the client hearing
+          // about it, so the whole queue is still pending client-side and comes back at rev 1).
+          // Keep baseRev 0: the log holds only this upload's earlier batches (plus any foreign
+          // interleaves, which transform normally), so the read-side dedup below recognizes the
+          // committed copies, echoes them back as catchup, and commits the remainder — the same
+          // flow an idempotent same-batchId continuation resend already takes. Rebasing instead
+          // would move baseRev past the committed prefix, hiding the echoes from the dedup
+          // window and re-committing the root op it just exempted (DAB-837).
+          uploadResume = true;
+        } else {
+          // Rebase explicit baseRev: 0 on existing docs to current revision.
+          // The caller signals docReloadRequired so the client knows to call getDoc.
+          docReloadRequired = true;
+          baseRev = initialRev;
+          for (const c of changes) {
+            c.baseRev = baseRev;
+          }
         }
-      } else if (!(await isOwnUpload())) {
+      } else if (await isOwnUpload()) {
+        // A continuation of the upload that created the doc: committed prefix rows it re-sends
+        // (a split resend can overlap the tail it already landed) are its own across connections.
+        uploadResume = true;
+      } else {
         // The head of this flush was already resolved (its first batch was answered with
         // docReloadRequired), so these ops were minted against state the client has since
         // replaced. Neither treatment is sound: rebasing moves baseRev to the tip, leaving the
@@ -232,8 +253,15 @@ export async function commitChanges(
       // also match on it; either side missing falls back to id-only matching (pre-stamp rows).
       const senderClientId = changes.find(c => c.clientId)?.clientId;
       const sameOrigin = (c: Change) => !senderClientId || !c.clientId || c.clientId === senderClientId;
+      // A resumed upload's committed prefix is this sender's work from an EARLIER connection —
+      // a resume happens after a reload or in a later session, so the live connection identity
+      // never matches the stored one and would disown the very echoes the resume exists to
+      // confirm (transforming the tail against its own head's echo double-applies it). Bounded
+      // to the prefix the doc had when this request started: rows landing DURING the request
+      // still arbitrate by live identity.
+      const ownOrigin = (c: Change) => sameOrigin(c) || (uploadResume && c.rev <= initialRev);
       const isOwnCommitted = (c: Change) =>
-        sameOrigin(c) && ((batchId ? c.batchId === batchId : false) || changeIds.has(c.id));
+        ownOrigin(c) && ((batchId ? c.batchId === batchId : false) || changeIds.has(c.id));
       const committedChanges = allCommittedChanges.filter(c => !isOwnCommitted(c));
 
       // Filter changes already committed after baseRev AND duplicates within the incoming
@@ -241,7 +269,7 @@ export async function commitChanges(
       // committing it twice double-applies its ops (the second copy is never transformed
       // against the first). Only same-origin committed copies count: a foreign colliding id
       // must not swallow the sender's distinct change.
-      const committedIds = new Set(allCommittedChanges.filter(sameOrigin).map(c => c.id));
+      const committedIds = new Set(allCommittedChanges.filter(ownOrigin).map(c => c.id));
       const seenIncomingIds = new Set<string>();
       const incomingChanges = changes.filter(c => {
         if (committedIds.has(c.id) || storeCommittedIds.has(c.id) || seenIncomingIds.has(c.id)) return false;
@@ -251,7 +279,7 @@ export async function commitChanges(
 
       // Committed copies of changes this request re-sent (a retry after a lost ack) must be echoed back so the
       // client can confirm them, even though they are excluded from the transform set above.
-      const resentCommitted = allCommittedChanges.filter(c => sameOrigin(c) && changeIds.has(c.id));
+      const resentCommitted = allCommittedChanges.filter(c => ownOrigin(c) && changeIds.has(c.id));
       const catchupChanges = resentCommitted.length
         ? [...committedChanges, ...resentCommitted].sort((a, b) => a.rev - b.rev)
         : committedChanges;
@@ -356,14 +384,31 @@ export async function commitChanges(
 }
 
 /**
- * Whether `batchId` is the multi-batch upload that CREATED this doc, identified by the doc's
+ * Whether this request is the multi-batch upload that CREATED this doc, identified by the doc's
  * oldest change. One row, and no `startAfter`, so a log that starts above rev 1 (pruned,
  * migrated) reads as itself rather than as a gap.
+ *
+ * Matched two ways:
+ * - `batchId`: the later batches of an uninterrupted upload carry the id its first batch
+ *   committed with.
+ * - The creating change's own id arriving again in the batch: a resend after a lost ack
+ *   re-mints its batchId (`breakChangesIntoBatches` derives it per call), and historical rows
+ *   predate the stable derivation — so the durable fingerprint of "this upload created the doc"
+ *   is the client re-sending the very change that created it. Change ids are client-minted
+ *   random ids, so a foreign batch colliding on the creating id while ALSO carrying a baseRev-0
+ *   root op is not an accident this guard exists to stop; connection identity cannot arbitrate
+ *   here — a resume after a reload is a new connection by definition (DAB-837).
  */
-async function createdByBatch(store: OTStoreBackend, docId: string, batchId?: string): Promise<boolean> {
-  if (!batchId) return false;
+async function createdByUpload(
+  store: OTStoreBackend,
+  docId: string,
+  batchId: string | undefined,
+  changes: ChangeInput[]
+): Promise<boolean> {
   const [oldest] = await store.listChanges(docId, { limit: 1 });
-  return oldest?.batchId === batchId;
+  if (!oldest) return false;
+  if (batchId && oldest.batchId === batchId) return true;
+  return changes.some(c => c.id === oldest.id);
 }
 
 /**

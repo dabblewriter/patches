@@ -1,4 +1,3 @@
-import { createId } from 'crypto-id';
 import { createChange } from '../../../data/change.js';
 import type { JSONPatchOp } from '../../../json-patch/types.js';
 import type { Change } from '../../../types.js';
@@ -101,11 +100,18 @@ export function breakChangesIntoBatches(
     return [processedChanges];
   }
 
+  // The batch id marks every wire batch as one upload; the server's own-upload exemption
+  // (commitChanges) lets later batches — and resends after a lost ack — continue past the
+  // guards that protect existing docs from foreign baseRev-0 writes. Derive it from the
+  // queue head's persisted change id rather than minting randomly: a retry then presents
+  // the SAME upload identity it presented last time, even after a reload, so an interrupted
+  // upload can resume instead of being refused forever (DAB-837). Derived before the wire
+  // re-split below, whose pieces get fresh ids per call.
+  const batchId = changes[0].id;
+
   // Split any change too large for one wire batch (shouldn't happen if maxStorageBytes < maxPayloadBytes).
   // breakChanges renumbers the whole queue so split pieces never collide with the revs that follow them.
   processedChanges = breakChanges(processedChanges, maxPayloadBytes);
-
-  const batchId = createId(12);
   const batches: Change[][] = [];
   let currentBatch: Change[] = [];
   let currentSize = 2; // Account for [] wrapper

@@ -193,7 +193,12 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
     const rebased = rebaseChanges(serverChanges, [...this._pendingChanges, ...synthetic]);
     const opsById = new Map(rebased.map(c => [c.id, c.ops]));
     this._optimisticOps = this._optimisticOps.filter((ops, i) => {
-      const newOps = opsById.get(`${tag}-${i}`) ?? [];
+      // transformPatch hands back its input array UNTOUCHED when no op needed
+      // transforming, so `rebased` can hold this very array. Copy before clearing —
+      // otherwise a no-op rebase (a foreign change on unrelated paths, the common
+      // case) empties both aliases and destroys the in-flight ops instead of
+      // keeping them.
+      const newOps = [...(opsById.get(`${tag}-${i}`) ?? [])];
       ops.length = 0;
       ops.push(...newOps);
       return ops.length > 0;

@@ -23,10 +23,16 @@ export type * from './ClientAlgorithm.js';
 export { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
 export { ApplyChangesError } from '../algorithms/ot/shared/applyChanges.js';
 export { isUnsplittableChangeError, UnsplittableChangeError } from '../net/error.js';
-// Telemetry for changes the splitter can't get under the storage budget
+// The splitter itself, plus telemetry for changes it can't get under the storage
+// budget. `breakChangesIntoBatches` is public because apps commit over REST on
+// paths `PatchesSync.flushDoc` never sees (branch merges, heals); without it they
+// reimplement the splitting and drift from the budget the library was configured with.
 export {
+  breakChangesIntoBatches,
   onOversizedOp,
+  type BreakChangesIntoBatchesOptions,
   type ChangeSplitOptions,
   type OversizedOpReason,
   type OversizedOpReport,
+  type SizeCalculator,
 } from '../algorithms/ot/shared/changeBatching.js';

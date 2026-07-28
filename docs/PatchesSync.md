@@ -512,6 +512,18 @@ sync.onError((error, context) => {
 
 When a document is deleted locally while offline, `PatchesSync` creates a tombstone. On reconnect, it attempts to delete the document on the server. If that succeeds, the tombstone is removed. If it fails, the tombstone persists for retry.
 
+## Degraded Mode (Send-Independent Transports)
+
+Transports declare `sendRequiresStream` on `PatchesConnection`. WebSocket declares `true` — every call rides the socket, so a down socket genuinely blocks sends. The SSE + REST transport declares `false` — the EventSource only carries server→client pushes, while commits and reads are independent HTTP requests that keep working when the stream is down. Some networks (corporate TLS inspection, antivirus "web protection" HTTPS scanners) buffer `text/event-stream` so the stream never opens at all, while every plain fetch succeeds.
+
+`PatchesSync` uses the flag to split _"can I send right now?"_ from _"am I receiving live pushes?"_:
+
+- **Sends never gate on the stream** on a send-independent transport. Local edits flush, reads and deletes go out, and the retry ladders keep running, whenever the app is online and `connect()` has been called (`disconnect()` turns this off — the intent flag is what stops the send path, since `connected` no longer does).
+- **A degraded-mode pass covers receive and cold starts.** While online with the stream down, a jittered ~24-30s pass flushes pending and pulls committed catch-up (`getChangesSince`) for every tracked doc through the normal `syncDoc` path. It starts immediately when `connect()` fails or the app comes online, and cancels the moment the stream establishes — `syncAllKnownDocs` takes over, exactly as on a cold connect. Subscriptions are skipped while degraded (the server rejects them with no stream), so delivery is catch-up cadence rather than live push.
+- **A stream-only failure is not a sync error.** A failed `connect()` on a send-independent transport leaves `syncStatus` alone rather than latching `'error'`, and the transport's ongoing reconnect attempts (which emit an error state every backoff cycle) don't reset per-doc retry state, error-surfacing dedup, or the global status. After a clean degraded pass over all tracked docs, `syncStatus` reports `'synced'` — the work genuinely is on the server; only live pushes are paused.
+
+UI implication: treat `connected: false` as "live updates paused", not "changes aren't saving". Saving is failing only when `syncStatus === 'error'` or per-doc statuses latch at `'error'`.
+
 ## Related Documentation
 
 - [Patches](Patches.md) - The main client coordinator

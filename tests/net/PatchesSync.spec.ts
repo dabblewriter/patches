@@ -3125,11 +3125,32 @@ describe('PatchesSync', () => {
 
     /**
      * REST-like connection: same mock surface as mockWebSocket, but sends are
-     * independent requests that don't ride the push stream.
+     * independent requests that don't ride the push stream. Built fresh (no spies
+     * shared with mockWebSocket) so call attribution between the WS `sync` and the
+     * REST instance can never blur.
      */
     function makeRestSync() {
-      const restConnection = { ...mockWebSocket, sendRequiresStream: false };
+      const restConnection: any = {
+        url: 'mock://rest',
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn(),
+        subscribe: vi.fn().mockResolvedValue([]),
+        unsubscribe: vi.fn().mockResolvedValue(undefined),
+        getDoc: vi.fn().mockResolvedValue({ state: { content: 'server' }, rev: 10 }),
+        getChangesSince: vi.fn().mockResolvedValue([]),
+        commitChanges: vi.fn().mockResolvedValue({ changes: [] }),
+        deleteDoc: vi.fn().mockResolvedValue(undefined),
+        onStateChange: vi.fn(),
+        onChangesCommitted: vi.fn(),
+        onDocDeleted: vi.fn(),
+        resumedStream: false,
+        sendRequiresStream: false,
+      };
       const restSync = new PatchesSync(mockPatches, restConnection);
+      // Arm the started intent the way the app does. The mock connect resolves and no
+      // state events fire, so this only flips the flag — sends require it now that
+      // `connected` no longer gates them on REST.
+      void restSync.connect();
       restSyncs.push(restSync);
       return { restConnection, restSync };
     }
@@ -3257,6 +3278,64 @@ describe('PatchesSync', () => {
       await restSync['_handleDocDeleted']('doc1');
 
       expect(restConnection.deleteDoc).toHaveBeenCalledWith('doc1');
+    });
+
+    it('disconnect() stops the send path and an in-flight degraded pass cannot re-arm', async () => {
+      const { restConnection, restSync } = makeRestSync();
+      restSync['updateState']({ connected: false });
+      let releasePending!: () => void;
+      mockAlgorithm.getPendingToSend.mockReturnValue(
+        new Promise(resolve => (releasePending = () => resolve([pendingChange])))
+      );
+
+      const pass = (restSync as any)._syncAllDegraded();
+      // Wait until the pass is inside syncDoc awaiting the store read, then tear the
+      // instance down — logout-while-degraded is exactly when DAB-765 users hit this.
+      await vi.waitFor(() => expect(mockAlgorithm.getPendingToSend).toHaveBeenCalled());
+      restSync.disconnect();
+      releasePending();
+      await pass;
+
+      // The finally must not re-arm on a stopped instance, and nothing went out.
+      expect((restSync as any)._degradedSyncTimer).toBeNull();
+      expect(restConnection.commitChanges).not.toHaveBeenCalled();
+
+      // An explicit stop parks keystrokes again, like the pre-DAB-831 disconnect did.
+      const syncDocSpy = vi.spyOn(restSync as any, 'syncDoc').mockResolvedValue(undefined);
+      restSync['_handleDocChange']('doc1');
+      expect(syncDocSpy).not.toHaveBeenCalled();
+
+      // connect() re-arms the intent: sends flow again with no stream event needed.
+      await restSync.connect();
+      restSync['_handleDocChange']('doc1');
+      expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+    });
+
+    it('REST stream-drop events preserve retry state, error dedup, and global status', () => {
+      const { restSync } = makeRestSync();
+      restSync['updateState']({ connected: true, syncStatus: 'synced' });
+      (restSync as any)._surfacedSyncErrors.add('doc1');
+      (restSync as any)._syncRetryAttempts.set('doc1', 2);
+
+      // The transport retries the stream forever (~30s backoff) and emits 'error' on
+      // every failed attempt — this branch must not wipe sync state on that cadence.
+      restSync['_handleConnectionChange']('error');
+
+      expect(restSync.state.syncStatus).toBe('synced'); // no unsynced↔synced flap
+      expect((restSync as any)._surfacedSyncErrors.has('doc1')).toBe(true); // no telemetry re-drip
+      expect((restSync as any)._syncRetryAttempts.get('doc1')).toBe(2);
+
+      // A genuine reconnect starts a fresh surfacing session: ladders drop so a
+      // still-failing doc may surface once more while syncAllKnownDocs re-attempts all.
+      restSync['_handleConnectionChange']('connected');
+      expect((restSync as any)._surfacedSyncErrors.size).toBe(0);
+
+      // WS drops still wipe, exactly as before — sends are blocked there.
+      sync['updateState']({ connected: true, syncStatus: 'synced' });
+      (sync as any)._surfacedSyncErrors.add('doc1');
+      sync['_handleConnectionChange']('error');
+      expect(sync.state.syncStatus).toBe('unsynced');
+      expect((sync as any)._surfacedSyncErrors.size).toBe(0);
     });
   });
 });

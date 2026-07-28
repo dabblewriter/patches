@@ -180,10 +180,12 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._unsubs = [
       onlineState.onOnlineChange(online => {
         this.updateState({ online });
-        // Coming online with the stream down: on a send-independent transport don't
-        // wait for the stream to establish (a hostile network may hold it down forever
-        // — DAB-831); drain pending and pull catch-up over plain requests right away.
-        if (online && !this.state.connected && !this.connection.sendRequiresStream) {
+        // Coming online with the stream down: on a started, send-independent transport
+        // don't wait for the stream to establish (a hostile network may hold it down
+        // forever — DAB-831); drain pending and pull catch-up over plain requests right
+        // away. `_canSend()` also keeps this from firing on a never-connect()ed or
+        // explicitly disconnect()ed instance.
+        if (online && !this.state.connected && this._canSend()) {
           void this._syncAllDegraded();
         } else if (!online) {
           this._clearDegradedSync();
@@ -215,6 +217,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   private _syncReprobeTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
   /** Pending timer for the next degraded-mode catch-up pass (see `_syncAllDegraded`); null when idle. */
   private _degradedSyncTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
+  /**
+   * Whether the app has asked this instance to sync (`connect()` sets it, `disconnect()`
+   * clears it). `_canSend()` consults it, so on a send-independent transport an explicit
+   * disconnect stops the send path too — not just the stream. Without it, a degraded
+   * pass in flight when `disconnect()`/`destroy()` runs would re-arm itself in its
+   * `finally` and keep POSTing on a torn-down instance (stale-auth requests after a
+   * logout, forever). Mirrors the transport's internal `shouldBeConnected` intent,
+   * which isn't visible through the connection interface.
+   */
+  private _started = false;
   /**
    * Docs whose current sync failure has already been surfaced (console + `onError`).
    * A background re-probe re-enters `syncDoc` every few minutes; without this a
@@ -300,14 +312,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // transport did), not from the cursor being passed here (what the caller intended) —
     // so an offline defer or an already-connected no-op can't leak a resume into a later
     // cold reconnect. See `_handleConnectionChange`.
+    this._started = true;
     try {
       await this.connection.connect(lastEventId);
     } catch (err) {
       console.error('PatchesSync connection failed:', err);
       const error = err instanceof Error ? err : new Error(String(err));
-      if (this.connection.sendRequiresStream) {
-        this.updateState({ connected: false, syncStatus: 'error', syncError: error });
-      } else {
+      if (this.connection.sendRequiresStream === false) {
         // A stream-only failure isn't a sync failure on a send-independent transport:
         // every commit and read still works over plain requests (DAB-831). Keep the
         // error off the sync posture, start the degraded catch-up/flush pass now (the
@@ -315,6 +326,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         // and let the transport keep retrying the stream with its own backoff.
         this.updateState({ connected: false });
         void this._syncAllDegraded();
+      } else {
+        this.updateState({ connected: false, syncStatus: 'error', syncError: error });
       }
       this.onError.emit(error);
       throw err;
@@ -325,6 +338,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * Disconnects from the server and stops syncing.
    */
   disconnect(): void {
+    // Clear the intent first: an in-flight degraded pass checks `_canSend()` between
+    // docs and its finally's re-schedule guards on `_started`, so this is what makes
+    // an explicit stop actually stop the send path (not just the stream).
+    this._started = false;
     this.connection.disconnect();
     this.updateState({ connected: false, syncStatus: 'unsynced' });
     this._clearAllSyncRetries();
@@ -608,12 +625,18 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   protected async _syncAllDegraded(): Promise<void> {
     this._clearDegradedSync();
-    if (this.connection.sendRequiresStream || this.state.connected || onlineState.isOffline) return;
+    if (!this._canSend() || this.state.connected || this.connection.sendRequiresStream !== false) return;
     try {
       // Branch metas first — branches must exist server-side before their doc content.
+      // A rejection from the branch-store read (or any other surprise) must not escape
+      // the `void` call sites as an unhandled rejection — see catch below. Liveness
+      // note: if a store read HANGS (the WebKit IndexedDB-stall family) rather than
+      // rejecting, the finally never runs and the loop stays dormant until the next
+      // connection-state or online event re-arms it.
       await this.syncPendingBranchMetas();
       for (const docId of [...this.trackedDocs]) {
-        // The stream may establish mid-pass — hand off to syncAllKnownDocs cleanly.
+        // The stream may establish mid-pass (hand off to syncAllKnownDocs cleanly),
+        // or disconnect()/offline may land mid-pass (stop sending immediately).
         if (this.state.connected || !this._canSend()) return;
         await this.syncDoc(docId);
       }
@@ -626,6 +649,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       if (allSynced && !this.state.connected) {
         this.updateState({ syncStatus: 'synced' });
       }
+    } catch (error) {
+      console.error('Error during degraded sync pass:', error);
+      this.onError.emit(error instanceof Error ? error : new Error(String(error)));
     } finally {
       this._scheduleDegradedSync();
     }
@@ -633,7 +659,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
   /** Arm the next degraded-mode pass; no-op whenever it doesn't apply (see `_syncAllDegraded`). */
   protected _scheduleDegradedSync(): void {
-    if (this.connection.sendRequiresStream || this.state.connected || onlineState.isOffline) return;
+    if (!this._canSend() || this.state.connected || this.connection.sendRequiresStream !== false) return;
     if (this._degradedSyncTimer !== null) return;
     this._degradedSyncTimer = globalThis.setTimeout(() => {
       this._degradedSyncTimer = null;
@@ -1270,17 +1296,26 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     const isConnected = connectionState === 'connected';
     const isConnecting = connectionState === 'connecting';
 
-    // Preserve syncing state if moving from connecting -> connected
-    // Reset syncing if disconnected or errored
-    const newSyncStatus: DocSyncStatus = isConnected
-      ? this.state.syncStatus // Preserve
-      : isConnecting
-        ? this.state.syncStatus // Preserve during connecting phase too
+    // Preserve syncing state if moving from connecting -> connected (and while
+    // connecting). On a stream-bound transport a definitive drop resets to
+    // 'unsynced' — sends are blocked until reconnect. On a send-independent
+    // transport the drop branch fires on EVERY failed reconnect attempt (the
+    // transport retries forever, backoff capped ~30s), and sends are unaffected —
+    // resetting here would flap global status unsynced↔synced on that cadence for
+    // every stream-blocked client, so the status is preserved instead.
+    const newSyncStatus: DocSyncStatus =
+      isConnected || isConnecting || this.connection.sendRequiresStream === false
+        ? this.state.syncStatus // Preserve
         : 'unsynced'; // Reset
 
     this.updateState({ connected: isConnected, syncStatus: newSyncStatus });
 
     if (isConnected) {
+      // Fresh connection session: syncAllKnownDocs below re-attempts every doc, so
+      // drop the old retry ladders and let a still-failing doc surface once more.
+      // (On WS the drop side already cleared these; on REST the drop deliberately
+      // doesn't — see the else branch.)
+      this._clearAllSyncRetries();
       // The stream is up — live pushes resume; the degraded-mode pass hands off here.
       this._clearDegradedSync();
       // A resumed stream (opened with a cursor) trusts the server's replay for the gap and
@@ -1290,14 +1325,21 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       const resume = this.connection.resumedStream ?? false;
       void this.syncAllKnownDocs({ resume });
     } else if (!isConnecting) {
-      // Drop pending retries — the next reconnect's syncAllKnownDocs re-syncs everything.
-      this._clearAllSyncRetries();
-      // Reset any stale 'syncing' statuses on disconnect/error
-      this._resetSyncingStatuses();
-      // Stream down while still online: on a send-independent transport, keep sync
-      // alive over plain requests until the stream re-establishes (DAB-831). Scheduled
-      // (not run immediately) so a quick transport reconnect wins the race and cancels
-      // it; a genuinely blocked stream gets its first pass within ~30s.
+      if (this.connection.sendRequiresStream !== false) {
+        // Sends ride the stream, so they're blocked now. Drop pending retries — the
+        // next reconnect's syncAllKnownDocs re-syncs everything — and reset any
+        // stale 'syncing' statuses.
+        this._clearAllSyncRetries();
+        this._resetSyncingStatuses();
+      }
+      // Send-independent transport: a stream drop doesn't touch the send path, and
+      // this branch fires on every failed reconnect attempt (~30s). Wiping the retry
+      // ladders here would also wipe the error-surfacing dedup, re-emitting a latched
+      // per-doc error (e.g. a 403) to console/telemetry every cycle; and resetting
+      // per-doc 'syncing' would kick docs whose REST syncs are still legitimately in
+      // flight. Keep sync state intact and just keep the degraded pass armed.
+      // Scheduled (not run immediately) so a quick transport reconnect wins the race
+      // and cancels it; a genuinely blocked stream gets its first pass within ~30s.
       this._scheduleDegradedSync();
     }
   }
@@ -1643,15 +1685,21 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
-   * Whether an outbound request can be attempted right now. On a transport whose sends
-   * ride the push channel (WebSocket), that requires the connection to be up; on a
-   * send-independent transport (REST/SSE), being online is enough — the stream only
-   * gates *receiving* live pushes, never sending (DAB-831). This also governs the
-   * retry/reprobe ladders: while online with the stream blocked on REST, no reconnect
-   * resync is coming, so retries must keep running here instead of deferring to it.
+   * Whether an outbound request can be attempted right now. On a transport whose
+   * sends ride the push channel (WebSocket), that requires the connection to be up —
+   * exactly the old gate. On a send-independent transport (REST/SSE) the stream only
+   * gates *receiving* live pushes, never sending (DAB-831) — but that leg additionally
+   * requires `_started` (connect() called, disconnect() not), because with `connected`
+   * out of the equation the intent flag is the only thing that lets an explicit
+   * disconnect/destroy actually stop the send path. The `=== false` polarity is
+   * deliberate: an un-migrated implementer that doesn't declare `sendRequiresStream`
+   * gets the conservative stream-bound behavior. This also governs the retry/reprobe
+   * ladders: while online with the stream blocked on REST, no reconnect resync is
+   * coming, so retries must keep running here instead of deferring to it.
    */
   protected _canSend(): boolean {
-    return !onlineState.isOffline && (this.state.connected || !this.connection.sendRequiresStream);
+    if (onlineState.isOffline) return false;
+    return this.state.connected || (this._started && this.connection.sendRequiresStream === false);
   }
 
   /**

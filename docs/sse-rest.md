@@ -94,6 +94,8 @@ const sync = new PatchesSync(patches, rest);
 
 Both implement the `PatchesConnection` interface, so everything downstream (`PatchesSync`, your application code) works identically regardless of transport.
 
+One capability differs: `PatchesREST` declares `sendRequiresStream: false` — commits and reads are plain HTTP requests that don't need the SSE stream — so `PatchesSync` keeps saving and catch-up-pulling even when a hostile network or HTTPS-inspecting middlebox blocks `text/event-stream` entirely. See [Degraded Mode](PatchesSync.md#degraded-mode-send-independent-transports).
+
 ## REST API
 
 All document operations use standard HTTP methods. Document IDs can contain slashes (they're hierarchical). Sub-resources use `_`-prefixed path segments to avoid collisions.

@@ -22,3 +22,11 @@ export type * from './ClientAlgorithm.js';
 // Sync-recovery errors, exported so consumers can `instanceof` instead of matching by name
 export { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
 export { ApplyChangesError } from '../algorithms/ot/shared/applyChanges.js';
+export { isUnsplittableChangeError, UnsplittableChangeError } from '../net/error.js';
+// Telemetry for changes the splitter can't get under the storage budget
+export {
+  onOversizedOp,
+  type ChangeSplitOptions,
+  type OversizedOpReason,
+  type OversizedOpReport,
+} from '../algorithms/ot/shared/changeBatching.js';

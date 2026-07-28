@@ -111,7 +111,7 @@ export class OTAlgorithm implements ClientAlgorithm {
         pendingRev = pending[pending.length - 1]?.rev ?? committedRev;
       }
 
-      const changes = this._createChangesFromOps(committedRev, pendingRev, ops, metadata, id);
+      const changes = this._createChangesFromOps(committedRev, pendingRev, ops, metadata, id, docId);
       if (changes.length === 0) return [];
 
       // Re-stamps each change's rev in place from the persisted tail; the objects below carry it.
@@ -591,21 +591,25 @@ export class OTAlgorithm implements ClientAlgorithm {
   /**
    * Creates Change objects from raw ops. An optional `id` mints the (first) change with a
    * caller-supplied stable id so a retried submit is idempotent end-to-end (the server dedups
-   * resubmitted commits by change id).
+   * resubmitted commits by change id). `docId` is carried only on oversized-op reports.
    */
   protected _createChangesFromOps(
     committedRev: number,
     pendingRev: number,
     ops: JSONPatchOp[],
     metadata: Record<string, any>,
-    id?: string
+    id?: string,
+    docId?: string
   ): Change[] {
     const rev = pendingRev + 1;
 
     let changes = [createChange(committedRev, rev, ops, metadata, id)];
 
     if (this._options.maxStorageBytes) {
-      changes = breakChanges(changes, this._options.maxStorageBytes, this._options.sizeCalculator);
+      changes = breakChanges(changes, this._options.maxStorageBytes, this._options.sizeCalculator, {
+        maxUnsplittableBytes: this._options.maxUnsplittableBytes,
+        docId,
+      });
     }
 
     return changes;

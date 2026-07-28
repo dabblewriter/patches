@@ -49,6 +49,18 @@ export interface PatchesConnection extends PatchesAPI {
    */
   readonly resumedStream?: boolean;
 
+  /**
+   * Whether outbound requests (commits, reads, subscription management) ride the same
+   * channel `onStateChange` reports on. WebSocket: `true` — every call is JSON-RPC over
+   * the socket, so a down socket genuinely blocks sends. REST/SSE: `false` — the
+   * EventSource only carries server→client pushes; commits and reads are independent
+   * HTTP requests that succeed with the stream down. PatchesSync consults this to
+   * decide whether "stream down" must also mean "cannot send" (see `_canSend`): on a
+   * send-independent transport, sync keeps flushing and catching up over plain
+   * requests while the push stream is blocked by a hostile network (DAB-831).
+   */
+  readonly sendRequiresStream: boolean;
+
   /** Tear down the connection. */
   disconnect(): void;
 

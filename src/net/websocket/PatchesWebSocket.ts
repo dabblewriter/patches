@@ -13,6 +13,9 @@ import { WebSocketTransport, type WebSocketOptions } from './WebSocketTransport.
 export class PatchesWebSocket extends PatchesClient implements PatchesConnection {
   transport: WebSocketTransport;
 
+  /** All traffic (commits included) rides the socket — a down socket blocks sends. */
+  readonly sendRequiresStream = true;
+
   // --- Public Signals ---
 
   /** Signal emitted when the underlying WebSocket connection state changes. */

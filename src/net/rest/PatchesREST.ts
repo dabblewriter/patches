@@ -86,6 +86,12 @@ export interface PatchesRESTOptions {
  * with PatchesSync.
  */
 export class PatchesREST implements PatchesConnection {
+  /**
+   * Sends are independent fetches — only server→client pushes ride the SSE stream, so
+   * commits and reads keep working while the stream is down (see PatchesConnection).
+   */
+  readonly sendRequiresStream = false;
+
   /** The client ID used for SSE connection and subscription management. */
   readonly clientId: string;
   /**

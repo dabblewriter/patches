@@ -629,6 +629,26 @@ describe('PatchesREST', () => {
     });
   });
 
+  describe('DAB-831: sends independent of the stream', () => {
+    it('declares sendRequiresStream = false', () => {
+      expect(rest.sendRequiresStream).toBe(false);
+    });
+
+    it('commits without the stream ever opening', async () => {
+      const committed = { changes: [{ id: 'c1', rev: 6 }] };
+      globalThis.fetch = mockFetchResponse(committed);
+
+      // No connect() — the EventSource never existed. The POST must still go out:
+      // PatchesSync relies on this to keep saving while a hostile network blocks SSE.
+      const result = await rest.commitChanges('doc1', [{ id: 'c1', ops: [] }]);
+
+      expect(result).toEqual(committed);
+      const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/docs/doc1/_changes?clientId=test-client-123');
+      expect(init?.method).toBe('POST');
+    });
+  });
+
   describe('API methods', () => {
     beforeEach(async () => {
       const p = rest.connect();

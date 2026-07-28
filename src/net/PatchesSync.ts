@@ -96,6 +96,14 @@ function jitterReprobeDelay(delayMs: number): number {
 }
 
 /**
+ * Interval between degraded-mode catch-up passes while online with the push stream down
+ * on a send-independent transport (see `_syncAllDegraded`). Jittered via
+ * `jitterReprobeDelay` (~24-30s) so a fleet of stream-blocked clients doesn't sweep the
+ * server in lockstep. DAB-831.
+ */
+const DEGRADED_SYNC_INTERVAL_MS = 30_000;
+
+/**
  * Handles server connection, document subscriptions, and syncing logic between
  * the Patches instance and the server.
  *
@@ -170,7 +178,17 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     // --- Event Listeners ---
     this._unsubs = [
-      onlineState.onOnlineChange(online => this.updateState({ online })),
+      onlineState.onOnlineChange(online => {
+        this.updateState({ online });
+        // Coming online with the stream down: on a send-independent transport don't
+        // wait for the stream to establish (a hostile network may hold it down forever
+        // — DAB-831); drain pending and pull catch-up over plain requests right away.
+        if (online && !this.state.connected && !this.connection.sendRequiresStream) {
+          void this._syncAllDegraded();
+        } else if (!online) {
+          this._clearDegradedSync();
+        }
+      }),
       this.connection.onStateChange(this._handleConnectionChange.bind(this)),
       this.connection.onChangesCommitted(this._receiveCommittedChanges.bind(this)),
       this.connection.onDocDeleted(docId => this._handleRemoteDocDeleted(docId)),
@@ -195,6 +213,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   private _reloadBuffers = new Map<string, Change[]>();
   /** Pending per-doc slow re-probe timers for docs the retry ladder gave up on (see `_scheduleSyncReprobe`). */
   private _syncReprobeTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
+  /** Pending timer for the next degraded-mode catch-up pass (see `_syncAllDegraded`); null when idle. */
+  private _degradedSyncTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   /**
    * Docs whose current sync failure has already been surfaced (console + `onError`).
    * A background re-probe re-enters `syncDoc` every few minutes; without this a
@@ -285,7 +305,17 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     } catch (err) {
       console.error('PatchesSync connection failed:', err);
       const error = err instanceof Error ? err : new Error(String(err));
-      this.updateState({ connected: false, syncStatus: 'error', syncError: error });
+      if (this.connection.sendRequiresStream) {
+        this.updateState({ connected: false, syncStatus: 'error', syncError: error });
+      } else {
+        // A stream-only failure isn't a sync failure on a send-independent transport:
+        // every commit and read still works over plain requests (DAB-831). Keep the
+        // error off the sync posture, start the degraded catch-up/flush pass now (the
+        // pending backlog must not wait for a `connected` event that may never come),
+        // and let the transport keep retrying the stream with its own backoff.
+        this.updateState({ connected: false });
+        void this._syncAllDegraded();
+      }
       this.onError.emit(error);
       throw err;
     }
@@ -298,6 +328,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.connection.disconnect();
     this.updateState({ connected: false, syncStatus: 'unsynced' });
     this._clearAllSyncRetries();
+    this._clearDegradedSync();
     this._resetSyncingStatuses();
   }
 
@@ -335,7 +366,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     const deletes = pendingBranches.filter(b => b.pendingOp === 'delete');
 
     for (const branch of creates) {
-      if (!this.state.connected) break;
+      if (!this._canSend()) break;
 
       try {
         // Create the branch on the server. The server is idempotent when metadata.id is provided.
@@ -365,7 +396,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     }
 
     for (const branch of updates) {
-      if (!this.state.connected) break;
+      if (!this._canSend()) break;
 
       try {
         // Extract only the editable metadata fields to send to the server
@@ -394,7 +425,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     }
 
     for (const branch of deletes) {
-      if (!this.state.connected) break;
+      if (!this._canSend()) break;
 
       try {
         await branchApi.deleteBranch(branch.id);
@@ -561,12 +592,69 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
+   * One degraded-mode sync pass: flush pending and pull committed catch-up for every
+   * tracked doc over plain requests while the push stream is down (DAB-831). Only
+   * meaningful on transports whose sends don't ride the stream
+   * (`sendRequiresStream === false`) — for those, a hostile network can hold the
+   * stream down forever (an SSE-buffering middlebox never fires `onopen`) while every
+   * fetch still succeeds; without this pass the pending backlog would wait for a
+   * `connected` event that never arrives. Skips the re-subscribe — subscriptions
+   * belong to an open stream (the server rejects them without one) — so live pushes
+   * stay off; each pass is one round of send + catch-up per doc, riding `syncDoc`'s
+   * serial gate, retry ladder, and reload-buffer guards. Re-schedules itself
+   * (jittered, ~24-30s) until the stream connects, we go offline, or the transport is
+   * stream-bound; the `connected` transition cancels it and `syncAllKnownDocs` takes
+   * over.
+   */
+  protected async _syncAllDegraded(): Promise<void> {
+    this._clearDegradedSync();
+    if (this.connection.sendRequiresStream || this.state.connected || onlineState.isOffline) return;
+    try {
+      // Branch metas first — branches must exist server-side before their doc content.
+      await this.syncPendingBranchMetas();
+      for (const docId of [...this.trackedDocs]) {
+        // The stream may establish mid-pass — hand off to syncAllKnownDocs cleanly.
+        if (this.state.connected || !this._canSend()) return;
+        await this.syncDoc(docId);
+      }
+      // Report an honest global posture after a full pass: 'synced' only when every
+      // tracked doc came through clean (per-doc failures latch their own docStates and
+      // keep their own retry/reprobe machinery running).
+      const allSynced =
+        this.trackedDocs.size > 0 &&
+        [...this.trackedDocs].every(id => this.docStates.state[id]?.syncStatus === 'synced');
+      if (allSynced && !this.state.connected) {
+        this.updateState({ syncStatus: 'synced' });
+      }
+    } finally {
+      this._scheduleDegradedSync();
+    }
+  }
+
+  /** Arm the next degraded-mode pass; no-op whenever it doesn't apply (see `_syncAllDegraded`). */
+  protected _scheduleDegradedSync(): void {
+    if (this.connection.sendRequiresStream || this.state.connected || onlineState.isOffline) return;
+    if (this._degradedSyncTimer !== null) return;
+    this._degradedSyncTimer = globalThis.setTimeout(() => {
+      this._degradedSyncTimer = null;
+      void this._syncAllDegraded();
+    }, jitterReprobeDelay(DEGRADED_SYNC_INTERVAL_MS));
+  }
+
+  protected _clearDegradedSync(): void {
+    if (this._degradedSyncTimer !== null) {
+      globalThis.clearTimeout(this._degradedSyncTimer);
+      this._degradedSyncTimer = null;
+    }
+  }
+
+  /**
    * Syncs a single document.
    * @param docId The ID of the document to sync.
    */
   @serialGate
   protected async syncDoc(docId: string): Promise<void> {
-    if (!this.state.connected || onlineState.isOffline || !this.trackedDocs.has(docId)) return;
+    if (!this._canSend() || !this.trackedDocs.has(docId)) return;
 
     this._initDocSyncState(docId, { syncStatus: 'syncing' });
 
@@ -681,7 +769,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       const willRetry = retryable && this._scheduleSyncRetry(docId);
       if (!willRetry) {
         this._clearSyncRetry(docId);
-        const recoverableOnReconnect = retryable && !this._isConnectedAndOnline();
+        const recoverableOnReconnect = retryable && !this._canSend();
         if (!recoverableOnReconnect && !this._surfacedSyncErrors.has(docId)) {
           this._surfacedSyncErrors.add(docId);
           console.error(`Error syncing doc ${docId}:`, failure);
@@ -872,7 +960,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (!this.trackedDocs.has(docId)) {
       throw new Error(`Document ${docId} is not tracked`);
     }
-    if (!this.state.connected || onlineState.isOffline) {
+    if (!this._canSend()) {
       throw new NetworkError('Not connected to server');
     }
 
@@ -925,7 +1013,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       let reloadedMidFlush = false;
 
       for (const changeBatch of batches) {
-        if (!this.state.connected || onlineState.isOffline) {
+        if (!this._canSend()) {
           throw new NetworkError('Disconnected during flush');
         }
 
@@ -1161,8 +1249,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * This now delegates the local tombstone marking to Patches.
    */
   protected async _handleDocDeleted(docId: string): Promise<void> {
-    // Attempt server delete if online
-    if (this.state.connected) {
+    // Attempt server delete whenever a send can go out (deleteDoc is a plain request
+    // on send-independent transports — it doesn't need the push stream).
+    if (this._canSend()) {
       try {
         const algorithm = this._getAlgorithm(docId);
         await this.connection.deleteDoc(docId);
@@ -1192,6 +1281,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.updateState({ connected: isConnected, syncStatus: newSyncStatus });
 
     if (isConnected) {
+      // The stream is up — live pushes resume; the degraded-mode pass hands off here.
+      this._clearDegradedSync();
       // A resumed stream (opened with a cursor) trusts the server's replay for the gap and
       // only flushes local pending; a cold connect re-syncs everything. The transport is the
       // authority: `resumedStream` is true only for a stream actually opened with the cursor,
@@ -1203,6 +1294,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this._clearAllSyncRetries();
       // Reset any stale 'syncing' statuses on disconnect/error
       this._resetSyncingStatuses();
+      // Stream down while still online: on a send-independent transport, keep sync
+      // alive over plain requests until the stream re-establishes (DAB-831). Scheduled
+      // (not run immediately) so a quick transport reconnect wins the race and cancels
+      // it; a genuinely blocked stream gets its first pass within ~30s.
+      this._scheduleDegradedSync();
     }
   }
 
@@ -1271,18 +1367,22 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       }
     });
 
-    if (this.state.connected) {
-      try {
-        // Only subscribe to IDs not already covered by existing subscriptions
-        const subscribeIds = this._filterSubscribeIds(newIds).filter(id => !alreadySubscribed.has(id));
-        if (subscribeIds.length) {
-          await this.connection.subscribe(subscribeIds);
+    if (this._canSend()) {
+      // Subscriptions belong to an open stream (the server rejects them without one),
+      // so only attempt them while connected; a degraded-mode sync still runs below.
+      if (this.state.connected) {
+        try {
+          // Only subscribe to IDs not already covered by existing subscriptions
+          const subscribeIds = this._filterSubscribeIds(newIds).filter(id => !alreadySubscribed.has(id));
+          if (subscribeIds.length) {
+            await this.connection.subscribe(subscribeIds);
+          }
+        } catch (err) {
+          // A failed subscribe must not skip the initial sync below — a doc with offline
+          // pending changes would never send them (nothing retries a skipped syncDoc).
+          console.warn(`Failed to subscribe newly tracked docs: ${newIds.join(', ')}`, err);
+          this.onError.emit(err as Error);
         }
-      } catch (err) {
-        // A failed subscribe must not skip the initial sync below — a doc with offline
-        // pending changes would never send them (nothing retries a skipped syncDoc).
-        console.warn(`Failed to subscribe newly tracked docs: ${newIds.join(', ')}`, err);
-        this.onError.emit(err as Error);
       }
       // Trigger sync for newly tracked docs immediately. Per-doc failures are handled
       // inside syncDoc (retry/backoff), so this never rejects.
@@ -1323,7 +1423,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   protected _handleDocChange(docId: string): void {
     if (!this.trackedDocs.has(docId)) return;
     this._initDocSyncState(docId, { hasPending: true });
-    if (!this.state.connected || onlineState.isOffline) return;
+    if (!this._canSend()) return;
     this.syncDoc(docId);
   }
 
@@ -1542,8 +1642,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       .catch(() => undefined);
   }
 
-  protected _isConnectedAndOnline(): boolean {
-    return this.state.connected && !onlineState.isOffline;
+  /**
+   * Whether an outbound request can be attempted right now. On a transport whose sends
+   * ride the push channel (WebSocket), that requires the connection to be up; on a
+   * send-independent transport (REST/SSE), being online is enough — the stream only
+   * gates *receiving* live pushes, never sending (DAB-831). This also governs the
+   * retry/reprobe ladders: while online with the stream blocked on REST, no reconnect
+   * resync is coming, so retries must keep running here instead of deferring to it.
+   */
+  protected _canSend(): boolean {
+    return !onlineState.isOffline && (this.state.connected || !this.connection.sendRequiresStream);
   }
 
   /**
@@ -1596,7 +1704,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     baseDoc?.updateSyncStatus(stable);
     if (this._scheduleSyncRetry(docId)) return;
     this._clearSyncRetry(docId);
-    if (isAbortError(failure) && this._isConnectedAndOnline() && !this._surfacedSyncErrors.has(docId)) {
+    if (isAbortError(failure) && this._canSend() && !this._surfacedSyncErrors.has(docId)) {
       this._surfacedSyncErrors.add(docId);
       console.error(`Aborted request persisted past retries while syncing doc ${docId}:`, failure);
       this.onError.emit(failure, { docId });
@@ -1614,7 +1722,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * (a local edit, untrack, or reconnect) re-arms it from a clean slate.
    */
   protected _scheduleSyncRetry(docId: string): boolean {
-    if (!this._isConnectedAndOnline()) return false;
+    if (!this._canSend()) return false;
     const attempts = this._syncRetryAttempts.get(docId) ?? 0;
     if (attempts >= SYNC_RETRY_MAX_ATTEMPTS) return false;
     const delay = Math.min(SYNC_RETRY_BASE_MS * 2 ** attempts, SYNC_RETRY_MAX_MS);
@@ -1623,7 +1731,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (existing !== undefined) globalThis.clearTimeout(existing);
     const timer = globalThis.setTimeout(() => {
       this._syncRetryTimers.delete(docId);
-      if (!this._isConnectedAndOnline() || !this.trackedDocs.has(docId)) return;
+      if (!this._canSend() || !this.trackedDocs.has(docId)) return;
       void this.syncDoc(docId);
     }, delay);
     this._syncRetryTimers.set(docId, timer);
@@ -1646,13 +1754,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * finds the connection down rather than being cleared up front.
    */
   protected _scheduleSyncReprobe(docId: string, retryable: boolean): void {
-    if (!this._isConnectedAndOnline() || !this.trackedDocs.has(docId)) return;
+    if (!this._canSend() || !this.trackedDocs.has(docId)) return;
     const delay = jitterReprobeDelay(retryable ? SYNC_REPROBE_EXHAUSTED_MS : SYNC_REPROBE_TERMINAL_MS);
     const existing = this._syncReprobeTimers.get(docId);
     if (existing !== undefined) globalThis.clearTimeout(existing);
     const timer = globalThis.setTimeout(() => {
       this._syncReprobeTimers.delete(docId);
-      if (!this._isConnectedAndOnline() || !this.trackedDocs.has(docId)) return;
+      if (!this._canSend() || !this.trackedDocs.has(docId)) return;
       void this.syncDoc(docId);
     }, delay);
     this._syncReprobeTimers.set(docId, timer);

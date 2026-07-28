@@ -228,6 +228,18 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   private _started = false;
   /**
+   * Doc ids THIS instance has successfully subscribed on the server. A resume pass
+   * (successor tab reconnecting with the predecessor's cursor) rides the server-restored
+   * subscription set for docs it knows it subscribed, but must subscribe tracked docs
+   * missing from this set — a doc tracked while the stream was down (offline, or the
+   * degraded mode DAB-831 makes routine) was never subscribed by anyone, and skipping it
+   * on resume left it silently missing live pushes until the next cold connect (DAB-865).
+   * A successor starts empty and so re-subscribes everything on resume: one idempotent
+   * POST buys correctness; the round-trip saving remains for same-instance resumes.
+   * Cleared on disconnect — conservative, since re-subscribing known ids is harmless.
+   */
+  private _subscribedIds = new Set<string>();
+  /**
    * Docs whose current sync failure has already been surfaced (console + `onError`).
    * A background re-probe re-enters `syncDoc` every few minutes; without this a
    * permanently-latched doc (e.g. a 403) would re-log/re-emit the identical error on
@@ -347,6 +359,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._clearAllSyncRetries();
     this._clearDegradedSync();
     this._resetSyncingStatuses();
+    this._subscribedIds.clear();
   }
 
   /**
@@ -552,17 +565,23 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // connect syncs every doc. hasPending was just read into syncedEntries above.
       const flushIds = resume ? syncIds.filter(id => syncedEntries[id]?.hasPending) : syncIds;
 
-      // Cold connect subscribes everything. A resume subscribes only the docs it will flush
-      // — one may have been created offline and never subscribed by the predecessor, so it
-      // needs a subscription to receive future changes; clean docs ride the subscriptions
-      // the server restored from its own store (2h TTL) when the stream reopened, so
-      // re-POSTing them would just add the round-trips a hand-off is meant to avoid.
-      const subscribeCandidates = resume ? flushIds : syncIds;
+      // Cold connect subscribes everything. A resume subscribes the docs it will flush
+      // (one may have been created offline and never subscribed by the predecessor) PLUS
+      // any tracked doc this instance never subscribed itself (`_subscribedIds`) — a doc
+      // tracked while the stream was down has no subscription anywhere, and skipping it
+      // here left it silently missing live pushes until the next cold connect (DAB-865).
+      // Docs this instance knows it subscribed ride the set the server restored from its
+      // own store (2h TTL) when the stream reopened, so re-POSTing those would just add
+      // the round-trips a hand-off is meant to avoid.
+      const subscribeCandidates = resume
+        ? syncIds.filter(id => syncedEntries[id]?.hasPending || !this._subscribedIds.has(id))
+        : syncIds;
       if (subscribeCandidates.length > 0) {
         try {
           const subscribeIds = this._filterSubscribeIds(subscribeCandidates);
           if (subscribeIds.length) {
             await this.connection.subscribe(subscribeIds);
+            subscribeIds.forEach(id => this._subscribedIds.add(id));
           }
         } catch (err) {
           console.warn('Error subscribing to active docs during sync:', err);
@@ -987,7 +1006,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       throw new Error(`Document ${docId} is not tracked`);
     }
     if (!this._canSend()) {
-      throw new NetworkError('Not connected to server');
+      throw new NetworkError('Cannot send changes: offline or not connected');
     }
 
     // Guarantee a docStates entry exists. flushDoc is protected/subclass-callable and
@@ -1040,7 +1059,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
       for (const changeBatch of batches) {
         if (!this._canSend()) {
-          throw new NetworkError('Disconnected during flush');
+          throw new NetworkError('Cannot send changes: went offline or lost the connection during flush');
         }
 
         let commitResult;
@@ -1418,6 +1437,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           const subscribeIds = this._filterSubscribeIds(newIds).filter(id => !alreadySubscribed.has(id));
           if (subscribeIds.length) {
             await this.connection.subscribe(subscribeIds);
+            subscribeIds.forEach(id => this._subscribedIds.add(id));
           }
         } catch (err) {
           // A failed subscribe must not skip the initial sync below — a doc with offline
@@ -1456,6 +1476,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (this.state.connected && unsubscribeIds.length) {
       try {
         await this.connection.unsubscribe(unsubscribeIds);
+        unsubscribeIds.forEach(id => this._subscribedIds.delete(id));
       } catch (err) {
         console.warn(`Failed to unsubscribe docs: ${unsubscribeIds.join(', ')}`, err);
       }

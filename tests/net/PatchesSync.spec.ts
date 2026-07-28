@@ -388,6 +388,9 @@ describe('PatchesSync', () => {
         { docId: 'doc2', committedRev: 5 },
       ] as TrackedDoc[]);
       mockAlgorithm.hasPending.mockResolvedValue(false);
+      // This instance subscribed both docs (a prior cold connect); the resume replay
+      // and the server-restored subscription set cover them.
+      (sync as any)._subscribedIds = new Set(['doc1', 'doc2']);
       const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
 
       sync['updateState']({ syncStatus: 'synced' });
@@ -408,6 +411,8 @@ describe('PatchesSync', () => {
         { docId: 'doc2', committedRev: 5 },
       ] as TrackedDoc[]);
       mockAlgorithm.hasPending.mockImplementation(async (id: string) => id === 'doc1');
+      // This instance subscribed both docs on a prior cold connect.
+      (sync as any)._subscribedIds = new Set(['doc1', 'doc2']);
       const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
 
       await sync['syncAllKnownDocs']({ resume: true });
@@ -417,6 +422,32 @@ describe('PatchesSync', () => {
       expect(syncDocSpy).toHaveBeenCalledWith('doc1');
       expect(syncDocSpy).not.toHaveBeenCalledWith('doc2');
       expect(sync.state.syncStatus).toBe('synced');
+    });
+
+    it('resume: subscribes tracked docs this instance never subscribed (DAB-865)', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'doc2', committedRev: 5 },
+      ] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      // doc1 was subscribed by this instance; doc2 was tracked while the stream was
+      // down (offline or DAB-831 degraded mode) and never subscribed by anyone — the
+      // server-restored set can't cover it, so the resume pass must.
+      (sync as any)._subscribedIds = new Set(['doc1']);
+
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc2']);
+      // Still no per-doc pull: it's a subscription gap, not a content gap — the doc is
+      // clean and the replay covers the committed tail.
+      expect(syncDocSpy).not.toHaveBeenCalled();
+      // The successor case: an instance with no subscribe history re-subscribes all
+      // tracked docs in one idempotent POST rather than silently missing pushes.
+      (sync as any)._subscribedIds = new Set();
+      vi.mocked(mockWebSocket.subscribe).mockClear();
+      await sync['syncAllKnownDocs']({ resume: true });
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc1', 'doc2']);
     });
 
     it('resume: defers tombstone deletes to the next cold sync', async () => {
@@ -1524,13 +1555,13 @@ describe('PatchesSync', () => {
     it('should throw if not connected', async () => {
       sync['updateState']({ connected: false });
 
-      await expect(sync['flushDoc']('doc1')).rejects.toThrow('Not connected to server');
+      await expect(sync['flushDoc']('doc1')).rejects.toThrow('Cannot send changes');
     });
 
     it('should throw if offline even when connection state is stale-connected', async () => {
       setOffline(true);
 
-      await expect(sync['flushDoc']('doc1')).rejects.toThrow('Not connected to server');
+      await expect(sync['flushDoc']('doc1')).rejects.toThrow('Cannot send changes');
       expect(mockWebSocket.commitChanges).not.toHaveBeenCalled();
     });
 
@@ -3196,7 +3227,7 @@ describe('PatchesSync', () => {
       sync['_handleDocChange']('doc1');
       expect(syncDocSpy).not.toHaveBeenCalled();
 
-      await expect(sync['flushDoc']('doc1')).rejects.toThrow('Not connected to server');
+      await expect(sync['flushDoc']('doc1')).rejects.toThrow('Cannot send changes');
     });
 
     it('never-connects: a failed connect() keeps the error off the sync posture and drains the backlog (REST)', async () => {

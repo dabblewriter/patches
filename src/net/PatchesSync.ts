@@ -580,8 +580,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         try {
           const subscribeIds = this._filterSubscribeIds(subscribeCandidates);
           if (subscribeIds.length) {
-            await this.connection.subscribe(subscribeIds);
-            subscribeIds.forEach(id => this._subscribedIds.add(id));
+            // Record only the GRANTED ids: subscribe() resolves with the possibly-partial
+            // subset actually registered (denied/unaccounted ids resolve silently, no
+            // throw). Recording the request instead would mark a denied doc as
+            // subscribed and permanently skip it from re-subscribe — the silent miss
+            // DAB-865 exists to prevent.
+            const granted = (await this.connection.subscribe(subscribeIds)) ?? [];
+            granted.forEach(id => this._subscribedIds.add(id));
           }
         } catch (err) {
           console.warn('Error subscribing to active docs during sync:', err);
@@ -1436,8 +1441,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // Only subscribe to IDs not already covered by existing subscriptions
           const subscribeIds = this._filterSubscribeIds(newIds).filter(id => !alreadySubscribed.has(id));
           if (subscribeIds.length) {
-            await this.connection.subscribe(subscribeIds);
-            subscribeIds.forEach(id => this._subscribedIds.add(id));
+            // Granted subset only — see the same pattern in syncAllKnownDocs (DAB-865).
+            const granted = (await this.connection.subscribe(subscribeIds)) ?? [];
+            granted.forEach(id => this._subscribedIds.add(id));
           }
         } catch (err) {
           // A failed subscribe must not skip the initial sync below — a doc with offline

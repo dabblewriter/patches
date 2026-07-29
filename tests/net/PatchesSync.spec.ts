@@ -424,6 +424,30 @@ describe('PatchesSync', () => {
       expect(sync.state.syncStatus).toBe('synced');
     });
 
+    it('records only the granted subset of a partial subscribe response (DAB-865)', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'doc2', committedRev: 5 },
+      ] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      // subscribe() resolves with the ids actually registered — doc2 is denied or
+      // left unaccounted, silently (the contract never throws for partial grants).
+      mockWebSocket.subscribe.mockResolvedValue(['doc1']);
+      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      sync['updateState']({ connected: true });
+
+      await sync['syncAllKnownDocs']();
+
+      expect((sync as any)._subscribedIds.has('doc1')).toBe(true);
+      expect((sync as any)._subscribedIds.has('doc2')).toBe(false);
+
+      // The next resume pass re-attempts the ungranted doc instead of skipping it.
+      vi.mocked(mockWebSocket.subscribe).mockClear();
+      mockWebSocket.subscribe.mockResolvedValue(['doc2']);
+      await sync['syncAllKnownDocs']({ resume: true });
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc2']);
+    });
+
     it('resume: subscribes tracked docs this instance never subscribed (DAB-865)', async () => {
       mockAlgorithm.listDocs.mockResolvedValue([
         { docId: 'doc1', committedRev: 5 },

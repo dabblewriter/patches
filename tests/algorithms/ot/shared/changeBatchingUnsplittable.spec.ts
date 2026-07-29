@@ -106,6 +106,7 @@ describe('unsplittable ops', () => {
         path: hatch.path,
         reason: hatch.reason,
         maxBytes,
+        budget: 'storage',
         docId: 'doc-1',
         changeId: 'change-1',
         emitted: true,
@@ -147,6 +148,18 @@ describe('unsplittable ops', () => {
 
     expect(batches.flat()).toHaveLength(1);
     expect(reports).toEqual([expect.objectContaining({ emitted: true })]);
+  });
+
+  it('stamps wire re-split reports with the payload budget and doc id', () => {
+    // No maxStorageBytes: only the wire re-split runs, and this op has no seam for it either.
+    const change = createChange([{ op: 'move', path: '/source', from: '/destination', value: 'x'.repeat(5_000) }]);
+
+    const batches = breakChangesIntoBatches([change], { maxPayloadBytes: 3_000, docId: 'doc-1' });
+
+    expect(batches.flat()).toHaveLength(1);
+    expect(reports).toEqual([
+      expect.objectContaining({ budget: 'payload', docId: 'doc-1', maxBytes: 3_000, emitted: true }),
+    ]);
   });
 
   it('honours maxUnsplittableBytes passed through breakChangesIntoBatches', () => {
@@ -237,7 +250,10 @@ describe('large text inserts', () => {
     const pieces = breakChanges([change], maxBytes, compressedSizeUint8);
 
     expect(pieces.length).toBeGreaterThan(1);
-    expect(pieces.every(piece => (piece.ops[0].value as any[]).every(op => op.attributes?.bold))).toBe(true);
+    // Every insert carries the attributes; the positional retain prefixes rightly carry none.
+    const inserts = pieces.flatMap(piece => (piece.ops[0].value as any[]).filter(op => op.insert !== undefined));
+    expect(inserts.length).toBeGreaterThan(1);
+    expect(inserts.every(op => op.attributes?.bold)).toBe(true);
   });
 
   it('never cuts a surrogate pair', () => {

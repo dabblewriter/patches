@@ -118,6 +118,8 @@ describe('PatchesSync re-splits on a 413', () => {
     expect(ctx.sync.docStates.state[DOC_ID].syncStatus).toBe('error');
     expect(ctx.sync.docStates.state[DOC_ID].syncError).toBeInstanceOf(StatusError);
     expect(ctx.sync['_resplitBudgets'].get(DOC_ID)).toBe(FLOOR);
+    // Deterministic on these bytes: the retry ladder must not resend the identical request.
+    expect(ctx.sync['_isRetryableSyncError'](ctx.sync.docStates.state[DOC_ID].syncError)).toBe(false);
 
     // At the floor, another pass halves nothing and adds exactly one more attempt.
     await ctx.sync['syncDoc'](DOC_ID);

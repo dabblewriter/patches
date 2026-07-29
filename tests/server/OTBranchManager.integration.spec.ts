@@ -902,9 +902,9 @@ describe('DAB-760 editor-copy merge doubling', () => {
   });
 
   // F) The near-miss: a floor off by ONE rev replays only the seed's LAST stored piece — a
-  //    bare insert that is a mid-body slice, not a prefix of the field head. A prefix check
-  //    misses it (silent corruption); tracking what the batch inserts against what survives
-  //    catches it.
+  //    retain-prefixed insert that re-lands a mid-body slice immediately before the surviving
+  //    copy of the same text. A prefix check misses it (silent corruption); tracking what the
+  //    batch inserts against what survives catches it.
   it('guard: a floor off by one rev (a single tail piece) is refused', async () => {
     const { store, server, manager } = setup(GUARD);
     const STORAGE = 3_000;
@@ -924,6 +924,47 @@ describe('DAB-760 editor-copy merge doubling', () => {
     expect(committedSpan).toBeGreaterThan(2);
 
     const branchId = 'branchOffByOne';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: committedSpan }); // one short
+    await store.saveChanges(branchId, committedSeed);
+
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(branchId)).rejects.toBeInstanceOf(MergeContentDuplicationError);
+    err.mockRestore();
+
+    const { state: after } = await coldLoad(server, 'doc1');
+    expect(docBody(after, 'd1')).toBe(bigBody);
+  });
+
+  // F2) The same near-miss with the piece shapes OLDER splitters persisted: retain-less tail
+  //     pieces that re-insert their slice at the head of the field. Branches seeded before the
+  //     positional fix still hold these, so the head-anchored signature must keep refusing them.
+  it('guard: a legacy retain-less tail piece is still refused', async () => {
+    const { store, server, manager } = setup(GUARD);
+    const STORAGE = 3_000;
+    const PAYLOAD = 6_000;
+
+    const bigBody = 'The grey cat sat by the window and watched the rain.\n'.repeat(600);
+    const state = { docs: { d1: { id: 'd1', body: { content: { ops: [{ insert: bigBody }] } } } } };
+    await server.commitChanges('doc1', [rootChange('s1', state)]);
+
+    const rootReplace = createChange(0, 1, [{ op: 'replace', path: '', value: state }], { committedAt: 0 }) as Change;
+    const committedSeed = breakChangesIntoBatches([rootReplace], {
+      maxPayloadBytes: PAYLOAD,
+      maxStorageBytes: STORAGE,
+      sizeCalculator: compressedSizeUint8,
+    })
+      .flat()
+      // Strip the positional retain prefixes back off, reproducing what a pre-fix splitter stored.
+      .map(change => ({
+        ...change,
+        ops: change.ops.map(op =>
+          op.op === '@txt' && Array.isArray(op.value) && op.value[0]?.retain ? { ...op, value: op.value.slice(1) } : op
+        ),
+      }));
+    const committedSpan = committedSeed[committedSeed.length - 1].rev;
+    expect(committedSpan).toBeGreaterThan(2);
+
+    const branchId = 'branchLegacyTail';
     await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: committedSpan }); // one short
     await store.saveChanges(branchId, committedSeed);
 

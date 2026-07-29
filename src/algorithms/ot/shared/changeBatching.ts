@@ -41,7 +41,7 @@ export type OversizedOpReason =
   | 'value-not-object'
   /** A `replace`/`add` object value with no text deltas to extract. */
   | 'value-no-text'
-  /** A single-character insert that still measures over budget. */
+  /** A single code point of an insert (possibly a surrogate pair) that still measures over budget. */
   | 'insert-chunk';
 
 /** An op the splitter could not break below the storage budget. */
@@ -51,8 +51,15 @@ export interface OversizedOpReport {
   path: string;
   /** Measured size of the op, by the caller's size calculator. */
   bytes: number;
-  /** The `maxStorageBytes` budget it overshot. */
+  /** The budget it overshot. */
   maxBytes: number;
+  /**
+   * Which budget `maxBytes` is: `'storage'` for the per-change storage split
+   * (`maxStorageBytes`, possibly compressed), `'payload'` for the wire re-split
+   * (`maxPayloadBytes`, raw JSON). One op over both budgets reports once per pass — filter on
+   * this to avoid double-counting in telemetry.
+   */
+  budget: 'storage' | 'payload';
   docId?: string;
   changeId?: string;
   /** True when the op went out anyway; false when it was refused with an `UnsplittableChangeError`. */
@@ -81,6 +88,11 @@ export interface ChangeSplitOptions {
   maxUnsplittableBytes?: number;
   /** Doc id, carried on {@link OversizedOpReport} for the consumer's telemetry. */
   docId?: string;
+  /**
+   * Which budget this split enforces, stamped on {@link OversizedOpReport}. Defaults to
+   * `'storage'`; `breakChangesIntoBatches` stamps `'payload'` on its wire re-split.
+   */
+  budget?: 'storage' | 'payload';
 }
 
 /** Everything the recursive splitters need, threaded as one value. */
@@ -89,6 +101,7 @@ interface SplitContext extends Required<Pick<ChangeSplitOptions, 'maxUnsplittabl
   sizeCalculator?: SizeCalculator;
   docId?: string;
   changeId?: string;
+  budget: 'storage' | 'payload';
 }
 
 /**
@@ -121,6 +134,7 @@ export function breakChanges(
       maxUnsplittableBytes: options?.maxUnsplittableBytes ?? Infinity,
       docId: options?.docId,
       changeId: change.id,
+      budget: options?.budget ?? 'storage',
     });
     revShift += pieces.length - 1;
     results.push(...pieces);
@@ -145,6 +159,7 @@ function guardUnsplittable(
     path,
     bytes,
     maxBytes: ctx.maxBytes,
+    budget: ctx.budget,
     docId: ctx.docId,
     changeId: ctx.changeId,
     emitted,
@@ -215,9 +230,12 @@ export function breakChangesIntoBatches(
   // re-split below, whose pieces get fresh ids per call.
   const batchId = changes[0].id;
 
-  // Split any change too large for one wire batch (shouldn't happen if maxStorageBytes < maxPayloadBytes).
-  // breakChanges renumbers the whole queue so split pieces never collide with the revs that follow them.
-  processedChanges = breakChanges(processedChanges, maxPayloadBytes);
+  // Split any change too large for one wire batch. Reachable even with maxStorageBytes set:
+  // the storage pass may measure compressed bytes while this one measures raw JSON, so a change
+  // under the storage budget can still exceed the wire cap. breakChanges renumbers the whole
+  // queue so split pieces never collide with the revs that follow them. Reports from this pass
+  // are stamped `budget: 'payload'` so telemetry can tell them from the storage pass's.
+  processedChanges = breakChanges(processedChanges, maxPayloadBytes, undefined, { docId, budget: 'payload' });
   const batches: Change[][] = [];
   let currentBatch: Change[] = [];
   let currentSize = 2; // Account for [] wrapper
@@ -320,7 +338,15 @@ function breakSingleChange(orig: Change, ctx: SplitContext): Change[] {
 }
 
 /**
- * Break a large @txt operation into multiple smaller operations
+ * Break a large @txt operation into multiple smaller operations.
+ *
+ * The pieces are SEQUENTIAL changes: each composes onto the document produced by the piece before
+ * it, exactly as replay applies them. Ops keep their original coordinates only inside the first
+ * piece; every later piece must first retain past everything the earlier pieces retained or
+ * inserted (a delete occupies no width in the document it leaves behind), or its ops would land at
+ * the head of the document. `pieceStartPos` is that cursor. The content past it is untouched by
+ * the earlier pieces, so the ops of a piece — expressed in the original delta's relative
+ * coordinates — stay valid from that point on.
  */
 function breakTextOp(origChange: Change, textOp: JSONPatchOp, startRev: number, ctx: SplitContext): Change[] {
   const results: Change[] = [];
@@ -337,88 +363,60 @@ function breakTextOp(origChange: Change, textOp: JSONPatchOp, startRev: number, 
     }
   }
 
-  let currentOpsForNextChangePiece: any[] = [];
-  let retainToPrefixCurrentPiece = 0; // Retain that should prefix the ops in currentOpsForNextChangePiece
+  // Width an op occupies in the document AFTER it applies: a retain skips it, a string insert adds
+  // its length (UTF-16 units, delta's coordinate space), an embed insert adds 1, a delete removes
+  // what it consumed.
+  const advanceOf = (op: any): number =>
+    op.retain ? op.retain : typeof op.insert === 'string' ? op.insert.length : op.insert !== undefined ? 1 : 0;
 
-  const flushCurrentChangePiece = () => {
-    if (!currentOpsForNextChangePiece.length) return;
+  // Position in the current document (all earlier pieces applied) where the next piece's ops act.
+  let pieceStartPos = 0;
+  const withStartRetain = (ops: any[]): any[] => (pieceStartPos > 0 ? [{ retain: pieceStartPos }, ...ops] : ops);
 
-    const opsToFlush = [...currentOpsForNextChangePiece];
-    if (retainToPrefixCurrentPiece > 0) {
-      if (!opsToFlush[0]?.retain) {
-        // Only add if not already starting with a retain
-        opsToFlush.unshift({ retain: retainToPrefixCurrentPiece });
-      } else {
-        // If it starts with retain, assume it's the intended one from deltaOps.
-        // This might need adjustment if a small retain op is batched after a large retain prefix.
-        // For now, this prioritizes an existing retain op at the start of the batch.
-      }
-    }
-    results.push(deriveNewChange(origChange, rev++, [{ ...textOp, value: opsToFlush }]));
-    currentOpsForNextChangePiece = [];
-    // retainToPrefixCurrentPiece is NOT reset here, it carries over for the start of the next piece IF it's non-zero from a previous retain op.
+  const measure = (ops: any[]) =>
+    getSizeForStorage({ ...origChange, ops: [{ ...textOp, value: ops }] }, ctx.sizeCalculator);
+
+  let pieceOps: any[] = [];
+  let pieceAdvance = 0;
+
+  const flushPiece = () => {
+    if (!pieceOps.length) return;
+    results.push(deriveNewChange(origChange, rev++, [{ ...textOp, value: withStartRetain(pieceOps) }]));
+    pieceStartPos += pieceAdvance;
+    pieceOps = [];
+    pieceAdvance = 0;
   };
 
   for (const op of deltaOps) {
-    // Try adding current op (with its necessary prefix) to the current batch
-    const testBatchOps = [...currentOpsForNextChangePiece];
-    if (retainToPrefixCurrentPiece > 0 && testBatchOps.length === 0) {
-      // If batch is empty, it needs the prefix
-      testBatchOps.push({ retain: retainToPrefixCurrentPiece });
-    }
-    testBatchOps.push(op);
-    const testBatchSize = getSizeForStorage(
-      { ...origChange, ops: [{ ...textOp, value: testBatchOps }] },
-      ctx.sizeCalculator
-    );
-
-    if (currentOpsForNextChangePiece.length > 0 && testBatchSize > ctx.maxBytes) {
-      flushCurrentChangePiece();
-      // After flush, retainToPrefixCurrentPiece still holds the value for the *start* of the new piece (current op)
+    if (pieceOps.length > 0 && measure(withStartRetain([...pieceOps, op])) > ctx.maxBytes) {
+      flushPiece();
     }
 
-    // Check if the op itself (with its prefix) is too large for a new piece
-    const opStandaloneOps = retainToPrefixCurrentPiece > 0 ? [{ retain: retainToPrefixCurrentPiece }, op] : [op];
-    const opStandaloneSize = getSizeForStorage(
-      { ...origChange, ops: [{ ...textOp, value: opStandaloneOps }] },
-      ctx.sizeCalculator
-    );
-
-    if (currentOpsForNextChangePiece.length === 0 && opStandaloneSize > ctx.maxBytes) {
-      if (op.insert && typeof op.insert === 'string') {
-        const insertPieces = splitLargeInsertText(
-          origChange,
-          textOp,
-          op.insert,
-          op.attributes,
-          retainToPrefixCurrentPiece,
-          ctx
-        );
-        for (const pieceOps of insertPieces) {
-          results.push(deriveNewChange(origChange, rev++, [{ ...textOp, value: pieceOps }]));
+    if (pieceOps.length === 0) {
+      const standaloneOps = withStartRetain([op]);
+      const standaloneSize = measure(standaloneOps);
+      if (standaloneSize > ctx.maxBytes) {
+        if (op.insert && typeof op.insert === 'string') {
+          const insertPieces = splitLargeInsertText(origChange, textOp, op.insert, op.attributes, pieceStartPos, ctx);
+          for (const pieceValue of insertPieces) {
+            results.push(deriveNewChange(origChange, rev++, [{ ...textOp, value: pieceValue }]));
+          }
+          pieceStartPos += op.insert.length;
+          continue;
         }
-        retainToPrefixCurrentPiece = 0; // An insert consumes the preceding retain for the next original op
-      } else {
         // Non-splittable large op (a retain, or an embed insert like an image data URL)
-        guardUnsplittable(ctx, textOp.op, textOp.path, opStandaloneSize, 'delta-op');
-        results.push(deriveNewChange(origChange, rev++, [{ ...textOp, value: opStandaloneOps }]));
-        retainToPrefixCurrentPiece = op.retain || 0;
-      }
-    } else {
-      // Op fits into current batch (or starts a new one that fits)
-      currentOpsForNextChangePiece.push(op);
-      if (op.retain) {
-        retainToPrefixCurrentPiece += op.retain; // Accumulate retain for the next op or flush
-      } else {
-        // Insert or delete
-        retainToPrefixCurrentPiece = 0; // Consumes retain for the next op
+        guardUnsplittable(ctx, textOp.op, textOp.path, standaloneSize, 'delta-op');
+        results.push(deriveNewChange(origChange, rev++, [{ ...textOp, value: standaloneOps }]));
+        pieceStartPos += advanceOf(op);
+        continue;
       }
     }
+
+    pieceOps.push(op);
+    pieceAdvance += advanceOf(op);
   }
 
-  if (currentOpsForNextChangePiece.length > 0) {
-    flushCurrentChangePiece();
-  }
+  flushPiece();
   return results;
 }
 
@@ -430,45 +428,61 @@ function safeSplitIndex(text: string, index: number): number {
 
 /**
  * Split a large insert string into the delta-op arrays of the change pieces that carry it, each
- * measuring at or under `ctx.maxBytes`. `retainPrefix` prefixes the first piece only.
+ * measuring at or under `ctx.maxBytes`.
+ *
+ * `startPos` is the position in the current document where the insert begins. Every piece is
+ * prefixed with a retain to its own position: the first piece retains to `startPos`, and each
+ * later piece additionally retains past the chunks the earlier pieces inserted — the pieces are
+ * sequential changes, so a piece without that cumulative retain would insert at the head of the
+ * document.
  *
  * The character budget below is only a seed: it comes from a *byte* budget the size calculator may
  * measure post-compression, so it says nothing reliable about how big a chunk of this particular
- * text will store as. Every chunk is measured and halved until it fits.
+ * text will store as. Every chunk is measured and halved until it fits. A cut is never placed
+ * inside a surrogate pair; a lone pair that still cannot fit goes through `guardUnsplittable`
+ * whole.
  */
 function splitLargeInsertText(
   origChange: Change,
   textOp: JSONPatchOp,
   text: string,
   attributes: any,
-  retainPrefix: number,
+  startPos: number,
   ctx: SplitContext
 ): any[][] {
   const pieces: any[][] = [];
   const measure = (deltaOps: any[]) =>
     getSizeForStorage({ ...origChange, ops: [{ ...textOp, value: deltaOps }] }, ctx.sizeCalculator);
 
-  const emit = (chunk: string, prefix: number): void => {
-    const deltaOps: any[] = prefix > 0 ? [{ retain: prefix }] : [];
+  // Document position where the next chunk inserts; advances by each emitted chunk's length.
+  let position = startPos;
+
+  const emit = (chunk: string): void => {
+    const deltaOps: any[] = position > 0 ? [{ retain: position }] : [];
     deltaOps.push({ insert: chunk, attributes: attributes ? { ...attributes } : undefined });
     const bytes = measure(deltaOps);
     if (bytes > ctx.maxBytes) {
-      if (chunk.length > 1) {
-        const mid = Math.max(1, safeSplitIndex(chunk, Math.ceil(chunk.length / 2)));
-        emit(chunk.slice(0, mid), prefix);
-        emit(chunk.slice(mid), 0);
+      const mid = safeSplitIndex(chunk, Math.ceil(chunk.length / 2));
+      if (mid > 0 && mid < chunk.length) {
+        emit(chunk.slice(0, mid));
+        emit(chunk.slice(mid));
         return;
       }
+      // Down to one code point (possibly a surrogate pair) that still measures over budget.
       guardUnsplittable(ctx, textOp.op, textOp.path, bytes, 'insert-chunk');
     }
     pieces.push(deltaOps);
+    position += chunk.length;
   };
 
   const baseSize = getSizeForStorage({ ...origChange, ops: [{ ...textOp, value: '' }] }, ctx.sizeCalculator);
   const seedLength = Math.max(1, ctx.maxBytes - baseSize - 20);
   for (let i = 0; i < text.length; ) {
-    const end = Math.min(text.length, Math.max(i + 1, safeSplitIndex(text, i + seedLength)));
-    emit(text.slice(i, end), i === 0 ? retainPrefix : 0);
+    let end = Math.min(text.length, i + seedLength);
+    if (end < text.length) end = safeSplitIndex(text, end);
+    // A surrogate pair right at a one-unit seed is indivisible: take both units.
+    if (end <= i) end = Math.min(text.length, i + 2);
+    emit(text.slice(i, end));
     i = end;
   }
   return pieces;

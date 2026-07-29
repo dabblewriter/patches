@@ -1513,6 +1513,12 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // An op with no seam to split on measures the same every time; the ladder would just burn
     // attempts before latching on the identical error.
     if (isUnsplittableChangeError(err)) return false;
+    // A 413 the server scoped to ONE change is deterministic on those bytes. By the time it
+    // reaches this decision, `_tryResplitOversized` has already declined to shrink further
+    // (no split budget configured, or the budget is at its floor), so the ladder would resend
+    // the identical request. Latch like the splitter-refused case above; the slow reprobe and
+    // any local edit still re-enter sync if the queue ever changes shape.
+    if (err instanceof StatusError && err.code === 413 && err.data?.scope === 'change') return false;
     if (err instanceof StatusError) return !TERMINAL_SYNC_CODES.has(err.code);
     return true;
   }
@@ -1535,9 +1541,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._resplitBudgets.set(docId, next);
     this._clearSyncRetry(docId);
     this._surfacedSyncErrors.delete(docId);
-    console.warn(
-      `Server refused change ${failure.data.changeId} on doc ${docId} as too large; re-splitting at ${next} bytes`
-    );
+    const changeId = typeof failure.data.changeId === 'string' ? failure.data.changeId : '(unnamed)';
+    console.warn(`Server refused change ${changeId} on doc ${docId} as too large; re-splitting at ${next} bytes`);
     // We are inside syncDoc's serialGate run, so this queues exactly one follow-up pass.
     void this.syncDoc(docId);
     return true;

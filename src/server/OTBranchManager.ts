@@ -78,8 +78,14 @@ export interface MergeBranchOptions {
   contentDuplicationGuard?: 'refuse' | 'warn' | 'off';
 }
 
-/** The run of text a `@txt` delta prepends at position 0 (empty when it begins with retain/delete). */
-function leadingInsertText(value: unknown): string {
+/**
+ * The contiguous run of text a `@txt` delta inserts after at most leading retains — the shape of
+ * a replayed seed piece. Pieces stored by older splitters are retain-less and prepend at position
+ * 0; position-correct pieces retain to their slot first and insert there. A leading delete marks
+ * an ordinary edit (no seed piece deletes), and anything after the run is irrelevant here — this
+ * is only the cheap arming trigger; the segment walk decides.
+ */
+function seedShapedInsertText(value: unknown): string {
   const ops = toOps(value);
   if (!ops) return '';
   let text = '';
@@ -88,7 +94,10 @@ function leadingInsertText(value: unknown): string {
     if (typeof insert === 'string') text += insert;
     else if (insert != null)
       text += EMBED_PLACEHOLDER; // embeds prepend content too
-    else break; // a retain / delete ends the leading prepend
+    else if (text)
+      break; // a retain / delete ends the run
+    else if ((op as { delete?: unknown }).delete != null) return ''; // leading delete: an ordinary edit
+    // else: a leading retain — skip to where the piece inserts
   }
   return text;
 }
@@ -256,19 +265,34 @@ function findDuplication(beforeText: string, segments: TextSegment[], minLength:
   const afterText = segments.map(s => s.text).join('');
   if (countOccurrences(afterText, beforeText) >= 2) return beforeText.length;
 
-  // The replayed-seed shape: stored seed pieces re-insert body text ahead of the original
-  // content, which survives untouched. Flag a substantial inserted run sitting ahead of all
-  // surviving original content that duplicates text still present in the surviving spans.
-  // Anchoring to the head keeps a mid-document paste of repeated prose out of scope, and
-  // requiring the original to survive lets trims, moves, re-pastes and undos net out.
   const originalRetained = segments
     .filter(s => s.original)
     .map(s => s.text)
     .join('');
   if (!originalRetained) return null;
+
+  // Replayed-seed shape A — retain-less pieces (stored by older splitters) re-insert body text
+  // ahead of the original content, which survives untouched. Flag a substantial inserted run
+  // sitting ahead of all surviving original content that duplicates text still present in the
+  // surviving spans. Anchoring to the head keeps a mid-document paste of repeated prose out of
+  // scope, and requiring the original to survive lets trims, moves, re-pastes and undos net out.
   for (const segment of segments) {
     if (segment.original) break; // only the region ahead of all surviving original content
     if (segment.text.length >= minLength && originalRetained.includes(segment.text)) {
+      return segment.text.length;
+    }
+  }
+
+  // Replayed-seed shape B — position-correct pieces retain to their slot first, so replaying one
+  // onto content it already seeded composes its insert IMMEDIATELY BEFORE the surviving copy of
+  // the same text. Flag a substantial inserted run that the surviving original content resumes
+  // with, verbatim. An ordinary paste lands after the text it copied or somewhere unrelated;
+  // inserting a ≥minLength exact copy of precisely what follows it is the replay signature.
+  let followingOriginal = originalRetained;
+  for (const segment of segments) {
+    if (segment.original) {
+      followingOriginal = followingOriginal.slice(segment.text.length);
+    } else if (segment.text.length >= minLength && followingOriginal.startsWith(segment.text)) {
       return segment.text.length;
     }
   }
@@ -550,20 +574,24 @@ export class OTBranchManager implements BranchManager {
   /**
    * Opt-in guard against merges whose net effect would duplicate content the source document
    * already has. When a merge floor (`contentStartRev` / `lastMergedRev`) undercounts a
-   * client-seeded branch's seed, the merge replays stored seed pieces as retain-less `@txt`
-   * inserts, re-inserting each field's body ahead of content the source already holds and
-   * doubling it — and it survives "reject all tracked changes", because the duplicated
-   * content is the seed, not the tracked edits.
+   * client-seeded branch's seed, the merge replays stored seed pieces onto content the source
+   * already holds, doubling it — and it survives "reject all tracked changes", because the
+   * duplicated content is the seed, not the tracked edits. Pieces stored by older splitters are
+   * retain-less and re-insert at the head; position-correct pieces retain to their slot and
+   * re-insert immediately before the surviving copy of the same text. Both shapes are guarded.
    *
    * Detection walks each affected text field through the whole batch — composing `@txt`
    * deltas and field-level `replace`/`add`/`remove` sets in order — against the source's
    * CURRENT head, tracking which spans of the head survive and which runs the batch inserts.
-   * A field is flagged when either:
+   * A field is flagged when any of:
    *
    * - the final content contains the field's current head content two or more times (a field
    *   set wholesale to an already-doubled value), or
    * - a substantial inserted run sitting ahead of all surviving head content duplicates text
-   *   that still survives in the field — the replayed-seed shape.
+   *   that still survives in the field — the retain-less replayed-seed shape, or
+   * - a substantial inserted run that the surviving original content resumes with verbatim —
+   *   the position-correct replayed-seed shape (the replayed copy lands immediately before
+   *   the survivor it duplicates).
    *
    * Because retained and deleted spans are tracked through the whole batch, an edit that
    * merely trims, moves, re-pastes or undoes content nets out and is not flagged; and because
@@ -571,10 +599,11 @@ export class OTBranchManager implements BranchManager {
    * longer holds cannot be "duplicated" on a repeat merge.
    *
    * Cheap in the common case: the head is only reconstructed when some change carries a
-   * substantial leading `@txt` insert or sets a field to a substantial delta value. Ordinary
-   * edits (leading retain, short inserts) skip the check entirely. A reconstruction failure
-   * propagates to the caller: with the guard enabled, "cannot check" must not silently become
-   * "checked, fine" — a retryable read error is cheap to retry, a doubled document is not.
+   * substantial `@txt` insert run after at most leading retains, or sets a field to a
+   * substantial delta value. Ordinary edits (leading deletes, short inserts) skip the check
+   * entirely. A reconstruction failure propagates to the caller: with the guard enabled,
+   * "cannot check" must not silently become "checked, fine" — a retryable read error is cheap
+   * to retry, a doubled document is not.
    */
   private async checkContentDuplication(
     sourceDocId: string,
@@ -587,8 +616,9 @@ export class OTBranchManager implements BranchManager {
     const minLength = configured?.minLength ?? DEFAULT_DUPLICATION_MIN_LENGTH;
 
     // Cheap first pass: collect the text-field paths the batch touches and whether any of
-    // them could produce the duplication signature — a `@txt` op that PREPENDS a substantial
-    // run (no leading retain), or a field set to a substantial delta value.
+    // them could produce the duplication signature — a `@txt` op that inserts a substantial
+    // run after at most leading retains (the seed-piece shape, retain-less or
+    // position-correct), or a field set to a substantial delta value.
     const paths = new Set<string>();
     let triggered = false;
     for (const change of changes) {
@@ -596,7 +626,7 @@ export class OTBranchManager implements BranchManager {
         if (typeof op.path !== 'string') continue;
         if (op.op === '@txt') {
           paths.add(op.path);
-          if (leadingInsertText(op.value).length >= minLength) triggered = true;
+          if (seedShapedInsertText(op.value).length >= minLength) triggered = true;
         } else if (op.op === 'replace' || op.op === 'add') {
           for (const found of collectDeltaTexts(op.value, op.path)) {
             paths.add(found.path);

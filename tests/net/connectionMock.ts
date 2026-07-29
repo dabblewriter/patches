@@ -9,6 +9,9 @@ import type { Change } from '../../src/types.js';
 export function makeConnection(overrides: Record<string, any> = {}) {
   return {
     url: 'mock://server',
+    // WS-like default: sends ride the stream, so `connected` gates them (the historical
+    // behavior most specs assume). REST-behavior specs override with `false`.
+    sendRequiresStream: true,
     connect: vi.fn(async () => {}),
     disconnect: vi.fn(),
     subscribe: vi.fn(async (ids: string[]) => ids),

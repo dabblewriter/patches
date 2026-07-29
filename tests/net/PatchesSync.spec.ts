@@ -111,6 +111,9 @@ describe('PatchesSync', () => {
       onChangesCommitted: vi.fn(),
       onDocDeleted: vi.fn(),
       resumedStream: false,
+      // This mock emulates the WebSocket transport: sends ride the stream, so
+      // `connected` gates them (see PatchesConnection.sendRequiresStream).
+      sendRequiresStream: true,
     };
 
     // Mock constructors - use function expressions for Vitest 4 compatibility
@@ -385,6 +388,9 @@ describe('PatchesSync', () => {
         { docId: 'doc2', committedRev: 5 },
       ] as TrackedDoc[]);
       mockAlgorithm.hasPending.mockResolvedValue(false);
+      // This instance subscribed both docs (a prior cold connect); the resume replay
+      // and the server-restored subscription set cover them.
+      (sync as any)._subscribedIds = new Set(['doc1', 'doc2']);
       const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
 
       sync['updateState']({ syncStatus: 'synced' });
@@ -405,6 +411,8 @@ describe('PatchesSync', () => {
         { docId: 'doc2', committedRev: 5 },
       ] as TrackedDoc[]);
       mockAlgorithm.hasPending.mockImplementation(async (id: string) => id === 'doc1');
+      // This instance subscribed both docs on a prior cold connect.
+      (sync as any)._subscribedIds = new Set(['doc1', 'doc2']);
       const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
 
       await sync['syncAllKnownDocs']({ resume: true });
@@ -414,6 +422,56 @@ describe('PatchesSync', () => {
       expect(syncDocSpy).toHaveBeenCalledWith('doc1');
       expect(syncDocSpy).not.toHaveBeenCalledWith('doc2');
       expect(sync.state.syncStatus).toBe('synced');
+    });
+
+    it('records only the granted subset of a partial subscribe response (DAB-865)', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'doc2', committedRev: 5 },
+      ] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      // subscribe() resolves with the ids actually registered — doc2 is denied or
+      // left unaccounted, silently (the contract never throws for partial grants).
+      mockWebSocket.subscribe.mockResolvedValue(['doc1']);
+      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      sync['updateState']({ connected: true });
+
+      await sync['syncAllKnownDocs']();
+
+      expect((sync as any)._subscribedIds.has('doc1')).toBe(true);
+      expect((sync as any)._subscribedIds.has('doc2')).toBe(false);
+
+      // The next resume pass re-attempts the ungranted doc instead of skipping it.
+      vi.mocked(mockWebSocket.subscribe).mockClear();
+      mockWebSocket.subscribe.mockResolvedValue(['doc2']);
+      await sync['syncAllKnownDocs']({ resume: true });
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc2']);
+    });
+
+    it('resume: subscribes tracked docs this instance never subscribed (DAB-865)', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'doc2', committedRev: 5 },
+      ] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      // doc1 was subscribed by this instance; doc2 was tracked while the stream was
+      // down (offline or DAB-831 degraded mode) and never subscribed by anyone — the
+      // server-restored set can't cover it, so the resume pass must.
+      (sync as any)._subscribedIds = new Set(['doc1']);
+
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc2']);
+      // Still no per-doc pull: it's a subscription gap, not a content gap — the doc is
+      // clean and the replay covers the committed tail.
+      expect(syncDocSpy).not.toHaveBeenCalled();
+      // The successor case: an instance with no subscribe history re-subscribes all
+      // tracked docs in one idempotent POST rather than silently missing pushes.
+      (sync as any)._subscribedIds = new Set();
+      vi.mocked(mockWebSocket.subscribe).mockClear();
+      await sync['syncAllKnownDocs']({ resume: true });
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc1', 'doc2']);
     });
 
     it('resume: defers tombstone deletes to the next cold sync', async () => {
@@ -1521,13 +1579,13 @@ describe('PatchesSync', () => {
     it('should throw if not connected', async () => {
       sync['updateState']({ connected: false });
 
-      await expect(sync['flushDoc']('doc1')).rejects.toThrow('Not connected to server');
+      await expect(sync['flushDoc']('doc1')).rejects.toThrow('Cannot send changes');
     });
 
     it('should throw if offline even when connection state is stale-connected', async () => {
       setOffline(true);
 
-      await expect(sync['flushDoc']('doc1')).rejects.toThrow('Not connected to server');
+      await expect(sync['flushDoc']('doc1')).rejects.toThrow('Cannot send changes');
       expect(mockWebSocket.commitChanges).not.toHaveBeenCalled();
     });
 
@@ -3114,6 +3172,225 @@ describe('PatchesSync', () => {
       );
       const savedBranches = mockBranchStore.saveBranches.mock.calls[0][1];
       expect(savedBranches[0]).not.toHaveProperty('pendingOp');
+    });
+  });
+
+  describe('DAB-831: sends decoupled from push-stream liveness (sendRequiresStream)', () => {
+    let restSyncs: PatchesSync[];
+
+    /**
+     * REST-like connection: same mock surface as mockWebSocket, but sends are
+     * independent requests that don't ride the push stream. Built fresh (no spies
+     * shared with mockWebSocket) so call attribution between the WS `sync` and the
+     * REST instance can never blur.
+     */
+    function makeRestSync() {
+      const restConnection: any = {
+        url: 'mock://rest',
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn(),
+        subscribe: vi.fn().mockResolvedValue([]),
+        unsubscribe: vi.fn().mockResolvedValue(undefined),
+        getDoc: vi.fn().mockResolvedValue({ state: { content: 'server' }, rev: 10 }),
+        getChangesSince: vi.fn().mockResolvedValue([]),
+        commitChanges: vi.fn().mockResolvedValue({ changes: [] }),
+        deleteDoc: vi.fn().mockResolvedValue(undefined),
+        onStateChange: vi.fn(),
+        onChangesCommitted: vi.fn(),
+        onDocDeleted: vi.fn(),
+        resumedStream: false,
+        sendRequiresStream: false,
+      };
+      const restSync = new PatchesSync(mockPatches, restConnection);
+      // Arm the started intent the way the app does. The mock connect resolves and no
+      // state events fire, so this only flips the flag — sends require it now that
+      // `connected` no longer gates them on REST.
+      void restSync.connect();
+      restSyncs.push(restSync);
+      return { restConnection, restSync };
+    }
+
+    const pendingChange = { id: 'p1', rev: 6, baseRev: 5, ops: [], createdAt: 0, committedAt: 0 };
+
+    beforeEach(() => {
+      restSyncs = [];
+    });
+
+    afterEach(() => {
+      // Kill any degraded-pass/retry timers so they can't fire into a later test.
+      for (const s of restSyncs) {
+        (s as any)._clearDegradedSync();
+        (s as any)._clearAllSyncRetries();
+      }
+    });
+
+    it('flushDoc succeeds while the push stream is down but online (REST)', async () => {
+      const { restConnection, restSync } = makeRestSync();
+      restSync['updateState']({ connected: false });
+      mockAlgorithm.getPendingToSend.mockResolvedValue([pendingChange]);
+
+      await restSync['flushDoc']('doc1');
+
+      expect(restConnection.commitChanges).toHaveBeenCalledWith('doc1', [pendingChange]);
+    });
+
+    it('a local edit while the stream is down syncs immediately (outer gate, REST)', () => {
+      const { restSync } = makeRestSync();
+      restSync['updateState']({ connected: false });
+      const syncDocSpy = vi.spyOn(restSync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      restSync['_handleDocChange']('doc1');
+
+      expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+    });
+
+    it('WebSocket transport still gates sends on the socket being up', async () => {
+      sync['updateState']({ connected: false });
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc');
+
+      sync['_handleDocChange']('doc1');
+      expect(syncDocSpy).not.toHaveBeenCalled();
+
+      await expect(sync['flushDoc']('doc1')).rejects.toThrow('Cannot send changes');
+    });
+
+    it('never-connects: a failed connect() keeps the error off the sync posture and drains the backlog (REST)', async () => {
+      const { restConnection, restSync } = makeRestSync();
+      restConnection.connect.mockRejectedValue(new Error('SSE connection timed out'));
+      mockAlgorithm.getPendingToSend.mockResolvedValue([pendingChange]);
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+
+      await expect(restSync.connect()).rejects.toThrow('SSE connection timed out');
+
+      // Not a sync failure: sends still work over plain requests. (Old posture: 'error',
+      // which drove "Can't reach Dabble" while every POST would have succeeded.)
+      expect(restSync.state.syncStatus).not.toBe('error');
+      // The degraded pass drains the pending backlog without any 'connected' event ever
+      // firing — the never-connects cohort's fix.
+      await vi.waitFor(() => {
+        expect(restConnection.commitChanges).toHaveBeenCalledWith('doc1', [pendingChange]);
+      });
+    });
+
+    it('WS: a failed connect() still latches the error posture', async () => {
+      mockWebSocket.connect.mockRejectedValue(new Error('socket refused'));
+
+      await expect(sync.connect()).rejects.toThrow('socket refused');
+
+      expect(sync.state.syncStatus).toBe('error');
+    });
+
+    it('stream drop while online arms a jittered degraded pass and hands off on reconnect (REST)', async () => {
+      vi.useFakeTimers();
+      try {
+        const { restConnection, restSync } = makeRestSync();
+        mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+
+        restSync['_handleConnectionChange']('error');
+        expect((restSync as any)._degradedSyncTimer).not.toBeNull();
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        // No pending → the pass pulls committed catch-up for every tracked doc.
+        expect(restConnection.getChangesSince).toHaveBeenCalledWith('doc1', 5);
+        expect(restConnection.getChangesSince).toHaveBeenCalledWith('doc2', 5);
+        // Re-armed for the next pass while still degraded.
+        expect((restSync as any)._degradedSyncTimer).not.toBeNull();
+
+        // The stream re-establishing cancels the poll — syncAllKnownDocs takes over.
+        restSync['_handleConnectionChange']('connected');
+        expect((restSync as any)._degradedSyncTimer).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a clean degraded pass reports global 'synced' (REST)", async () => {
+      const { restSync } = makeRestSync();
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+
+      await (restSync as any)._syncAllDegraded();
+
+      expect(restSync.state.syncStatus).toBe('synced');
+    });
+
+    it('degraded pass declines while offline, and never engages on a stream-bound transport', async () => {
+      const { restConnection, restSync } = makeRestSync();
+      setOffline(true);
+      await (restSync as any)._syncAllDegraded();
+      expect(restConnection.getChangesSince).not.toHaveBeenCalled();
+      expect((restSync as any)._degradedSyncTimer).toBeNull();
+      setOffline(false);
+
+      // WS: the stream-drop transition never arms the degraded machinery.
+      sync['_handleConnectionChange']('error');
+      expect((sync as any)._degradedSyncTimer).toBeNull();
+    });
+
+    it('a server delete while the stream is down goes out over a plain request (REST)', async () => {
+      const { restConnection, restSync } = makeRestSync();
+      restSync['updateState']({ connected: false });
+
+      await restSync['_handleDocDeleted']('doc1');
+
+      expect(restConnection.deleteDoc).toHaveBeenCalledWith('doc1');
+    });
+
+    it('disconnect() stops the send path and an in-flight degraded pass cannot re-arm', async () => {
+      const { restConnection, restSync } = makeRestSync();
+      restSync['updateState']({ connected: false });
+      let releasePending!: () => void;
+      mockAlgorithm.getPendingToSend.mockReturnValue(
+        new Promise(resolve => (releasePending = () => resolve([pendingChange])))
+      );
+
+      const pass = (restSync as any)._syncAllDegraded();
+      // Wait until the pass is inside syncDoc awaiting the store read, then tear the
+      // instance down — logout-while-degraded is exactly when DAB-765 users hit this.
+      await vi.waitFor(() => expect(mockAlgorithm.getPendingToSend).toHaveBeenCalled());
+      restSync.disconnect();
+      releasePending();
+      await pass;
+
+      // The finally must not re-arm on a stopped instance, and nothing went out.
+      expect((restSync as any)._degradedSyncTimer).toBeNull();
+      expect(restConnection.commitChanges).not.toHaveBeenCalled();
+
+      // An explicit stop parks keystrokes again, like the pre-DAB-831 disconnect did.
+      const syncDocSpy = vi.spyOn(restSync as any, 'syncDoc').mockResolvedValue(undefined);
+      restSync['_handleDocChange']('doc1');
+      expect(syncDocSpy).not.toHaveBeenCalled();
+
+      // connect() re-arms the intent: sends flow again with no stream event needed.
+      await restSync.connect();
+      restSync['_handleDocChange']('doc1');
+      expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+    });
+
+    it('REST stream-drop events preserve retry state, error dedup, and global status', () => {
+      const { restSync } = makeRestSync();
+      restSync['updateState']({ connected: true, syncStatus: 'synced' });
+      (restSync as any)._surfacedSyncErrors.add('doc1');
+      (restSync as any)._syncRetryAttempts.set('doc1', 2);
+
+      // The transport retries the stream forever (~30s backoff) and emits 'error' on
+      // every failed attempt — this branch must not wipe sync state on that cadence.
+      restSync['_handleConnectionChange']('error');
+
+      expect(restSync.state.syncStatus).toBe('synced'); // no unsynced↔synced flap
+      expect((restSync as any)._surfacedSyncErrors.has('doc1')).toBe(true); // no telemetry re-drip
+      expect((restSync as any)._syncRetryAttempts.get('doc1')).toBe(2);
+
+      // A genuine reconnect starts a fresh surfacing session: ladders drop so a
+      // still-failing doc may surface once more while syncAllKnownDocs re-attempts all.
+      restSync['_handleConnectionChange']('connected');
+      expect((restSync as any)._surfacedSyncErrors.size).toBe(0);
+
+      // WS drops still wipe, exactly as before — sends are blocked there.
+      sync['updateState']({ connected: true, syncStatus: 'synced' });
+      (sync as any)._surfacedSyncErrors.add('doc1');
+      sync['_handleConnectionChange']('error');
+      expect(sync.state.syncStatus).toBe('unsynced');
+      expect((sync as any)._surfacedSyncErrors.size).toBe(0);
     });
   });
 });

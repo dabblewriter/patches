@@ -265,6 +265,30 @@ function findDuplication(beforeText: string, segments: TextSegment[], minLength:
   const afterText = segments.map(s => s.text).join('');
   if (countOccurrences(afterText, beforeText) >= 2) return beforeText.length;
 
+  return (
+    findInsertedDuplication(segments, minLength) ??
+    // Formatted spans arrive as ADJACENT inserted fragments (bold/plain/italic), each shorter
+    // than minLength on its own — coalesce same-provenance neighbours and look again so a
+    // fragmented duplicate can't slip under the length gate. Second pass, not a replacement:
+    // coalescing can also glue a duplicate to novel inserted text and hide it from the
+    // exact-match checks, so the fragment-level pass keeps everything it caught before.
+    findInsertedDuplication(coalesceSegments(segments), minLength)
+  );
+}
+
+/** Merge adjacent segments of the same provenance into whole runs. */
+function coalesceSegments(segments: TextSegment[]): TextSegment[] {
+  const out: TextSegment[] = [];
+  for (const segment of segments) {
+    const last = out[out.length - 1];
+    if (last && last.original === segment.original) last.text += segment.text;
+    else out.push({ ...segment });
+  }
+  return out;
+}
+
+/** The inserted-run detection shared by the fragment-level and coalesced passes of {@link findDuplication}. */
+function findInsertedDuplication(segments: TextSegment[], minLength: number): number | null {
   const originalRetained = segments
     .filter(s => s.original)
     .map(s => s.text)
@@ -511,7 +535,12 @@ export class OTBranchManager implements BranchManager {
     // source already has — the signature of a merge floor that undercounts a client-seeded
     // branch's seed. Runs before the version copies below and the commit, so a refused merge
     // leaves no side effects on the source document.
-    await this.checkContentDuplication(sourceDocId, changesToCommit, options?.contentDuplicationGuard);
+    await this.checkContentDuplication(
+      sourceDocId,
+      changesToCommit,
+      branchStartRevOnSource,
+      options?.contentDuplicationGuard
+    );
 
     // Get not-yet-merged versions from the branch doc, using the same cursor as the changes
     // query — repeat merges must not re-copy versions already on the source. This also skips
@@ -596,7 +625,11 @@ export class OTBranchManager implements BranchManager {
    * Because retained and deleted spans are tracked through the whole batch, an edit that
    * merely trims, moves, re-pastes or undoes content nets out and is not flagged; and because
    * the comparison is against the current head (not the branch point), content the source no
-   * longer holds cannot be "duplicated" on a repeat merge.
+   * longer holds cannot be "duplicated" on a repeat merge. Changes already committed inside
+   * the merge's dedup window (`listChanges(startAfter: baseRev)`, the corpus `commitChanges`
+   * dedups resends against) are excluded from the walk: a crash-retry or concurrent
+   * double-merge re-presents a batch the head already contains, and walking it would
+   * self-match every ordinary insert against its own committed copy.
    *
    * Cheap in the common case: the head is only reconstructed when some change carries a
    * substantial `@txt` insert run after at most leading retains, or sets a field to a
@@ -608,6 +641,7 @@ export class OTBranchManager implements BranchManager {
   private async checkContentDuplication(
     sourceDocId: string,
     changes: Change[],
+    baseRev: number,
     override?: MergeBranchOptions['contentDuplicationGuard']
   ): Promise<void> {
     const configured = this.options.contentDuplicationGuard;
@@ -619,23 +653,39 @@ export class OTBranchManager implements BranchManager {
     // them could produce the duplication signature — a `@txt` op that inserts a substantial
     // run after at most leading retains (the seed-piece shape, retain-less or
     // position-correct), or a field set to a substantial delta value.
-    const paths = new Set<string>();
-    let triggered = false;
-    for (const change of changes) {
-      for (const op of change.ops) {
-        if (typeof op.path !== 'string') continue;
-        if (op.op === '@txt') {
-          paths.add(op.path);
-          if (seedShapedInsertText(op.value).length >= minLength) triggered = true;
-        } else if (op.op === 'replace' || op.op === 'add') {
-          for (const found of collectDeltaTexts(op.value, op.path)) {
-            paths.add(found.path);
-            // Doubling via a set requires the value to hold the field's content twice.
-            if (found.text.length >= minLength * 2) triggered = true;
+    const arm = (batch: Change[]): { paths: Set<string>; triggered: boolean } => {
+      const paths = new Set<string>();
+      let triggered = false;
+      for (const change of batch) {
+        for (const op of change.ops) {
+          if (typeof op.path !== 'string') continue;
+          if (op.op === '@txt') {
+            paths.add(op.path);
+            if (seedShapedInsertText(op.value).length >= minLength) triggered = true;
+          } else if (op.op === 'replace' || op.op === 'add') {
+            for (const found of collectDeltaTexts(op.value, op.path)) {
+              paths.add(found.path);
+              // Doubling via a set requires the value to hold the field's content twice.
+              if (found.text.length >= minLength * 2) triggered = true;
+            }
           }
         }
       }
-    }
+      return { paths, triggered };
+    };
+    if (!arm(changes).triggered) return;
+
+    // A retry after a crash in the commit→watermark window re-walks a batch the source has
+    // already committed: every ordinary insert then sits immediately before its own committed
+    // copy and self-matches the position-correct replay signature — refusing a merge the
+    // retry contract promises dedups to a no-op (likewise a concurrent double-merge).
+    // `commitChanges` dedups those resends by id within `listChanges(startAfter: baseRev)`;
+    // exclude the same corpus here so the guard only walks changes the commit would apply.
+    const committedIds = new Set(
+      (await this.store.listChanges(sourceDocId, { startAfter: baseRev })).map(change => change.id)
+    );
+    const batch = changes.filter(change => !committedIds.has(change.id));
+    const { paths, triggered } = arm(batch);
     if (!triggered) return;
 
     // Only now pay for a state reconstruction — the source's current head, read once.
@@ -648,7 +698,7 @@ export class OTBranchManager implements BranchManager {
       if (beforeText == null || beforeText.length < minLength) continue;
 
       let segments: TextSegment[] = [{ text: beforeText, original: true }];
-      for (const change of changes) {
+      for (const change of batch) {
         for (const op of change.ops) {
           segments = applyOpToSegments(segments, op, path);
         }

@@ -976,6 +976,75 @@ describe('DAB-760 editor-copy merge doubling', () => {
     expect(docBody(after, 'd1')).toBe(bigBody);
   });
 
+  // H) The retry contract under the guard. A crash between commit and watermark re-presents a
+  //    batch the source has ALREADY committed, so on the retry every ordinary insert sits
+  //    immediately before its own committed copy — indistinguishable, by text shape alone,
+  //    from a replayed tail piece. Changes already inside the commit dedup window
+  //    (`listChanges(startAfter: baseRev)`) are excluded from the guard walk, so the retry
+  //    stays the documented dedup-to-a-no-op instead of latching the branch behind a refusal.
+  it('guard: a crash-retry of an already-committed batch is not refused', async () => {
+    const { store, server, manager } = setup(GUARD);
+    await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+    const branchId = await manager.createBranch('doc1', 1);
+    const para = 'A wholly new passage, absent from the source. ';
+    await server.commitChanges(branchId, [
+      txtChange('p1', 1, '/docs/d1/body/content', [{ retain: 13 }, { insert: para }]),
+    ]);
+
+    failWatermarkOnce(store);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(branchId)).rejects.toThrow('simulated crash');
+    // The commit landed; the watermark write did not. The retry walks a head that already
+    // contains `para` — and must not read that as content doubling.
+    await manager.mergeBranch(branchId);
+    err.mockRestore();
+
+    const { state: after } = await coldLoad(server, 'doc1');
+    expect(docBody(after, 'd1')).toBe(`Chapter one. ${para}The grey cat sat by the window.\n`);
+  });
+
+  // I) Formatted spans arrive as ADJACENT inserted fragments (bold/plain/italic), each under
+  //    minLength on its own. The coalesced second pass still refuses the tail-piece shape when
+  //    the duplicate is delivered fragmented.
+  it('guard: a fragmented (formatted) tail-piece duplicate is still refused', async () => {
+    const { server, manager } = setup(GUARD);
+    await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+    const branchId = await manager.createBranch('doc1', 1);
+    const slice = 'The grey cat sat by the window.'; // BODY1 at position 13, 31 chars
+    await server.commitChanges(branchId, [
+      txtChange('frag', 1, '/docs/d1/body/content', [
+        { retain: 13 },
+        { insert: slice.slice(0, 10), attributes: { bold: true } },
+        { insert: slice.slice(10, 20) },
+        { insert: slice.slice(20), attributes: { italic: true } },
+      ]),
+    ]);
+
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(branchId)).rejects.toBeInstanceOf(MergeContentDuplicationError);
+    err.mockRestore();
+  });
+
+  // J) DOCUMENTED TRADE-OFF, pinned deliberately: pasting an exact ≥minLength copy of a
+  //    passage immediately BEFORE its original (cursor at the start, paste) composes to the
+  //    same text shape as a replayed tail piece, and is refused. Pasting AFTER the copied text
+  //    merges fine, as does editing the pasted copy first. The escapes are the per-merge
+  //    `'off'` override and the consumer's minLength policy. If this class of edit needs to
+  //    merge untouched, the signature needs a discriminator beyond text shape — a product
+  //    decision for the guard's owner, not something detection can infer.
+  it('guard: pasting a duplicate paragraph immediately before its original is refused', async () => {
+    const { server, manager } = setup(GUARD);
+    await server.commitChanges('doc1', [rootChange('s1', manuscript())]);
+    const branchId = await manager.createBranch('doc1', 1);
+    await server.commitChanges(branchId, [
+      txtChange('paste', 1, '/docs/d1/body/content', [{ retain: 13 }, { insert: 'The grey cat sat by the window.' }]),
+    ]);
+
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(branchId)).rejects.toBeInstanceOf(MergeContentDuplicationError);
+    err.mockRestore();
+  });
+
   // G) A whole-field `replace`/`add` is in the same family as the `@txt` seed pieces (the
   //    seed splitter emits structural replaces alongside them): one carrying an
   //    already-doubled value must be refused, while an ordinary rewrite passes.

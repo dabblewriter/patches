@@ -217,7 +217,7 @@ class ConvergenceHarness {
    */
   async flush(id: ClientId, round: number): Promise<void> {
     const client = this.clients.get(id)!;
-    const pending = await client.algorithm.getPendingToSend(DOC_ID, client.doc);
+    const pending = await client.algorithm.getPendingToSend(DOC_ID);
     if (!pending || pending.length === 0) return;
     this.lastBroadcast = [];
     const response = await this.server.commitChanges(DOC_ID, pending);

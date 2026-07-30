@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { JSONPatch } from '../../src/json-patch/JSONPatch';
-import type { JSONPatchOp } from '../../src/types';
+import type { JSONPatchOp } from '../../src/json-patch/types.js';
 
 /**
  * Aliasing regressions for JSONPatch.transform()/compose(): transformPatch (and

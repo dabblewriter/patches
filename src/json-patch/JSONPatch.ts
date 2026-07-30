@@ -183,8 +183,13 @@ export class JSONPatch {
    */
   transform(patch: JSONPatch | JSONPatchOp[], obj?: any): this {
     const JSONPatch = this.constructor as any;
+    // transformPatch hands back its input ops array UNTOUCHED when no op needed transforming
+    // (disjoint paths — the common case), so the result can BE the caller's array. Copy before
+    // wrapping: the returned patch's builder methods push into `this.ops`, and without the copy
+    // they would append into the source patch/array — the same aliasing class as the OTDoc
+    // optimistic-ops fix (#127).
     return new JSONPatch(
-      transformPatch(obj, this.ops, Array.isArray(patch) ? patch : patch.ops, this.custom),
+      [...transformPatch(obj, this.ops, Array.isArray(patch) ? patch : patch.ops, this.custom)],
       this.custom
     );
   }
@@ -205,7 +210,11 @@ export class JSONPatch {
     const JSONPatch = this.constructor as any;
     let ops = this.ops;
     if (patch) ops = ops.concat(Array.isArray(patch) ? patch : patch.ops);
-    return new JSONPatch(composePatch(ops), this.custom);
+    // composePatch passes its input array through by identity when nothing composed
+    // (mapAndFilterOps' `changed ? mapped : ops`); in the no-arg form that array is
+    // `this.ops`, entangling the returned patch with this one. Same copy rule as
+    // transform() above.
+    return new JSONPatch([...composePatch(ops)], this.custom);
   }
 
   /**

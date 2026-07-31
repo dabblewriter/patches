@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { OTBranchManager, assertBranchMetadata } from '../../src/server/OTBranchManager';
+import { DEFAULT_MERGE_WINDOW_CHANGES, OTBranchManager, assertBranchMetadata } from '../../src/server/OTBranchManager';
 import type { PatchesServer } from '../../src/server/PatchesServer';
 import type { BranchingStoreBackend, OTStoreBackend } from '../../src/server/types';
 import type { Branch, Change, EditableBranchMetadata, VersionMetadata } from '../../src/types';
@@ -453,7 +453,10 @@ describe('OTBranchManager', () => {
       const result = await branchManager.mergeBranch('branch1');
 
       expect(mockStore.loadBranch).toHaveBeenCalledWith('branch1');
-      expect(mockStore.listChanges).toHaveBeenCalledWith('branch1', { startAfter: 1 });
+      expect(mockStore.listChanges).toHaveBeenCalledWith('branch1', {
+        startAfter: 1,
+        limit: DEFAULT_MERGE_WINDOW_CHANGES,
+      });
       // Versions use the same cursor as changes so repeat merges don't re-copy them
       expect(mockStore.listVersions).toHaveBeenCalledWith('branch1', {
         origin: 'main',
@@ -675,7 +678,10 @@ describe('OTBranchManager', () => {
       await branchManager.mergeBranch('branch1');
 
       // Should query changes after lastMergedRev, not contentStartRev
-      expect(mockStore.listChanges).toHaveBeenCalledWith('branch1', { startAfter: 5 });
+      expect(mockStore.listChanges).toHaveBeenCalledWith('branch1', {
+        startAfter: 5,
+        limit: DEFAULT_MERGE_WINDOW_CHANGES,
+      });
       // Should update lastMergedRev to the latest branch rev
       expect(mockStore.updateBranch).toHaveBeenCalledWith('branch1', {
         lastMergedRev: 6,

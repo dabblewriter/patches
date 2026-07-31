@@ -65,7 +65,32 @@ export interface OTBranchManagerOptions {
    * duplicated text is meaningful, is policy that belongs to the consuming server.
    */
   contentDuplicationGuard?: ContentDuplicationGuardOptions;
+  /**
+   * How many branch changes a single merge commit may carry. A merge past this size is
+   * committed as several sequential windows instead of one batch (see
+   * {@link OTBranchManager.mergeBranch}). Defaults to {@link DEFAULT_MERGE_WINDOW_CHANGES}.
+   */
+  maxChangesPerMerge?: number;
 }
+
+/**
+ * Default window size for a chunked merge.
+ *
+ * A merge's cost is superlinear in batch size — every change is transformed against the
+ * source's concurrent changes, persisted, and returned — and an editorial pass on a shared
+ * branch reaches five figures of changes in a day or two (DAB-896: 12,000 changes in 27
+ * hours). Windowing keeps each commit's memory, write batch and response bounded regardless
+ * of how long a branch has been open, at the cost of more round trips on large merges.
+ */
+export const DEFAULT_MERGE_WINDOW_CHANGES = 2_000;
+
+/**
+ * Safety valve on the number of windows one `mergeBranch` call will commit. Termination is
+ * already guaranteed by the watermark advancing every window (a window that does not advance
+ * it breaks the loop), so this only bounds a store whose watermark writes are silently lost —
+ * a pathology that should surface as a stuck merge, not an unbounded write loop.
+ */
+const MAX_MERGE_WINDOWS = 500;
 
 /** Per-merge options for {@link OTBranchManager.mergeBranch}. */
 export interface MergeBranchOptions {
@@ -449,27 +474,77 @@ export class OTBranchManager implements BranchManager {
    *    `updateBranchIf` (see {@link advanceMergeWatermark}), so interleaved merges cannot
    *    regress the watermark; without the capability, legacy max-wins semantics apply.
    *
+   * ## Windowing
+   *
+   * The branch's unmerged changes are committed in windows of at most
+   * `maxChangesPerMerge` ({@link DEFAULT_MERGE_WINDOW_CHANGES}) rather than as one batch, and
+   * `lastMergedRev` advances after each. A window is exactly the work a *repeat* merge already
+   * does — same pinned merge base, same `batchId`, same id-dedup — so windowing adds no new
+   * commit shape, it only stops one merge's size scaling with how long the branch has been
+   * open. Consequences worth knowing:
+   *
+   * - A failure part-way leaves the earlier windows committed and the watermark pointing at
+   *   them, so the next attempt resumes rather than redoing. The source is never left
+   *   mid-window: each window's commit is atomic.
+   * - The duplication guard runs per window against the source's current head, so it still
+   *   sees a replayed seed (which lands in the first window) but judges each window on the
+   *   state the previous ones produced.
+   *
    * @param branchId - The ID of the branch document to merge.
    * @param options - Optional per-merge options (e.g. a content-duplication guard override).
-   * @returns The server commit change(s) applied to the source document.
+   * @returns The server commit change(s) applied to the source document, across all windows.
    * @throws Error if branch not found, already closed/merged, or merge fails.
    */
   async mergeBranch(branchId: string, options?: MergeBranchOptions): Promise<Change[]> {
-    // Load and validate branch
+    const windowSize = this.options.maxChangesPerMerge ?? DEFAULT_MERGE_WINDOW_CHANGES;
+    const committed: Change[] = [];
+    let previousRev: number | undefined;
+
+    for (let window = 0; window < MAX_MERGE_WINDOWS; window++) {
+      const result = await this.mergeBranchWindow(branchId, windowSize, options);
+      if (!result) break;
+
+      committed.push(...result.changes);
+      // The watermark must move every window, or the next read returns the same changes and
+      // the loop spins re-committing them. A store that silently drops the watermark write,
+      // or a concurrent merge that regressed it, stops here with the work done so far.
+      if (previousRev !== undefined && result.lastBranchRev <= previousRev) break;
+      previousRev = result.lastBranchRev;
+
+      if (!result.hasMore) break;
+    }
+
+    return committed;
+  }
+
+  /**
+   * Merge one window of a branch's unmerged changes; see {@link mergeBranch}. Returns
+   * `undefined` when the branch has nothing left to merge.
+   */
+  private async mergeBranchWindow(
+    branchId: string,
+    windowSize: number,
+    options?: MergeBranchOptions
+  ): Promise<{ changes: Change[]; lastBranchRev: number; hasMore: boolean } | undefined> {
+    // Load and validate branch. Re-read per window: the previous window advanced the
+    // watermark this window's cursor is derived from.
     const branch = await this.store.loadBranch(branchId);
     assertBranchExists(branch, branchId);
 
     const sourceDocId = branch.docId;
     const branchStartRevOnSource = await this.resolveMergeBase(branch);
 
-    // Get only unmerged changes: since lastMergedRev (if previously merged) or contentStartRev
+    // Get only unmerged changes: since lastMergedRev (if previously merged) or contentStartRev.
+    // Bounded by the window so the read, the commit and the response all stay proportional to
+    // the window rather than to the branch's whole history.
     const startAfter = branch.lastMergedRev ?? (branch.contentStartRev ?? 2) - 1;
-    const branchChanges = await this.store.listChanges(branchId, { startAfter });
+    const branchChanges = await this.store.listChanges(branchId, { startAfter, limit: windowSize });
     if (branchChanges.length === 0) {
-      return [];
+      return undefined;
     }
 
     const lastBranchRev = branchChanges[branchChanges.length - 1].rev;
+    const hasMore = branchChanges.length === windowSize;
 
     // Re-stamp branch changes for source document context:
     // - baseRev: where the branch diverged from source (for transformation)
@@ -493,16 +568,30 @@ export class OTBranchManager implements BranchManager {
     // query — repeat merges must not re-copy versions already on the source. This also skips
     // the branch's initial version (the branch point already exists in source history) and
     // offline-branch versions.
-    const branchVersions = await this.store.listVersions(branchId, {
-      origin: 'main',
-      orderBy: 'endRev',
-      startAfter,
-    });
+    //
+    // Bounded to this window: a version covering branch revs we have not committed yet would
+    // be copied ahead of the source's change log, which builders can only defer on. One that
+    // straddles the window boundary is simply picked up by the window that covers its endRev.
+    const branchVersions = (
+      await this.store.listVersions(branchId, {
+        origin: 'main',
+        orderBy: 'endRev',
+        startAfter,
+      })
+    ).filter(v => v.endRev <= lastBranchRev);
 
-    // Map branch-local revs onto the claimed source revs of the commit below. Copied versions
-    // must live in the source's rev-space: a branch-local endRev past the source tip would
-    // become the source's version watermark and leave real source revs un-versioned.
-    const toSourceRev = (rev: number) => branchStartRevOnSource + Math.max(0, rev - startAfter);
+    // Map branch-local revs onto the source revs this window's changes will occupy. Copied
+    // versions must live in the source's rev-space: a branch-local endRev past the source tip
+    // would become the source's version watermark and leave real source revs un-versioned.
+    //
+    // The anchor is the source's current tip, not the merge base: the base is pinned for the
+    // life of the branch (and shared by every window), so anchoring there would map the second
+    // and later windows onto revs the first window already occupies. They coincide on the
+    // common path — a single window merging into a source that has not moved since the branch
+    // point — so this only changes the mapping where it was already wrong.
+    const sourceRevBeforeCommit = await this.store.getCurrentRev(sourceDocId);
+    const versionAnchor = Math.max(branchStartRevOnSource, sourceRevBeforeCommit);
+    const toSourceRev = (rev: number) => versionAnchor + Math.max(0, rev - startAfter);
 
     // Copy versions with a deterministic identity: the source copy keeps the branch version's
     // id (version ids are namespaced per doc, so there is no collision on the source). A
@@ -544,7 +633,7 @@ export class OTBranchManager implements BranchManager {
     // merged (never the branch tip — a concurrent branch edit past our snapshot must remain
     // mergeable). CAS-guarded against concurrent merges when the store supports it.
     await advanceMergeWatermark(this.store, branchId, branch.lastMergedRev, lastBranchRev);
-    return committedMergeChanges;
+    return { changes: committedMergeChanges, lastBranchRev, hasMore };
   }
 
   /**

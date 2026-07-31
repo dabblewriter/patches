@@ -352,6 +352,104 @@ describe('OTBranchManager integration', () => {
     warn.mockRestore();
   });
 
+  // A branch under active editorial review accumulates changes for as long as it stays open —
+  // five figures within a couple of days on a shared book (DAB-896). Merging that in one batch
+  // scales the read, the transform, the write batch and the response with the branch's whole
+  // history, so the merge is committed in windows instead.
+  describe('windowed merge', () => {
+    beforeEach(() => {
+      // Copied versions build against a source with no versions of its own; that warns.
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      vi.mocked(console.warn).mockRestore();
+    });
+
+    /** Source at rev 2 with `count` single-op branch edits waiting to merge. */
+    async function branchWithEdits(count: number, managerOptions?: OTBranchManagerOptions) {
+      const ctx = setup(managerOptions);
+      await ctx.server.commitChanges('doc1', [rootChange('s1', { src1: 1 })]);
+      await ctx.server.commitChanges('doc1', [change('s2', 1, '/src2', 2)]);
+      const branchId = await ctx.manager.createBranch('doc1', 2);
+      for (let i = 1; i <= count; i++) {
+        await ctx.server.commitChanges(branchId, [change(`e${i}`, i, `/edit${i}`, i)]);
+      }
+      return { ...ctx, branchId };
+    }
+
+    const expectedState = (count: number) => {
+      const state: Record<string, number> = { src1: 1, src2: 2 };
+      for (let i = 1; i <= count; i++) state[`edit${i}`] = i;
+      return state;
+    };
+
+    it('merges a branch larger than the window across several windows', async () => {
+      const { store, server, manager, branchId } = await branchWithEdits(7, { maxChangesPerMerge: 2 });
+      const listChanges = vi.spyOn(store, 'listChanges');
+
+      const committed = await manager.mergeBranch(branchId);
+
+      // 7 edits at 2 per window: four windows of work, plus the read that finds nothing left.
+      const branchReads = listChanges.mock.calls.filter(([docId]) => docId === branchId);
+      expect(branchReads.length).toBeGreaterThan(1);
+      expect(branchReads.every(([, options]) => options?.limit === 2)).toBe(true);
+
+      // Every edit lands exactly once, and the caller still sees the whole merge.
+      const { state } = await coldLoad(server, 'doc1');
+      expect(state).toEqual(expectedState(7));
+      expect(committed).toHaveLength(7);
+      const ids = await changeIds(store, 'doc1');
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+
+    it('produces the same source state as an unwindowed merge', async () => {
+      const windowed = await branchWithEdits(7, { maxChangesPerMerge: 2 });
+      const single = await branchWithEdits(7, { maxChangesPerMerge: 1_000 });
+
+      await windowed.manager.mergeBranch(windowed.branchId);
+      await single.manager.mergeBranch(single.branchId);
+
+      const a = await coldLoad(windowed.server, 'doc1');
+      const b = await coldLoad(single.server, 'doc1');
+      expect(a.state).toEqual(b.state);
+      expect(a.rev).toBe(b.rev);
+    });
+
+    it('advances the watermark to the branch tip so a follow-up merge is a no-op', async () => {
+      const { store, manager, branchId } = await branchWithEdits(5, { maxChangesPerMerge: 2 });
+
+      await manager.mergeBranch(branchId);
+
+      expect((await store.loadBranch(branchId))?.lastMergedRev).toBe(6);
+      await expect(manager.mergeBranch(branchId)).resolves.toEqual([]);
+    });
+
+    // The point of advancing the watermark per window: a merge that dies part-way is resumable
+    // rather than all-or-nothing, so a branch too big to merge in one go still converges.
+    it('resumes from the last committed window after a mid-merge failure', async () => {
+      const { store, server, manager, branchId } = await branchWithEdits(7, { maxChangesPerMerge: 2 });
+      const realListChanges = store.listChanges.bind(store);
+      let branchReads = 0;
+      store.listChanges = async (docId, options) => {
+        if (docId === branchId && ++branchReads === 3) throw new Error('simulated failure mid-merge');
+        return realListChanges(docId, options);
+      };
+
+      await expect(manager.mergeBranch(branchId)).rejects.toThrow('simulated failure mid-merge');
+
+      // Two windows committed and the watermark records them — nothing is rolled back.
+      expect((await store.loadBranch(branchId))?.lastMergedRev).toBe(5);
+      expect((await coldLoad(server, 'doc1')).state).toEqual(expectedState(4));
+
+      store.listChanges = realListChanges;
+      await manager.mergeBranch(branchId);
+
+      expect((await coldLoad(server, 'doc1')).state).toEqual(expectedState(7));
+      const ids = await changeIds(store, 'doc1');
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+  });
+
   describe('merge retry and concurrency safety', () => {
     // These merges copy branch versions onto sources that carry no versions of their own, so
     // building each copy's state legitimately replays from rev 1 — and warns about it. The

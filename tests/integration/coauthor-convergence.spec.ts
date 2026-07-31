@@ -263,7 +263,9 @@ class ConvergenceHarness {
       await client.algorithm.applyServerChanges(DOC_ID, changes, client.doc);
     } catch (err) {
       if (!(err instanceof MissingChangesError)) throw err;
-      this.log(`r${round} ${id} gap on ${via} (expected ${err.expectedRev}, got ${err.gotRev}) -> recover since ${err.sinceRev}`);
+      this.log(
+        `r${round} ${id} gap on ${via} (expected ${err.expectedRev}, got ${err.gotRev}) -> recover since ${err.sinceRev}`
+      );
       const tail = await this.backend.listChanges(DOC_ID, { startAfter: err.sinceRev });
       await client.algorithm.applyServerChanges(DOC_ID, tail, client.doc);
     }
@@ -365,9 +367,10 @@ describe('co-author convergence under sender-excluded, coalesced, and dropped fa
             expect(snapshot?.rev, `${id} store rev != doc rev @r${round}\n${harness.failureContext()}`).toBe(
               client.doc.committedRev
             );
-            expect(client.doc.state, `${id} doc != own store @r${round} (seed ${seed})\n${harness.failureContext()}`).toEqual(
-              snapshot?.state
-            );
+            expect(
+              client.doc.state,
+              `${id} doc != own store @r${round} (seed ${seed})\n${harness.failureContext()}`
+            ).toEqual(snapshot?.state);
           }
         }
       }

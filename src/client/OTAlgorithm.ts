@@ -130,26 +130,21 @@ export class OTAlgorithm implements ClientAlgorithm {
     return pending.length > 0;
   }
 
+  /**
+   * The queue to put on the wire. Store rows are ground truth — the same contract the receive
+   * path uses (see {@link _collectPending}) — because the store is the sole rev sequencer: a
+   * context sharing it mints at the STORE's tail, which can be a rev this doc's in-memory
+   * mirror already occupies. Keying the read off the mirror's tail therefore withheld any row
+   * at or below it: unsent until a later echo rebuilt the queue from the store, by which point
+   * changes minted after it had committed ahead of it — and the rebase against them could
+   * transform it away entirely, losing content that was already persisted (DAB-946).
+   */
   async getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null> {
-    let batch: Change[];
-    if (doc) {
-      // Trust the open doc for pending; a ranged store read picks up any foreign tab's mints
-      // (rev past the doc's tail) and appends them raw. The serial flush and the commit echo
-      // rebase make that safe — the doc learns of them through the echo.
-      const otDoc = doc as OTDoc<any>;
-      const pending = otDoc.getPendingChanges();
-      const tail = pending[pending.length - 1]?.rev ?? otDoc.committedRev;
-      const delta = await this.store.getPendingChanges(docId, { startAfterRev: tail });
-      // Filter the delta against the doc's own pending by id: a custom store that ignores
-      // startAfterRev (back-compat) would return the whole queue, folding the doc's pending in
-      // twice — a duplicate commit the server's id dedup would otherwise have to catch.
-      const have = new Set(pending.map(c => c.id));
-      batch = [...pending, ...delta.filter(c => !have.has(c.id))];
-    } else {
-      batch = await this.store.getPendingChanges(docId);
-    }
-    if (batch.length === 0) return null;
-    return this._withConsistentBaseRev(docId, batch);
+    const otDoc = doc as OTDoc<any> | undefined;
+    const committedRev = otDoc ? otDoc.committedRev : await this.store.getCommittedRev(docId);
+    const { pending } = await this._collectPending(docId, otDoc, committedRev);
+    if (pending.length === 0) return null;
+    return this._withConsistentBaseRev(docId, pending);
   }
 
   async applyServerChanges<T extends object>(

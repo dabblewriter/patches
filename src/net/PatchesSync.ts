@@ -13,6 +13,7 @@ import { isDocLoaded } from '../shared/utils.js';
 import type { Change, DocSyncState, DocSyncStatus, PatchesSnapshot } from '../types.js';
 import { blockable, serialGate } from '../utils/concurrency.js';
 import {
+  CommittedPoisonSkippedError,
   ErrorCodes,
   isAbortError,
   isNetworkError,
@@ -97,6 +98,15 @@ const MIN_RESPLIT_STORAGE_BYTES = 100_000;
 // Circuit breaker: max auto-ejections per doc per session, so a systematically
 // mis-attributing server can't serially drain an offline queue into quarantine.
 const MAX_DOC_EJECTIONS = 3;
+// Strict-apply failures a COMMITTED change must rack up before it is skipped rather than
+// re-attempted forever (see `_skipFlooredPoison`). Two, not one: the first failure is far
+// more likely to mean this replica's committed state drifted, which the snapshot reload
+// recovers losslessly — only a change that fails again on top of authoritative state has
+// proven the document's history is what can't be applied.
+const POISON_SKIP_FLOOR = 2;
+// Bound on the per-doc poison memo, oldest first. A doc accumulating this many distinct
+// unappliable committed changes is broken in a way skipping won't fix.
+const MAX_POISON_MEMO_ENTRIES = 50;
 // Slow background re-probe for a doc left at 'error' with pending changes while the
 // connection stays up (see `_scheduleSyncReprobe`).
 const SYNC_REPROBE_EXHAUSTED_MS = 5 * 60_000;
@@ -272,6 +282,18 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   private _resplitBudgets = new Map<string, number>();
   /** Docs whose persisted quarantine entries were re-surfaced this session (see `_resurfaceQuarantined`). */
   private _quarantineResurfaced = new Set<string>();
+  /**
+   * Per-doc memo of COMMITTED changes that failed strict apply this session (see
+   * `_skipFlooredPoison`): how many times each failed, whether an authoritative snapshot has
+   * been installed since, and whether the skip has been surfaced. Deliberately NOT cleared
+   * when the doc syncs cleanly — the reload that answers each failure IS a success, so
+   * clearing on success would reset the count on every lap and the floor would never be
+   * reached. Session-scoped, dropped with the doc.
+   */
+  private _committedApplyFailures = new Map<
+    string,
+    Map<string, { failures: number; reloadedSince: boolean; surfaced: boolean; error: ApplyChangesError }>
+  >();
 
   /**
    * Gets the algorithm for a document. Uses the open doc's algorithm if available,
@@ -946,6 +968,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       }
       // Save via algorithm's store
       await algorithm.store.saveDoc(docId, snapshot);
+      // Authoritative state is now installed: a committed change that fails to apply from here
+      // on is failing on top of the server's own truth (see `_skipFlooredPoison`).
+      this._markPoisonReloaded(docId);
       // Read back the actual committed rev (store may compute from changes)
       const committedRev = await algorithm.getCommittedRev(docId);
       this._updateDocSyncState(docId, {
@@ -1290,6 +1315,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   protected async _applyServerChangesToDoc(docId: string, serverChanges: Change[]): Promise<void> {
     const doc = this.patches.getOpenDoc(docId);
     const algorithm = this._getAlgorithm(docId);
+    // The one choke point every committed batch reaches (flush echoes, broadcasts, catch-up,
+    // merges, the reload drain), so the poison floor is applied here and nowhere else.
+    const changes = this._skipFlooredPoison(docId, serverChanges);
 
     // Guarantee a docStates entry exists for a tracked doc. This is reachable from
     // paths that don't run _initDocSyncState first — the public applyMergeChanges API
@@ -1311,16 +1339,93 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       0;
 
     // Delegate to algorithm - it handles store updates and doc updates
-    await algorithm.applyServerChanges(docId, serverChanges, doc);
+    try {
+      await algorithm.applyServerChanges(docId, changes, doc);
+    } catch (err) {
+      if (err instanceof ApplyChangesError) this._recordCommittedApplyFailure(docId, changes, err);
+      throw err;
+    }
 
-    if (serverChanges.length > 0) {
-      const lastRev = serverChanges[serverChanges.length - 1].rev;
+    if (changes.length > 0) {
+      const lastRev = changes[changes.length - 1].rev;
       this._updateDocSyncState(docId, { committedRev: lastRev });
       // The one choke point covering every path where server-committed changes became locally
       // durable (flush echoes, broadcasts, catchup, merges).
-      const newlyDurable = serverChanges.filter(c => c.rev > priorRev);
+      const newlyDurable = changes.filter(c => c.rev > priorRev);
       if (newlyDurable.length > 0) this.patches.onServerCommit.emit(docId, newlyDurable);
     }
+  }
+
+  /**
+   * Replace committed changes that have earned the skip floor with ops-less copies of
+   * themselves, so the rest of the batch can apply.
+   *
+   * A committed change that fails strict apply deterministically latches the document on every
+   * device forever: the recovery reload succeeds, the next catch-up re-delivers the change, and
+   * it throws again. `applyChanges` refuses to skip for good reason (see its doc) — a client
+   * that silently drops a change every other client applies diverges with zero signal. That
+   * reasoning inverts once an authoritative snapshot has been installed and the SAME change
+   * still fails: the history, not this replica, is what can't be applied, and the server itself
+   * skips such a change when it replays committed history (`applyChangesForReconstruction`), so
+   * skipping is what converges with server truth. `POISON_SKIP_FLOOR` + `reloadedSince` is the
+   * evidence bar for that conclusion.
+   *
+   * Neutered rather than removed: the batch must stay rev-contiguous (the algorithms reject a
+   * gapped committed batch) and the id must survive to confirm any pending copy, so an ops-less
+   * copy is the exact shape of "applied, changed nothing" — leaving local state equal to what
+   * `applyChangesForReconstruction` computes over the same history. The neutered change is what
+   * gets persisted, so a later rebuild from the store can't resurrect the failure.
+   */
+  private _skipFlooredPoison(docId: string, changes: Change[]): Change[] {
+    const memo = this._committedApplyFailures.get(docId);
+    if (!memo?.size) return changes;
+    let skipped: Change[] | undefined;
+    for (let i = 0; i < changes.length; i++) {
+      const change = changes[i];
+      const entry = memo.get(change.id);
+      if (!entry || entry.failures < POISON_SKIP_FLOOR || !entry.reloadedSince) continue;
+      skipped ??= changes.slice();
+      skipped[i] = { ...change, ops: [] };
+      if (!entry.surfaced) {
+        entry.surfaced = true;
+        const error = new CommittedPoisonSkippedError(docId, change.id, change.rev, entry.error);
+        console.error(error.message, entry.error);
+        this.onError.emit(error, { docId });
+      }
+    }
+    return skipped ?? changes;
+  }
+
+  /**
+   * Record a committed change that failed strict apply, for `_skipFlooredPoison`'s floor.
+   * Ignores a failure naming something outside the batch we handed over — the algorithms also
+   * materialize PENDING changes on this path, and a pending change that won't apply is the
+   * quarantine/ejection path's business, not this one.
+   */
+  private _recordCommittedApplyFailure(docId: string, changes: Change[], error: ApplyChangesError): void {
+    if (!changes.some(change => change.id === error.changeId)) return;
+    let memo = this._committedApplyFailures.get(docId);
+    if (!memo) this._committedApplyFailures.set(docId, (memo = new Map()));
+    const entry = memo.get(error.changeId);
+    if (entry) {
+      entry.failures++;
+      entry.error = error;
+    } else {
+      memo.set(error.changeId, { failures: 1, reloadedSince: false, surfaced: false, error });
+      const oldest = memo.size > MAX_POISON_MEMO_ENTRIES ? memo.keys().next().value : undefined;
+      if (oldest !== undefined) memo.delete(oldest);
+    }
+  }
+
+  /**
+   * Mark the doc's recorded apply failures as having survived an authoritative snapshot — the
+   * half of the floor that distinguishes "this replica drifted" (which the reload just fixed)
+   * from "the history is unappliable".
+   */
+  private _markPoisonReloaded(docId: string): void {
+    const memo = this._committedApplyFailures.get(docId);
+    if (!memo) return;
+    for (const entry of memo.values()) entry.reloadedSince = true;
   }
 
   /**
@@ -1500,6 +1605,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this._clearSyncRetry(id);
       this._surfacedSyncErrors.delete(id);
       this._resplitBudgets.delete(id);
+      this._committedApplyFailures.delete(id);
     });
     batch(() => {
       existingIds.forEach(id => this._updateDocSyncState(id, undefined));
@@ -1549,6 +1655,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._clearSyncRetry(docId);
     this._surfacedSyncErrors.delete(docId);
     this._resplitBudgets.delete(docId);
+    this._committedApplyFailures.delete(docId);
     this._updateDocSyncState(docId, undefined);
     await algorithm.confirmDeleteDoc(docId);
 

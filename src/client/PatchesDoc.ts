@@ -12,6 +12,17 @@ export interface PatchesDocOptions {
    */
   maxStorageBytes?: number;
   /**
+   * Hard ceiling for a single operation the splitter cannot break apart (an op type with no
+   * splitter, a binary `replace` value, a delta embed). Under it such an op is emitted anyway and
+   * reported via `onOversizedOp`; over it the split fails with an `UnsplittableChangeError`.
+   * Defaults to `Infinity`, preserving the emit-anyway behavior for every existing consumer.
+   *
+   * Set it to what the backend genuinely rejects, NOT to `maxStorageBytes`, which is a
+   * conservative split target (and may measure compressed bytes plus envelope), so refusing at it
+   * would reject changes the backend stores fine.
+   */
+  maxUnsplittableBytes?: number;
+  /**
    * Custom size calculator for storage limit checks.
    * Import from '@dabble/patches/compression' for actual compression measurement,
    * or provide your own function (e.g., ratio estimate).

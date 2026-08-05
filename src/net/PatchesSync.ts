@@ -12,7 +12,15 @@ import type { AlgorithmName, TrackedDoc } from '../client/PatchesStore.js';
 import { isDocLoaded } from '../shared/utils.js';
 import type { Change, DocSyncState, DocSyncStatus, PatchesSnapshot } from '../types.js';
 import { blockable, serialGate } from '../utils/concurrency.js';
-import { ErrorCodes, isAbortError, isNetworkError, NetworkError, StatusError, TERMINAL_STATUS_CODES } from './error.js';
+import {
+  ErrorCodes,
+  isAbortError,
+  isNetworkError,
+  isUnsplittableChangeError,
+  NetworkError,
+  StatusError,
+  TERMINAL_STATUS_CODES,
+} from './error.js';
 import type { PatchesConnection } from './PatchesConnection.js';
 import type { JSONRPCClient } from './protocol/JSONRPCClient.js';
 import type { BranchAPI, ConnectionState } from './protocol/types.js';
@@ -35,6 +43,11 @@ export interface PatchesSyncOptions {
   maxPayloadBytes?: number;
   /** Per-change storage limit for backend. Falls back to patches.docOptions.maxStorageBytes. */
   maxStorageBytes?: number;
+  /**
+   * Hard ceiling for an op the splitter can't break apart. Falls back to
+   * patches.docOptions.maxUnsplittableBytes, then to `Infinity` (emit it anyway).
+   */
+  maxUnsplittableBytes?: number;
   /** Custom size calculator for storage limit. Falls back to patches.docOptions.sizeCalculator. */
   sizeCalculator?: SizeCalculator;
   /**
@@ -77,6 +90,10 @@ const SYNC_RETRY_MAX_ATTEMPTS = 10;
 // Definitive StatusError codes — don't retry (auth, payment, permission, not-found, gone).
 // Shared with Patches' change-submit retry so both layers classify failures the same way.
 const TERMINAL_SYNC_CODES = TERMINAL_STATUS_CODES;
+// Floor for the per-doc storage budget halved by `_tryResplitOversized`. Four halvings from a
+// typical 900KB budget; below this the change is small enough that a 413 is telling us something
+// other than "split harder", so stop and let the doc latch instead of grinding to nothing.
+const MIN_RESPLIT_STORAGE_BYTES = 100_000;
 // Circuit breaker: max auto-ejections per doc per session, so a systematically
 // mis-attributing server can't serially drain an offline queue into quarantine.
 const MAX_DOC_EJECTIONS = 3;
@@ -120,6 +137,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   protected patches: Patches;
   protected maxPayloadBytes?: number;
   protected maxStorageBytes?: number;
+  protected maxUnsplittableBytes?: number;
   protected sizeCalculator?: SizeCalculator;
   protected trackedDocs: Set<string>;
   /** Maps docId to the algorithm name used for that doc */
@@ -165,6 +183,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // Use options if provided, otherwise fall back to patches.docOptions
     this.maxPayloadBytes = options?.maxPayloadBytes ?? patches.docOptions?.maxPayloadBytes;
     this.maxStorageBytes = options?.maxStorageBytes ?? patches.docOptions?.maxStorageBytes;
+    this.maxUnsplittableBytes = options?.maxUnsplittableBytes ?? patches.docOptions?.maxUnsplittableBytes;
     this.sizeCalculator = options?.sizeCalculator ?? patches.docOptions?.sizeCalculator;
 
     if (typeof urlOrConnection === 'string') {
@@ -249,6 +268,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   private _surfacedSyncErrors = new Set<string>();
   /** Per-doc auto-ejection counts for the circuit breaker (see MAX_DOC_EJECTIONS). Session-scoped. */
   private _ejectionCounts = new Map<string, number>();
+  /** Per-doc storage budgets halved down from `maxStorageBytes` by a 413 (see `_tryResplitOversized`). */
+  private _resplitBudgets = new Map<string, number>();
   /** Docs whose persisted quarantine entries were re-surfaced this session (see `_resurfaceQuarantined`). */
   private _quarantineResurfaced = new Set<string>();
 
@@ -801,6 +822,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         this._deferDocToConnectionRecovery(docId, baseDoc, pending, syncError);
         return;
       }
+      // A 413 on one change is about SIZE, not content: re-split smaller and retry before the
+      // ejection path below considers throwing the user's work into quarantine.
+      if (this._tryResplitOversized(docId, failure)) return;
       // A rejection naming a corroborated poison change recovers by ejecting it into
       // quarantine so the rest of the queue can sync past it.
       if (await this._tryEjectPoisonChange(docId, algorithm, failure)) return;
@@ -1033,8 +1057,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
       const batches = breakChangesIntoBatches(pending, {
         maxPayloadBytes: this.maxPayloadBytes,
-        maxStorageBytes: this.maxStorageBytes,
+        maxStorageBytes: this._resplitBudgets.get(docId) ?? this.maxStorageBytes,
+        maxUnsplittableBytes: this.maxUnsplittableBytes,
         sizeCalculator: this.sizeCalculator,
+        docId,
       });
 
       // Splitting an oversized change re-identifies and renumbers part of the queue. The store
@@ -1144,6 +1170,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         pending = (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId) as PatchesDoc<any>)) ?? [];
       }
 
+      // The budget a 413 halved got this doc through, so stop paying for it: the next flush
+      // starts from the configured budget again and re-halves only if the server objects again.
+      this._resplitBudgets.delete(docId);
       const stillHasPending = await algorithm.hasPending(docId);
       this._updateDocSyncState(docId, { hasPending: stillHasPending, syncStatus: 'synced' });
       // Send the remainder the reload rebased, from the store rather than from `batches`. Sync is
@@ -1470,6 +1499,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this._untrackedDuringResync?.add(id);
       this._clearSyncRetry(id);
       this._surfacedSyncErrors.delete(id);
+      this._resplitBudgets.delete(id);
     });
     batch(() => {
       existingIds.forEach(id => this._updateDocSyncState(id, undefined));
@@ -1518,6 +1548,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._untrackedDuringResync?.add(docId);
     this._clearSyncRetry(docId);
     this._surfacedSyncErrors.delete(docId);
+    this._resplitBudgets.delete(docId);
     this._updateDocSyncState(docId, undefined);
     await algorithm.confirmDeleteDoc(docId);
 
@@ -1648,7 +1679,41 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
   /** Retryable = any failure except a definitive auth/payment/permission/not-found/gone StatusError. */
   protected _isRetryableSyncError(err: unknown): boolean {
+    // An op with no seam to split on measures the same every time; the ladder would just burn
+    // attempts before latching on the identical error.
+    if (isUnsplittableChangeError(err)) return false;
+    // A 413 the server scoped to ONE change is deterministic on those bytes. By the time it
+    // reaches this decision, `_tryResplitOversized` has already declined to shrink further
+    // (no split budget configured, or the budget is at its floor), so the ladder would resend
+    // the identical request. Latch like the splitter-refused case above; the slow reprobe and
+    // any local edit still re-enter sync if the queue ever changes shape.
+    if (err instanceof StatusError && err.code === 413 && err.data?.scope === 'change') return false;
     if (err instanceof StatusError) return !TERMINAL_SYNC_CODES.has(err.code);
+    return true;
+  }
+
+  /**
+   * The server refused ONE change as too large (413 scope:'change'). Our split budget is a client
+   * estimate of what the backend stores; when it estimates high, halve this doc's budget and flush
+   * again so the same edit goes up in smaller pieces. Bounded by {@link MIN_RESPLIT_STORAGE_BYTES}
+   * so a 413 that isn't really about size latches the doc instead of looping.
+   *
+   * Only halves a budget the consumer configured: with no `maxStorageBytes` nothing splits at all,
+   * and inventing one here would start re-cutting changes for a consumer that never asked.
+   */
+  private _tryResplitOversized(docId: string, failure: unknown): boolean {
+    if (!(failure instanceof StatusError) || failure.code !== 413 || failure.data?.scope !== 'change') return false;
+    if (!this.maxStorageBytes) return false;
+    const current = this._resplitBudgets.get(docId) ?? this.maxStorageBytes;
+    if (current <= MIN_RESPLIT_STORAGE_BYTES) return false;
+    const next = Math.max(MIN_RESPLIT_STORAGE_BYTES, Math.floor(current / 2));
+    this._resplitBudgets.set(docId, next);
+    this._clearSyncRetry(docId);
+    this._surfacedSyncErrors.delete(docId);
+    const changeId = typeof failure.data.changeId === 'string' ? failure.data.changeId : '(unnamed)';
+    console.warn(`Server refused change ${changeId} on doc ${docId} as too large; re-splitting at ${next} bytes`);
+    // We are inside syncDoc's serialGate run, so this queues exactly one follow-up pass.
+    void this.syncDoc(docId);
     return true;
   }
 

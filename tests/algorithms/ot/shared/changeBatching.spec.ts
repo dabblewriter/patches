@@ -172,9 +172,7 @@ describe('breakChanges', () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].ops).toEqual([change.ops[0]]);
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Warning: Single operation of type move exceeds maxBytes')
-    );
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Oversized op move at "/source"'));
 
     consoleSpy.mockRestore();
   });
@@ -210,7 +208,7 @@ describe('breakChanges', () => {
     const result = breakChanges([change], 200);
 
     expect(result).toHaveLength(1);
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('not an object'));
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Oversized op replace at "/content"'));
     consoleSpy.mockRestore();
   });
 
@@ -303,7 +301,7 @@ describe('breakChanges', () => {
     const result = breakChanges([change], maxBytes);
 
     expect(result).toHaveLength(1);
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('no text deltas'));
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Oversized op replace at "/data"'));
     consoleSpy.mockRestore();
   });
 });

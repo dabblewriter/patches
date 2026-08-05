@@ -255,8 +255,17 @@ export function toStorageError(err: unknown): unknown {
  * these means the record ITSELF is malformed. That is a bug in the code that produced the change,
  * never a transient condition — which is exactly why the storage-fault doc-comment lists
  * `ConstraintError`/`DataError` as programming errors it excludes.
+ *
+ * `UnsplittableChangeError` joins them from the other end: the record is well-formed, but it
+ * carries a single operation the splitter has no seam for and that is larger than the store will
+ * ever accept, so every attempt is refused identically.
  */
-const DEFECTIVE_CHANGE_ERROR_NAMES: ReadonlySet<string> = new Set(['DataCloneError', 'DataError', 'ConstraintError']);
+const DEFECTIVE_CHANGE_ERROR_NAMES: ReadonlySet<string> = new Set([
+  'DataCloneError',
+  'DataError',
+  'ConstraintError',
+  'UnsplittableChangeError',
+]);
 
 /**
  * True when a failure means THE CHANGE ITSELF can never be saved — its data is structurally
@@ -276,6 +285,50 @@ const DEFECTIVE_CHANGE_ERROR_NAMES: ReadonlySet<string> = new Set(['DataCloneErr
 export function isDefectiveChangeError(err: unknown): boolean {
   const name = (err as { name?: unknown } | null | undefined)?.name;
   return typeof name === 'string' && DEFECTIVE_CHANGE_ERROR_NAMES.has(name);
+}
+
+/**
+ * Error for a change the splitter cannot break below the store's hard limit: one operation with
+ * no seam to cut on (an op type with no splitter, a binary/base64 `replace` value, a delta embed)
+ * measuring more than `maxUnsplittableBytes`.
+ *
+ * The splitter's ordinary budget (`maxStorageBytes`) is a conservative *target*: an op that
+ * overshoots it usually still stores fine, so those keep going out and are only reported via
+ * `onOversizedOp`. `maxUnsplittableBytes` is the separate, explicit point past which the store is
+ * known to refuse the write. Emitting anyway there is worse than failing: the change persists
+ * locally, every retry re-splits to the same oversized bytes, and the queue behind it never
+ * drains. Named into {@link DEFECTIVE_CHANGE_ERROR_NAMES} so it classifies as a defective change:
+ * roll it back, surface it, never retry.
+ */
+export class UnsplittableChangeError extends Error {
+  constructor(
+    /** The JSON Patch op type that could not be split (`@txt`, `replace`, `add`, …). */
+    readonly op: string,
+    /** The path the op targets. */
+    readonly path: string,
+    /** Measured size of the op, by the caller's size calculator. */
+    readonly bytes: number,
+    /** The `maxUnsplittableBytes` ceiling it exceeded. */
+    readonly maxBytes: number,
+    /** The id of the change carrying the op, and the doc it belongs to, when known. */
+    readonly context: { docId?: string; changeId?: string } = {}
+  ) {
+    super(`Operation ${op} at "${path}" is ${bytes} bytes, cannot be split, and exceeds the ${maxBytes}-byte limit`);
+    this.name = 'UnsplittableChangeError';
+  }
+
+  get docId(): string | undefined {
+    return this.context.docId;
+  }
+
+  get changeId(): string | undefined {
+    return this.context.changeId;
+  }
+}
+
+/** True for an {@link UnsplittableChangeError}, matched by `name` for the cross-realm reasons on {@link isStorageError}. */
+export function isUnsplittableChangeError(err: unknown): boolean {
+  return (err as { name?: unknown } | null | undefined)?.name === 'UnsplittableChangeError';
 }
 
 /**

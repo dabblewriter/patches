@@ -1,5 +1,7 @@
+import { signal } from 'easy-signal';
 import { createChange } from '../../../data/change.js';
 import type { JSONPatchOp } from '../../../json-patch/types.js';
+import { UnsplittableChangeError } from '../../../net/error.js';
 import type { Change } from '../../../types.js';
 
 /**
@@ -29,6 +31,79 @@ export function getJSONByteSize(data: unknown): number {
   }
 }
 
+/** Why the splitter had no seam to cut an op on. */
+export type OversizedOpReason =
+  /** Op type has no splitter (not `@txt`, `replace` or `add`). */
+  | 'op-type'
+  /** A single delta op that isn't a string insert: an embed, or a retain that can't shrink. */
+  | 'delta-op'
+  /** A `replace`/`add` whose value is a string or array, not a structure to pull text out of. */
+  | 'value-not-object'
+  /** A `replace`/`add` object value with no text deltas to extract. */
+  | 'value-no-text'
+  /** A single code point of an insert (possibly a surrogate pair) that still measures over budget. */
+  | 'insert-chunk';
+
+/** An op the splitter could not break below the storage budget. */
+export interface OversizedOpReport {
+  /** The JSON Patch op type (`@txt`, `replace`, `add`, …). */
+  op: string;
+  path: string;
+  /** Measured size of the op, by the caller's size calculator. */
+  bytes: number;
+  /** The budget it overshot. */
+  maxBytes: number;
+  /**
+   * Which budget `maxBytes` is: `'storage'` for the per-change storage split
+   * (`maxStorageBytes`, possibly compressed), `'payload'` for the wire re-split
+   * (`maxPayloadBytes`, raw JSON). One op over both budgets reports once per pass — filter on
+   * this to avoid double-counting in telemetry.
+   */
+  budget: 'storage' | 'payload';
+  docId?: string;
+  changeId?: string;
+  /** True when the op went out anyway; false when it was refused with an `UnsplittableChangeError`. */
+  emitted: boolean;
+  reason: OversizedOpReason;
+}
+
+/**
+ * Fires for every op the splitter cannot break below `maxStorageBytes`, whether it went out anyway
+ * or was refused. Subscribe to route these to telemetry: an emitted one is a change riding above
+ * the intended budget (fine until the store disagrees), a refused one is user work that can never
+ * be saved.
+ */
+export const onOversizedOp = signal<(report: OversizedOpReport) => void>();
+
+/** Options for splitting changes, beyond the byte budget itself. */
+export interface ChangeSplitOptions {
+  /**
+   * Hard ceiling for an op the splitter cannot break apart. Below it an unsplittable op is emitted
+   * as before (and reported via {@link onOversizedOp}); above it the split fails with an
+   * `UnsplittableChangeError`. Defaults to `Infinity`, so every op is emitted, as it always was.
+   *
+   * Keep it well above `maxBytes`: that budget is a conservative split *target*, so refusing at it
+   * would reject changes the store accepts happily. Set this to what the store genuinely rejects.
+   */
+  maxUnsplittableBytes?: number;
+  /** Doc id, carried on {@link OversizedOpReport} for the consumer's telemetry. */
+  docId?: string;
+  /**
+   * Which budget this split enforces, stamped on {@link OversizedOpReport}. Defaults to
+   * `'storage'`; `breakChangesIntoBatches` stamps `'payload'` on its wire re-split.
+   */
+  budget?: 'storage' | 'payload';
+}
+
+/** Everything the recursive splitters need, threaded as one value. */
+interface SplitContext extends Required<Pick<ChangeSplitOptions, 'maxUnsplittableBytes'>> {
+  maxBytes: number;
+  sizeCalculator?: SizeCalculator;
+  docId?: string;
+  changeId?: string;
+  budget: 'storage' | 'payload';
+}
+
 /**
  * Break changes into smaller changes so that each change's storage size never exceeds `maxBytes`.
  *
@@ -39,18 +114,64 @@ export function getJSONByteSize(data: unknown): number {
  * @param changes - The changes to break apart
  * @param maxBytes - Maximum storage size in bytes per change
  * @param sizeCalculator - Custom size calculator (e.g., for compressed size)
+ * @param options - Unsplittable-op ceiling and reporting context
+ * @throws {UnsplittableChangeError} When an op can't be split and exceeds `maxUnsplittableBytes`
  */
-export function breakChanges(changes: Change[], maxBytes: number, sizeCalculator?: SizeCalculator): Change[] {
+export function breakChanges(
+  changes: Change[],
+  maxBytes: number,
+  sizeCalculator?: SizeCalculator,
+  options?: ChangeSplitOptions
+): Change[] {
   const results: Change[] = [];
   // Splitting one change into N pieces occupies N revs, so every change after it shifts up
   let revShift = 0;
   for (const change of changes) {
     const shifted = revShift ? { ...change, rev: change.rev + revShift } : change;
-    const pieces = breakSingleChange(shifted, maxBytes, sizeCalculator);
+    const pieces = breakSingleChange(shifted, {
+      maxBytes,
+      sizeCalculator,
+      maxUnsplittableBytes: options?.maxUnsplittableBytes ?? Infinity,
+      docId: options?.docId,
+      changeId: change.id,
+      budget: options?.budget ?? 'storage',
+    });
     revShift += pieces.length - 1;
     results.push(...pieces);
   }
   return results;
+}
+
+/**
+ * Report an op the splitter ran out of seams on, and refuse it when it is past the point the store
+ * will accept. Returning normally means "emit it anyway", exactly as before this guard existed.
+ */
+function guardUnsplittable(
+  ctx: SplitContext,
+  op: string,
+  path: string,
+  bytes: number,
+  reason: OversizedOpReason
+): void {
+  const emitted = bytes <= ctx.maxUnsplittableBytes;
+  onOversizedOp.emit({
+    op,
+    path,
+    bytes,
+    maxBytes: ctx.maxBytes,
+    budget: ctx.budget,
+    docId: ctx.docId,
+    changeId: ctx.changeId,
+    emitted,
+    reason,
+  });
+  if (!emitted) {
+    throw new UnsplittableChangeError(op, path, bytes, ctx.maxUnsplittableBytes, {
+      docId: ctx.docId,
+      changeId: ctx.changeId,
+    });
+  }
+  console.warn(`Oversized op ${op} at "${path}" is ${bytes} bytes and cannot be split; including it anyway`);
 }
 
 /** Default wire batch size limit (1MB) */
@@ -59,7 +180,7 @@ const DEFAULT_MAX_PAYLOAD_BYTES = 1_000_000;
 /**
  * Options for breaking changes into batches.
  */
-export interface BreakChangesIntoBatchesOptions {
+export interface BreakChangesIntoBatchesOptions extends ChangeSplitOptions {
   /** Batch limit for wire (uncompressed JSON). Defaults to 1MB. */
   maxPayloadBytes?: number;
   /** Per-change storage limit. If exceeded, individual changes are split. */
@@ -87,12 +208,12 @@ export function breakChangesIntoBatches(
     typeof options === 'number' ? { maxPayloadBytes: options } : (options ?? {});
 
   const maxPayloadBytes = opts.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
-  const { maxStorageBytes, sizeCalculator } = opts;
+  const { maxStorageBytes, sizeCalculator, maxUnsplittableBytes, docId } = opts;
 
   // First, split individual changes if they exceed storage limit
   let processedChanges = changes;
   if (maxStorageBytes) {
-    processedChanges = breakChanges(changes, maxStorageBytes, sizeCalculator);
+    processedChanges = breakChanges(changes, maxStorageBytes, sizeCalculator, { maxUnsplittableBytes, docId });
   }
 
   // If all changes fit in one batch, return as-is
@@ -109,9 +230,12 @@ export function breakChangesIntoBatches(
   // re-split below, whose pieces get fresh ids per call.
   const batchId = changes[0].id;
 
-  // Split any change too large for one wire batch (shouldn't happen if maxStorageBytes < maxPayloadBytes).
-  // breakChanges renumbers the whole queue so split pieces never collide with the revs that follow them.
-  processedChanges = breakChanges(processedChanges, maxPayloadBytes);
+  // Split any change too large for one wire batch. Reachable even with maxStorageBytes set:
+  // the storage pass may measure compressed bytes while this one measures raw JSON, so a change
+  // under the storage budget can still exceed the wire cap. breakChanges renumbers the whole
+  // queue so split pieces never collide with the revs that follow them. Reports from this pass
+  // are stamped `budget: 'payload'` so telemetry can tell them from the storage pass's.
+  processedChanges = breakChanges(processedChanges, maxPayloadBytes, undefined, { docId, budget: 'payload' });
   const batches: Change[][] = [];
   let currentBatch: Change[] = [];
   let currentSize = 2; // Account for [] wrapper
@@ -152,11 +276,10 @@ function getSizeForStorage(data: unknown, sizeCalculator?: SizeCalculator): numb
 }
 
 /**
- * Break a single Change into multiple Changes so that the storage size never exceeds `maxBytes`.
- * @param sizeCalculator - Custom size calculator (e.g., for compressed size)
+ * Break a single Change into multiple Changes so that the storage size never exceeds `ctx.maxBytes`.
  */
-function breakSingleChange(orig: Change, maxBytes: number, sizeCalculator?: SizeCalculator): Change[] {
-  if (getSizeForStorage(orig, sizeCalculator) <= maxBytes) return [orig];
+function breakSingleChange(orig: Change, ctx: SplitContext): Change[] {
+  if (getSizeForStorage(orig, ctx.sizeCalculator) <= ctx.maxBytes) return [orig];
 
   // First pass: split by ops
   const byOps: Change[] = [];
@@ -178,13 +301,14 @@ function breakSingleChange(orig: Change, maxBytes: number, sizeCalculator?: Size
 
   for (const op of orig.ops) {
     const tentative = group.concat(op);
-    if (getSizeForStorage({ ...orig, ops: tentative }, sizeCalculator) > maxBytes) flush();
+    if (getSizeForStorage({ ...orig, ops: tentative }, ctx.sizeCalculator) > ctx.maxBytes) flush();
 
     // Handle the case where a single op is too large
-    if (group.length === 0 && getSizeForStorage({ ...orig, ops: [op] }, sizeCalculator) > maxBytes) {
+    const soloSize = group.length === 0 ? getSizeForStorage({ ...orig, ops: [op] }, ctx.sizeCalculator) : 0;
+    if (soloSize > ctx.maxBytes) {
       // We have a single op that's too big - can only be @txt op with large delta
       if (op.op === '@txt' && op.value) {
-        const pieces = breakTextOp(orig, op, maxBytes, rev, sizeCalculator);
+        const pieces = breakTextOp(orig, op, rev, ctx);
         byOps.push(...pieces);
         // Only update rev if we got results from breakTextOp
         if (pieces.length > 0) {
@@ -193,15 +317,14 @@ function breakSingleChange(orig: Change, maxBytes: number, sizeCalculator?: Size
         continue;
       } else if (op.op === 'replace' || op.op === 'add') {
         // For replace/add operations with large value payloads, try to split the value if it's a string or array
-        const pieces = breakLargeValueOp(orig, op, maxBytes, rev, sizeCalculator);
+        const pieces = breakLargeValueOp(orig, op, rev, ctx);
         byOps.push(...pieces);
         if (pieces.length > 0) {
           rev = pieces[pieces.length - 1].rev + 1;
         }
         continue;
       } else {
-        // Non-splittable op that's too large, include it anyway with a warning
-        console.warn(`Warning: Single operation of type ${op.op} exceeds maxBytes. Including it anyway.`);
+        guardUnsplittable(ctx, op.op, op.path, soloSize, 'op-type');
         group.push(op);
         continue;
       }
@@ -215,23 +338,19 @@ function breakSingleChange(orig: Change, maxBytes: number, sizeCalculator?: Size
 }
 
 /**
- * Break a large @txt operation into multiple smaller operations
- * @param sizeCalculator - Custom size calculator (e.g., for compressed size)
+ * Break a large @txt operation into multiple smaller operations.
+ *
+ * The pieces are SEQUENTIAL changes: each composes onto the document produced by the piece before
+ * it, exactly as replay applies them. Ops keep their original coordinates only inside the first
+ * piece; every later piece must first retain past everything the earlier pieces retained or
+ * inserted (a delete occupies no width in the document it leaves behind), or its ops would land at
+ * the head of the document. `pieceStartPos` is that cursor. The content past it is untouched by
+ * the earlier pieces, so the ops of a piece — expressed in the original delta's relative
+ * coordinates — stay valid from that point on.
  */
-function breakTextOp(
-  origChange: Change,
-  textOp: JSONPatchOp,
-  maxBytes: number,
-  startRev: number,
-  sizeCalculator?: SizeCalculator
-): Change[] {
+function breakTextOp(origChange: Change, textOp: JSONPatchOp, startRev: number, ctx: SplitContext): Change[] {
   const results: Change[] = [];
   let rev = startRev;
-
-  const baseSize = getSizeForStorage({ ...origChange, ops: [{ ...textOp, value: '' }] }, sizeCalculator);
-  const budget = maxBytes - baseSize;
-  const buffer = 20;
-  const maxLength = Math.max(1, budget - buffer);
 
   let deltaOps: any[] = [];
   if (textOp.value) {
@@ -244,106 +363,129 @@ function breakTextOp(
     }
   }
 
-  let currentOpsForNextChangePiece: any[] = [];
-  let retainToPrefixCurrentPiece = 0; // Retain that should prefix the ops in currentOpsForNextChangePiece
+  // Width an op occupies in the document AFTER it applies: a retain skips it, a string insert adds
+  // its length (UTF-16 units, delta's coordinate space), an embed insert adds 1, a delete removes
+  // what it consumed.
+  const advanceOf = (op: any): number =>
+    op.retain ? op.retain : typeof op.insert === 'string' ? op.insert.length : op.insert !== undefined ? 1 : 0;
 
-  const flushCurrentChangePiece = () => {
-    if (!currentOpsForNextChangePiece.length) return;
+  // Position in the current document (all earlier pieces applied) where the next piece's ops act.
+  let pieceStartPos = 0;
+  const withStartRetain = (ops: any[]): any[] => (pieceStartPos > 0 ? [{ retain: pieceStartPos }, ...ops] : ops);
 
-    const opsToFlush = [...currentOpsForNextChangePiece];
-    if (retainToPrefixCurrentPiece > 0) {
-      if (!opsToFlush[0]?.retain) {
-        // Only add if not already starting with a retain
-        opsToFlush.unshift({ retain: retainToPrefixCurrentPiece });
-      } else {
-        // If it starts with retain, assume it's the intended one from deltaOps.
-        // This might need adjustment if a small retain op is batched after a large retain prefix.
-        // For now, this prioritizes an existing retain op at the start of the batch.
-      }
-    }
-    results.push(deriveNewChange(origChange, rev++, [{ ...textOp, value: opsToFlush }]));
-    currentOpsForNextChangePiece = [];
-    // retainToPrefixCurrentPiece is NOT reset here, it carries over for the start of the next piece IF it's non-zero from a previous retain op.
+  const measure = (ops: any[]) =>
+    getSizeForStorage({ ...origChange, ops: [{ ...textOp, value: ops }] }, ctx.sizeCalculator);
+
+  let pieceOps: any[] = [];
+  let pieceAdvance = 0;
+
+  const flushPiece = () => {
+    if (!pieceOps.length) return;
+    results.push(deriveNewChange(origChange, rev++, [{ ...textOp, value: withStartRetain(pieceOps) }]));
+    pieceStartPos += pieceAdvance;
+    pieceOps = [];
+    pieceAdvance = 0;
   };
 
   for (const op of deltaOps) {
-    // Try adding current op (with its necessary prefix) to the current batch
-    const testBatchOps = [...currentOpsForNextChangePiece];
-    if (retainToPrefixCurrentPiece > 0 && testBatchOps.length === 0) {
-      // If batch is empty, it needs the prefix
-      testBatchOps.push({ retain: retainToPrefixCurrentPiece });
-    }
-    testBatchOps.push(op);
-    const testBatchSize = getSizeForStorage(
-      { ...origChange, ops: [{ ...textOp, value: testBatchOps }] },
-      sizeCalculator
-    );
-
-    if (currentOpsForNextChangePiece.length > 0 && testBatchSize > maxBytes) {
-      flushCurrentChangePiece();
-      // After flush, retainToPrefixCurrentPiece still holds the value for the *start* of the new piece (current op)
+    if (pieceOps.length > 0 && measure(withStartRetain([...pieceOps, op])) > ctx.maxBytes) {
+      flushPiece();
     }
 
-    // Check if the op itself (with its prefix) is too large for a new piece
-    const opStandaloneOps = retainToPrefixCurrentPiece > 0 ? [{ retain: retainToPrefixCurrentPiece }, op] : [op];
-    const opStandaloneSize = getSizeForStorage(
-      { ...origChange, ops: [{ ...textOp, value: opStandaloneOps }] },
-      sizeCalculator
-    );
-
-    if (currentOpsForNextChangePiece.length === 0 && opStandaloneSize > maxBytes) {
-      if (op.insert && typeof op.insert === 'string') {
-        const insertChunks = splitLargeInsertText(op.insert, maxLength, op.attributes);
-        for (let i = 0; i < insertChunks.length; i++) {
-          const chunkOp = insertChunks[i];
-          const opsForThisChunk: any[] = [];
-          if (i === 0 && retainToPrefixCurrentPiece > 0) {
-            // Prefix only the first chunk
-            opsForThisChunk.push({ retain: retainToPrefixCurrentPiece });
+    if (pieceOps.length === 0) {
+      const standaloneOps = withStartRetain([op]);
+      const standaloneSize = measure(standaloneOps);
+      if (standaloneSize > ctx.maxBytes) {
+        if (op.insert && typeof op.insert === 'string') {
+          const insertPieces = splitLargeInsertText(origChange, textOp, op.insert, op.attributes, pieceStartPos, ctx);
+          for (const pieceValue of insertPieces) {
+            results.push(deriveNewChange(origChange, rev++, [{ ...textOp, value: pieceValue }]));
           }
-          opsForThisChunk.push(chunkOp);
-          results.push(deriveNewChange(origChange, rev++, [{ ...textOp, value: opsForThisChunk }]));
+          pieceStartPos += op.insert.length;
+          continue;
         }
-        retainToPrefixCurrentPiece = 0; // An insert consumes the preceding retain for the next original op
-      } else {
-        // Non-splittable large op (e.g., large retain)
-        console.warn(`Warning: Single delta op too large, including with prefix: ${JSON.stringify(op)}`);
-        results.push(deriveNewChange(origChange, rev++, [{ ...textOp, value: opStandaloneOps }]));
-        retainToPrefixCurrentPiece = op.retain || 0;
-      }
-    } else {
-      // Op fits into current batch (or starts a new one that fits)
-      currentOpsForNextChangePiece.push(op);
-      if (op.retain) {
-        retainToPrefixCurrentPiece += op.retain; // Accumulate retain for the next op or flush
-      } else {
-        // Insert or delete
-        retainToPrefixCurrentPiece = 0; // Consumes retain for the next op
+        // Non-splittable large op (a retain, or an embed insert like an image data URL)
+        guardUnsplittable(ctx, textOp.op, textOp.path, standaloneSize, 'delta-op');
+        results.push(deriveNewChange(origChange, rev++, [{ ...textOp, value: standaloneOps }]));
+        pieceStartPos += advanceOf(op);
+        continue;
       }
     }
+
+    pieceOps.push(op);
+    pieceAdvance += advanceOf(op);
   }
 
-  if (currentOpsForNextChangePiece.length > 0) {
-    flushCurrentChangePiece();
-  }
+  flushPiece();
   return results;
 }
 
+/** Never cut between a surrogate pair: half a code point is a different character. */
+function safeSplitIndex(text: string, index: number): number {
+  const code = text.charCodeAt(index);
+  return index > 0 && code >= 0xdc00 && code <= 0xdfff ? index - 1 : index;
+}
+
 /**
- * Split a large insert string into multiple delta insert operations.
- * Each operation will have the original attributes.
+ * Split a large insert string into the delta-op arrays of the change pieces that carry it, each
+ * measuring at or under `ctx.maxBytes`.
+ *
+ * `startPos` is the position in the current document where the insert begins. Every piece is
+ * prefixed with a retain to its own position: the first piece retains to `startPos`, and each
+ * later piece additionally retains past the chunks the earlier pieces inserted — the pieces are
+ * sequential changes, so a piece without that cumulative retain would insert at the head of the
+ * document.
+ *
+ * The character budget below is only a seed: it comes from a *byte* budget the size calculator may
+ * measure post-compression, so it says nothing reliable about how big a chunk of this particular
+ * text will store as. Every chunk is measured and halved until it fits. A cut is never placed
+ * inside a surrogate pair; a lone pair that still cannot fit goes through `guardUnsplittable`
+ * whole.
  */
-function splitLargeInsertText(text: string, maxChunkLength: number, attributes?: any): any[] {
-  const results: any[] = [];
-  if (maxChunkLength <= 0) {
-    console.warn('splitLargeInsertText: maxChunkLength is invalid, returning original text as one chunk.');
-    return [{ insert: text, attributes }];
+function splitLargeInsertText(
+  origChange: Change,
+  textOp: JSONPatchOp,
+  text: string,
+  attributes: any,
+  startPos: number,
+  ctx: SplitContext
+): any[][] {
+  const pieces: any[][] = [];
+  const measure = (deltaOps: any[]) =>
+    getSizeForStorage({ ...origChange, ops: [{ ...textOp, value: deltaOps }] }, ctx.sizeCalculator);
+
+  // Document position where the next chunk inserts; advances by each emitted chunk's length.
+  let position = startPos;
+
+  const emit = (chunk: string): void => {
+    const deltaOps: any[] = position > 0 ? [{ retain: position }] : [];
+    deltaOps.push({ insert: chunk, attributes: attributes ? { ...attributes } : undefined });
+    const bytes = measure(deltaOps);
+    if (bytes > ctx.maxBytes) {
+      const mid = safeSplitIndex(chunk, Math.ceil(chunk.length / 2));
+      if (mid > 0 && mid < chunk.length) {
+        emit(chunk.slice(0, mid));
+        emit(chunk.slice(mid));
+        return;
+      }
+      // Down to one code point (possibly a surrogate pair) that still measures over budget.
+      guardUnsplittable(ctx, textOp.op, textOp.path, bytes, 'insert-chunk');
+    }
+    pieces.push(deltaOps);
+    position += chunk.length;
+  };
+
+  const baseSize = getSizeForStorage({ ...origChange, ops: [{ ...textOp, value: '' }] }, ctx.sizeCalculator);
+  const seedLength = Math.max(1, ctx.maxBytes - baseSize - 20);
+  for (let i = 0; i < text.length; ) {
+    let end = Math.min(text.length, i + seedLength);
+    if (end < text.length) end = safeSplitIndex(text, end);
+    // A surrogate pair right at a one-unit seed is indivisible: take both units.
+    if (end <= i) end = Math.min(text.length, i + 2);
+    emit(text.slice(i, end));
+    i = end;
   }
-  for (let i = 0; i < text.length; i += maxChunkLength) {
-    const chunkText = text.slice(i, i + maxChunkLength);
-    results.push({ insert: chunkText, attributes: attributes ? { ...attributes } : undefined });
-  }
-  return results;
+  return pieces;
 }
 
 /**
@@ -381,22 +523,20 @@ function stripTextDeltas(value: any, basePath: string, textOps: JSONPatchOp[]): 
  * and separate `@txt` ops are appended to the same Change. If the resulting Change still
  * exceeds maxBytes, it is split further by ops via breakSingleChange.
  *
- * Non-object values (strings, arrays) and objects with no text deltas are included as-is
- * with a warning.
+ * Non-object values (strings, arrays) and objects with no text deltas have no seam to cut on, so
+ * they go through `guardUnsplittable`: reported, and refused once past `maxUnsplittableBytes`.
  */
-function breakLargeValueOp(
-  origChange: Change,
-  op: JSONPatchOp,
-  maxBytes: number,
-  startRev: number,
-  sizeCalculator?: SizeCalculator
-): Change[] {
+function breakLargeValueOp(origChange: Change, op: JSONPatchOp, startRev: number, ctx: SplitContext): Change[] {
   const value = op.value;
+  const asIs = (reason: OversizedOpReason) => {
+    const piece = deriveNewChange(origChange, startRev, [op]);
+    guardUnsplittable(ctx, op.op, op.path, getSizeForStorage(piece, ctx.sizeCalculator), reason);
+    return [piece];
+  };
 
   // Only handle plain object values
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    console.warn(`Oversized op ${op.op} at "${op.path}" is not an object; including as-is`);
-    return [deriveNewChange(origChange, startRev, [op])];
+    return asIs('value-not-object');
   }
 
   // Extract text deltas, replacing them with stubs
@@ -404,8 +544,7 @@ function breakLargeValueOp(
   const strippedValue = stripTextDeltas(value, op.path, textOps);
 
   if (textOps.length === 0) {
-    console.warn(`Oversized op ${op.op} at "${op.path}" has no text deltas; including as-is`);
-    return [deriveNewChange(origChange, startRev, [op])];
+    return asIs('value-no-text');
   }
 
   // Build a combined Change: structural op with stubs + all @txt ops
@@ -413,12 +552,12 @@ function breakLargeValueOp(
   const combinedChange = deriveNewChange(origChange, startRev, allOps);
 
   // If combined Change fits within the limit, return it as-is
-  if (getSizeForStorage(combinedChange, sizeCalculator) <= maxBytes) {
+  if (getSizeForStorage(combinedChange, ctx.sizeCalculator) <= ctx.maxBytes) {
     return [combinedChange];
   }
 
   // Still too large — split by ops (individual @txt ops broken further by breakTextOp)
-  return breakSingleChange(combinedChange, maxBytes, sizeCalculator);
+  return breakSingleChange(combinedChange, ctx);
 }
 
 function deriveNewChange(origChange: Change, rev: number, ops: JSONPatchOp[]) {

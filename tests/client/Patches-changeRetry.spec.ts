@@ -6,6 +6,7 @@ import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
 import type { OTDoc } from '../../src/client/OTDoc';
 import { Patches } from '../../src/client/Patches';
 import { createChange } from '../../src/data/change';
+import { UnsplittableChangeError } from '../../src/net/error';
 
 /**
  * Non-destructive rollback on transient submit failures (sync-reliability register
@@ -208,6 +209,26 @@ describe('Patches change-submit retry (non-destructive rollback)', () => {
       expect(await store.getPendingChanges('doc1')).toEqual([]);
       expect(patches.isWriteLatched('doc1')).toBe(false); // terminal, not latched
       const defective = errors.find(e => e.context?.kind === 'defective');
+      expect(defective?.context).toEqual({ docId: 'doc1', willRetry: false, kind: 'defective' });
+    });
+
+    it('treats an op the splitter cannot break as a defective change', async () => {
+      store = new OTInMemoryStore();
+      const docOptions = { maxStorageBytes: 100, maxUnsplittableBytes: 500 };
+      patches = new Patches({ algorithms: { ot: new OTAlgorithm(store, docOptions) }, docOptions });
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const errors: { error: Error; context?: any }[] = [];
+      patches.onError((error, context) => errors.push({ error, context }));
+
+      const doc = await patches.openDoc<{ cover?: string }>('doc1');
+      doc.change(patch => patch.add('/cover', 'x'.repeat(4000)));
+      await doc.flush();
+
+      expect(doc.state).toEqual({}); // rolled back; it can never be saved
+      expect(await store.getPendingChanges('doc1')).toEqual([]);
+      const defective = errors.find(e => e.context?.kind === 'defective');
+      expect(defective?.error).toBeInstanceOf(UnsplittableChangeError);
       expect(defective?.context).toEqual({ docId: 'doc1', willRetry: false, kind: 'defective' });
     });
 

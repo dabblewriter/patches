@@ -78,8 +78,14 @@ export interface MergeBranchOptions {
   contentDuplicationGuard?: 'refuse' | 'warn' | 'off';
 }
 
-/** The run of text a `@txt` delta prepends at position 0 (empty when it begins with retain/delete). */
-function leadingInsertText(value: unknown): string {
+/**
+ * The contiguous run of text a `@txt` delta inserts after at most leading retains — the shape of
+ * a replayed seed piece. Pieces stored by older splitters are retain-less and prepend at position
+ * 0; position-correct pieces retain to their slot first and insert there. A leading delete marks
+ * an ordinary edit (no seed piece deletes), and anything after the run is irrelevant here — this
+ * is only the cheap arming trigger; the segment walk decides.
+ */
+function seedShapedInsertText(value: unknown): string {
   const ops = toOps(value);
   if (!ops) return '';
   let text = '';
@@ -88,7 +94,10 @@ function leadingInsertText(value: unknown): string {
     if (typeof insert === 'string') text += insert;
     else if (insert != null)
       text += EMBED_PLACEHOLDER; // embeds prepend content too
-    else break; // a retain / delete ends the leading prepend
+    else if (text)
+      break; // a retain / delete ends the run
+    else if ((op as { delete?: unknown }).delete != null) return ''; // leading delete: an ordinary edit
+    // else: a leading retain — skip to where the piece inserts
   }
   return text;
 }
@@ -256,19 +265,58 @@ function findDuplication(beforeText: string, segments: TextSegment[], minLength:
   const afterText = segments.map(s => s.text).join('');
   if (countOccurrences(afterText, beforeText) >= 2) return beforeText.length;
 
-  // The replayed-seed shape: stored seed pieces re-insert body text ahead of the original
-  // content, which survives untouched. Flag a substantial inserted run sitting ahead of all
-  // surviving original content that duplicates text still present in the surviving spans.
-  // Anchoring to the head keeps a mid-document paste of repeated prose out of scope, and
-  // requiring the original to survive lets trims, moves, re-pastes and undos net out.
+  return (
+    findInsertedDuplication(segments, minLength) ??
+    // Formatted spans arrive as ADJACENT inserted fragments (bold/plain/italic), each shorter
+    // than minLength on its own — coalesce same-provenance neighbours and look again so a
+    // fragmented duplicate can't slip under the length gate. Second pass, not a replacement:
+    // coalescing can also glue a duplicate to novel inserted text and hide it from the
+    // exact-match checks, so the fragment-level pass keeps everything it caught before.
+    findInsertedDuplication(coalesceSegments(segments), minLength)
+  );
+}
+
+/** Merge adjacent segments of the same provenance into whole runs. */
+function coalesceSegments(segments: TextSegment[]): TextSegment[] {
+  const out: TextSegment[] = [];
+  for (const segment of segments) {
+    const last = out[out.length - 1];
+    if (last && last.original === segment.original) last.text += segment.text;
+    else out.push({ ...segment });
+  }
+  return out;
+}
+
+/** The inserted-run detection shared by the fragment-level and coalesced passes of {@link findDuplication}. */
+function findInsertedDuplication(segments: TextSegment[], minLength: number): number | null {
   const originalRetained = segments
     .filter(s => s.original)
     .map(s => s.text)
     .join('');
   if (!originalRetained) return null;
+
+  // Replayed-seed shape A — retain-less pieces (stored by older splitters) re-insert body text
+  // ahead of the original content, which survives untouched. Flag a substantial inserted run
+  // sitting ahead of all surviving original content that duplicates text still present in the
+  // surviving spans. Anchoring to the head keeps a mid-document paste of repeated prose out of
+  // scope, and requiring the original to survive lets trims, moves, re-pastes and undos net out.
   for (const segment of segments) {
     if (segment.original) break; // only the region ahead of all surviving original content
     if (segment.text.length >= minLength && originalRetained.includes(segment.text)) {
+      return segment.text.length;
+    }
+  }
+
+  // Replayed-seed shape B — position-correct pieces retain to their slot first, so replaying one
+  // onto content it already seeded composes its insert IMMEDIATELY BEFORE the surviving copy of
+  // the same text. Flag a substantial inserted run that the surviving original content resumes
+  // with, verbatim. An ordinary paste lands after the text it copied or somewhere unrelated;
+  // inserting a ≥minLength exact copy of precisely what follows it is the replay signature.
+  let followingOriginal = originalRetained;
+  for (const segment of segments) {
+    if (segment.original) {
+      followingOriginal = followingOriginal.slice(segment.text.length);
+    } else if (segment.text.length >= minLength && followingOriginal.startsWith(segment.text)) {
       return segment.text.length;
     }
   }
@@ -487,7 +535,12 @@ export class OTBranchManager implements BranchManager {
     // source already has — the signature of a merge floor that undercounts a client-seeded
     // branch's seed. Runs before the version copies below and the commit, so a refused merge
     // leaves no side effects on the source document.
-    await this.checkContentDuplication(sourceDocId, changesToCommit, options?.contentDuplicationGuard);
+    await this.checkContentDuplication(
+      sourceDocId,
+      changesToCommit,
+      branchStartRevOnSource,
+      options?.contentDuplicationGuard
+    );
 
     // Get not-yet-merged versions from the branch doc, using the same cursor as the changes
     // query — repeat merges must not re-copy versions already on the source. This also skips
@@ -550,35 +603,45 @@ export class OTBranchManager implements BranchManager {
   /**
    * Opt-in guard against merges whose net effect would duplicate content the source document
    * already has. When a merge floor (`contentStartRev` / `lastMergedRev`) undercounts a
-   * client-seeded branch's seed, the merge replays stored seed pieces as retain-less `@txt`
-   * inserts, re-inserting each field's body ahead of content the source already holds and
-   * doubling it — and it survives "reject all tracked changes", because the duplicated
-   * content is the seed, not the tracked edits.
+   * client-seeded branch's seed, the merge replays stored seed pieces onto content the source
+   * already holds, doubling it — and it survives "reject all tracked changes", because the
+   * duplicated content is the seed, not the tracked edits. Pieces stored by older splitters are
+   * retain-less and re-insert at the head; position-correct pieces retain to their slot and
+   * re-insert immediately before the surviving copy of the same text. Both shapes are guarded.
    *
    * Detection walks each affected text field through the whole batch — composing `@txt`
    * deltas and field-level `replace`/`add`/`remove` sets in order — against the source's
    * CURRENT head, tracking which spans of the head survive and which runs the batch inserts.
-   * A field is flagged when either:
+   * A field is flagged when any of:
    *
    * - the final content contains the field's current head content two or more times (a field
    *   set wholesale to an already-doubled value), or
    * - a substantial inserted run sitting ahead of all surviving head content duplicates text
-   *   that still survives in the field — the replayed-seed shape.
+   *   that still survives in the field — the retain-less replayed-seed shape, or
+   * - a substantial inserted run that the surviving original content resumes with verbatim —
+   *   the position-correct replayed-seed shape (the replayed copy lands immediately before
+   *   the survivor it duplicates).
    *
    * Because retained and deleted spans are tracked through the whole batch, an edit that
    * merely trims, moves, re-pastes or undoes content nets out and is not flagged; and because
    * the comparison is against the current head (not the branch point), content the source no
-   * longer holds cannot be "duplicated" on a repeat merge.
+   * longer holds cannot be "duplicated" on a repeat merge. Changes already committed inside
+   * the merge's dedup window (`listChanges(startAfter: baseRev)`, the corpus `commitChanges`
+   * dedups resends against) are excluded from the walk: a crash-retry or concurrent
+   * double-merge re-presents a batch the head already contains, and walking it would
+   * self-match every ordinary insert against its own committed copy.
    *
    * Cheap in the common case: the head is only reconstructed when some change carries a
-   * substantial leading `@txt` insert or sets a field to a substantial delta value. Ordinary
-   * edits (leading retain, short inserts) skip the check entirely. A reconstruction failure
-   * propagates to the caller: with the guard enabled, "cannot check" must not silently become
-   * "checked, fine" — a retryable read error is cheap to retry, a doubled document is not.
+   * substantial `@txt` insert run after at most leading retains, or sets a field to a
+   * substantial delta value. Ordinary edits (leading deletes, short inserts) skip the check
+   * entirely. A reconstruction failure propagates to the caller: with the guard enabled,
+   * "cannot check" must not silently become "checked, fine" — a retryable read error is cheap
+   * to retry, a doubled document is not.
    */
   private async checkContentDuplication(
     sourceDocId: string,
     changes: Change[],
+    baseRev: number,
     override?: MergeBranchOptions['contentDuplicationGuard']
   ): Promise<void> {
     const configured = this.options.contentDuplicationGuard;
@@ -587,25 +650,42 @@ export class OTBranchManager implements BranchManager {
     const minLength = configured?.minLength ?? DEFAULT_DUPLICATION_MIN_LENGTH;
 
     // Cheap first pass: collect the text-field paths the batch touches and whether any of
-    // them could produce the duplication signature — a `@txt` op that PREPENDS a substantial
-    // run (no leading retain), or a field set to a substantial delta value.
-    const paths = new Set<string>();
-    let triggered = false;
-    for (const change of changes) {
-      for (const op of change.ops) {
-        if (typeof op.path !== 'string') continue;
-        if (op.op === '@txt') {
-          paths.add(op.path);
-          if (leadingInsertText(op.value).length >= minLength) triggered = true;
-        } else if (op.op === 'replace' || op.op === 'add') {
-          for (const found of collectDeltaTexts(op.value, op.path)) {
-            paths.add(found.path);
-            // Doubling via a set requires the value to hold the field's content twice.
-            if (found.text.length >= minLength * 2) triggered = true;
+    // them could produce the duplication signature — a `@txt` op that inserts a substantial
+    // run after at most leading retains (the seed-piece shape, retain-less or
+    // position-correct), or a field set to a substantial delta value.
+    const arm = (batch: Change[]): { paths: Set<string>; triggered: boolean } => {
+      const paths = new Set<string>();
+      let triggered = false;
+      for (const change of batch) {
+        for (const op of change.ops) {
+          if (typeof op.path !== 'string') continue;
+          if (op.op === '@txt') {
+            paths.add(op.path);
+            if (seedShapedInsertText(op.value).length >= minLength) triggered = true;
+          } else if (op.op === 'replace' || op.op === 'add') {
+            for (const found of collectDeltaTexts(op.value, op.path)) {
+              paths.add(found.path);
+              // Doubling via a set requires the value to hold the field's content twice.
+              if (found.text.length >= minLength * 2) triggered = true;
+            }
           }
         }
       }
-    }
+      return { paths, triggered };
+    };
+    if (!arm(changes).triggered) return;
+
+    // A retry after a crash in the commit→watermark window re-walks a batch the source has
+    // already committed: every ordinary insert then sits immediately before its own committed
+    // copy and self-matches the position-correct replay signature — refusing a merge the
+    // retry contract promises dedups to a no-op (likewise a concurrent double-merge).
+    // `commitChanges` dedups those resends by id within `listChanges(startAfter: baseRev)`;
+    // exclude the same corpus here so the guard only walks changes the commit would apply.
+    const committedIds = new Set(
+      (await this.store.listChanges(sourceDocId, { startAfter: baseRev })).map(change => change.id)
+    );
+    const batch = changes.filter(change => !committedIds.has(change.id));
+    const { paths, triggered } = arm(batch);
     if (!triggered) return;
 
     // Only now pay for a state reconstruction — the source's current head, read once.
@@ -618,7 +698,7 @@ export class OTBranchManager implements BranchManager {
       if (beforeText == null || beforeText.length < minLength) continue;
 
       let segments: TextSegment[] = [{ text: beforeText, original: true }];
-      for (const change of changes) {
+      for (const change of batch) {
         for (const op of change.ops) {
           segments = applyOpToSegments(segments, op, path);
         }

@@ -107,6 +107,9 @@ const POISON_SKIP_FLOOR = 2;
 // Bound on the per-doc poison memo, oldest first. A doc accumulating this many distinct
 // unappliable committed changes is broken in a way skipping won't fix.
 const MAX_POISON_MEMO_ENTRIES = 50;
+// Unappliable committed changes `_loadRepairedSnapshot` will skip in one server snapshot
+// before giving up. A snapshot needing more is damaged past what skipping can honestly heal.
+const MAX_SNAPSHOT_REPAIRS = 5;
 // Slow background re-probe for a doc left at 'error' with pending changes while the
 // connection stays up (see `_scheduleSyncReprobe`).
 const SYNC_REPROBE_EXHAUSTED_MS = 5 * 60_000;
@@ -983,7 +986,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // changes the store kept across saveDoc. Passing `changes: []` here would let
       // doc.import() wipe in-memory pending state (OTDoc._pendingChanges) and LWW
       // echo tracking (_inFlightOpKeys), diverging the doc from its store.
-      const fullSnapshot = await algorithm.loadDoc(docId);
+      const fullSnapshot = await this._loadRepairedSnapshot(docId, algorithm, snapshot as PatchesSnapshot);
       if (fullSnapshot) {
         // resolvedChanges + committedTail as the resolved set: the open doc's in-memory
         // pending may still list changes reconcilePending just dropped as server-committed —
@@ -1381,19 +1384,67 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (!memo?.size) return changes;
     let skipped: Change[] | undefined;
     for (let i = 0; i < changes.length; i++) {
-      const change = changes[i];
-      const entry = memo.get(change.id);
+      const entry = memo.get(changes[i].id);
       if (!entry || entry.failures < POISON_SKIP_FLOOR || !entry.reloadedSince) continue;
       skipped ??= changes.slice();
-      skipped[i] = { ...change, ops: [] };
-      if (!entry.surfaced) {
-        entry.surfaced = true;
-        const error = new CommittedPoisonSkippedError(docId, change.id, change.rev, entry.error);
-        console.error(error.message, entry.error);
-        this.onError.emit(error, { docId });
-      }
+      skipped[i] = this._neuterPoison(docId, changes[i], entry.error);
     }
     return skipped ?? changes;
+  }
+
+  /**
+   * Materialize the snapshot `_reloadDocFromServer` just installed, skipping any committed
+   * change in the server's own envelope that cannot apply, and re-installing the repaired
+   * envelope so the store holds only appliable history.
+   *
+   * This is the recovery of last resort: the reload IS the fallback for an apply failure, so a
+   * snapshot whose own committed tail won't materialize leaves nothing else to try — every
+   * retry re-fetches identical bytes and the document latches forever (which is what it did
+   * before this). The evidence bar the sync path spends two strikes establishing is met here by
+   * construction: both the base state and the changes came straight from the server this
+   * instant, so a change that fails against them is unappliable against authoritative truth —
+   * precisely the condition under which the server replays with `applyChangesForReconstruction`.
+   *
+   * Bounded: a snapshot needing more than a handful of repairs is damaged beyond what skipping
+   * can honestly recover, so the error propagates and the doc latches as before.
+   */
+  private async _loadRepairedSnapshot(
+    docId: string,
+    algorithm: ClientAlgorithm,
+    installed: PatchesSnapshot
+  ): Promise<PatchesSnapshot | undefined> {
+    for (let repairs = 0; ; repairs++) {
+      try {
+        return await algorithm.loadDoc(docId);
+      } catch (err) {
+        const changes = installed.changes;
+        const index =
+          err instanceof ApplyChangesError && repairs < MAX_SNAPSHOT_REPAIRS
+            ? (changes?.findIndex(change => change.id === err.changeId) ?? -1)
+            : -1;
+        if (index === -1) throw err;
+        changes[index] = this._neuterPoison(docId, changes[index], err as ApplyChangesError);
+        await algorithm.store.saveDoc(docId, installed);
+      }
+    }
+  }
+
+  /**
+   * Reduce a committed change to a no-op copy of itself — the shape of "applied, changed
+   * nothing" — and report it exactly once per `(docId, changeId)`. Recorded as floored so every
+   * later delivery of the same change skips it without re-earning the strikes.
+   */
+  private _neuterPoison(docId: string, change: Change, error: ApplyChangesError): Change {
+    const entry = this._poisonEntry(docId, change.id, error);
+    entry.failures = Math.max(entry.failures, POISON_SKIP_FLOOR);
+    entry.reloadedSince = true;
+    if (!entry.surfaced) {
+      entry.surfaced = true;
+      const skipped = new CommittedPoisonSkippedError(docId, change.id, change.rev, error);
+      console.error(skipped.message, error);
+      this.onError.emit(skipped, { docId });
+    }
+    return { ...change, ops: [] };
   }
 
   /**
@@ -1404,17 +1455,23 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   private _recordCommittedApplyFailure(docId: string, changes: Change[], error: ApplyChangesError): void {
     if (!changes.some(change => change.id === error.changeId)) return;
+    this._poisonEntry(docId, error.changeId, error).failures++;
+  }
+
+  /** Get-or-create this change's memo entry, evicting the oldest past the per-doc bound. */
+  private _poisonEntry(docId: string, changeId: string, error: ApplyChangesError) {
     let memo = this._committedApplyFailures.get(docId);
     if (!memo) this._committedApplyFailures.set(docId, (memo = new Map()));
-    const entry = memo.get(error.changeId);
-    if (entry) {
-      entry.failures++;
-      entry.error = error;
-    } else {
-      memo.set(error.changeId, { failures: 1, reloadedSince: false, surfaced: false, error });
-      const oldest = memo.size > MAX_POISON_MEMO_ENTRIES ? memo.keys().next().value : undefined;
-      if (oldest !== undefined) memo.delete(oldest);
+    const existing = memo.get(changeId);
+    if (existing) {
+      existing.error = error;
+      return existing;
     }
+    const entry = { failures: 0, reloadedSince: false, surfaced: false, error };
+    memo.set(changeId, entry);
+    const oldest = memo.size > MAX_POISON_MEMO_ENTRIES ? memo.keys().next().value : undefined;
+    if (oldest !== undefined) memo.delete(oldest);
+    return entry;
   }
 
   /**

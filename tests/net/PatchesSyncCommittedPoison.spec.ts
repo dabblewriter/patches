@@ -133,6 +133,24 @@ describe('PatchesSync committed-poison skip floor', () => {
     expect(ctx.doc.getPendingChanges()).toEqual([]);
   });
 
+  it('repairs a reload snapshot whose own committed tail cannot materialize', async () => {
+    // The recovery of last resort: nothing else is left to try, so every retry re-fetches the
+    // identical bytes. Both the state and the changes came straight from the server, so the
+    // two-strike evidence bar is met by construction — skip on the first failure here.
+    const poison = committed(3, POISON_OPS);
+    const good = committed(4, [{ op: 'add', path: '/note', value: 'kept' }]);
+    const ctx = await setup({ getDoc: vi.fn(async () => ({ ...SNAPSHOT, changes: [poison, good] })) });
+
+    await ctx.sync['_reloadDocFromServer'](DOC, ctx.algorithm);
+
+    expect(ctx.doc.state).toEqual({ title: 'x', note: 'kept' });
+    expect(ctx.doc.committedRev).toBe(4);
+    expect(ctx.skips).toHaveLength(1);
+    expect(ctx.skips[0]).toMatchObject({ docId: DOC, changeId: poison.id, rev: 3 });
+    // The repaired envelope was re-installed, so the store no longer holds unappliable history.
+    expect((await ctx.store.getDoc(DOC))?.state).toEqual({ title: 'x', note: 'kept' });
+  });
+
   it('never skips a failure the reload actually fixed — one strike is not the floor', async () => {
     // This replica's committed state drifted: `title` is a primitive here, an object on the
     // server. The change fails locally, then applies cleanly once the snapshot is installed.

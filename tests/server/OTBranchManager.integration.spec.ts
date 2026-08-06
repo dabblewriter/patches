@@ -9,9 +9,12 @@ import type { BranchClientStore } from '../../src/client/BranchClientStore';
 import { OTAlgorithm } from '../../src/client/OTAlgorithm';
 import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
 import { PatchesBranchClient } from '../../src/client/PatchesBranchClient';
+import { DuplicateChangeIdsError } from '../../src/server/DuplicateChangeIdsError';
 import { readStreamAsString } from '../../src/server/jsonReadable';
 import {
   MergeContentDuplicationError,
+  MergeFrameAlignmentError,
+  MergePartialProgressError,
   OTBranchManager,
   type OTBranchManagerOptions,
 } from '../../src/server/OTBranchManager';
@@ -34,6 +37,7 @@ import type {
  */
 class MemoryOTBranchStore implements OTStoreBackend, BranchingStoreBackend {
   private docs = new Map<string, Change[]>();
+  private committedIds = new Map<string, Set<string>>();
   private versions = new Map<string, { metadata: VersionMetadata; state?: any; changes: Change[] }[]>();
   private branches = new Map<string, Branch>();
 
@@ -42,6 +46,15 @@ class MemoryOTBranchStore implements OTStoreBackend, BranchingStoreBackend {
   }
 
   async saveChanges(docId: string, changes: Change[]): Promise<void> {
+    // The mandatory write-time id guard production stores implement: merge retries re-send
+    // changes whose committed copies sit outside commitChanges' read-side dedup window, and
+    // only this catches them. Nothing is written when any id is a duplicate.
+    const ids = this.committedIds.get(docId) ?? new Set<string>();
+    const duplicates = changes.filter(c => ids.has(c.id)).map(c => c.id);
+    if (duplicates.length > 0) throw new DuplicateChangeIdsError(docId, duplicates);
+    changes.forEach(c => ids.add(c.id));
+    this.committedIds.set(docId, ids);
+
     const existing = this.docs.get(docId) ?? [];
     this.docs.set(
       docId,
@@ -56,6 +69,18 @@ class MemoryOTBranchStore implements OTStoreBackend, BranchingStoreBackend {
     if (options.withoutBatchId) changes = changes.filter(c => c.batchId !== options.withoutBatchId);
     if (options.reverse) changes = [...changes].reverse();
     if (options.limit !== undefined) changes = changes.slice(0, options.limit);
+    if (options.maxBytes !== undefined) {
+      // Byte-budget read hint: stop once the accumulated ops pass the budget, but never
+      // return an empty page — a single oversized change must still be readable.
+      let bytes = 0;
+      const budgeted: Change[] = [];
+      for (const c of changes) {
+        bytes += JSON.stringify(c.ops).length;
+        if (bytes > options.maxBytes && budgeted.length > 0) break;
+        budgeted.push(c);
+      }
+      changes = budgeted;
+    }
     return changes;
   }
 
@@ -163,6 +188,14 @@ class MemoryOTBranchStore implements OTStoreBackend, BranchingStoreBackend {
   getVersions(docId: string): VersionMetadata[] {
     return (this.versions.get(docId) ?? []).map(v => v.metadata);
   }
+
+  /** Drop a doc's changes at or below `rev`, as a compacted/pruned production log would. */
+  pruneChangesThrough(docId: string, rev: number): void {
+    this.docs.set(
+      docId,
+      (this.docs.get(docId) ?? []).filter(c => c.rev > rev)
+    );
+  }
 }
 
 function change(id: string, baseRev: number, path: string, value: any): ChangeInput {
@@ -188,15 +221,16 @@ function setup(managerOptions?: OTBranchManagerOptions) {
 }
 
 /**
- * Simulate a crash in the B-1 window: the merge commit lands but the process dies before the
- * `lastMergedRev` update. Only the first watermark write fails; base-pinning writes
+ * Simulate a crash in a merge window: its commit lands but the process dies before the
+ * `lastMergedRev` update. Only the `nth` watermark write fails; base-pinning writes
  * (`mergeBaseRev`) and later attempts go through.
  */
-function failWatermarkOnce(store: MemoryOTBranchStore) {
+function failWatermarkOnce(store: MemoryOTBranchStore, nth = 1) {
   const original = store.updateBranchIf.bind(store);
+  let writes = 0;
   let failed = false;
   store.updateBranchIf = async (branchId, updates, expected) => {
-    if (!failed && 'lastMergedRev' in updates) {
+    if (!failed && 'lastMergedRev' in updates && ++writes === nth) {
       failed = true;
       throw new Error('simulated crash before watermark update');
     }
@@ -207,6 +241,14 @@ function failWatermarkOnce(store: MemoryOTBranchStore) {
 /** All change ids on a doc, in log order — duplicates would appear twice. */
 async function changeIds(store: MemoryOTBranchStore, docId: string): Promise<string[]> {
   return (await store.listChanges(docId, {})).map(c => c.id);
+}
+
+/**
+ * A merge result must be applicable as one run: `PatchesSync.applyMergeChanges` walks it in rev
+ * order, so an interior gap between the first and last rev would strand the tail.
+ */
+function expectRevDense(changes: Change[]): void {
+  expect(changes.map(c => c.rev)).toEqual(changes.map((_, i) => changes[0].rev + i));
 }
 
 describe('OTBranchManager integration', () => {
@@ -352,6 +394,114 @@ describe('OTBranchManager integration', () => {
     warn.mockRestore();
   });
 
+  // A branch under active editorial review accumulates changes for as long as it stays open —
+  // five figures within a couple of days on a shared book (DAB-896). Merging that in one batch
+  // scales the read, the transform, the write batch and the response with the branch's whole
+  // history, so the merge is committed in windows instead.
+  describe('windowed merge', () => {
+    beforeEach(() => {
+      // Copied versions build against a source with no versions of its own; that warns.
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      vi.mocked(console.warn).mockRestore();
+    });
+
+    /** Source at rev 2 with `count` single-op branch edits waiting to merge. */
+    async function branchWithEdits(count: number, managerOptions?: OTBranchManagerOptions) {
+      const ctx = setup(managerOptions);
+      await ctx.server.commitChanges('doc1', [rootChange('s1', { src1: 1 })]);
+      await ctx.server.commitChanges('doc1', [change('s2', 1, '/src2', 2)]);
+      const branchId = await ctx.manager.createBranch('doc1', 2);
+      for (let i = 1; i <= count; i++) {
+        await ctx.server.commitChanges(branchId, [change(`e${i}`, i, `/edit${i}`, i)]);
+      }
+      return { ...ctx, branchId };
+    }
+
+    const expectedState = (count: number) => {
+      const state: Record<string, number> = { src1: 1, src2: 2 };
+      for (let i = 1; i <= count; i++) state[`edit${i}`] = i;
+      return state;
+    };
+
+    /** The window slice reads on the branch — the frame's catch-up reads carry no byte budget. */
+    const windowReads = (calls: [string, ListChangesOptions?][], branchId: string) =>
+      calls.filter(([docId, options]) => docId === branchId && options?.maxBytes !== undefined);
+
+    it('merges a branch larger than the window across several windows', async () => {
+      const { store, server, manager, branchId } = await branchWithEdits(7, { maxChangesPerMerge: 2 });
+      const listChanges = vi.spyOn(store, 'listChanges');
+
+      const committed = await manager.mergeBranch(branchId);
+
+      // 7 edits (branch revs 2..8) at 2 per window: four windows, each starting where the
+      // frame left off rather than back at the content floor, then the trailing read that
+      // finds nothing left — the only thing that ends a merge, since a short slice can mean
+      // a byte-trimmed window rather than the end of the branch.
+      const reads = windowReads(listChanges.mock.calls as any, branchId);
+      expect(reads.every(([, options]) => options!.limit === 2)).toBe(true);
+      expect(reads.map(([, options]) => options!.startAfter)).toEqual([1, 3, 5, 7, 8]);
+
+      // Every edit lands exactly once, and the caller still sees the whole merge.
+      const { state } = await coldLoad(server, 'doc1');
+      expect(state).toEqual(expectedState(7));
+      expect(committed).toHaveLength(7);
+      const ids = await changeIds(store, 'doc1');
+      expect(new Set(ids).size).toBe(ids.length);
+      listChanges.mockRestore();
+    });
+
+    it('produces the same source state as an unwindowed merge', async () => {
+      const windowed = await branchWithEdits(7, { maxChangesPerMerge: 2 });
+      const single = await branchWithEdits(7, { maxChangesPerMerge: 1_000 });
+
+      await windowed.manager.mergeBranch(windowed.branchId);
+      await single.manager.mergeBranch(single.branchId);
+
+      const a = await coldLoad(windowed.server, 'doc1');
+      const b = await coldLoad(single.server, 'doc1');
+      expect(a.state).toEqual(b.state);
+      expect(a.rev).toBe(b.rev);
+    });
+
+    it('advances the watermark to the branch tip so a follow-up merge is a no-op', async () => {
+      const { store, manager, branchId } = await branchWithEdits(5, { maxChangesPerMerge: 2 });
+
+      await manager.mergeBranch(branchId);
+
+      expect((await store.loadBranch(branchId))?.lastMergedRev).toBe(6);
+      await expect(manager.mergeBranch(branchId)).resolves.toEqual([]);
+    });
+
+    // The point of advancing the watermark per window: a merge that dies part-way is resumable
+    // rather than all-or-nothing, so a branch too big to merge in one go still converges.
+    it('resumes from the last committed window after a mid-merge failure', async () => {
+      const { store, server, manager, branchId } = await branchWithEdits(7, { maxChangesPerMerge: 2 });
+      const realListChanges = store.listChanges.bind(store);
+      let reads = 0;
+      store.listChanges = async (docId, options) => {
+        if (docId === branchId && options?.maxBytes !== undefined && ++reads === 3) {
+          throw new Error('simulated failure mid-merge');
+        }
+        return realListChanges(docId, options);
+      };
+
+      await expect(manager.mergeBranch(branchId)).rejects.toThrow('simulated failure mid-merge');
+
+      // Two windows committed and the watermark records them — nothing is rolled back.
+      expect((await store.loadBranch(branchId))?.lastMergedRev).toBe(5);
+      expect((await coldLoad(server, 'doc1')).state).toEqual(expectedState(4));
+
+      store.listChanges = realListChanges;
+      await manager.mergeBranch(branchId);
+
+      expect((await coldLoad(server, 'doc1')).state).toEqual(expectedState(7));
+      const ids = await changeIds(store, 'doc1');
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+  });
+
   describe('merge retry and concurrency safety', () => {
     // These merges copy branch versions onto sources that carry no versions of their own, so
     // building each copy's state legitimately replays from rev 1 — and warns about it. The
@@ -454,7 +604,7 @@ describe('OTBranchManager integration', () => {
       expect(await manager.mergeBranch(branchId)).toEqual([]);
     });
 
-    it('leaves a mid-merge branch edit uncovered so the next merge picks it up', async () => {
+    it('drains a mid-merge branch edit in the same call — watermark covers only what was read', async () => {
       const { store, server, manager } = setup();
 
       await server.commitChanges('doc1', [rootChange('s1', { src1: 1 })]);
@@ -479,21 +629,27 @@ describe('OTBranchManager integration', () => {
 
       const mergeA = manager.mergeBranch(branchId);
       await aParked;
-      // Branch edit lands after A read its batch (revs 2–3) but before A stamps the watermark.
+      // Branch edit lands after A read its first window (revs 2–3) but before A stamps the
+      // watermark, so it sits above the cursor A is about to write.
       await server.commitChanges(branchId, [change('e3', 3, '/edit3', 3)]);
       releaseA();
-      await mergeA;
+      const merged = await mergeA;
 
-      // The watermark covers only what A actually merged — never the branch tip at write time.
-      expect((await store.loadBranch(branchId))!.lastMergedRev).toBe(3);
-      expect(await changeIds(store, 'doc1')).toEqual(['s1', 'e1', 'e2']);
+      // A's next window reads past the cursor it just wrote and picks the edit up, so the call
+      // drains the branch rather than leaving work for a follow-up merge.
+      expect(merged.map(c => c.id)).toEqual(['e1', 'e2', 'e3']);
+      const ids = await changeIds(store, 'doc1');
+      expect(ids).toEqual(['s1', 'e1', 'e2', 'e3']);
+      expect(new Set(ids).size).toBe(ids.length);
 
-      // The next merge picks up the uncovered edit.
-      await manager.mergeBranch(branchId);
-      expect((await store.loadBranch(branchId))!.lastMergedRev).toBe(4);
-      expect(await changeIds(store, 'doc1')).toEqual(['s1', 'e1', 'e2', 'e3']);
+      // The watermark is the highest branch rev actually READ and committed — the merge never
+      // stamps a tip it has not read, so an edit landing after the last read stays uncovered.
+      const branch = (await store.loadBranch(branchId))!;
+      expect(branch.lastMergedRev).toBe(4);
+      expect(branch.lastMergedRev).toBe(await store.getCurrentRev(branchId));
       const { state } = await coldLoad(server, 'doc1');
       expect(state).toEqual({ src1: 1, edit1: 1, edit2: 2, edit3: 3 });
+      expect(await manager.mergeBranch(branchId)).toEqual([]);
     });
 
     it('dedups a clamped-branch retry via the pinned merge base even though the tip advanced', async () => {
@@ -1286,5 +1442,694 @@ describe('DAB-760 editor-copy merge doubling', () => {
     store.listChanges = originalListChanges;
     expect(await changeIds(store, 'doc1')).toEqual(['s1']);
     expect((await store.loadBranch(branchId))!.lastMergedRev).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Windowed merges against a source that moved. A window commits its slice at the source tip,
+// so every later window's changes must be lifted through the source's concurrent (foreign)
+// changes RE-EXPRESSED in the branch's frame — the merge frame. Transformed against the raw
+// committed forms instead, a later window lands its ops at offsets shifted by the branch's own
+// earlier windows: text deleted or inserted in the wrong place.
+// ---------------------------------------------------------------------------
+
+describe('windowed merge with concurrent source edits', () => {
+  beforeEach(() => {
+    // Copied versions build against sources carrying no versions of their own; that warns.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.mocked(console.warn).mockRestore();
+  });
+
+  /** Plain text of the doc's `@txt` `/body` field. */
+  function bodyText(state: any): string {
+    const value = state?.body;
+    const ops: any[] = Array.isArray(value) ? value : (value?.ops ?? []);
+    return ops.map(o => (typeof o.insert === 'string' ? o.insert : '')).join('');
+  }
+
+  /** Commit one `/body` text edit onto `docId` at its current tip. */
+  function editor({ store, server }: Pick<ReturnType<typeof setup>, 'store' | 'server'>) {
+    return async (docId: string, id: string, ops: any[]) => {
+      await server.commitChanges(docId, [txtChange(id, await store.getCurrentRev(docId), '/body', ops)]);
+    };
+  }
+
+  async function seededSource(text: string, options?: OTBranchManagerOptions) {
+    const ctx = setup(options);
+    await ctx.server.commitChanges('doc1', [rootChange('s1', { body: { ops: [{ insert: text }] } })]);
+    const branchId = await ctx.manager.createBranch('doc1', 1);
+    return { ...ctx, branchId, edit: editor(ctx), apply: applier(ctx) };
+  }
+
+  /** Commit one change of arbitrary ops onto `docId` at its current tip. */
+  function applier({ store, server }: Pick<ReturnType<typeof setup>, 'store' | 'server'>) {
+    return async (docId: string, id: string, ops: any[], extra?: Partial<ChangeInput>) => {
+      const baseRev = await store.getCurrentRev(docId);
+      await server.commitChanges(docId, [{ id, baseRev, rev: baseRev + 1, ops, ...extra }]);
+    };
+  }
+
+  /** A source doc holding a plain array — array ops make a misplaced frame an index shift. */
+  async function seededList(list: string[], options?: OTBranchManagerOptions) {
+    const ctx = setup(options);
+    await ctx.server.commitChanges('doc1', [rootChange('s1', { list })]);
+    const branchId = await ctx.manager.createBranch('doc1', 1);
+    return { ...ctx, branchId, apply: applier(ctx) };
+  }
+
+  /**
+   * Run `inject` once, right after the merge reads the branch slice holding `changeId` and
+   * before that window commits — the window where a foreign row lands in the commit result.
+   * Returns whether it fired, so a test can prove it modelled the race it names.
+   */
+  function injectAfterSliceRead(
+    store: MemoryOTBranchStore,
+    branchId: string,
+    changeId: string,
+    inject: () => Promise<void>
+  ): () => boolean {
+    const realListChanges = store.listChanges.bind(store);
+    let injected = false;
+    store.listChanges = async (docId, options) => {
+      const rows = await realListChanges(docId, options);
+      if (!injected && docId === branchId && options?.maxBytes !== undefined && rows.some(r => r.id === changeId)) {
+        injected = true;
+        await inject();
+      }
+      return rows;
+    };
+    return () => injected;
+  }
+
+  /** The frame the branch record currently carries, parsed out of its persisted string form. */
+  async function persistedPrograms(store: MemoryOTBranchStore, branchId: string): Promise<any[][]> {
+    return JSON.parse((await store.loadBranch(branchId))!.mergeFrame!.programs);
+  }
+
+  // The repro the frame exists for: two branch edits whose second is expressed on top of the
+  // first, plus a source edit that deletes text both of them sit near. One window merges them
+  // as a single queue (the frame is implicit); two windows must reach the same text.
+  it('windowed and one-shot merges agree on overlapping text edits', async () => {
+    async function run(maxChangesPerMerge: number) {
+      const { store, server, manager, branchId, edit } = await seededSource('Hello world', { maxChangesPerMerge });
+      await edit(branchId, 'b1', [{ insert: 'XXXXX ' }]);
+      await edit(branchId, 'b2', [{ retain: 8 }, { insert: '!' }]);
+      await edit('doc1', 's2', [{ retain: 5 }, { delete: 6 }]);
+
+      await manager.mergeBranch(branchId);
+      const ids = await changeIds(store, 'doc1');
+      expect(new Set(ids).size).toBe(ids.length);
+      return bodyText((await coldLoad(server, 'doc1')).state);
+    }
+
+    const windowed = await run(1);
+    const oneShot = await run(1_000);
+    expect(oneShot).toBe('XXXXX He!llo\n');
+    expect(windowed).toBe(oneShot);
+  });
+
+  // A second merge session starts where the first left off, but the source has moved since —
+  // and its edit was made against text the first merge had already landed. Markers make a
+  // misplaced retain visible as an exact-string mismatch.
+  it('places a repeat merge correctly after the source edited already-merged content', async () => {
+    async function run(maxChangesPerMerge: number) {
+      const { server, manager, branchId, edit } = await seededSource('one two three four', { maxChangesPerMerge });
+      await edit(branchId, 'b1', [{ insert: '[1]' }]);
+      await edit(branchId, 'b2', [{ retain: 21 }, { insert: '[2]' }]);
+      await manager.mergeBranch(branchId);
+
+      // The source drops "one " from the merged text; the branch never saw that.
+      await edit('doc1', 's2', [{ retain: 3 }, { delete: 4 }]);
+
+      await edit(branchId, 'b3', [{ retain: 11 }, { insert: '[3]' }]);
+      await edit(branchId, 'b4', [{ retain: 27 }, { insert: '[4]' }]);
+      await manager.mergeBranch(branchId);
+
+      return bodyText((await coldLoad(server, 'doc1')).state);
+    }
+
+    // [3] marks "three" and [4] the end, both shifted back by the four characters the source
+    // deleted. A raw-form transform lands them four characters late.
+    expect(await run(1_000)).toBe('[1]two [3]three four[2][4]\n');
+    expect(await run(1)).toBe('[1]two [3]three four[2][4]\n');
+  });
+
+  it('reaches the same state at every window size (seeded fuzz)', async () => {
+    const BASE = 'The quick brown fox jumps over the lazy do';
+
+    function mulberry32(seed: number) {
+      let a = seed;
+      return () => {
+        a = (a + 0x6d2b79f5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    /** 12 branch edits and 5 source edits in a seeded interleaving, each legal for its own text. */
+    function schedule(seed: number) {
+      const rand = mulberry32(seed);
+      const lengths = { branch: BASE.length + 1, doc1: BASE.length + 1 };
+      const targets: ('branch' | 'doc1')[] = [...Array(12).fill('branch'), ...Array(5).fill('doc1')];
+      for (let i = targets.length - 1; i > 0; i--) {
+        const j = Math.floor(rand() * (i + 1));
+        [targets[i], targets[j]] = [targets[j], targets[i]];
+      }
+      return targets.map((target, i) => {
+        const length = lengths[target];
+        const at = Math.floor(rand() * length);
+        if (rand() < 0.55 || length - at < 3) {
+          const text = `<${i}>`;
+          lengths[target] += text.length;
+          return { target, ops: at ? [{ retain: at }, { insert: text }] : [{ insert: text }] };
+        }
+        const count = 1 + Math.floor(rand() * Math.min(4, length - at - 1));
+        lengths[target] -= count;
+        return { target, ops: at ? [{ retain: at }, { delete: count }] : [{ delete: count }] };
+      });
+    }
+
+    async function run(items: ReturnType<typeof schedule>, maxChangesPerMerge: number) {
+      const { server, manager, branchId, edit } = await seededSource(BASE, { maxChangesPerMerge });
+      for (const [i, item] of items.entries()) {
+        await edit(item.target === 'branch' ? branchId : 'doc1', `c${i}`, item.ops);
+      }
+      await manager.mergeBranch(branchId);
+      return (await coldLoad(server, 'doc1')).state;
+    }
+
+    for (let seed = 1; seed <= 10; seed++) {
+      const items = schedule(seed);
+      const states = [];
+      for (const maxChangesPerMerge of [1, 2, 3, 1_000]) states.push(await run(items, maxChangesPerMerge));
+      const oneShot = JSON.stringify(states[3]);
+      expect(
+        states.map(state => JSON.stringify(state)),
+        `seed ${seed}`
+      ).toEqual([oneShot, oneShot, oneShot, oneShot]);
+    }
+  });
+
+  // A foreign change landing between two windows is folded by the next window's catch-up; one
+  // landing between a window's catch-up and its commit comes back in the commit result and is
+  // folded forward through the slice as sent.
+  it('converges when a foreign change lands mid-merge', async () => {
+    const { store, server, manager, branchId, edit } = await seededSource('alpha beta gamma', {
+      maxChangesPerMerge: 1,
+    });
+    await edit(branchId, 'b1', [{ insert: '<b1>' }]);
+    await edit(branchId, 'b2', [{ retain: 20 }, { insert: '<b2>' }]);
+    await edit(branchId, 'b3', [{ retain: 10 }, { insert: '<b3>' }]);
+
+    // One source edit lands between windows (the next window's catch-up folds it)...
+    const updateBranchIf = store.updateBranchIf.bind(store);
+    let watermarks = 0;
+    store.updateBranchIf = async (id, updates, expected) => {
+      const applied = await updateBranchIf(id, updates, expected);
+      if ('lastMergedRev' in updates && ++watermarks === 1) {
+        await edit('doc1', 'f1', [{ retain: 6 }, { insert: '<f1>' }]);
+      }
+      return applied;
+    };
+    // ...and one inside the next window, after its catch-up read but before its commit, so it
+    // comes back in the commit result and has to be folded forward through the slice as sent.
+    const realListChanges = store.listChanges.bind(store);
+    let sliceReads = 0;
+    store.listChanges = async (docId, options) => {
+      const rows = await realListChanges(docId, options);
+      if (docId === branchId && options?.maxBytes !== undefined && ++sliceReads === 2) {
+        await edit('doc1', 'f2', [{ insert: '<f2>' }]);
+      }
+      return rows;
+    };
+
+    await manager.mergeBranch(branchId);
+    expect(watermarks).toBeGreaterThan(0);
+    expect(sliceReads).toBeGreaterThan(1);
+
+    const text = bodyText((await coldLoad(server, 'doc1')).state);
+    for (const marker of ['<b1>', '<b2>', '<b3>', '<f1>', '<f2>']) {
+      expect(text.indexOf(marker), marker).toBeGreaterThanOrEqual(0);
+      expect(text.indexOf(marker), marker).toBe(text.lastIndexOf(marker));
+    }
+    // Nothing but the markers changed: no character landed twice or went missing.
+    expect(text.replace(/<[bf]\d>/g, '')).toBe('alpha beta gamma\n');
+    const ids = await changeIds(store, 'doc1');
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('resumes a crashed windowed merge and returns the committed prefix too', async () => {
+    const { store, server, manager, branchId, edit } = await seededSource('one two three four', {
+      maxChangesPerMerge: 2,
+    });
+    await edit(branchId, 'b1', [{ insert: '[1]' }]);
+    await edit(branchId, 'b2', [{ retain: 21 }, { insert: '[2]' }]);
+    await edit(branchId, 'b3', [{ retain: 11 }, { insert: '[3]' }]);
+    await edit(branchId, 'b4', [{ retain: 27 }, { insert: '[4]' }]);
+    await edit('doc1', 's2', [{ retain: 3 }, { delete: 4 }]); // drops " two" from the source
+
+    failWatermarkOnce(store);
+    await expect(manager.mergeBranch(branchId)).rejects.toThrow('simulated crash');
+
+    // The first window's commit landed; its watermark write did not.
+    const partial = await changeIds(store, 'doc1');
+    expect(partial).toEqual(['s1', 's2', 'b1', 'b2']);
+    expect((await store.loadBranch(branchId))!.lastMergedRev).toBeUndefined();
+
+    const committed = await manager.mergeBranch(branchId);
+
+    // The resumed merge reports the whole merge, not just what it committed itself — and
+    // rev-dense across the span it observed, so the foreign row it folded (s2) rides along.
+    expect(committed.map(c => c.id)).toEqual(['s2', 'b1', 'b2', 'b3', 'b4']);
+    expectRevDense(committed);
+    const ids = await changeIds(store, 'doc1');
+    expect(ids).toEqual(['s1', 's2', 'b1', 'b2', 'b3', 'b4']);
+    expect(new Set(ids).size).toBe(ids.length);
+    // Both windows' markers sit where the source's deletion left them: [3] before "three",
+    // [2] and [4] at the tail in the order the branch minted them.
+    expect(bodyText((await coldLoad(server, 'doc1')).state)).toBe('[1]one [3]three four[2][4]\n');
+  });
+
+  // Frames over the persisted-size cap are cleared rather than written, so a merge picked up by
+  // a different server instance has only the watermark to go on and rebuilds the frame from the
+  // raw logs. That rebuild must land the remaining windows exactly where the carry would have.
+  it('rebuilds an oversized (unpersisted) frame from the raw logs', async () => {
+    const HUGE = 'z'.repeat(300_000);
+
+    async function branchWithHugeForeignEdit(options: OTBranchManagerOptions) {
+      const ctx = await seededSource('one two three four', options);
+      await ctx.edit(ctx.branchId, 'b1', [{ insert: '[1]' }]);
+      await ctx.edit(ctx.branchId, 'b2', [{ retain: 21 }, { insert: '[2]' }]);
+      // A foreign change far larger than the frame budget: the frame carrying it cannot be stored.
+      await ctx.edit('doc1', 's2', [{ retain: 3 }, { delete: 4 }, { insert: HUGE }]);
+      return ctx;
+    }
+
+    const control = await branchWithHugeForeignEdit({ maxChangesPerMerge: 1_000 });
+    await control.manager.mergeBranch(control.branchId);
+    const expected = bodyText((await coldLoad(control.server, 'doc1')).state);
+
+    const { store, server, branchId } = await branchWithHugeForeignEdit({ maxChangesPerMerge: 1 });
+    const first = new OTBranchManager(store, server, { maxChangesPerMerge: 1 });
+    // Kill the run after the first window commits and persists, before the second reads.
+    const realListChanges = store.listChanges.bind(store);
+    let windowReads = 0;
+    store.listChanges = async (docId, options) => {
+      if (docId === branchId && options?.maxBytes !== undefined && ++windowReads === 2) {
+        throw new Error('simulated instance loss between windows');
+      }
+      return realListChanges(docId, options);
+    };
+    await expect(first.mergeBranch(branchId)).rejects.toThrow('simulated instance loss');
+    store.listChanges = realListChanges;
+
+    // The window persisted its watermark but cleared the frame it could not store.
+    const branch = (await store.loadBranch(branchId))!;
+    expect(branch.lastMergedRev).toBe(2);
+    expect(branch.mergeFrame).toBeNull();
+
+    // A fresh instance carries nothing: it must rebuild the frame from the source and branch logs.
+    await new OTBranchManager(store, server, { maxChangesPerMerge: 1 }).mergeBranch(branchId);
+
+    expect(bodyText((await coldLoad(server, 'doc1')).state)).toBe(expected);
+    const ids = await changeIds(store, 'doc1');
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  // The guard decides over the whole unmerged batch before any window commits, so a refused
+  // windowed merge is as side-effect-free as a refused one-shot merge.
+  it('refuses a duplicating merge before the first window commits', async () => {
+    const BODY = 'Chapter one. The grey cat sat by the window.\n';
+    const { store, server, manager } = setup({
+      contentDuplicationGuard: { action: 'refuse', minLength: 16 },
+      maxChangesPerMerge: 1,
+    });
+    await server.commitChanges('doc1', [rootChange('s1', { body: { ops: [{ insert: BODY }] } })]);
+
+    const branchId = 'branchGuardWindowed';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: 2 }); // undercounts the seed
+    await store.saveChanges(branchId, [
+      createChange(0, 1, [{ op: 'replace', path: '', value: { body: { ops: [] } } }], { committedAt: 0 }) as Change,
+      createChange(1, 2, [txtOp('/body', [{ insert: BODY }])], { committedAt: 0 }) as Change,
+      createChange(2, 3, [txtOp('/body', [{ retain: 3 }, { insert: 'edit' }])], { committedAt: 0 }) as Change,
+    ]);
+
+    const before = await coldLoad(server, 'doc1');
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(branchId)).rejects.toBeInstanceOf(MergeContentDuplicationError);
+    err.mockRestore();
+
+    const after = await coldLoad(server, 'doc1');
+    expect(after.rev).toBe(before.rev);
+    expect(after.state).toEqual(before.state);
+    expect(await changeIds(store, 'doc1')).toEqual(['s1']);
+    expect((await store.loadBranch(branchId))!.lastMergedRev).toBeUndefined();
+  });
+
+  // The window's second axis: a branch of few but large changes is bounded on bytes, not count.
+  it('bounds a window by its byte budget', async () => {
+    const filler = 'x'.repeat(1_000);
+    const { store, server, manager, branchId, edit } = await seededSource('start', {
+      maxChangesPerMerge: 1_000,
+      maxBytesPerMergeWindow: 2_500,
+    });
+    for (let i = 1; i <= 6; i++) await edit(branchId, `b${i}`, [{ insert: `${i}${filler}` }]);
+
+    const listChanges = vi.spyOn(store, 'listChanges');
+    // No window reads past the budget, so the branch drains over several of them.
+    await manager.mergeBranch(branchId);
+
+    const windowReads = listChanges.mock.calls.filter(
+      ([docId, options]) => docId === branchId && options?.maxBytes !== undefined
+    );
+    expect(windowReads.length).toBeGreaterThan(1);
+    expect(windowReads.every(([, options]) => options!.maxBytes === 2_500)).toBe(true);
+
+    const text = bodyText((await coldLoad(server, 'doc1')).state);
+    for (let i = 1; i <= 6; i++) expect(text).toContain(`${i}${filler}`);
+    expect(text.replace(new RegExp(`[1-6]${filler}`, 'g'), '')).toBe('start\n');
+    const ids = await changeIds(store, 'doc1');
+    expect(new Set(ids).size).toBe(ids.length);
+    listChanges.mockRestore();
+  });
+
+  // A window whose slice lifts to nothing still has to account for the foreign row that
+  // obsoleted it — through the slice AS SENT, exactly once. Folding that row raw leaves the
+  // frame carrying an effect the branch's own ops already had, and every later window's ops
+  // land shifted by it.
+  it('folds a foreign row through a window whose changes lift to noops', async () => {
+    async function run(maxChangesPerMerge: number) {
+      const { store, server, manager, branchId, apply } = await seededList(['a', 'b', 'c', 'd'], {
+        maxChangesPerMerge,
+      });
+      await apply(branchId, 'b1', [{ op: 'remove', path: '/list/0' }]);
+      await apply(branchId, 'b2', [{ op: 'replace', path: '/list/2', value: 'X' }]);
+      // The source removes the same element between the first window's slice read and its
+      // commit, so the window's own change lifts away and only the foreign row comes back.
+      const injected = injectAfterSliceRead(store, branchId, 'b1', () =>
+        apply('doc1', 'f1', [{ op: 'remove', path: '/list/0' }])
+      );
+
+      await manager.mergeBranch(branchId);
+      expect(injected()).toBe(true);
+      // The branch's own removal lifted away against the source's; only the foreign row landed.
+      const ids = await changeIds(store, 'doc1');
+      expect(ids).toEqual(['s1', 'f1', 'b2']);
+      expect(new Set(ids).size).toBe(ids.length);
+      return (await coldLoad(server, 'doc1')).state.list;
+    }
+
+    expect(await run(1_000)).toEqual(['b', 'c', 'X']);
+    expect(await run(1)).toEqual(['b', 'c', 'X']);
+  });
+
+  // The same double-fold with the noop window LAST: its frame is the one persisted, so the
+  // next merge session is what a stale copy corrupts.
+  it('persists a noop window frame without a raw copy of the foreign row', async () => {
+    const { store, server, manager, branchId, apply } = await seededList(['a', 'b', 'c', 'd'], {
+      maxChangesPerMerge: 1,
+    });
+    await apply(branchId, 'b1', [{ op: 'add', path: '/list/4', value: 'B1' }]);
+    await apply(branchId, 'b2', [{ op: 'remove', path: '/list/0' }]);
+    const injected = injectAfterSliceRead(store, branchId, 'b2', () =>
+      apply('doc1', 'f1', [{ op: 'remove', path: '/list/0' }])
+    );
+
+    await manager.mergeBranch(branchId);
+    expect(injected()).toBe(true);
+    expect((await coldLoad(server, 'doc1')).state.list).toEqual(['b', 'c', 'd', 'B1']);
+
+    // The persisted frame expresses the foreign removal AFTER the branch's own, which already
+    // performed it — so it carries no removal at all.
+    const ops = (await persistedPrograms(store, branchId)).flat();
+    expect(ops.filter(op => op.op === 'remove' && op.path === '/list/0')).toEqual([]);
+
+    await apply(branchId, 'b3', [{ op: 'replace', path: '/list/1', value: 'X' }]);
+    await manager.mergeBranch(branchId);
+
+    // A stale removal in the frame would have shifted this replace down to /list/0.
+    expect((await coldLoad(server, 'doc1')).state.list).toEqual(['b', 'X', 'd', 'B1']);
+  });
+
+  // A byte-trimmed slice is shorter than the change limit but does not mean the branch is
+  // drained — only an empty read does. Ending on the short slice left the tail unmerged.
+  it('merges every byte-bounded window in one call', async () => {
+    const filler = 'x'.repeat(1_000);
+    const { store, manager, branchId, edit } = await seededSource('start', {
+      maxChangesPerMerge: 1_000,
+      maxBytesPerMergeWindow: 2_500,
+    });
+    for (let i = 1; i <= 6; i++) await edit(branchId, `b${i}`, [{ insert: `${i}${filler}` }]);
+
+    await manager.mergeBranch(branchId);
+
+    expect((await store.loadBranch(branchId))!.lastMergedRev).toBe(await store.getCurrentRev(branchId));
+  });
+
+  // Two merges read the same slice; the loser commits into a source that already holds its
+  // rows, so the commit answers with pure echoes and a foreign row ABOVE them. The echoes are
+  // its own rows: that foreign row folds through what is left of the queue after them
+  // (nothing), never through the whole queue a second time.
+  it('folds correctly when a concurrent merge dedups the whole window', async () => {
+    /** The same history without the losing merge — the text the race must not disturb. */
+    async function sequential() {
+      const { server, manager, branchId, edit } = await seededSource('alpha beta gamma');
+      await edit(branchId, 'b1', [{ insert: '<b1>' }]);
+      await edit(branchId, 'b2', [{ retain: 20 }, { insert: '<b2>' }]);
+      await manager.mergeBranch(branchId);
+      await edit('doc1', 'f1', [{ retain: 6 }, { insert: '<f1>' }]);
+      await edit(branchId, 'b3', [{ retain: 10 }, { insert: '<b3>' }]);
+      await manager.mergeBranch(branchId);
+      return bodyText((await coldLoad(server, 'doc1')).state);
+    }
+
+    /**
+     * The loser parks holding its slice while the winner merges the same one and a foreign
+     * edit lands on top of it. On a CAS store the loser's watermark write loses and its frame
+     * is dropped; on a legacy (max-wins) store the equal watermark stands and the loser's
+     * frame is what the NEXT merge lifts through — so the fold has to be right either way.
+     */
+    async function race(cas: boolean) {
+      const { store, server, manager, branchId, edit } = await seededSource('alpha beta gamma');
+      if (!cas) (store as any).updateBranchIf = undefined;
+      await edit(branchId, 'b1', [{ insert: '<b1>' }]);
+      await edit(branchId, 'b2', [{ retain: 20 }, { insert: '<b2>' }]);
+
+      let release!: () => void;
+      let reached!: () => void;
+      const parked = new Promise<void>(resolve => (release = resolve));
+      const atSlice = new Promise<void>(resolve => (reached = resolve));
+      const realListChanges = store.listChanges.bind(store);
+      let parkedOnce = false;
+      store.listChanges = async (docId, options) => {
+        const rows = await realListChanges(docId, options);
+        if (!parkedOnce && docId === branchId && options?.maxBytes !== undefined) {
+          parkedOnce = true;
+          reached();
+          await parked;
+        }
+        return rows;
+      };
+
+      const losing = new OTBranchManager(store, server).mergeBranch(branchId);
+      await atSlice;
+      await manager.mergeBranch(branchId);
+      await edit('doc1', 'f1', [{ retain: 6 }, { insert: '<f1>' }]);
+      release();
+      const loser = await losing;
+
+      const programs = JSON.stringify(await persistedPrograms(store, branchId));
+      await edit(branchId, 'b3', [{ retain: 10 }, { insert: '<b3>' }]);
+      await manager.mergeBranch(branchId);
+      return {
+        loser,
+        programs,
+        ids: await changeIds(store, 'doc1'),
+        text: bodyText((await coldLoad(server, 'doc1')).state),
+      };
+    }
+
+    const expected = await sequential();
+    for (const cas of [true, false]) {
+      const { loser, programs, ids, text } = await race(cas);
+      const label = `cas ${cas}`;
+      // The loser commits nothing new and reports its rows as echoes, foreign row above.
+      expect(
+        loser.map(c => c.id),
+        label
+      ).toEqual(['b1', 'b2', 'f1']);
+      expectRevDense(loser);
+      expect(ids, label).toEqual(['s1', 'b1', 'b2', 'f1', 'b3']);
+      // The surviving frame carries the foreign row's insert once, never twice.
+      expect(programs.split('<f1>').length - 1, label).toBeLessThanOrEqual(1);
+      // A double-folded row would shift the next merge's insert by its own length.
+      expect(text, label).toBe(expected);
+    }
+  });
+
+  // A window failing after an earlier one committed is not "nothing happened": the prefix is
+  // permanent and the error has to say so, or consumers tell users a merge left no trace.
+  it('reports partial progress when a later window fails, and resumes on retry', async () => {
+    const { store, manager, branchId, edit } = await seededSource('one two three four', {
+      maxChangesPerMerge: 1,
+    });
+    await edit(branchId, 'b1', [{ insert: '[1]' }]);
+    await edit(branchId, 'b2', [{ retain: 21 }, { insert: '[2]' }]);
+    await edit(branchId, 'b3', [{ retain: 11 }, { insert: '[3]' }]);
+
+    failWatermarkOnce(store, 2); // the second window's watermark write
+
+    const error = (await manager.mergeBranch(branchId).catch(e => e)) as MergePartialProgressError;
+    expect(error).toBeInstanceOf(MergePartialProgressError);
+    expect(error.committedChanges.map(c => c.id)).toEqual(['b1']);
+    expect(error.mergedThroughRev).toBe(2);
+    expect((error.cause as Error).message).toContain('simulated crash');
+
+    const retried = await manager.mergeBranch(branchId);
+    expectRevDense(retried);
+
+    // Every branch change is reported exactly once across the failure and the retry...
+    const reported = [...error.committedChanges, ...retried].map(c => c.id).filter(id => id.startsWith('b'));
+    expect(reported.sort()).toEqual(['b1', 'b2', 'b3']);
+    // ...and landed on the source exactly once.
+    expect(await changeIds(store, 'doc1')).toEqual(['s1', 'b1', 'b2', 'b3']);
+    expect((await store.loadBranch(branchId))!.lastMergedRev).toBe(await store.getCurrentRev(branchId));
+  });
+
+  // The guard walks the whole unmerged batch, so a duplicating change waiting in a LATER
+  // window still refuses before the first window commits anything.
+  it('refuses when the duplicating change sits in a later window', async () => {
+    const BODY = 'Chapter one. The grey cat sat by the window.\n';
+    const { store, server, manager } = setup({
+      contentDuplicationGuard: { action: 'refuse', minLength: 16 },
+      maxChangesPerMerge: 1,
+    });
+    await server.commitChanges('doc1', [rootChange('s1', { body: { ops: [{ insert: BODY }] } })]);
+
+    const branchId = 'branchGuardLateWindow';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: 2 }); // undercounts the seed
+    await store.saveChanges(branchId, [
+      createChange(0, 1, [{ op: 'replace', path: '', value: { body: { ops: [] } } }], { committedAt: 0 }) as Change,
+      // Window 1 is an ordinary small edit; window 2 replays the seed onto content the source
+      // already holds.
+      createChange(1, 2, [txtOp('/body', [{ insert: 'Hi. ' }])], { committedAt: 0 }) as Change,
+      createChange(2, 3, [txtOp('/body', [{ retain: 4 }, { insert: BODY }])], { committedAt: 0 }) as Change,
+    ]);
+
+    const before = await coldLoad(server, 'doc1');
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(branchId)).rejects.toBeInstanceOf(MergeContentDuplicationError);
+    err.mockRestore();
+
+    // Nothing of window 1 escaped: the refusal is decided before the first commit.
+    const after = await coldLoad(server, 'doc1');
+    expect(after.rev).toBe(before.rev);
+    expect(after.state).toEqual(before.state);
+    expect(await changeIds(store, 'doc1')).toEqual(['s1']);
+    expect((await store.loadBranch(branchId))!.lastMergedRev).toBeUndefined();
+  });
+
+  // Array indices shift as bluntly as text offsets: a frame carrying the source's concurrent
+  // insert has to move each window's adds the same way one queue would.
+  it('lands array ops through the frame where a one-shot merge lands them', async () => {
+    async function run(maxChangesPerMerge: number) {
+      const { store, server, manager, branchId, apply } = await seededList(['a', 'b', 'c', 'd', 'e'], {
+        maxChangesPerMerge,
+      });
+      await apply(branchId, 'b1', [{ op: 'add', path: '/list/1', value: 'B1' }]);
+      await apply(branchId, 'b2', [{ op: 'add', path: '/list/4', value: 'B2' }]);
+      await apply('doc1', 's2', [{ op: 'add', path: '/list/3', value: 'S2' }]);
+
+      await manager.mergeBranch(branchId);
+      const ids = await changeIds(store, 'doc1');
+      expect(new Set(ids).size).toBe(ids.length);
+      return (await coldLoad(server, 'doc1')).state.list;
+    }
+
+    const oneShot = await run(1_000);
+    // The branch's two adds keep their slots; the source's lands beside the second.
+    expect(oneShot).toEqual(['a', 'B1', 'b', 'c', 'B2', 'S2', 'd', 'e']);
+    expect(await run(1)).toEqual(oneShot);
+  });
+
+  // `batchId` is client-mintable, so an ordinary source change can wear the branch's id. It
+  // must fold as the foreign change it is rather than wedge the merge or shift what follows.
+  it('treats a foreign change wearing the branch batchId as foreign', async () => {
+    async function run(impostor: boolean) {
+      const { store, server, manager, branchId, edit, apply } = await seededSource('one two three four', {
+        maxChangesPerMerge: 1,
+      });
+      await edit(branchId, 'b1', [{ insert: '[1]' }]);
+      await manager.mergeBranch(branchId);
+
+      await apply(
+        'doc1',
+        'imp',
+        [txtOp('/body', [{ retain: 3 }, { insert: '<imp>' }])],
+        impostor ? { batchId: branchId } : undefined
+      );
+      await edit(branchId, 'b2', [{ retain: 11 }, { insert: '[2]' }]);
+      await manager.mergeBranch(branchId);
+
+      const text = bodyText((await coldLoad(server, 'doc1')).state);
+      expect(text.split('<imp>').length - 1).toBe(1);
+      const ids = await changeIds(store, 'doc1');
+      expect(new Set(ids).size).toBe(ids.length);
+      return text;
+    }
+
+    expect(await run(true)).toBe(await run(false));
+  });
+
+  // The frame's advance needs the raw branch ops behind its own committed merge rows. A log
+  // compacted past them cannot supply those, and no retry ever will.
+  it('surfaces a pruned branch log as an alignment failure', async () => {
+    const { store, manager, branchId, edit } = await seededSource('one two three four');
+    await edit(branchId, 'b1', [{ insert: '[1]' }]);
+    await edit(branchId, 'b2', [{ retain: 21 }, { insert: '[2]' }]);
+    await manager.mergeBranch(branchId);
+
+    await edit(branchId, 'b3', [{ retain: 11 }, { insert: '[3]' }]);
+    // The branch log is compacted below the watermark, and the frame that would have skipped
+    // the rebuild is gone (an oversized frame is cleared, not stored).
+    store.pruneChangesThrough(branchId, (await store.loadBranch(branchId))!.lastMergedRev!);
+    await store.updateBranch(branchId, { mergeFrame: null } as any);
+
+    await expect(manager.mergeBranch(branchId)).rejects.toBeInstanceOf(MergeFrameAlignmentError);
+  });
+
+  /** A windowed merge over a concurrent source edit, so the branch ends up carrying a frame. */
+  async function mergeWithForeignEdit() {
+    const ctx = await seededSource('alpha beta gamma', { maxChangesPerMerge: 1 });
+    await ctx.edit(ctx.branchId, 'b1', [{ insert: '<b1>' }]);
+    await ctx.edit(ctx.branchId, 'b2', [{ retain: 20 }, { insert: '<b2>' }]);
+    await ctx.edit('doc1', 's2', [{ retain: 6 }, { insert: '<s2>' }]);
+    await ctx.manager.mergeBranch(ctx.branchId);
+    return ctx;
+  }
+
+  // Document stores refuse a nested array as a field value, so the frame's programs are
+  // persisted as a JSON string — not an array that happens to serialize.
+  it('persists the frame programs as a JSON string', async () => {
+    const { store, branchId } = await mergeWithForeignEdit();
+
+    const frame = (await store.loadBranch(branchId))!.mergeFrame!;
+    expect(typeof frame.programs).toBe('string');
+    expect(() => JSON.parse(frame.programs)).not.toThrow();
+    expect(JSON.parse(frame.programs).length).toBeGreaterThan(0);
+  });
+
+  // The frame is server-internal working state and runs to hundreds of kilobytes; it must not
+  // ride every branch-list sync out to every client.
+  it('strips the frame from listed branches while the record keeps it', async () => {
+    const { store, manager, branchId } = await mergeWithForeignEdit();
+
+    const listed = await manager.listBranches('doc1');
+    expect(listed.map(b => b.id)).toEqual([branchId]);
+    expect(listed.every(b => !('mergeFrame' in b))).toBe(true);
+    expect((await store.loadBranch(branchId))!.mergeFrame).toBeDefined();
   });
 });

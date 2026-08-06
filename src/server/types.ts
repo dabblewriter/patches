@@ -92,15 +92,19 @@ export interface OTStoreBackend extends ServerStoreBackend, VersioningStoreBacke
    * `RevConflictError` when a revision already exists (a concurrent commit won
    * the race), so `commitChanges` can re-read and retry.
    *
-   * Implementations should also enforce [docId, change.id] uniqueness atomically
+   * Implementations MUST also enforce [docId, change.id] uniqueness atomically
    * — recording committed change ids in the same write as the changes — and
    * throw `DuplicateChangeIdsError` naming the offending ids when any incoming
    * change id was already committed. This is the authoritative duplicate guard:
    * the commit path's read-side id dedup cannot see a committed copy at a rev
    * at or before the incoming `baseRev` (a retry the client rebased onto a
    * newer tip), nor arbitrate two simultaneous sends of the same change
-   * (DAB-607). Without it, a duplicate commit double-applies non-idempotent
-   * ops (array inserts/removes, text deltas) — real data corruption.
+   * (DAB-607) — and windowed branch merges commit each window with a `baseRev`
+   * past the windows before it, resting their retry idempotency entirely on
+   * this guard. Without it, a duplicate commit double-applies non-idempotent
+   * ops (array inserts/removes, text deltas) — real data corruption. (Promoted
+   * from "should" once windowed merges shipped; a backend without it is not a
+   * compliant OTStoreBackend.)
    */
   saveChanges(docId: string, changes: Change[]): Promise<void>;
 

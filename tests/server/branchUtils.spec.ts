@@ -265,11 +265,13 @@ describe('branchUtils', () => {
         });
       });
 
-      it('keeps a higher concurrent watermark (max-wins)', async () => {
+      it('keeps a higher concurrent watermark (max-wins) and leaves its frame alone', async () => {
         const store = makeStore({ loadBranch: vi.fn().mockResolvedValue({ ...baseBranch, lastMergedRev: 12 }) });
 
-        await advanceMergeWatermark(store, 'branch1', undefined, 8);
+        await advanceMergeWatermark(store, 'branch1', undefined, 8, { sourceRev: 9, branchRev: 8, programs: '[]' });
 
+        // Our frame belongs to the batch that lost — writing it would pair the concurrent
+        // merge's watermark with a stale frame.
         expect(store.updateBranch).toHaveBeenCalledWith('branch1', {
           lastMergedRev: 12,
           modifiedAt: expect.any(Number),
@@ -292,6 +294,36 @@ describe('branchUtils', () => {
         );
         expect(store.updateBranch).not.toHaveBeenCalled();
         expect(store.loadBranch).not.toHaveBeenCalled();
+      });
+
+      it('carries the merge frame in the same write as the watermark', async () => {
+        const updateBranchIf = vi.fn().mockResolvedValue(true);
+        const store = makeStore({ updateBranchIf });
+        // Programs ride as a JSON string: document stores refuse a nested array as a field value.
+        const frame = { sourceRev: 9, branchRev: 8, programs: JSON.stringify([[{ op: 'add', path: '/a', value: 1 }]]) };
+
+        await advanceMergeWatermark(store, 'branch1', 3, 8, frame);
+
+        expect(updateBranchIf).toHaveBeenCalledWith(
+          'branch1',
+          { lastMergedRev: 8, mergeFrame: frame, modifiedAt: expect.any(Number) },
+          { lastMergedRev: 3 }
+        );
+      });
+
+      it('clears a stored frame when this merge has none to persist', async () => {
+        const updateBranchIf = vi.fn().mockResolvedValue(true);
+        const store = makeStore({ updateBranchIf });
+
+        // An oversized frame is not written — but the previous one must go with it, or the
+        // next merge would adopt a frame that no longer matches the watermark.
+        await advanceMergeWatermark(store, 'branch1', 3, 8, null);
+
+        expect(updateBranchIf).toHaveBeenCalledWith(
+          'branch1',
+          { lastMergedRev: 8, mergeFrame: null, modifiedAt: expect.any(Number) },
+          { lastMergedRev: 3 }
+        );
       });
 
       it('skips the write when a concurrent merge already covered the batch', async () => {
@@ -341,7 +373,8 @@ describe('branchUtils', () => {
             .mockResolvedValue({ id: 'branch1', docId: 'doc1', modifiedAt: 1, deleted: true } as unknown as Branch),
         });
 
-        await expect(advanceMergeWatermark(store, 'branch1', undefined, 8)).resolves.toBeUndefined();
+        // Reports "not applied" rather than throwing — the tombstone stands.
+        await expect(advanceMergeWatermark(store, 'branch1', undefined, 8)).resolves.toBe(false);
         expect(updateBranchIf).toHaveBeenCalledTimes(1);
       });
 

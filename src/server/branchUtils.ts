@@ -1,6 +1,6 @@
 import { createId } from 'crypto-id';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
-import type { Branch, CreateBranchMetadata, EditableBranchMetadata } from '../types.js';
+import type { Branch, CreateBranchMetadata, EditableBranchMetadata, MergeFrame } from '../types.js';
 import type { BranchingStoreBackend } from './types.js';
 
 /**
@@ -44,10 +44,10 @@ export function assertBranchMetadata(metadata?: EditableBranchMetadata) {
 
 /**
  * Server-managed merge bookkeeping fields that clients must never set. `lastMergedRev` is the
- * merge watermark; `mergeBaseRev` pins the merge base (and with it the server's change-id
- * dedup window) for branches whose `branchedAtRev` was found ahead of the source tip.
+ * merge watermark; `mergeBaseRev` pins the merge base for branches whose `branchedAtRev` was
+ * found ahead of the source tip; `mergeFrame` is the windowed merge's carried OT frame.
  */
-const serverManagedMergeFields = ['lastMergedRev', 'mergeBaseRev'] as const;
+const serverManagedMergeFields = ['lastMergedRev', 'mergeBaseRev', 'mergeFrame'] as const;
 
 /**
  * Drops server-managed merge bookkeeping from client-supplied branch metadata. Only server
@@ -195,29 +195,39 @@ export async function advanceMergeWatermark(
   store: BranchingStoreBackend,
   branchId: string,
   expectedLastMergedRev: number | undefined,
-  mergedThroughRev: number
-): Promise<void> {
+  mergedThroughRev: number,
+  frame?: MergeFrame | null
+): Promise<boolean> {
+  // The frame rides in the same write as the watermark so the pair never diverges. `null`
+  // clears a previously persisted frame (this merge's frame was too large to persist);
+  // `undefined` leaves the field untouched (non-windowed callers).
+  const frameUpdate = frame === undefined ? {} : { mergeFrame: frame };
   if (!store.updateBranchIf) {
     // Legacy semantics: non-atomic read-then-write, max-wins against concurrent merges.
     const current = await store.loadBranch(branchId);
     const effective = Math.max(mergedThroughRev, current?.lastMergedRev ?? 0);
-    await store.updateBranch(branchId, { lastMergedRev: effective, modifiedAt: Date.now() });
-    return;
+    const wins = effective === mergedThroughRev;
+    await store.updateBranch(branchId, {
+      lastMergedRev: effective,
+      ...(wins ? frameUpdate : {}),
+      modifiedAt: Date.now(),
+    });
+    return wins;
   }
 
   let expected = expectedLastMergedRev;
   for (let attempt = 0; attempt < MAX_WATERMARK_CAS_RETRIES; attempt++) {
-    // A concurrent merge already covered this batch — its watermark stands.
-    if (expected !== undefined && expected >= mergedThroughRev) return;
+    // A concurrent merge already covered this batch — its watermark (and frame) stands.
+    if (expected !== undefined && expected >= mergedThroughRev) return false;
     const applied = await store.updateBranchIf(
       branchId,
-      { lastMergedRev: mergedThroughRev, modifiedAt: Date.now() },
+      { lastMergedRev: mergedThroughRev, ...frameUpdate, modifiedAt: Date.now() },
       { lastMergedRev: expected }
     );
-    if (applied) return;
+    if (applied) return true;
     const current = await store.loadBranch(branchId);
     // Branch deleted mid-merge — nothing to advance; the tombstone stands.
-    if (!current || current.deleted) return;
+    if (!current || current.deleted) return false;
     expected = current.lastMergedRev;
   }
   // Practically unreachable: each failed CAS means another merge advanced the watermark, and

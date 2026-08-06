@@ -102,6 +102,14 @@ interface SplitContext extends Required<Pick<ChangeSplitOptions, 'maxUnsplittabl
   docId?: string;
   changeId?: string;
   budget: 'storage' | 'payload';
+  /**
+   * Set on a {@link verifyPieces} re-split. The first pass already reported every op it had no
+   * seam for, and a re-split walks those same ops again under a tighter budget — emitting again
+   * would double-count one op in the consumer's telemetry. Refusal is unaffected:
+   * `maxUnsplittableBytes` does not move between passes, so the emit/refuse decision is identical
+   * either way.
+   */
+  resplit?: boolean;
 }
 
 /**
@@ -154,24 +162,28 @@ function guardUnsplittable(
   reason: OversizedOpReason
 ): void {
   const emitted = bytes <= ctx.maxUnsplittableBytes;
-  onOversizedOp.emit({
-    op,
-    path,
-    bytes,
-    maxBytes: ctx.maxBytes,
-    budget: ctx.budget,
-    docId: ctx.docId,
-    changeId: ctx.changeId,
-    emitted,
-    reason,
-  });
+  if (!ctx.resplit) {
+    onOversizedOp.emit({
+      op,
+      path,
+      bytes,
+      maxBytes: ctx.maxBytes,
+      budget: ctx.budget,
+      docId: ctx.docId,
+      changeId: ctx.changeId,
+      emitted,
+      reason,
+    });
+  }
   if (!emitted) {
     throw new UnsplittableChangeError(op, path, bytes, ctx.maxUnsplittableBytes, {
       docId: ctx.docId,
       changeId: ctx.changeId,
     });
   }
-  console.warn(`Oversized op ${op} at "${path}" is ${bytes} bytes and cannot be split; including it anyway`);
+  if (!ctx.resplit) {
+    console.warn(`Oversized op ${op} at "${path}" is ${bytes} bytes and cannot be split; including it anyway`);
+  }
 }
 
 /** Default wire batch size limit (1MB) */
@@ -276,14 +288,127 @@ function getSizeForStorage(data: unknown, sizeCalculator?: SizeCalculator): numb
 }
 
 /**
- * Break a single Change into multiple Changes so that the storage size never exceeds `ctx.maxBytes`.
+ * A piece compresses slightly worse than the change it came from — LZ builds a smaller dictionary
+ * over less input — so the calibrated ratio below runs a little optimistic for the pieces it sizes.
+ * Aim under the cap to absorb that.
+ *
+ * Getting this wrong is never a correctness problem: `verifyPieces` measures every emitted piece
+ * with the real calculator. Too optimistic costs a re-split pass. Too pessimistic costs extra
+ * seams — invisible in tests, which pin piece *counts* as deterministic but not their magnitude,
+ * and it surfaces as revision-count inflation on a large split (a branch seed most of all). Prefer
+ * nudging this down rather than up.
  */
-function breakSingleChange(orig: Change, ctx: SplitContext): Change[] {
-  if (getSizeForStorage(orig, ctx.sizeCalculator) <= ctx.maxBytes) return [orig];
+const PIECE_COMPRESSION_MARGIN = 1.1;
+
+/** How many times a piece may be re-split after the estimate proved optimistic. */
+const MAX_VERIFY_PASSES = 3;
+
+/** Budget tightening applied per re-split pass, so boundaries actually move. */
+const VERIFY_TIGHTEN = 0.8;
+
+/** JSON byte size of one op, memoised — boundary-finding asks for the same op repeatedly. */
+const opJSONSizes = new WeakMap<object, number>();
+function opJSONSize(op: unknown): number {
+  if (!op || typeof op !== 'object') return getJSONByteSize(op);
+  const cached = opJSONSizes.get(op as object);
+  if (cached !== undefined) return cached;
+  const size = getJSONByteSize(op);
+  opJSONSizes.set(op as object, size);
+  return size;
+}
+
+interface SizeEstimator {
+  /** Estimated storage bytes for a payload of `jsonBytes` JSON bytes. */
+  storage(jsonBytes: number): number;
+  /** Largest JSON payload expected to stay within `storageBytes`. */
+  jsonBudget(storageBytes: number): number;
+}
+
+/**
+ * Cheap size model for choosing split points inside one change.
+ *
+ * Finding boundaries asks "does this still fit?" once per op — and once per delta op inside an
+ * oversized text op. Answering each of those by actually compressing the accumulated payload makes
+ * splitting O(ops × payload): a ~5MB whole-document change took ~187s synchronously, which freezes
+ * the tab and takes the browser down with it (DAB-931). So measure the change once, derive how many
+ * storage bytes one JSON byte costs, and answer the hot questions from per-op JSON sizes that are
+ * each computed once.
+ *
+ * The estimate only chooses *where* to cut. Every emitted piece is measured for real by
+ * `verifyPieces`, so a bad ratio costs an extra split, never an oversized change.
+ *
+ * With no `sizeCalculator` the ratio is exactly 1 and this reproduces `getJSONByteSize` byte for
+ * byte, so the uncompressed path keeps its previous split boundaries exactly.
+ */
+function createSizeEstimator(orig: Change, exactSize: number, sizeCalculator?: SizeCalculator): SizeEstimator {
+  const jsonSize = getJSONByteSize(orig);
+  const ratio = jsonSize > 0 ? exactSize / jsonSize : 1;
+  const perJSONByte = ratio * (sizeCalculator ? PIECE_COMPRESSION_MARGIN : 1);
+  return {
+    storage: jsonBytes => jsonBytes * perJSONByte,
+    jsonBudget: storageBytes => (perJSONByte > 0 ? storageBytes / perJSONByte : storageBytes),
+  };
+}
+
+/** JSON bytes of a change carrying `contentBytes` of ops content across `count` ops. */
+function withOpsBytes(envelopeBytes: number, contentBytes: number, count: number): number {
+  // The ops array's own brackets are already in the envelope; only the commas between the
+  // elements are unaccounted for.
+  return envelopeBytes + contentBytes + Math.max(0, count - 1);
+}
+
+/**
+ * Confirm every piece really fits, and re-split the ones that don't.
+ *
+ * Boundaries come from an estimate (see {@link createSizeEstimator}), and an estimate can run
+ * optimistic. This is the gate that makes that safe: each piece is measured with the real
+ * calculator, and an oversized piece is re-split under a tighter budget. Without it an optimistic
+ * estimate would emit a change over the store's per-change cap — which the backend answers with a
+ * terminal error, permanently wedging that change.
+ */
+function verifyPieces(pieces: Change[], orig: Change, ctx: SplitContext, pass: number): Change[] {
+  // Without a calculator the estimate is exact arithmetic over JSON sizes, so there is nothing for
+  // a re-check to catch.
+  if (!ctx.sizeCalculator || pass >= MAX_VERIFY_PASSES || pieces.length === 0) return pieces;
+
+  let resplit = false;
+  const checked: Change[] = [];
+  for (const piece of pieces) {
+    const size = piece.ops.length === 0 ? 0 : ctx.sizeCalculator(piece);
+    if (size <= ctx.maxBytes) {
+      checked.push(piece);
+      continue;
+    }
+    resplit = true;
+    const tightened: SplitContext = { ...ctx, maxBytes: Math.floor(ctx.maxBytes * VERIFY_TIGHTEN), resplit: true };
+    checked.push(...breakSingleChange(piece, tightened, pass + 1, size));
+  }
+  if (!resplit) return pieces;
+
+  // Re-splitting inserts revs, so renumber the run. The first piece keeps the original id for the
+  // same reason `finish` assigns it.
+  return checked.map((piece, i) => ({ ...piece, rev: orig.rev + i, id: i === 0 ? orig.id : piece.id }));
+}
+
+/**
+ * Break a single Change into multiple Changes so that the storage size never exceeds `ctx.maxBytes`.
+ *
+ * @param verifyPass - Re-split depth; see {@link verifyPieces}
+ * @param knownExactSize - The caller's own measurement of `orig`, when it already has one
+ */
+function breakSingleChange(orig: Change, ctx: SplitContext, verifyPass = 0, knownExactSize?: number): Change[] {
+  // Measuring a whole-document change means compressing megabytes, so reuse the caller's
+  // measurement when it already has one.
+  const exactSize = knownExactSize ?? getSizeForStorage(orig, ctx.sizeCalculator);
+  if (exactSize <= ctx.maxBytes) return [orig];
+
+  const estimator = createSizeEstimator(orig, exactSize, ctx.sizeCalculator);
+  const envelope = getJSONByteSize({ ...orig, ops: [] });
 
   // First pass: split by ops
   const byOps: Change[] = [];
   let group: JSONPatchOp[] = [];
+  let groupBytes = 0;
   let rev = orig.rev;
 
   const finish = () => {
@@ -297,44 +422,58 @@ function breakSingleChange(orig: Change, ctx: SplitContext): Change[] {
     if (!group.length) return;
     byOps.push(deriveNewChange(orig, rev++, group));
     group = [];
+    groupBytes = 0;
   };
 
   for (const op of orig.ops) {
-    const tentative = group.concat(op);
-    if (getSizeForStorage({ ...orig, ops: tentative }, ctx.sizeCalculator) > ctx.maxBytes) flush();
+    const opBytes = opJSONSize(op);
 
-    // Handle the case where a single op is too large
-    const soloSize = group.length === 0 ? getSizeForStorage({ ...orig, ops: [op] }, ctx.sizeCalculator) : 0;
-    if (soloSize > ctx.maxBytes) {
-      // We have a single op that's too big - can only be @txt op with large delta
-      if (op.op === '@txt' && op.value) {
-        const pieces = breakTextOp(orig, op, rev, ctx);
-        byOps.push(...pieces);
-        // Only update rev if we got results from breakTextOp
-        if (pieces.length > 0) {
-          rev = pieces[pieces.length - 1].rev + 1; // Update rev for next changes
+    if (
+      group.length > 0 &&
+      estimator.storage(withOpsBytes(envelope, groupBytes + opBytes, group.length + 1)) > ctx.maxBytes
+    ) {
+      flush();
+    }
+
+    // Handle the case where a single op is too large. The estimate decides whether to look; the
+    // real calculator decides what to do, because `guardUnsplittable` reports and refuses on a
+    // measured size. One real measurement per oversized op is bounded — it was measuring on
+    // *every* op that made this quadratic.
+    if (group.length === 0 && estimator.storage(withOpsBytes(envelope, opBytes, 1)) > ctx.maxBytes) {
+      const soloSize = getSizeForStorage({ ...orig, ops: [op] }, ctx.sizeCalculator);
+      if (soloSize > ctx.maxBytes) {
+        // We have a single op that's too big - can only be @txt op with large delta
+        if (op.op === '@txt' && op.value) {
+          const pieces = breakTextOp(orig, op, rev, ctx, estimator);
+          byOps.push(...pieces);
+          // Only update rev if we got results from breakTextOp
+          if (pieces.length > 0) {
+            rev = pieces[pieces.length - 1].rev + 1; // Update rev for next changes
+          }
+          continue;
+        } else if (op.op === 'replace' || op.op === 'add') {
+          // For replace/add operations with large value payloads, try to split the value if it's a string or array
+          const pieces = breakLargeValueOp(orig, op, rev, ctx);
+          byOps.push(...pieces);
+          if (pieces.length > 0) {
+            rev = pieces[pieces.length - 1].rev + 1;
+          }
+          continue;
+        } else {
+          guardUnsplittable(ctx, op.op, op.path, soloSize, 'op-type');
+          group.push(op);
+          groupBytes += opBytes;
+          continue;
         }
-        continue;
-      } else if (op.op === 'replace' || op.op === 'add') {
-        // For replace/add operations with large value payloads, try to split the value if it's a string or array
-        const pieces = breakLargeValueOp(orig, op, rev, ctx);
-        byOps.push(...pieces);
-        if (pieces.length > 0) {
-          rev = pieces[pieces.length - 1].rev + 1;
-        }
-        continue;
-      } else {
-        guardUnsplittable(ctx, op.op, op.path, soloSize, 'op-type');
-        group.push(op);
-        continue;
       }
     }
 
     group.push(op);
+    groupBytes += opBytes;
   }
 
   flush();
-  return finish();
+  return verifyPieces(finish(), orig, ctx, verifyPass);
 }
 
 /**
@@ -348,7 +487,13 @@ function breakSingleChange(orig: Change, ctx: SplitContext): Change[] {
  * the earlier pieces, so the ops of a piece — expressed in the original delta's relative
  * coordinates — stay valid from that point on.
  */
-function breakTextOp(origChange: Change, textOp: JSONPatchOp, startRev: number, ctx: SplitContext): Change[] {
+function breakTextOp(
+  origChange: Change,
+  textOp: JSONPatchOp,
+  startRev: number,
+  ctx: SplitContext,
+  estimator: SizeEstimator
+): Change[] {
   const results: Change[] = [];
   let rev = startRev;
 
@@ -376,8 +521,20 @@ function breakTextOp(origChange: Change, textOp: JSONPatchOp, startRev: number, 
   const measure = (ops: any[]) =>
     getSizeForStorage({ ...origChange, ops: [{ ...textOp, value: ops }] }, ctx.sizeCalculator);
 
+  // Envelope for a change carrying just this text op with an empty delta. Per-delta-op JSON sizes
+  // are added to it, rather than re-measuring the whole change at every candidate boundary.
+  const textEnvelope = getJSONByteSize({ ...origChange, ops: [{ ...textOp, value: [] }] });
+  /** Estimated storage bytes for a piece of `contentBytes` across `count` ops, plus its start retain. */
+  const estimatePiece = (contentBytes: number, count: number) => {
+    const retainBytes = pieceStartPos > 0 ? opJSONSize({ retain: pieceStartPos }) : 0;
+    return estimator.storage(
+      withOpsBytes(textEnvelope, retainBytes + contentBytes, count + (pieceStartPos > 0 ? 1 : 0))
+    );
+  };
+
   let pieceOps: any[] = [];
   let pieceAdvance = 0;
+  let pieceBytes = 0;
 
   const flushPiece = () => {
     if (!pieceOps.length) return;
@@ -385,19 +542,32 @@ function breakTextOp(origChange: Change, textOp: JSONPatchOp, startRev: number, 
     pieceStartPos += pieceAdvance;
     pieceOps = [];
     pieceAdvance = 0;
+    pieceBytes = 0;
   };
 
   for (const op of deltaOps) {
-    if (pieceOps.length > 0 && measure(withStartRetain([...pieceOps, op])) > ctx.maxBytes) {
+    const opBytes = opJSONSize(op);
+
+    if (pieceOps.length > 0 && estimatePiece(pieceBytes + opBytes, pieceOps.length + 1) > ctx.maxBytes) {
       flushPiece();
     }
 
-    if (pieceOps.length === 0) {
+    // As in `breakSingleChange`: the estimate decides whether to look closer, the real calculator
+    // decides what to do — `guardUnsplittable` reports and refuses on a measured size.
+    if (pieceOps.length === 0 && estimatePiece(opBytes, 1) > ctx.maxBytes) {
       const standaloneOps = withStartRetain([op]);
       const standaloneSize = measure(standaloneOps);
       if (standaloneSize > ctx.maxBytes) {
         if (op.insert && typeof op.insert === 'string') {
-          const insertPieces = splitLargeInsertText(origChange, textOp, op.insert, op.attributes, pieceStartPos, ctx);
+          const insertPieces = splitLargeInsertText(
+            origChange,
+            textOp,
+            op.insert,
+            op.attributes,
+            pieceStartPos,
+            ctx,
+            estimator
+          );
           for (const pieceValue of insertPieces) {
             results.push(deriveNewChange(origChange, rev++, [{ ...textOp, value: pieceValue }]));
           }
@@ -414,6 +584,7 @@ function breakTextOp(origChange: Change, textOp: JSONPatchOp, startRev: number, 
 
     pieceOps.push(op);
     pieceAdvance += advanceOf(op);
+    pieceBytes += opBytes;
   }
 
   flushPiece();
@@ -448,7 +619,8 @@ function splitLargeInsertText(
   text: string,
   attributes: any,
   startPos: number,
-  ctx: SplitContext
+  ctx: SplitContext,
+  estimator: SizeEstimator
 ): any[][] {
   const pieces: any[][] = [];
   const measure = (deltaOps: any[]) =>
@@ -475,8 +647,15 @@ function splitLargeInsertText(
     position += chunk.length;
   };
 
-  const baseSize = getSizeForStorage({ ...origChange, ops: [{ ...textOp, value: '' }] }, ctx.sizeCalculator);
-  const seedLength = Math.max(1, ctx.maxBytes - baseSize - 20);
+  // Seed the chunk length through the estimator rather than treating a possibly-compressed byte
+  // budget as a character count: under compression that seed is several times too short and emits
+  // far more pieces than the budget needs. Still only a seed — every chunk is measured and halved
+  // above, so a wrong guess costs iterations, never an oversized piece.
+  const chunkOverhead = getJSONByteSize({
+    ...origChange,
+    ops: [{ ...textOp, value: [{ retain: startPos || 1 }, { insert: '', attributes }] }],
+  });
+  const seedLength = Math.max(1, Math.floor(estimator.jsonBudget(ctx.maxBytes)) - chunkOverhead - 20);
   for (let i = 0; i < text.length; ) {
     let end = Math.min(text.length, i + seedLength);
     if (end < text.length) end = safeSplitIndex(text, end);
@@ -552,12 +731,14 @@ function breakLargeValueOp(origChange: Change, op: JSONPatchOp, startRev: number
   const combinedChange = deriveNewChange(origChange, startRev, allOps);
 
   // If combined Change fits within the limit, return it as-is
-  if (getSizeForStorage(combinedChange, ctx.sizeCalculator) <= ctx.maxBytes) {
+  const combinedSize = getSizeForStorage(combinedChange, ctx.sizeCalculator);
+  if (combinedSize <= ctx.maxBytes) {
     return [combinedChange];
   }
 
-  // Still too large — split by ops (individual @txt ops broken further by breakTextOp)
-  return breakSingleChange(combinedChange, ctx);
+  // Still too large — split by ops (individual @txt ops broken further by breakTextOp). Hand over
+  // the measurement just taken; re-deriving it means compressing the whole document a second time.
+  return breakSingleChange(combinedChange, ctx, 0, combinedSize);
 }
 
 function deriveNewChange(origChange: Change, rev: number, ops: JSONPatchOp[]) {

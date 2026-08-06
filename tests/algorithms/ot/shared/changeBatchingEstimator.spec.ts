@@ -93,18 +93,35 @@ describe('estimated split points (DAB-931)', () => {
   }, 120_000);
 
   it('re-splits a piece the estimate left oversized rather than emitting it', () => {
-    // A deliberately hostile calculator: it under-reports everything except the exact payload the
-    // estimator will settle on, so first-pass boundaries land over budget and only `verifyPieces`
-    // can catch it.
-    const optimistic = (data: unknown) => Math.floor(getJSONByteSize(data) * 0.1);
     const docs = wholeDocument(40, 400);
     const change = createChange([{ op: 'replace', path: '/docs', value: docs }]);
-    const budget = Math.floor(optimistic(change) / 4);
+    const changeJSON = getJSONByteSize(change);
+    const budget = Math.floor((changeJSON * 0.1) / 4);
 
-    const pieces = breakChanges([change], budget, optimistic);
+    // A hostile calculator must be non-uniform: `createSizeEstimator` calibrates its ratio from one
+    // real measurement of the very change being split, so a calculator that is any constant
+    // multiple of JSON size is estimated perfectly and the re-split path never runs. Real LZ is
+    // non-uniform in exactly this direction — a large change compresses better than the smaller
+    // pieces cut from it — so model a sharp version of it: cheap at whole-change scale, 5× that
+    // rate for anything piece-sized. First-pass boundaries then land genuinely over budget, and
+    // only `verifyPieces` stands between an oversized piece and the store.
+    const pieceThreshold = Math.floor(changeJSON / 2);
+    const oversizedMeasurements: number[] = [];
+    const stepped = (data: unknown) => {
+      const json = getJSONByteSize(data);
+      const size = Math.floor(json * (json >= pieceThreshold ? 0.1 : 0.5));
+      if (json < pieceThreshold && size > budget) oversizedMeasurements.push(size);
+      return size;
+    };
 
+    const pieces = breakChanges([change], budget, stepped);
+
+    // The estimate really did produce over-budget pieces for `verifyPieces` to catch — nothing else
+    // measures piece-sized payloads, so this fails first if the gate is ever removed or broken.
+    expect(oversizedMeasurements.length).toBeGreaterThan(0);
+    expect(pieces.length).toBeGreaterThan(1);
     for (const piece of pieces) {
-      expect(optimistic(piece)).toBeLessThanOrEqual(budget);
+      expect(stepped(piece)).toBeLessThanOrEqual(budget);
     }
   });
 

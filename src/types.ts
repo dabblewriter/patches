@@ -151,10 +151,12 @@ export interface Branch {
    * `sourceRev` is the source revision the frame covers — foreign changes at or below it are
    * folded in; the merge folds newer ones on demand. Written atomically alongside
    * `lastMergedRev` so the two never diverge; absent (legacy branches, or a frame too large
-   * to persist) the merge rebuilds it from the branch's raw change log. Server-managed like
+   * to persist) the merge rebuilds it from the branch's raw change log. `null` is a real
+   * persisted state — the frame was explicitly cleared (an oversized frame, written atomically
+   * with the watermark it can no longer accompany) — distinct from absent. Server-managed like
    * `lastMergedRev`; client-supplied values are stripped.
    */
-  mergeFrame?: MergeFrame;
+  mergeFrame?: MergeFrame | null;
 
   /** The pending operation to sync to the server. Set by BranchClientStore methods. */
   pendingOp?: 'create' | 'update' | 'delete';

@@ -168,6 +168,8 @@ Each window's commit and the watermark update are separate writes, so a crash or
 
 Copied versions get the same treatment: the source copy keeps the branch version's id (version ids are namespaced per doc), so a retried or concurrent merge detects an existing copy and skips it instead of duplicating it.
 
+A merge that fails after anything committed — a later window's fault, a crash between a window's commit and its watermark write (even the first window's), a stalled cursor, or the per-call window cap — throws `MergePartialProgressError` carrying the committed changes and the branch rev content is durably merged through. The committed prefix is permanent and a retry resumes and completes it; consumers must not present this error as "nothing was changed". Deterministic refusals (e.g. `MergeContentDuplicationError`) decide before the first window commits and throw their original error — those genuinely leave no trace. A repeat merge with nothing new on the branch returns `[]` even when the source has moved on its own.
+
 `lastMergedRev`, `mergeBaseRev` and `mergeFrame` are server-managed: values arriving in client-supplied metadata (whole branch records sync through `PatchesSync`) are silently stripped on both create and update.
 
 ### LWW Merge Approach

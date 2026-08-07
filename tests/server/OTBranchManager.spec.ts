@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { OTBranchManager, assertBranchMetadata } from '../../src/server/OTBranchManager';
+import { MergePartialProgressError, OTBranchManager, assertBranchMetadata } from '../../src/server/OTBranchManager';
 import type { PatchesServer } from '../../src/server/PatchesServer';
 import type { BranchingStoreBackend, OTStoreBackend } from '../../src/server/types';
 import type { Branch, Change, EditableBranchMetadata, VersionMetadata } from '../../src/types';
@@ -433,7 +433,8 @@ describe('OTBranchManager', () => {
     function branchLog(changes: Change[], sourceChanges: Change[] = []) {
       vi.mocked(mockStore.listChanges).mockImplementation(async (docId, options = {}) => {
         const log = docId === 'branch1' ? changes : sourceChanges;
-        return log.filter(c => c.rev > (options.startAfter ?? 0));
+        const rows = log.filter(c => c.rev > (options.startAfter ?? 0));
+        return options.limit !== undefined ? rows.slice(0, options.limit) : rows;
       });
     }
 
@@ -513,7 +514,7 @@ describe('OTBranchManager', () => {
       // of server revision" guard and the merge throws. The base must clamp to
       // the source tip (294) so the branch's edits rebase onto the real head.
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      vi.mocked(mockStore.loadBranch).mockResolvedValue({ ...mockBranch, branchedAtRev: 295 });
+      branchRecord = { ...mockBranch, branchedAtRev: 295 };
       vi.mocked(mockStore.getCurrentRev).mockResolvedValue(294);
 
       const committedChanges = mockBranchChanges.map((c, i) => ({
@@ -547,7 +548,7 @@ describe('OTBranchManager', () => {
       // A retry must use it verbatim — even though min(branchedAtRev, tip) would now be
       // higher — so previously committed merge changes stay inside the dedup window.
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      vi.mocked(mockStore.loadBranch).mockResolvedValue({ ...mockBranch, branchedAtRev: 295, mergeBaseRev: 290 });
+      branchRecord = { ...mockBranch, branchedAtRev: 295, mergeBaseRev: 290 };
       vi.mocked(mockStore.getCurrentRev).mockResolvedValue(296);
 
       vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: [] });
@@ -592,15 +593,19 @@ describe('OTBranchManager', () => {
 
     it('adopts a concurrently pinned merge base when the CAS loses', async () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      // Lose the mergeBaseRev CAS (a concurrent merge pinned it first); the later
-      // lastMergedRev CAS succeeds normally.
-      const updateBranchIf = vi.fn(async (_id: string, updates: Record<string, any>) => !('mergeBaseRev' in updates));
+      // Lose the mergeBaseRev CAS — a concurrent merge pinned 293 first (the mock lands the
+      // winner's pin as it rejects ours); the later lastMergedRev CAS succeeds normally.
+      const updateBranchIf = vi.fn(async (_id: string, updates: Record<string, any>) => {
+        if ('mergeBaseRev' in updates) {
+          branchRecord.mergeBaseRev = 293;
+          return false;
+        }
+        Object.assign(branchRecord, updates);
+        return true;
+      });
       mockStore.updateBranchIf = updateBranchIf;
+      branchRecord = { ...mockBranch, branchedAtRev: 295 };
       vi.mocked(mockStore.getCurrentRev).mockResolvedValue(294);
-      // First load: no pinned base; re-read after losing the CAS: another merge pinned 293.
-      vi.mocked(mockStore.loadBranch)
-        .mockResolvedValueOnce({ ...mockBranch, branchedAtRev: 295 })
-        .mockResolvedValue({ ...mockBranch, branchedAtRev: 295, mergeBaseRev: 293 });
       vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: [] });
 
       await branchManager.mergeBranch('branch1');
@@ -656,12 +661,13 @@ describe('OTBranchManager', () => {
       }));
       vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: committedChanges });
 
-      // After commit, simulate another client having already merged with a higher rev
+      // After commit, simulate another client having already merged with a higher rev —
+      // carrying the frame that merge would have persisted alongside its watermark.
       let loadCallCount = 0;
       vi.mocked(mockStore.loadBranch).mockImplementation(async () => {
         loadCallCount++;
         if (loadCallCount === 1) return mockBranch; // First call: initial load
-        return { ...mockBranch, lastMergedRev: 10 }; // Second call: post-commit, concurrent merge set it to 10
+        return { ...mockBranch, lastMergedRev: 10, mergeFrame: { sourceRev: 7, branchRev: 10, programs: '[]' } };
       });
 
       await branchManager.mergeBranch('branch1');
@@ -689,12 +695,11 @@ describe('OTBranchManager', () => {
     it('should resume after the previous merge instead of re-reading from contentStartRev', async () => {
       // A previously merged branch carries the frame its last window persisted; the next
       // window reads from the frame's branch position, not the content floor.
-      const previouslyMergedBranch = {
+      branchRecord = {
         ...mockBranch,
         lastMergedRev: 5,
         mergeFrame: { sourceRev: 5, branchRev: 5, programs: '[]' },
       };
-      vi.mocked(mockStore.loadBranch).mockResolvedValue(previouslyMergedBranch);
 
       const newChanges: Change[] = [
         {
@@ -731,7 +736,7 @@ describe('OTBranchManager', () => {
       // Legacy branches (merged before the frame existed) and branches whose frame was too
       // large to persist have only `lastMergedRev`. The catch-up recognises the merge's own
       // rows on the source log by batchId and realigns the cursor from the branch's raw log.
-      vi.mocked(mockStore.loadBranch).mockResolvedValue({ ...mockBranch, lastMergedRev: 2 });
+      branchRecord = { ...mockBranch, lastMergedRev: 2 };
       const alreadyMerged: Change[] = mockBranchChanges.map((c, i) => ({
         ...c,
         baseRev: 5,
@@ -927,10 +932,14 @@ describe('OTBranchManager', () => {
       mockStore.updateBranchIf = updateBranchIf;
       vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: [] });
       // Initial load: never merged. Re-read after the failed CAS: a concurrent merge
-      // advanced the watermark past our batch (rev 2).
+      // advanced the watermark past our batch (rev 2), frame alongside as always.
       vi.mocked(mockStore.loadBranch)
         .mockResolvedValueOnce(mockBranch)
-        .mockResolvedValue({ ...mockBranch, lastMergedRev: 10 });
+        .mockResolvedValue({
+          ...mockBranch,
+          lastMergedRev: 10,
+          mergeFrame: { sourceRev: 5, branchRev: 10, programs: '[]' },
+        });
 
       await branchManager.mergeBranch('branch1');
 
@@ -938,6 +947,42 @@ describe('OTBranchManager', () => {
       // blind overwrite that would rewind 10 back to 2.
       expect(updateBranchIf).toHaveBeenCalledTimes(1);
       expect(mockStore.updateBranch).not.toHaveBeenCalled();
+    });
+
+    it('throws partial progress when the watermark write silently fails to advance the cursor', async () => {
+      // A store that acks the watermark write without applying it re-serves the same window
+      // forever; the committed prefix must surface as partial progress, never as success.
+      vi.mocked(mockStore.updateBranch).mockImplementation(async () => {});
+      const committedChanges = mockBranchChanges.map((c, i) => ({ ...c, baseRev: 5, rev: 6 + i, batchId: 'branch1' }));
+      vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: committedChanges });
+
+      const error = (await branchManager.mergeBranch('branch1').catch(e => e)) as MergePartialProgressError;
+      expect(error).toBeInstanceOf(MergePartialProgressError);
+      expect(error.committedChanges.map(c => c.id)).toEqual(['change1', 'change2']);
+      expect((error.cause as Error).message).toContain('cursor failed to advance');
+    });
+
+    it('throws partial progress when the window cap is exhausted before the branch drains', async () => {
+      const manyChanges: Change[] = Array.from({ length: 600 }, (_, i) => ({
+        id: `c${i + 1}`,
+        rev: i + 2,
+        baseRev: i + 1,
+        ops: [{ op: 'replace', path: '/n', value: i }],
+        createdAt: 0,
+        committedAt: 0,
+        metadata: {},
+      }));
+      branchLog(manyChanges);
+      vi.mocked(mockServer.commitChanges).mockImplementation(async (_docId, changes) => ({
+        changes: changes as Change[],
+      }));
+      const manager = new OTBranchManager(mockStore, mockServer, { maxChangesPerMerge: 1 });
+
+      const error = (await manager.mergeBranch('branch1').catch(e => e)) as MergePartialProgressError;
+      expect(error).toBeInstanceOf(MergePartialProgressError);
+      expect(error.committedChanges).toHaveLength(500);
+      expect((error.cause as Error).message).toContain('exceeded');
+      // A retry picks up where the cap stopped — the loop is bounded per call, not per branch.
     });
   });
 });

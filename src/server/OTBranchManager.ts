@@ -404,7 +404,11 @@ export class MergePartialProgressError extends Error {
     readonly branchId: string,
     /** Every change committed (and observed) before the failure, in rev order. */
     readonly committedChanges: Change[],
-    /** The branch revision the merge is durably merged through. */
+    /**
+     * The branch revision through which content is durably on the source. The persisted
+     * watermark may trail this (a crash between commit and watermark write); the retry's
+     * catch-up heals it.
+     */
     readonly mergedThroughRev: number | undefined,
     override readonly cause: unknown
   ) {
@@ -438,6 +442,23 @@ export class MergeFrameAlignmentError extends Error {
         `(ids: ${missingIds.slice(0, 5).join(', ')}${missingIds.length > 5 ? ', …' : ''}).`
     );
     this.name = 'MergeFrameAlignmentError';
+  }
+}
+
+/**
+ * Internal: a window failed after this merge had observed committed rows (its own commit,
+ * or a resumed prefix). {@link OTBranchManager.mergeBranch} folds the rows into the
+ * {@link MergePartialProgressError} it surfaces — classification keys on "did a commit land",
+ * not "did the window return".
+ */
+class MergeWindowFault extends Error {
+  constructor(
+    readonly observed: Change[],
+    readonly committedThroughRev: number,
+    override readonly cause: unknown
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'MergeWindowFault';
   }
 }
 
@@ -641,50 +662,81 @@ export class OTBranchManager implements BranchManager {
 
     const committed: Change[] = [];
     const committedIds = new Set<string>();
+    // A window after a lost CAS can re-encounter rows an earlier window already returned
+    // (its catch-up replays from the adopted state) — the result must not repeat them.
+    const collect = (changes: Change[]) => {
+      for (const change of changes) {
+        if (committedIds.has(change.id)) continue;
+        committedIds.add(change.id);
+        committed.push(change);
+      }
+    };
     let carry: MergeCarry | undefined;
     let previousBranchRev: number | undefined;
 
     try {
+      // Completion is detected by a window reading an empty slice (`drained`) — never by a
+      // count heuristic, which a byte-trimmed or store-truncated read would fool.
+      let drained = false;
       for (let window = 0; window < MAX_MERGE_WINDOWS; window++) {
         const result = await this.mergeBranchWindow(branchId, carry);
-        if (!result) break;
-        // A window after a lost CAS can re-encounter rows an earlier window already returned
-        // (its catch-up replays from the adopted state) — the result must not repeat them.
-        for (const change of result.changes) {
-          if (committedIds.has(change.id)) continue;
-          committedIds.add(change.id);
-          committed.push(change);
+        if (!result) {
+          drained = true;
+          break;
         }
+        collect(result.changes);
         carry = result.carry;
-        // The cursor must move every window, or the next read returns the same changes and the
-        // loop spins re-committing them. A store that silently drops the watermark write, or a
-        // concurrent merge that regressed it, stops here with the work done so far. Completion
-        // is detected by a window reading an empty slice (returning undefined above) — never by
-        // a count heuristic, which a byte-trimmed or store-truncated read would fool.
-        if (previousBranchRev !== undefined && result.branchRev <= previousBranchRev) break;
+        drained = result.drained;
+        // The cursor must move every committing window, or the next read returns the same
+        // changes and the loop spins re-committing them. A partial merge must never present
+        // as a completed one, so both backstops — a stalled cursor and window exhaustion —
+        // throw (wrapped below as partial progress) instead of returning the prefix as done.
+        if (!drained && previousBranchRev !== undefined && result.branchRev <= previousBranchRev) {
+          throw new Error(
+            `The merge cursor failed to advance past branch rev ${result.branchRev} — the store dropped ` +
+              `or a concurrent merge regressed the watermark write. Retrying the merge resumes it.`
+          );
+        }
         previousBranchRev = result.branchRev;
+        if (drained) break;
+      }
+      if (!drained) {
+        throw new Error(
+          `The merge exceeded ${MAX_MERGE_WINDOWS} windows without draining the branch. ` +
+            `Retrying the merge resumes it.`
+        );
       }
     } catch (error) {
-      // A failure after the first window committed is NOT "nothing happened": the prefix is
-      // permanent, the watermark points at it, and a retry resumes. Surface that distinctly
-      // so consumers stop telling users the merge left no trace. A failure before anything
-      // committed (including guard refusals, which run before the loop) throws unchanged.
-      if (committed.length > 0) {
-        throw new MergePartialProgressError(branchId, committed, previousBranchRev, error);
+      // A failure after anything committed — this attempt's windows, or a resumed crash's
+      // prefix — is NOT "nothing happened": the prefix is permanent, and a retry resumes.
+      // Surface that distinctly so consumers stop telling users the merge left no trace. A
+      // failure before anything committed (including guard refusals, which run before the
+      // loop) throws unchanged.
+      let cause = error;
+      let mergedThroughRev = previousBranchRev;
+      if (error instanceof MergeWindowFault) {
+        collect(error.observed);
+        mergedThroughRev = error.committedThroughRev;
+        cause = error.cause;
       }
-      throw error;
+      if (committed.length > 0) {
+        throw new MergePartialProgressError(branchId, committed, mergedThroughRev, cause);
+      }
+      throw cause;
     }
     return committed;
   }
 
   /**
    * Merge one window of a branch's unmerged changes; see {@link mergeBranch}. Returns
-   * `undefined` when the branch has nothing left to merge (and nothing was resumed).
+   * `undefined` when the branch has nothing left to merge (and nothing was resumed);
+   * `drained` marks a window that read an empty slice — the completion signal — while still
+   * carrying a resumed crash's rows.
    */
   private async mergeBranchWindow(
     branchId: string,
     carry: MergeCarry | undefined
-  ): Promise<{ changes: Change[]; branchRev: number; carry: MergeCarry | undefined } | undefined> {
+  ): Promise<{ changes: Change[]; branchRev: number; carry: MergeCarry | undefined; drained: boolean } | undefined> {
     // Re-load per window: the previous window advanced the state this window starts from, and
     // a concurrent merge may have advanced it further — adopt whatever is current.
     const branch = await this.store.loadBranch(branchId);
@@ -724,11 +776,13 @@ export class OTBranchManager implements BranchManager {
     if (slice.length === 0) {
       // Nothing new to merge. Persist any progress the catch-up made (a pure resume), then
       // surface everything the catch-up observed so a retried merge still returns the full,
-      // rev-dense result.
+      // rev-dense result. Foreign rows alone are the source moving on its own, not this
+      // branch merging — a true no-op merge answers `[]` as it always has, and rev-density
+      // only requires the foreign rows that sit beneath a resumed own row.
       const nextCarry = await this.persistMergeProgress(branch, frame);
+      if (resumed.own.length === 0) return undefined;
       const resumedRows = byRev([...resumed.own, ...resumed.foreign]);
-      if (resumedRows.length === 0) return undefined;
-      return { changes: resumedRows, branchRev: frame.branchRev, carry: nextCarry };
+      return { changes: resumedRows, branchRev: frame.branchRev, carry: nextCarry, drained: true };
     }
 
     const spanStart = frame.branchRev;
@@ -766,73 +820,92 @@ export class OTBranchManager implements BranchManager {
     const foldedForeign: Change[] = [];
     let accountedRev = frame.sourceRev;
     let carryInvalid = false;
-    if (changesToCommit.length > 0) {
-      const result = (
-        await wrapMergeCommit(branchId, sourceDocId, async () => {
-          return (await this.patchesServer.commitChanges(sourceDocId, changesToCommit)).changes;
-        })
-      ).sort((a, b) => a.rev - b.rev);
+    let result: Change[] | undefined;
+    // Branch content is durably on the source through this rev if the window fails below:
+    // the resumed prefix now, the whole span once the commit lands (the store's id guard
+    // makes the commit permanent even when the watermark write after it is not).
+    let committedThroughRev = frame.branchRev;
+    try {
+      if (changesToCommit.length > 0) {
+        result = (
+          await wrapMergeCommit(branchId, sourceDocId, async () => {
+            return (await this.patchesServer.commitChanges(sourceDocId, changesToCommit)).changes;
+          })
+        ).sort((a, b) => a.rev - b.rev);
+        committedThroughRev = spanEnd;
 
-      // Walk rows in rev order, consuming the as-sent queue as our own rows pass: a foreign
-      // row's stored ops already include every slice row committed BEFORE it (our rows it
-      // interleaved after, or a concurrent merge's dedup'd copies of them), so it folds
-      // through only the REMAINING as-sent suffix — and a foreign row after our last own row
-      // appends raw. Consecutive foreign rows fold as one sequential program.
-      let sentSuffix = changesToCommit as Change[];
-      for (let i = 0; i < result.length; i++) {
-        const row = result[i];
-        if (sliceIds.has(row.id)) {
-          windowCommitted.push(row);
-          const idx = sentSuffix.findIndex(change => change.id === row.id);
-          if (idx !== -1) sentSuffix = sentSuffix.slice(idx + 1);
-          accountedRev = row.rev;
-        } else if (row.batchId !== branchId) {
-          let runEnd = i;
-          while (
-            runEnd + 1 < result.length &&
-            !sliceIds.has(result[runEnd + 1].id) &&
-            result[runEnd + 1].batchId !== branchId
-          ) {
-            runEnd++;
+        // Walk rows in rev order, consuming the as-sent queue as our own rows pass: a foreign
+        // row's stored ops already include every slice row committed BEFORE it (our rows it
+        // interleaved after, or a concurrent merge's dedup'd copies of them), so it folds
+        // through only the REMAINING as-sent suffix — and a foreign row after our last own row
+        // appends raw. Consecutive foreign rows fold as one sequential program.
+        let sentSuffix = changesToCommit as Change[];
+        for (let i = 0; i < result.length; i++) {
+          const row = result[i];
+          if (sliceIds.has(row.id)) {
+            windowCommitted.push(row);
+            const idx = sentSuffix.findIndex(change => change.id === row.id);
+            if (idx !== -1) sentSuffix = sentSuffix.slice(idx + 1);
+            accountedRev = row.rev;
+          } else if (row.batchId !== branchId) {
+            let runEnd = i;
+            while (
+              runEnd + 1 < result.length &&
+              !sliceIds.has(result[runEnd + 1].id) &&
+              result[runEnd + 1].batchId !== branchId
+            ) {
+              runEnd++;
+            }
+            const run = result.slice(i, runEnd + 1);
+            advancedForeign.push(
+              ...advanceProgramsThroughQueue(
+                run.map(r => r.ops),
+                sentSuffix
+              )
+            );
+            foldedForeign.push(...run);
+            accountedRev = run[run.length - 1].rev;
+            i = runEnd;
+          } else {
+            // A concurrent merge committed rows beyond our slice mid-window. The frame cannot
+            // account for them (their raw branch ops are not in hand), so stop here: rows at
+            // and above this one stay uncovered for the next catch-up to replay, and the carry
+            // is stale. Never advance `accountedRev` past this point.
+            carryInvalid = true;
+            break;
           }
-          const run = result.slice(i, runEnd + 1);
-          advancedForeign.push(
-            ...advanceProgramsThroughQueue(
-              run.map(r => r.ops),
-              sentSuffix
-            )
-          );
-          foldedForeign.push(...run);
-          accountedRev = run[run.length - 1].rev;
-          i = runEnd;
-        } else {
-          // A concurrent merge committed rows beyond our slice mid-window. The frame cannot
-          // account for them (their raw branch ops are not in hand), so stop here: rows at
-          // and above this one stay uncovered for the next catch-up to replay, and the carry
-          // is stale. Never advance `accountedRev` past this point.
-          carryInvalid = true;
-          break;
         }
+      } else {
+        // The whole slice lifted to no-ops — nothing to commit, but the span is covered.
+        committedThroughRev = spanEnd;
       }
+
+      // 6. Advance the frame past this window: expressed after the slice's raw ops, covering
+      //    every source row accounted for above (so the next catch-up folds nothing twice).
+      const nextFrame: WorkingFrame = {
+        sourceRev: Math.max(frame.sourceRev, accountedRev),
+        branchRev: spanEnd,
+        programs: advancedForeign,
+      };
+
+      // 7. Persist watermark + frame atomically; a lost CAS means a concurrent merge won and
+      //    the carry is stale either way.
+      const nextCarry = await this.persistMergeProgress(branch, nextFrame);
+
+      return {
+        changes: byRev([...resumed.own, ...resumed.foreign, ...windowCommitted, ...foldedForeign]),
+        branchRev: spanEnd,
+        carry: carryInvalid ? undefined : nextCarry,
+        drained: false,
+      };
+    } catch (error) {
+      // Every result row is a committed source row this merge observed — including foreign
+      // rows and a concurrent merge's copies (mergeBranch dedups by id). A window that fails
+      // with nothing observed (a fresh merge's first commit failing) propagates unchanged.
+      const observed = byRev([...resumed.own, ...resumed.foreign, ...(result ?? [])]);
+      if (observed.length === 0) throw error;
+      throw new MergeWindowFault(observed, committedThroughRev, error);
     }
-
-    // 6. Advance the frame past this window: expressed after the slice's raw ops, covering
-    //    every source row accounted for above (so the next catch-up folds nothing twice).
-    const nextFrame: WorkingFrame = {
-      sourceRev: Math.max(frame.sourceRev, accountedRev),
-      branchRev: spanEnd,
-      programs: advancedForeign,
-    };
-
-    // 7. Persist watermark + frame atomically; a lost CAS means a concurrent merge won and
-    //    the carry is stale either way.
-    const nextCarry = await this.persistMergeProgress(branch, nextFrame);
-
-    return {
-      changes: byRev([...resumed.own, ...resumed.foreign, ...windowCommitted, ...foldedForeign]),
-      branchRev: spanEnd,
-      carry: carryInvalid ? undefined : nextCarry,
-    };
   }
 
   /**
@@ -892,6 +965,12 @@ export class OTBranchManager implements BranchManager {
    * Returns the reclassified-foreign ids. A genuine gap in the branch log (a pruned log whose
    * oldest retained rev is past the frame's position) throws {@link MergeFrameAlignmentError}:
    * the raw ops the frame needs are permanently gone.
+   *
+   * Cost: classifying an impostor pages through the entire remaining branch log (its id
+   * matches nowhere), so K forged rows cost K × O(branch) paged reads on the next merge.
+   * Only collaborators can mint the batch id, and a genuine run's first match can sit
+   * arbitrarily deep past lift-noops, so there is no safe early cutoff — cap it here if it
+   * ever shows up in a profile.
    */
   private async advanceFrameThroughOwnRun(branchId: string, frame: WorkingFrame, run: Change[]): Promise<Set<string>> {
     const runIds = new Set(run.map(change => change.id));
@@ -953,9 +1032,11 @@ export class OTBranchManager implements BranchManager {
       return { frame, expectedWatermark: branch.lastMergedRev };
     }
     // Persisted programs are a JSON string: the natural array-of-arrays shape is unwritable
-    // as a field value in document stores like Firestore.
+    // as a field value in document stores like Firestore. Measured in real UTF-8 bytes —
+    // document-store size limits count those, and CJK/emoji-heavy content weighs up to 3×
+    // its UTF-16 code-unit count.
     const programs = JSON.stringify(frame.programs);
-    const fits = programs.length <= MAX_PERSISTED_FRAME_BYTES;
+    const fits = utf8ByteLength(programs) <= MAX_PERSISTED_FRAME_BYTES;
     const applied = await advanceMergeWatermark(
       this.store,
       branch.id,
@@ -1308,14 +1389,20 @@ function advanceProgramsThroughQueue(programs: JSONPatchOp[][], queue: Pick<Chan
   ).advancedForeign;
 }
 
+/** Real UTF-8 byte length — `string.length` counts UTF-16 code units, up to 3× lighter. */
+function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
 /**
- * Enforce the window's byte budget for stores that ignore the `maxBytes` read hint. Always
- * keeps at least one change — a single change over budget must still merge.
+ * Enforce the window's byte budget (UTF-8 bytes of the serialized ops) for stores that
+ * ignore the `maxBytes` read hint. Always keeps at least one change — a single change over
+ * budget must still merge.
  */
 function trimToByteBudget(changes: Change[], maxBytes: number): Change[] {
   let bytes = 0;
   for (let i = 0; i < changes.length; i++) {
-    bytes += JSON.stringify(changes[i].ops).length;
+    bytes += utf8ByteLength(JSON.stringify(changes[i].ops));
     if (bytes > maxBytes && i > 0) return changes.slice(0, i);
   }
   return changes;

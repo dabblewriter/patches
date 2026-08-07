@@ -474,6 +474,18 @@ describe('OTBranchManager integration', () => {
       await expect(manager.mergeBranch(branchId)).resolves.toEqual([]);
     });
 
+    it('answers [] for a repeat merge when only the source has moved', async () => {
+      const { store, server, manager, branchId } = await branchWithEdits(5, { maxChangesPerMerge: 2 });
+      await manager.mergeBranch(branchId);
+
+      // Foreign rows alone are the source moving on its own, not this branch merging — and
+      // nothing persists on this path, so reporting them would repeat on every poll.
+      const tip = await store.getCurrentRev('doc1');
+      await server.commitChanges('doc1', [change('f1', tip, '/foreign', 1)]);
+      await expect(manager.mergeBranch(branchId)).resolves.toEqual([]);
+      await expect(manager.mergeBranch(branchId)).resolves.toEqual([]);
+    });
+
     // The point of advancing the watermark per window: a merge that dies part-way is resumable
     // rather than all-or-nothing, so a branch too big to merge in one go still converges.
     it('resumes from the last committed window after a mid-merge failure', async () => {
@@ -1692,7 +1704,14 @@ describe('windowed merge with concurrent source edits', () => {
     await edit('doc1', 's2', [{ retain: 3 }, { delete: 4 }]); // drops " two" from the source
 
     failWatermarkOnce(store);
-    await expect(manager.mergeBranch(branchId)).rejects.toThrow('simulated crash');
+    // Even a FIRST window's commit→watermark crash reports as partial progress — the exact
+    // case where "nothing was changed" would be most tempting and most wrong — carrying the
+    // crashed window's own rows and the foreign row it folded.
+    const error = (await manager.mergeBranch(branchId).catch(e => e)) as MergePartialProgressError;
+    expect(error).toBeInstanceOf(MergePartialProgressError);
+    expect(error.committedChanges.map(c => c.id)).toEqual(['s2', 'b1', 'b2']);
+    expect(error.mergedThroughRev).toBe(3);
+    expect((error.cause as Error).message).toContain('simulated crash');
 
     // The first window's commit landed; its watermark write did not.
     const partial = await changeIds(store, 'doc1');
@@ -1970,6 +1989,71 @@ describe('windowed merge with concurrent source edits', () => {
     }
   });
 
+  // One commit result can interleave foreign rows AROUND our own rows — foreign below the
+  // echoes, foreign above them. Each run folds through what remains of the as-sent queue at
+  // its position: the first through everything, the last through nothing.
+  it('folds multiple foreign runs from one window commit through the right suffixes', async () => {
+    async function sequential() {
+      const { server, manager, branchId, edit } = await seededSource('alpha beta gamma');
+      await edit(branchId, 'b1', [{ insert: '<b1>' }]);
+      await edit(branchId, 'b2', [{ retain: 20 }, { insert: '<b2>' }]);
+      await edit('doc1', 'f0', [{ retain: 6 }, { insert: '<f0>' }]);
+      await manager.mergeBranch(branchId);
+      await edit('doc1', 'f1', [{ retain: 12 }, { insert: '<f1>' }]);
+      await edit(branchId, 'b3', [{ retain: 10 }, { insert: '<b3>' }]);
+      await manager.mergeBranch(branchId);
+      return bodyText((await coldLoad(server, 'doc1')).state);
+    }
+
+    // The loser parks holding its slice; f0 lands, the winner merges the slice, f1 lands.
+    // The loser's resend then answers with [f0, b1, b2, f1] in one result.
+    async function race() {
+      const { store, server, manager, branchId, edit } = await seededSource('alpha beta gamma');
+      await edit(branchId, 'b1', [{ insert: '<b1>' }]);
+      await edit(branchId, 'b2', [{ retain: 20 }, { insert: '<b2>' }]);
+
+      let release!: () => void;
+      let reached!: () => void;
+      const parked = new Promise<void>(resolve => (release = resolve));
+      const atSlice = new Promise<void>(resolve => (reached = resolve));
+      const realListChanges = store.listChanges.bind(store);
+      let parkedOnce = false;
+      store.listChanges = async (docId, options) => {
+        const rows = await realListChanges(docId, options);
+        if (!parkedOnce && docId === branchId && options?.maxBytes !== undefined) {
+          parkedOnce = true;
+          reached();
+          await parked;
+        }
+        return rows;
+      };
+
+      const losing = new OTBranchManager(store, server).mergeBranch(branchId);
+      await atSlice;
+      await edit('doc1', 'f0', [{ retain: 6 }, { insert: '<f0>' }]);
+      await manager.mergeBranch(branchId);
+      await edit('doc1', 'f1', [{ retain: 12 }, { insert: '<f1>' }]);
+      release();
+      const loser = await losing;
+
+      await edit(branchId, 'b3', [{ retain: 10 }, { insert: '<b3>' }]);
+      await manager.mergeBranch(branchId);
+      return {
+        loser,
+        ids: await changeIds(store, 'doc1'),
+        text: bodyText((await coldLoad(server, 'doc1')).state),
+      };
+    }
+
+    const expected = await sequential();
+    const { loser, ids, text } = await race();
+    expect(loser.map(c => c.id)).toEqual(['f0', 'b1', 'b2', 'f1']);
+    expectRevDense(loser);
+    expect(ids).toEqual(['s1', 'f0', 'b1', 'b2', 'f1', 'b3']);
+    // A run folded through the wrong suffix would shift the next merge's insert.
+    expect(text).toBe(expected);
+  });
+
   // A window failing after an earlier one committed is not "nothing happened": the prefix is
   // permanent and the error has to say so, or consumers tell users a merge left no trace.
   it('reports partial progress when a later window fails, and resumes on retry', async () => {
@@ -1984,16 +2068,21 @@ describe('windowed merge with concurrent source edits', () => {
 
     const error = (await manager.mergeBranch(branchId).catch(e => e)) as MergePartialProgressError;
     expect(error).toBeInstanceOf(MergePartialProgressError);
-    expect(error.committedChanges.map(c => c.id)).toEqual(['b1']);
-    expect(error.mergedThroughRev).toBe(2);
+    // The crashed window's committed rows ride in the error too — classification keys on
+    // "did the commit land", not "did the window return".
+    expect(error.committedChanges.map(c => c.id)).toEqual(['b1', 'b2']);
+    expect(error.mergedThroughRev).toBe(3);
     expect((error.cause as Error).message).toContain('simulated crash');
 
     const retried = await manager.mergeBranch(branchId);
     expectRevDense(retried);
+    // The retry resumes past the durable watermark (b1's window), re-observing the crashed
+    // window's rows and committing the rest.
+    expect(retried.map(c => c.id)).toEqual(['b2', 'b3']);
 
-    // Every branch change is reported exactly once across the failure and the retry...
-    const reported = [...error.committedChanges, ...retried].map(c => c.id).filter(id => id.startsWith('b'));
-    expect(reported.sort()).toEqual(['b1', 'b2', 'b3']);
+    // Every branch change is reported across the failure and the retry...
+    const reported = new Set([...error.committedChanges, ...retried].map(c => c.id).filter(id => id.startsWith('b')));
+    expect([...reported].sort()).toEqual(['b1', 'b2', 'b3']);
     // ...and landed on the source exactly once.
     expect(await changeIds(store, 'doc1')).toEqual(['s1', 'b1', 'b2', 'b3']);
     expect((await store.loadBranch(branchId))!.lastMergedRev).toBe(await store.getCurrentRev(branchId));
@@ -2096,7 +2185,7 @@ describe('windowed merge with concurrent source edits', () => {
     // The branch log is compacted below the watermark, and the frame that would have skipped
     // the rebuild is gone (an oversized frame is cleared, not stored).
     store.pruneChangesThrough(branchId, (await store.loadBranch(branchId))!.lastMergedRev!);
-    await store.updateBranch(branchId, { mergeFrame: null } as any);
+    await store.updateBranch(branchId, { mergeFrame: null });
 
     await expect(manager.mergeBranch(branchId)).rejects.toBeInstanceOf(MergeFrameAlignmentError);
   });

@@ -51,8 +51,16 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         this.state = applyChangesToState(this._committedState, this._pendingChanges);
       } catch {
         // Pending changes are corrupt (conflicting ops from accumulated sessions).
-        // Apply one-by-one, skipping changes that fail. Later changes created on
+        // Apply one-by-one, dropping changes that fail. Later changes created on
         // committed state may still apply even when earlier ones conflict.
+        //
+        // Dropping (not keeping) is deliberate for liveness: a change that fails strict
+        // apply here would also fail server-side at flush, and a rejected change at the
+        // head of the queue wedges every commit behind it. But the drop must never be
+        // SILENT — the next pending persist makes the truncation permanent, which is
+        // user work destroyed with zero signal. Each dropped change is captured on
+        // `droppedPendingChanges` so `Patches.openDoc` surfaces it via
+        // `onPendingDropped` and the app can preserve the content.
         let state = this._committedState;
         const valid: Change[] = [];
         for (const c of this._pendingChanges) {
@@ -60,11 +68,25 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
             state = applyPatch(state, c.ops, { strict: true });
             valid.push(c);
           } catch {
-            // Skip this corrupt change
+            this.droppedPendingChanges.push(c);
           }
         }
         this._pendingChanges = valid;
         this.state = state;
+        // Hardcoded console.error rather than an onSkippedChange-style hook (the
+        // convention applyChangesForReconstruction uses): the constructor is invoked
+        // through ClientAlgorithm.createDoc(docId, snapshot), which has no options
+        // plumb-through, and no consumer can have subscribed to anything yet. The
+        // structured channel is Patches.onPendingDropped, emitted from openDoc right
+        // after construction — this log is the fallback signal for non-Patches hosts
+        // and for drops that occur before any subscriber exists. Ids and revs only,
+        // never content.
+        console.error(
+          `OTDoc(${id}): dropped ${this.droppedPendingChanges.length} of ${
+            this.droppedPendingChanges.length + valid.length
+          } pending changes at hydration (failed strict apply against rev ${this._committedRev}):`,
+          this.droppedPendingChanges.map(c => `${c.id}@${c.rev}`).join(', ')
+        );
       }
     }
     this._checkLoaded();

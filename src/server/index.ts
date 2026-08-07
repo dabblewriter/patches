@@ -7,6 +7,8 @@ export type { BranchManager } from './BranchManager.js';
 export { LWWBranchManager } from './LWWBranchManager.js';
 export {
   MergeContentDuplicationError,
+  MergeFrameAlignmentError,
+  MergePartialProgressError,
   OTBranchManager,
   type ContentDuplicationGuardOptions,
   type MergeBranchOptions,

@@ -41,7 +41,7 @@ Patches supports two sync algorithms, and each has its own branch manager:
 **OT branching** (via `OTBranchManager`) works like git. The branch captures the source at a specific revision. When merging, the system checks if the source has new changes since the branch was created:
 
 - **Fast-forward merge:** No concurrent changes on source. Branch changes become part of the main timeline as-is.
-- **Divergent merge:** Source has new changes. Each branch change is re-stamped with `baseRev` at the branch point and `batchId: branchId`, then transformed individually against concurrent source changes.
+- **Divergent merge:** Source has new changes. Branch changes are lifted through the merge frame — the source's concurrent changes re-expressed in the branch's frame — and committed at the source tip in bounded windows, each stamped `batchId: branchId`.
 
 **LWW branching** (via `LWWBranchManager`) is simpler. Each field carries a timestamp. When merging, timestamps resolve conflicts automatically. No transformation needed. Later timestamp wins.
 
@@ -147,28 +147,30 @@ Source: [rev 40] [rev 41] [rev 42] [rev 43 (Bob)] [rev 44 (Carol)] ────�
 
 When Alice merges her branch:
 
-1. Branch versions get copied to source with `origin: 'branch'` in version metadata
-2. Unmerged branch changes (since `lastMergedRev`) are re-stamped with `baseRev` set to the branch point and `batchId: branchId`
-3. Original change IDs are preserved — this makes merges idempotent (safe to retry if the network drops after commit but before acknowledgment)
-4. `commitChanges` uses the `batchId` to skip transformation against previously-merged changes from the same branch (they share the same causal context)
-5. Each change gets transformed individually against truly concurrent source changes
-6. `lastMergedRev` is updated on the branch record
+1. Unmerged branch changes (since `lastMergedRev`) merge in bounded **windows** (at most `maxChangesPerMerge` changes and `maxBytesPerMergeWindow` serialized bytes each), so the merge's cost scales with the window, not the branch's age
+2. The **merge frame** — the source's concurrent changes re-expressed in the branch's frame — lifts each window's changes to the source tip before commit; the frame advances through each window's raw ops for the next one (this is the advance half of the OT diamond, carried explicitly instead of re-derived from a full queue)
+3. Each window commits with `batchId: branchId` and its original change IDs preserved — the store's write-time id guard makes retries and concurrent merges idempotent (safe to retry if the network drops after commit but before acknowledgment)
+4. Branch versions whose span a window covers get copied to source with `origin: 'branch'` in version metadata
+5. `lastMergedRev` and the frame are updated on the branch record together after each window
 
-Why `batchId`? All changes in a branch are created in the context of each other. Change 500 knows about change 5, even across multiple merges. Using the branch ID as the batch ID ensures they're never transformed against each other.
+Why `batchId`? All changes in a branch are created in the context of each other. Change 500 knows about change 5, even across multiple merges. Using the branch ID as the batch ID ensures they're never transformed against each other — while the frame ensures the source's changes still meet each window at the right offsets.
 
 Why preserve original changes instead of flattening? Idempotency. If changes are flattened into a new change with a new ID, a retry after a failed acknowledgment would create a duplicate with a different ID — the server can't detect it as a duplicate, and the document gets corrupted. Preserving original IDs means the server's ID-based deduplication catches retries automatically. This also enables offline merge: two clients merging the same branch produce identical change IDs, so deduplication prevents corruption.
 
 ### Merge Retry and Concurrency Safety
 
-The merge commit and the `lastMergedRev` update are separate writes, so a crash or timeout can land between them, and nothing serializes two merges of the same branch. Instead of a transaction, merges rely on three properties:
+Each window's commit and the watermark update are separate writes, so a crash or timeout can land between them, and nothing serializes two merges of the same branch. Instead of a transaction, merges rely on four properties:
 
-1. **Idempotent commit.** Merged changes keep their original branch change ids, and the merge base — which defines the server's `listChanges(startAfter: baseRev)` dedup window — is stable across attempts. For a branch whose `branchedAtRev` is ahead of the source tip (a migrated/renumbered doc), the clamped base is pinned on the branch record as `mergeBaseRev` _before_ anything is committed; recomputing `min(branchedAtRev, tip)` on retry would use a higher base once the first attempt's own commits advanced the tip, and the already-committed copies below it would escape deduplication and apply twice.
-2. **Watermark from the merged batch.** `lastMergedRev` is set to the highest branch rev in the batch actually read and committed — never the branch tip — so an edit landing on the branch mid-merge stays uncovered and is picked up by the next merge.
-3. **Forward-only watermark.** When the store implements the optional `updateBranchIf` compare-and-set capability, the watermark update is conditioned on the value observed at merge start; a losing CAS re-reads and reconciles (skipping the write when a concurrent merge already covered the batch) instead of blindly overwriting. Stores without the capability keep non-atomic max-wins semantics.
+1. **Write-time id guard.** Merged changes keep their original branch change ids, and the store's mandatory `[docId, change.id]` uniqueness enforcement (`OTStoreBackend.saveChanges`) resolves any re-send of already-committed changes as a resend instead of applying it twice. Windowed commits advance `baseRev` past earlier windows, so the read-side dedup cannot cover this — the store guard is load-bearing.
+2. **Frame catch-up.** A merge that finds its own committed rows above the frame's source position — a crash-resume's prefix, or a concurrent merge's windows — advances the frame through those rows' raw branch ops (from the branch log) before proceeding, exactly as if it had committed them itself. The merge base stays pinned (`mergeBaseRev` for clamped branches) so every attempt anchors the same frame.
+3. **Watermark from the merged batch.** `lastMergedRev` is set to the highest branch rev in the window actually read and committed — never the branch tip — so an edit landing on the branch mid-merge stays uncovered and is picked up by the next merge.
+4. **Forward-only watermark.** When the store implements the optional `updateBranchIf` compare-and-set capability, the watermark update (frame riding along) is conditioned on the value observed at window start; a losing CAS drops the merge's in-memory carry, and the next window adopts the winner's persisted state. Stores without the capability keep non-atomic max-wins semantics.
 
 Copied versions get the same treatment: the source copy keeps the branch version's id (version ids are namespaced per doc), so a retried or concurrent merge detects an existing copy and skips it instead of duplicating it.
 
-`lastMergedRev` and `mergeBaseRev` are server-managed: values arriving in client-supplied metadata (whole branch records sync through `PatchesSync`) are silently stripped on both create and update.
+A merge that fails after anything committed — a later window's fault, a crash between a window's commit and its watermark write (even the first window's), a stalled cursor, or the per-call window cap — throws `MergePartialProgressError` carrying the committed changes and the branch rev content is durably merged through. The committed prefix is permanent and a retry resumes and completes it; consumers must not present this error as "nothing was changed". Deterministic refusals (e.g. `MergeContentDuplicationError`) decide before the first window commits and throw their original error — those genuinely leave no trace. A repeat merge with nothing new on the branch returns `[]` even when the source has moved on its own.
+
+`lastMergedRev`, `mergeBaseRev` and `mergeFrame` are server-managed: values arriving in client-supplied metadata (whole branch records sync through `PatchesSync`) are silently stripped on both create and update.
 
 ### LWW Merge Approach
 

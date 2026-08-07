@@ -145,6 +145,19 @@ export interface Branch {
    */
   mergeBaseRev?: number;
 
+  /**
+   * The merge frame persisted by windowed merges: the source's concurrent (foreign) changes
+   * re-expressed in the branch's frame after every branch change at or below `lastMergedRev`.
+   * `sourceRev` is the source revision the frame covers — foreign changes at or below it are
+   * folded in; the merge folds newer ones on demand. Written atomically alongside
+   * `lastMergedRev` so the two never diverge; absent (legacy branches, or a frame too large
+   * to persist) the merge rebuilds it from the branch's raw change log. `null` is a real
+   * persisted state — the frame was explicitly cleared (an oversized frame, written atomically
+   * with the watermark it can no longer accompany) — distinct from absent. Server-managed like
+   * `lastMergedRev`; client-supplied values are stripped.
+   */
+  mergeFrame?: MergeFrame | null;
+
   /** The pending operation to sync to the server. Set by BranchClientStore methods. */
   pendingOp?: 'create' | 'update' | 'delete';
 
@@ -153,6 +166,29 @@ export interface Branch {
 
   /** Optional arbitrary metadata associated with the branch record. */
   [metadata: string]: any;
+}
+
+/**
+ * The foreign half of the merge's OT diamond, carried between merge windows: the source's
+ * concurrent changes advanced through the branch's raw ops so far. See `Branch.mergeFrame`.
+ */
+export interface MergeFrame {
+  /** The source revision this frame covers; foreign changes at or below are folded in. */
+  sourceRev: number;
+  /**
+   * The branch revision this frame is expressed after — the frame's programs are the foreign
+   * ops advanced through every branch change at or below it. Always at or below
+   * `lastMergedRev`; when below (a persist was skipped), the merge advances the frame through
+   * the branch's raw log across the gap before using it.
+   */
+  branchRev: number;
+  /**
+   * The foreign ops in commit order, re-expressed in the branch's merged frame — a
+   * JSON-serialized `JSONPatchOp[][]`. Serialized because the natural shape is an array of
+   * arrays, which document stores like Firestore refuse to write as a field value; a string
+   * survives every backend and every sync path unchanged.
+   */
+  programs: string;
 }
 
 export type EditableBranchMetadata = Disallowed<
@@ -307,6 +343,13 @@ export interface ListChangesOptions {
   reverse?: boolean;
   /** Filter out changes that have the given batch ID. */
   withoutBatchId?: string;
+  /**
+   * Advisory size bound: stores that track per-change stored size should stop reading once
+   * the accumulated size passes this many bytes (always returning at least one change).
+   * Bounds a bulk read on both axes — `limit` alone caps document count, not memory.
+   * Stores without size accounting may ignore it; callers must tolerate larger results.
+   */
+  maxBytes?: number;
 }
 
 /**

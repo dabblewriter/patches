@@ -1,4 +1,5 @@
 import { transformPatch } from '../../../json-patch/transformPatch.js';
+import type { JSONPatchOp } from '../../../json-patch/types.js';
 import type { Change } from '../../../types.js';
 
 /**
@@ -37,7 +38,28 @@ export function transformIncomingChanges(
   forceCommit = false,
   isOwnCommitted?: (change: Change) => boolean
 ): Change[] {
+  return transformIncomingChangesWithFrame(changes, committedChanges, currentRev, forceCommit, isOwnCommitted).changes;
+}
+
+/**
+ * The walk of {@link transformIncomingChanges}, also returning the advanced foreign ops.
+ *
+ * Each foreign committed change finishes its walk re-expressed in the frame *after* the
+ * queue's raw ops — `advancedForeign[i]` is that final form, in committed order, with
+ * own-committed echoes excluded and advanced-to-empty programs dropped. This is the half of
+ * the OT diamond the plain walk discards, and it is what a windowed branch merge must carry
+ * between windows: the next window's changes were minted on top of this queue, so the foreign
+ * ops they transform against are exactly these, not the raw committed forms.
+ */
+export function transformIncomingChangesWithFrame(
+  changes: Change[],
+  committedChanges: Change[],
+  currentRev: number,
+  forceCommit = false,
+  isOwnCommitted?: (change: Change) => boolean
+): { changes: Change[]; advancedForeign: JSONPatchOp[][] } {
   const queue = changes.map(change => ({ change, ops: change.ops }));
+  const advancedForeign: JSONPatchOp[][] = [];
 
   for (const committed of committedChanges) {
     if (isOwnCommitted?.(committed)) {
@@ -57,6 +79,7 @@ export function transformIncomingChanges(
       committedOps = transformPatch(null, entry.ops, committedOps, undefined, true);
       entry.ops = transformed;
     }
+    if (committedOps.length > 0) advancedForeign.push(committedOps);
   }
 
   let rev = currentRev + 1;
@@ -65,5 +88,5 @@ export function transformIncomingChanges(
     if (entry.ops.length === 0 && !forceCommit) continue; // Change is obsolete after transformation
     result.push({ ...entry.change, rev: rev++, ops: entry.ops });
   }
-  return result;
+  return { changes: result, advancedForeign };
 }

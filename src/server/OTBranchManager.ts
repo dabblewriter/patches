@@ -103,10 +103,12 @@ export interface OTBranchManagerOptions {
    */
   maxChangesPerMerge?: number;
   /**
-   * Maximum serialized ops bytes per merge window — the second axis of the window bound
-   * (`maxChangesPerMerge` caps document count; this caps memory for branches carrying large
-   * changes). Passed to the store as a read hint (`ListChangesOptions.maxBytes`) and enforced
-   * in memory after the read. Defaults to {@link DEFAULT_MERGE_WINDOW_BYTES}.
+   * Maximum serialized ops bytes (UTF-8) per merge window — the second axis of the window
+   * bound (`maxChangesPerMerge` caps document count). Always caps the transform/commit side:
+   * enforced in memory after the read, so an over-budget read is trimmed before any work.
+   * Caps the read side only when the store honours the `ListChangesOptions.maxBytes` hint —
+   * a store that ignores it still reads up to `maxChangesPerMerge` changes per window before
+   * the trim. Defaults to {@link DEFAULT_MERGE_WINDOW_BYTES}.
    */
   maxBytesPerMergeWindow?: number;
 }
@@ -720,11 +722,13 @@ export class OTBranchManager implements BranchManager {
         cause = error.cause;
       }
       if (committed.length > 0) {
-        throw new MergePartialProgressError(branchId, committed, mergedThroughRev, cause);
+        throw new MergePartialProgressError(branchId, byRev(committed), mergedThroughRev, cause);
       }
       throw cause;
     }
-    return committed;
+    // Ascending rev order held by construction on every path traced, but the consumer takes
+    // result[0]/result[last] as the span bounds and applies in order — make it contractual.
+    return byRev(committed);
   }
 
   /**
@@ -772,6 +776,32 @@ export class OTBranchManager implements BranchManager {
       maxBytes: windowBytes,
     });
     slice = trimToByteBudget(slice, windowBytes);
+
+    if (slice.length === 0) {
+      // An empty slice is the merge's completion signal, so verify it against the branch tip
+      // before trusting it: a store bug returning an empty read mid-log would otherwise end
+      // the merge with the watermark short — a silent under-merge. A branch edit landing
+      // between the two reads is indistinguishable from that here, so re-read once; rows
+      // resolve the race (the window proceeds), a second empty read is the store lying.
+      const branchTip = await this.store.getCurrentRev(branchId);
+      if (branchTip > frame.branchRev) {
+        slice = trimToByteBudget(
+          await this.store.listChanges(branchId, {
+            startAfter: frame.branchRev,
+            limit: windowChanges,
+            maxBytes: windowBytes,
+          }),
+          windowBytes
+        );
+        if (slice.length === 0) {
+          throw new Error(
+            `listChanges(${branchId}) returned an empty slice after rev ${frame.branchRev} while the ` +
+              `branch tip is ${branchTip} — the store violated the read contract; treating this as ` +
+              `completion would leave the merge silently short.`
+          );
+        }
+      }
+    }
 
     if (slice.length === 0) {
       // Nothing new to merge. Persist any progress the catch-up made (a pure resume), then
@@ -1167,7 +1197,12 @@ export class OTBranchManager implements BranchManager {
     const branch = await this.store.loadBranch(branchId);
     assertBranchExists(branch, branchId);
     const sourceDocId = branch.docId;
-    const mergeBase = await this.resolveMergeBase(branch);
+    // The guard needs only a read floor for the resend-exclusion corpus, never the pin
+    // `resolveMergeBase` may write: a refusal must leave the branch record as untouched as
+    // the source. An unpinned clamp floor can only sit lower than the pin would, which adds
+    // genuinely committed ids to the exclusion corpus — safe in the refusal direction.
+    const mergeBase =
+      branch.mergeBaseRev ?? Math.min(branch.branchedAtRev, await this.store.getCurrentRev(sourceDocId));
     const startAfterBranch = branch.lastMergedRev ?? (branch.contentStartRev ?? 2) - 1;
 
     // A retry after a crash in the commit→watermark window re-walks changes the source has

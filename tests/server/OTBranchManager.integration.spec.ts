@@ -1808,6 +1808,34 @@ describe('windowed merge with concurrent source edits', () => {
     expect((await store.loadBranch(branchId))!.lastMergedRev).toBeUndefined();
   });
 
+  // A refusal must leave the BRANCH record as untouched as the source: the guard computes
+  // its read floor without `resolveMergeBase`'s pin, so a clamped branch refused by the
+  // guard carries no `mergeBaseRev` from the attempt.
+  it('refuses a clamped branch without pinning its merge base', async () => {
+    const BODY = 'Chapter one. The grey cat sat by the window.\n';
+    const { store, server, manager } = setup({
+      contentDuplicationGuard: { action: 'refuse', minLength: 16 },
+    });
+    await server.commitChanges('doc1', [rootChange('s1', { body: { ops: [{ insert: BODY }] } })]);
+
+    const branchId = 'branchGuardClamped';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: 2 }); // undercounts the seed
+    await store.saveChanges(branchId, [
+      createChange(0, 1, [{ op: 'replace', path: '', value: { body: { ops: [] } } }], { committedAt: 0 }) as Change,
+      createChange(1, 2, [txtOp('/body', [{ insert: BODY }])], { committedAt: 0 }) as Change,
+    ]);
+    // A renumbered source leaves branchedAtRev ahead of the tip — the clamp case.
+    await store.updateBranch(branchId, { branchedAtRev: 99 } as any);
+
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(manager.mergeBranch(branchId)).rejects.toBeInstanceOf(MergeContentDuplicationError);
+    err.mockRestore();
+
+    const branch = (await store.loadBranch(branchId))!;
+    expect(branch.mergeBaseRev).toBeUndefined();
+    expect(branch.lastMergedRev).toBeUndefined();
+  });
+
   // The window's second axis: a branch of few but large changes is bounded on bytes, not count.
   it('bounds a window by its byte budget', async () => {
     const filler = 'x'.repeat(1_000);
@@ -1833,6 +1861,44 @@ describe('windowed merge with concurrent source edits', () => {
     const ids = await changeIds(store, 'doc1');
     expect(new Set(ids).size).toBe(ids.length);
     listChanges.mockRestore();
+  });
+
+  // The empty slice is the completion signal, and completing with rows still unread is a
+  // silent under-merge — so the merge verifies the signal against the branch tip. A store
+  // that stands by its empty read while the tip says otherwise fails loudly.
+  it('rejects a store whose empty window read contradicts the branch tip', async () => {
+    const { store, manager, branchId, edit } = await seededSource('one two three');
+    await edit(branchId, 'b1', [{ insert: '[1]' }]);
+
+    const real = store.listChanges.bind(store);
+    store.listChanges = async (docId, options) => {
+      if (docId === branchId && options?.maxBytes !== undefined) return [];
+      return real(docId, options);
+    };
+
+    await expect(manager.mergeBranch(branchId)).rejects.toThrow('violated the read contract');
+    expect((await store.loadBranch(branchId))!.lastMergedRev).toBeUndefined();
+  });
+
+  // ...but one transient empty read is indistinguishable from an edit landing between the
+  // slice read and the tip read, so the merge re-reads once instead of crying store bug.
+  it('re-reads once when an empty window read races a landing edit', async () => {
+    const { store, server, manager, branchId, edit } = await seededSource('one two three');
+    await edit(branchId, 'b1', [{ insert: '[1]' }]);
+
+    const real = store.listChanges.bind(store);
+    let lied = false;
+    store.listChanges = async (docId, options) => {
+      if (!lied && docId === branchId && options?.maxBytes !== undefined) {
+        lied = true;
+        return [];
+      }
+      return real(docId, options);
+    };
+
+    const committed = await manager.mergeBranch(branchId);
+    expect(committed.map(c => c.id)).toEqual(['b1']);
+    expect(bodyText((await coldLoad(server, 'doc1')).state)).toBe('[1]one two three\n');
   });
 
   // A window whose slice lifts to nothing still has to account for the foreign row that

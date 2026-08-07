@@ -428,9 +428,13 @@ describe('OTBranchManager', () => {
      * Route change reads by document: the branch log serves the merge window (honouring its
      * cursor), the source log is empty unless a test says otherwise. A single mock answering
      * for both would feed the branch's own changes back to the frame catch-up as foreign
-     * source changes.
+     * source changes. The branch's `getCurrentRev` answers from the same log — the merge
+     * verifies its completion signal against the tip, so the two must agree.
      */
+    let currentBranchLog: Change[] = [];
+    let sourceTip = 5;
     function branchLog(changes: Change[], sourceChanges: Change[] = []) {
+      currentBranchLog = changes;
       vi.mocked(mockStore.listChanges).mockImplementation(async (docId, options = {}) => {
         const log = docId === 'branch1' ? changes : sourceChanges;
         const rows = log.filter(c => c.rev > (options.startAfter ?? 0));
@@ -450,8 +454,12 @@ describe('OTBranchManager', () => {
         Object.assign(branchRecord, updates);
       });
       // Healthy branch: the source's current rev is at or beyond branchedAtRev,
-      // so the merge-base clamp is a no-op and baseRev stays at branchedAtRev.
-      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(5);
+      // so the merge-base clamp is a no-op and baseRev stays at branchedAtRev. Tests
+      // override the SOURCE tip via `sourceTip = n`; the branch tip tracks its log.
+      sourceTip = 5;
+      vi.mocked(mockStore.getCurrentRev).mockImplementation(async docId =>
+        docId === 'branch1' ? (currentBranchLog[currentBranchLog.length - 1]?.rev ?? 0) : sourceTip
+      );
       branchLog(mockBranchChanges);
       // The branch's versions are the ones to copy; the source carries no main version of its
       // own unless a test gives it one, so the first copy has nothing to chain to.
@@ -515,7 +523,7 @@ describe('OTBranchManager', () => {
       // the source tip (294) so the branch's edits rebase onto the real head.
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       branchRecord = { ...mockBranch, branchedAtRev: 295 };
-      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(294);
+      sourceTip = 294;
 
       const committedChanges = mockBranchChanges.map((c, i) => ({
         ...c,
@@ -549,7 +557,7 @@ describe('OTBranchManager', () => {
       // higher — so previously committed merge changes stay inside the dedup window.
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       branchRecord = { ...mockBranch, branchedAtRev: 295, mergeBaseRev: 290 };
-      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(296);
+      sourceTip = 296;
 
       vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: [] });
 
@@ -578,7 +586,7 @@ describe('OTBranchManager', () => {
       });
       mockStore.updateBranchIf = updateBranchIf;
       branchRecord = { ...mockBranch, branchedAtRev: 295 };
-      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(294);
+      sourceTip = 294;
       vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: [] });
 
       await branchManager.mergeBranch('branch1');
@@ -605,7 +613,7 @@ describe('OTBranchManager', () => {
       });
       mockStore.updateBranchIf = updateBranchIf;
       branchRecord = { ...mockBranch, branchedAtRev: 295 };
-      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(294);
+      sourceTip = 294;
       vi.mocked(mockServer.commitChanges).mockResolvedValue({ changes: [] });
 
       await branchManager.mergeBranch('branch1');

@@ -196,6 +196,12 @@ export class Patches {
    * flush and wedge the queue — but it discards real user work, so consumers should
    * preserve the payload (shelve it, surface it) rather than let it vanish. Emitted once
    * per open that observed drops; the changes carried are the dropped ones only.
+   *
+   * Handlers run BEFORE the doc is registered: the emit sits inside the open, ahead of
+   * `docs.set` (deliberately — it is the only moment nothing can have persisted the
+   * truncated queue yet). Inside a handler, `getOpenDoc(docId)` returns undefined, and
+   * awaiting `openDoc(docId)` re-enters an open that has not resolved. Persist the
+   * payload elsewhere (a shelf, telemetry) and return.
    */
   readonly onPendingDropped = signal<(docId: string, dropped: Change[]) => void>();
 

@@ -219,22 +219,22 @@ describe('OTDoc — hydration with corrupt pending', () => {
   });
 });
 
-describe('BaseDoc — optimisticOpsCount', () => {
+describe('BaseDoc — optimisticBatchCount', () => {
   it('counts in-flight optimistic batches that hasPending cannot see', () => {
     const doc = new OTDoc<TestDoc>('doc-1', makeSnapshot({ title: 'hello', count: 0 }, 5));
-    expect(doc.optimisticOpsCount).toBe(0);
+    expect(doc.optimisticBatchCount).toBe(0);
 
     doc.change((patch, path) => patch.replace(path.title, 'world'));
 
     // The exact window that produced DAB-854 false positives: `state` carries the op,
     // the pending queue does not, and hasPending reads false.
     expect(doc.hasPending).toBe(false);
-    expect(doc.optimisticOpsCount).toBe(1);
+    expect(doc.optimisticBatchCount).toBe(1);
 
     // Local confirmation moves the change into pending and shifts the optimistic queue.
     const ops = (doc.onChange.emit as any).mock.calls[0][0];
     doc.applyChanges([makeChange('c1', 5, 6, ops, false)]);
-    expect(doc.optimisticOpsCount).toBe(0);
+    expect(doc.optimisticBatchCount).toBe(0);
     expect(doc.hasPending).toBe(true);
   });
 });

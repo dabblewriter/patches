@@ -87,14 +87,15 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
   abstract get hasPending(): boolean;
 
   /**
-   * Count of op batches applied optimistically to `state` but not yet confirmed into the
-   * pending tier. NOT covered by `hasPending`: between change() and its applyChanges()
-   * confirmation this is non-zero while `hasPending` can read false — so `state` differs
-   * from the committed frame in a window `hasPending` cannot see. Consumers comparing
-   * state against a committed snapshot (audits, divergence heals) must gate on this too,
-   * or compare committed frames instead.
+   * Count of op BATCHES applied optimistically to `state` but not yet confirmed into the
+   * pending tier — one per un-confirmed change() call, NOT a count of individual ops
+   * (each batch may carry many). NOT covered by `hasPending`: between change() and its
+   * applyChanges() confirmation this is non-zero while `hasPending` can read false — so
+   * `state` differs from the committed frame in a window `hasPending` cannot see.
+   * Consumers comparing state against a committed snapshot (audits, divergence heals)
+   * must gate on this too, or compare committed frames instead.
    */
-  get optimisticOpsCount(): number {
+  get optimisticBatchCount(): number {
     return this._optimisticOps.length;
   }
 

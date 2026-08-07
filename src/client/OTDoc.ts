@@ -73,6 +73,14 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         }
         this._pendingChanges = valid;
         this.state = state;
+        // Hardcoded console.error rather than an onSkippedChange-style hook (the
+        // convention applyChangesForReconstruction uses): the constructor is invoked
+        // through ClientAlgorithm.createDoc(docId, snapshot), which has no options
+        // plumb-through, and no consumer can have subscribed to anything yet. The
+        // structured channel is Patches.onPendingDropped, emitted from openDoc right
+        // after construction — this log is the fallback signal for non-Patches hosts
+        // and for drops that occur before any subscriber exists. Ids and revs only,
+        // never content.
         console.error(
           `OTDoc(${id}): dropped ${this.droppedPendingChanges.length} of ${
             this.droppedPendingChanges.length + valid.length

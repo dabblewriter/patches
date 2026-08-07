@@ -189,6 +189,15 @@ export class Patches {
    * un-surfaced). At-least-once: consumers should key on docId + changeId.
    */
   readonly onChangeQuarantined = signal<(docId: string, quarantined: QuarantinedChange) => void>();
+  /**
+   * Emitted from openDoc when hydration dropped pending changes that failed strict apply
+   * against the snapshot's committed state (see BaseDoc.droppedPendingChanges). The drop
+   * is required for liveness — a change the local state rejects would also be rejected at
+   * flush and wedge the queue — but it discards real user work, so consumers should
+   * preserve the payload (shelve it, surface it) rather than let it vanish. Emitted once
+   * per open that observed drops; the changes carried are the dropped ones only.
+   */
+  readonly onPendingDropped = signal<(docId: string, dropped: Change[]) => void>();
 
   constructor(opts: PatchesOptions) {
     this.options = opts;
@@ -423,6 +432,16 @@ export class Patches {
       // Wire up flush() so it can await the in-flight change queue for this doc.
       const baseDoc = doc as unknown as BaseDoc<any>;
       baseDoc._setFlushAwaiter(() => this._changeQueues.get(docId));
+
+      // Hydration dropped pending changes (strict-apply failures — see the constructor
+      // recovery in OTDoc). Surface them BEFORE any consumer can persist the truncated
+      // queue: this signal is the only moment the dropped payload is still in hand.
+      // Probed structurally — createDoc's contract returns a PatchesDoc, which need not
+      // extend BaseDoc (custom doc classes, test doubles).
+      const dropped = (doc as { droppedPendingChanges?: Change[] }).droppedPendingChanges;
+      if (dropped && dropped.length > 0) {
+        this.onPendingDropped.emit(docId, [...dropped]);
+      }
 
       // Set up local listener -> algorithm handles packaging ops
       const unsubscribe = doc.onChange(ops => this._handleDocChange(docId, ops, doc, algorithm, mergedMetadata));
@@ -681,6 +700,7 @@ export class Patches {
 
     this.onChange.clear();
     this.onChangeQuarantined.clear();
+    this.onPendingDropped.clear();
     this.onDeleteDoc.clear();
     this.onUntrackDocs.clear();
     this.onTrackDocs.clear();

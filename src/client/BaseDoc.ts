@@ -40,6 +40,15 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
    */
   protected _optimisticOps: JSONPatchOp[][] = [];
 
+  /**
+   * Pending changes discarded during hydration because they failed strict apply against
+   * the snapshot's committed state (see OTDoc's constructor recovery). Empty for a clean
+   * hydration. Populated by subclasses BEFORE the constructor returns, so `Patches.openDoc`
+   * can surface the loss (`onPendingDropped`) instead of it vanishing silently — dropped
+   * changes are permanent once the next pending write persists the truncated queue.
+   */
+  readonly droppedPendingChanges: Change[] = [];
+
   /** Current sync status of this document. */
   readonly syncStatus = store<DocSyncStatus>('unsynced');
 
@@ -76,6 +85,18 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
 
   /** Are there local changes that haven't been committed yet? */
   abstract get hasPending(): boolean;
+
+  /**
+   * Count of op batches applied optimistically to `state` but not yet confirmed into the
+   * pending tier. NOT covered by `hasPending`: between change() and its applyChanges()
+   * confirmation this is non-zero while `hasPending` can read false — so `state` differs
+   * from the committed frame in a window `hasPending` cannot see. Consumers comparing
+   * state against a committed snapshot (audits, divergence heals) must gate on this too,
+   * or compare committed frames instead.
+   */
+  get optimisticOpsCount(): number {
+    return this._optimisticOps.length;
+  }
 
   /**
    * Captures an update to the document, applies it optimistically to state,

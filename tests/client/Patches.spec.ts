@@ -274,6 +274,30 @@ describe('Patches', () => {
       expect(mockAlgorithm.createDoc).toHaveBeenCalledTimes(1);
     });
 
+    it('emits onPendingDropped when hydration discarded corrupt pending changes', async () => {
+      // The doc's constructor dropped pending rows that failed strict apply (see OTDoc);
+      // openDoc must surface them — this signal is the only moment the payload is still
+      // in hand before a pending persist makes the truncation permanent.
+      const dropped = [createChange('corrupt', 1)];
+      mockDoc.droppedPendingChanges = dropped;
+      const handler = vi.fn();
+      patches.onPendingDropped(handler);
+
+      await patches.openDoc('doc1');
+
+      expect(handler).toHaveBeenCalledWith('doc1', dropped);
+    });
+
+    it('does not emit onPendingDropped on a clean hydration', async () => {
+      mockDoc.droppedPendingChanges = [];
+      const handler = vi.fn();
+      patches.onPendingDropped(handler);
+
+      await patches.openDoc('doc1');
+
+      expect(handler).not.toHaveBeenCalled();
+    });
+
     it('should handle document without snapshot', async () => {
       vi.mocked(mockAlgorithm.loadDoc).mockResolvedValue(undefined);
 

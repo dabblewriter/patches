@@ -1,11 +1,12 @@
 export { MicroClient } from './client.js';
 export type { ClientOptions } from './client.js';
 export { MicroDoc } from './doc.js';
-export type { Updatable } from './doc.js';
+export type { RestoredSend, Updatable } from './doc.js';
 export {
   applyBitmask,
   bitmask,
   buildState,
+  clearDescendants,
   combineBitmasks,
   consolidateOps,
   effectiveFields,
@@ -14,7 +15,7 @@ export {
   transformPendingTxt,
 } from './ops.js';
 export { MemoryDbBackend, MicroServer } from './server.js';
-export { RevConflictError, REF_THRESHOLD } from './types.js';
+export { CompactionError, RevConflictError, REF_THRESHOLD } from './types.js';
 export type {
   Change,
   ChangeLogEntry,

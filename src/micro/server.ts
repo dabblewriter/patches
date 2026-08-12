@@ -1,6 +1,7 @@
 import { Delta } from '@dabble/delta';
-import { applyBitmask } from './ops.js';
+import { descendantKeys, mergeField } from './ops.js';
 import {
+  CompactionError,
   RevConflictError,
   REF_THRESHOLD,
   type Change,
@@ -16,12 +17,17 @@ import {
   type TextLogEntry,
 } from './types.js';
 
-type Subscriber = (fields: FieldMap, rev: number) => void;
+type Subscriber = (fields: FieldMap, rev: number, changeId: string) => void;
 
 const MAX_RETRIES = 3;
 
+/** True when the base rev falls strictly inside a compacted entry's range. */
+const insideCompactedRange = (log: TextLogEntry[], baseRev: number) =>
+  log.some(e => e.startRev !== undefined && e.startRev < baseRev && baseRev < e.rev);
+
 export class MicroServer {
   private _subs = new Map<string, Set<Subscriber>>();
+  private _queues = new Map<string, Promise<unknown>>();
 
   constructor(
     private _db: DbBackend,
@@ -30,98 +36,99 @@ export class MicroServer {
 
   /** Get full document state. */
   async getDoc(docId: string): Promise<DocState> {
-    const [fields, rev] = await Promise.all([this._db.getFields(docId), this._db.getRev(docId)]);
+    const [fields, rev] = await Promise.all([this._fields(docId), this._db.getRev(docId)]);
     return { fields, rev };
   }
 
-  /** Get fields changed since a given revision, including text log for TXT field rebasing. */
+  /**
+   * Get the current state plus text log entries since a revision, so clients
+   * can resync and rebase pending TXT ops. Keys whose log has been compacted
+   * across `sinceRev` are omitted from the text log (the client reconciles
+   * from the snapshot instead).
+   */
   async getChangesSince(docId: string, sinceRev: number): Promise<SyncResult> {
     const { fields, rev } = await this.getDoc(docId);
-    const textLog: Record<string, any[]> = {};
-
-    // Collect text log entries for TXT fields so clients can rebase pending ops
-    for (const [key, field] of Object.entries(fields)) {
-      if (field.op === '#') {
-        const entries = await this._db.getTextLog(docId, key, sinceRev);
-        textLog[key] = entries.map(e => e.delta);
-      }
+    const textLog: Record<string, TextLogEntry[]> = {};
+    if (sinceRev < rev) {
+      const txtKeys = Object.keys(fields).filter(key => fields[key].op === '#');
+      const logs = await Promise.all(txtKeys.map(key => this._db.getTextLog(docId, key, sinceRev)));
+      txtKeys.forEach((key, i) => {
+        if (!insideCompactedRange(logs[i], sinceRev)) textLog[key] = logs[i];
+      });
     }
-
     return { fields, rev, textLog };
   }
 
-  /** Process an incoming change from a client. */
-  async commitChanges(docId: string, change: Change, _retries = MAX_RETRIES): Promise<CommitResult> {
-    // Idempotency check
-    if (await this._db.hasChange(docId, change.id)) {
-      const rev = await this._db.getRev(docId);
-      return { rev, fields: {} };
+  /** Process an incoming change from a client. Commits are serialized per doc. */
+  commitChanges(docId: string, change: Change): Promise<CommitResult> {
+    return this._enqueue(docId, () => this._commitChanges(docId, change, MAX_RETRIES));
+  }
+
+  private async _commitChanges(docId: string, change: Change, _retries: number): Promise<CommitResult> {
+    const touched = Object.keys(change.fields);
+    const [dup, rev, existingFields] = await Promise.all([
+      this._db.hasChange(docId, change.id),
+      this._db.getRev(docId),
+      this._fields(docId, touched),
+    ]);
+
+    if (dup) {
+      // Already committed (a retried send). Return the committed resolution of
+      // the touched paths — never re-apply, never starve the confirm path.
+      const fields: FieldMap = {};
+      for (const key of touched) {
+        const f = existingFields[key];
+        // TXT fields return the full committed text as an absolute value.
+        if (f) fields[key] = f.op === '#' ? { op: '=', val: f.val, ts: f.ts } : f;
+      }
+      return { rev, fields };
     }
 
-    const rev = await this._db.getRev(docId);
     const resultFields: FieldMap = {};
     const fieldsToSave: FieldMap = {};
     const textLogEntries: TextLogEntry[] = [];
     let hasCombinableOps = false;
 
     for (const [key, incoming] of Object.entries(change.fields)) {
-      const existing = await this._db.getField(docId, key);
+      const existing = existingFields[key];
+      if (incoming.op === '+' || incoming.op === '~' || incoming.op === '#') hasCombinableOps = true;
 
-      let resolved: Field;
-
-      switch (incoming.op) {
-        case '+': {
-          const ev = existing?.val ?? 0;
-          resolved = { op: '+', val: ev + incoming.val, ts: incoming.ts };
-          hasCombinableOps = true;
-          break;
+      if (incoming.op === '#') {
+        // Get text log entries since client's rev for OT
+        const log = await this._db.getTextLog(docId, key, change.rev);
+        if (insideCompactedRange(log, change.rev)) {
+          throw new CompactionError(change.rev); // client must resync and re-send
         }
-        case '~': {
-          const ev = existing?.val ?? 0;
-          resolved = { op: '~', val: applyBitmask(ev, incoming.val), ts: incoming.ts };
-          hasCombinableOps = true;
-          break;
-        }
-        case '^': {
-          const ev = existing?.val ?? 0;
-          resolved = incoming.val >= ev ? incoming : existing!;
-          if (resolved === existing) continue; // no change
-          break;
-        }
-        case '#': {
-          hasCombinableOps = true;
-          // Get text log entries since client's rev for OT
-          const log = await this._db.getTextLog(docId, key, change.rev);
-          let delta = new Delta(incoming.val);
+        let delta = new Delta(incoming.val);
 
-          // Transform against concurrent edits
-          for (const entry of log) {
-            const serverDelta = new Delta(entry.delta);
-            delta = serverDelta.transform(delta, true);
-          }
-
-          // Compose transformed delta into current full text
-          const base = existing?.val ? new Delta(existing.val) : new Delta();
-          resolved = { op: '#', val: base.compose(delta).ops, ts: incoming.ts };
-
-          textLogEntries.push({ key, delta: delta.ops, rev: rev + 1 });
-
-          // Store the transformed delta (not full text) in result for broadcast
-          resultFields[key] = { op: '#', val: delta.ops, ts: incoming.ts };
-          // Save full text to DB
-          await this._handleLargeValue(docId, key, resolved);
-          fieldsToSave[key] = resolved;
-          continue; // skip the common handling below
+        // Transform against concurrent edits
+        for (const entry of log) {
+          delta = new Delta(entry.delta).transform(delta, true);
         }
-        default: {
-          // LWW: incoming wins if ts >= existing
-          if (existing && incoming.ts < existing.ts) continue;
-          resolved = incoming;
-        }
+
+        // Compose transformed delta into current full text
+        const base = existing?.val ? new Delta(existing.val) : new Delta();
+        fieldsToSave[key] = { op: '#', val: base.compose(delta).ops, ts: incoming.ts };
+        textLogEntries.push({ key, delta: delta.ops, rev: rev + 1 });
+
+        // Broadcast the transformed delta (not the full text)
+        resultFields[key] = { op: '#', val: delta.ops, ts: incoming.ts };
+        continue;
       }
 
-      // Handle large values
-      await this._handleLargeValue(docId, key, resolved);
+      const resolved = mergeField(existing, incoming);
+      if (existing && resolved === existing) continue; // incoming lost the merge; nothing to write
+
+      if (incoming.op === '=' || incoming.op === '!') {
+        // A parent set/delete tombstones descendant fields (LWW ts-respecting)
+        // so deleted subtrees cannot resurrect from child rows.
+        for (const childKey of descendantKeys(existingFields, key, incoming.ts)) {
+          if (existingFields[childKey].val === null) continue;
+          const tombstone: Field = { op: '!', val: null, ts: incoming.ts };
+          fieldsToSave[childKey] = tombstone;
+          resultFields[childKey] = tombstone;
+        }
+      }
 
       resultFields[key] = resolved;
       fieldsToSave[key] = resolved;
@@ -131,11 +138,20 @@ export class MicroServer {
       return { rev, fields: {} };
     }
 
+    // Offload oversized values AFTER resultFields is built, so broadcasts and
+    // commit results always carry real values — refs never escape the server.
+    const saveFields: FieldMap = { ...fieldsToSave };
+    await Promise.all(
+      Object.entries(fieldsToSave).map(async ([key, field]) => {
+        saveFields[key] = await this._offload(docId, key, field);
+      })
+    );
+
     const changeLogEntry = hasCombinableOps ? { changeId: change.id, ts: Date.now() } : undefined;
 
     // Commit all writes, atomically if the backend supports it
     const newRev = await this._commit(docId, {
-      fields: fieldsToSave,
+      fields: saveFields,
       textLogEntries: textLogEntries.length ? textLogEntries : undefined,
       changeLogEntry,
       expectedRev: rev,
@@ -144,10 +160,10 @@ export class MicroServer {
     if (newRev === null) {
       // CAS conflict — retry
       if (_retries <= 0) throw new RevConflictError(rev, -1);
-      return this.commitChanges(docId, change, _retries - 1);
+      return this._commitChanges(docId, change, _retries - 1);
     }
 
-    this._broadcast(docId, resultFields, newRev);
+    this._broadcast(docId, resultFields, newRev, change.id);
     return { rev: newRev, fields: resultFields };
   }
 
@@ -188,12 +204,22 @@ export class MicroServer {
     return this._subs.get(docId)?.size ?? 0;
   }
 
-  private _broadcast(docId: string, fields: FieldMap, rev: number, exclude?: Subscriber) {
+  private _broadcast(docId: string, fields: FieldMap, rev: number, changeId: string) {
     const subs = this._subs.get(docId);
     if (!subs) return;
-    for (const cb of subs) {
-      if (cb !== exclude) cb(fields, rev);
-    }
+    for (const cb of subs) cb(fields, rev, changeId);
+  }
+
+  /** Serialize work per doc id so read-modify-write commits never interleave. */
+  private _enqueue<T>(docId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this._queues.get(docId) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => undefined);
+    this._queues.set(docId, tail);
+    void tail.then(() => {
+      if (this._queues.get(docId) === tail) this._queues.delete(docId);
+    });
+    return run;
   }
 
   /** Commit writes, using atomic commit if available. Returns new rev or null on CAS conflict. */
@@ -202,12 +228,15 @@ export class MicroServer {
       try {
         return await this._db.commit(docId, write);
       } catch (e) {
-        if (e instanceof RevConflictError) return null;
+        if (e instanceof RevConflictError || (e as Error)?.name === 'RevConflictError') return null;
         throw e;
       }
     }
 
-    // Non-atomic fallback (safe for single-server deployments)
+    // Non-atomic fallback. Safe on a single instance because commits are
+    // serialized per doc, but validate the rev anyway.
+    const currentRev = await this._db.getRev(docId);
+    if (currentRev !== write.expectedRev) return null;
     if (Object.keys(write.fields).length) {
       await this._db.setFields(docId, write.fields);
     }
@@ -224,13 +253,32 @@ export class MicroServer {
     return newRev;
   }
 
-  private async _handleLargeValue(docId: string, key: string, field: Field) {
-    if (!this._objects) return;
-    const json = JSON.stringify(field.val);
-    if (json.length > REF_THRESHOLD) {
-      const ref = await this._objects.put(`${docId}/${key}`, field.val);
-      field.val = { __ref: ref, __rev: field.ts };
-    }
+  /** Read a document's fields, hydrating refs for `keys` only (all keys if omitted). */
+  private async _fields(docId: string, keys?: string[]): Promise<FieldMap> {
+    return this._hydrate(await this._db.getFields(docId), keys);
+  }
+
+  /** Resolve `{ __ref }` stubs so refs never reach merge logic or clients. */
+  private async _hydrate(fields: FieldMap, keys?: string[]): Promise<FieldMap> {
+    if (!this._objects) return fields;
+    const refKeys = (keys ?? Object.keys(fields)).filter(key => fields[key]?.val?.__ref);
+    if (!refKeys.length) return fields;
+    const out = { ...fields };
+    await Promise.all(
+      refKeys.map(async key => {
+        out[key] = { ...out[key], val: await this._objects!.get(out[key].val.__ref) };
+      })
+    );
+    return out;
+  }
+
+  /** Swap oversized values for ObjectStore refs on the stored copy only. */
+  private async _offload(docId: string, key: string, field: Field): Promise<Field> {
+    if (!this._objects || field.val == null) return field;
+    const size = typeof field.val === 'string' ? field.val.length : JSON.stringify(field.val).length;
+    if (size <= REF_THRESHOLD) return field;
+    const ref = await this._objects.put(`${docId}/${key}`, field.val);
+    return { op: field.op, val: { __ref: ref, __rev: field.ts }, ts: field.ts };
   }
 }
 
@@ -264,8 +312,10 @@ export class MemoryDbBackend implements DbBackend {
   async compactTextLog(docId: string, key: string, throughRev: number, composedDelta: any): Promise<void> {
     const k = `${docId}:${key}`;
     const log = this._textLog.get(k) ?? [];
+    const composed = log.filter(e => e.rev <= throughRev);
     const remaining = log.filter(e => e.rev > throughRev);
-    remaining.unshift({ key, delta: composedDelta, rev: throughRev });
+    const startRev = composed.length ? Math.min(...composed.map(e => e.startRev ?? e.rev - 1)) : 0;
+    remaining.unshift({ key, delta: composedDelta, rev: throughRev, startRev });
     this._textLog.set(k, remaining);
   }
   async hasChange(docId: string, changeId: string): Promise<boolean> {

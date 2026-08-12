@@ -30,11 +30,15 @@ export interface DocState {
   fields: FieldMap;
 }
 
-/** Server-side text log entry for OT. */
+/**
+ * Server-side text log entry for OT. A compacted entry composes the range
+ * `(startRev, rev]`; plain entries cover only `rev` and omit `startRev`.
+ */
 export interface TextLogEntry {
   key: string;
   delta: any;
   rev: number;
+  startRev?: number;
 }
 
 /** Server-side change log entry for idempotency. */
@@ -62,15 +66,26 @@ export class RevConflictError extends Error {
   }
 }
 
-/** Sync result including text log for TXT field rebasing. */
+/**
+ * Thrown when a change's base rev falls inside a compacted text log range and
+ * can no longer be transformed. The client should resync and re-send.
+ */
+export class CompactionError extends Error {
+  status = 409;
+  constructor(public rev: number) {
+    super(`Base rev ${rev} falls inside a compacted text log range`);
+    this.name = 'CompactionError';
+  }
+}
+
+/** Sync result including text log entries for TXT field rebasing. */
 export interface SyncResult extends DocState {
-  textLog: Record<string, any[]>;
+  textLog: Record<string, TextLogEntry[]>;
 }
 
 /** Pluggable server-side database backend. */
 export interface DbBackend {
   getFields(docId: string): Promise<FieldMap>;
-  getField(docId: string, key: string): Promise<Field | null>;
   setFields(docId: string, fields: FieldMap): Promise<void>;
   getTextLog(docId: string, key: string, sinceRev?: number): Promise<TextLogEntry[]>;
   appendTextLog(docId: string, entry: TextLogEntry): Promise<void>;
@@ -86,9 +101,10 @@ export interface DbBackend {
    * and increment rev. Throws RevConflictError if current rev !== expectedRev.
    * Returns the new rev.
    *
-   * Optional. If not implemented, MicroServer falls back to non-atomic writes
-   * (safe for single-server deployments). Multi-server deployments must either
-   * implement this method or route all requests for a document to the same server.
+   * Optional. MicroServer serializes commits per document in-process, so the
+   * non-atomic fallback is safe on a single server instance. Multi-server
+   * deployments must either implement this method or route all requests for a
+   * document to the same instance.
    */
   commit?(docId: string, write: CommitWrite): Promise<number>;
 }

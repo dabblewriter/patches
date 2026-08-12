@@ -240,7 +240,7 @@ export class OTAlgorithm implements ClientAlgorithm {
           const staleIds = new Set(staleServerChanges.map(c => c.id));
           pendingSet = pendingSet.filter(c => !staleIds.has(c.id));
         }
-        rebased = newServerChanges.length > 0 ? rebaseChanges(newServerChanges, pendingSet) : pendingSet;
+        rebased = this._rebasePendingPreservingFrameDebt(newServerChanges, pendingSet, committedRev);
         const result = await this.store.applyServerChanges(docId, serverChanges, rebased, tailRev);
         if (result !== 'conflict') {
           applied = true;
@@ -321,11 +321,13 @@ export class OTAlgorithm implements ClientAlgorithm {
       if (pending.length === 0) return;
       const tailRev = pending[pending.length - 1].rev;
 
-      // rebaseChanges drops pending the server already committed (matched by id) and transforms
-      // the survivors into the tail's frame — a pure op transform that never applies the tail, so
+      // Drops pending the server already committed (matched by id) and transforms the
+      // survivors into the tail's frame — a pure op transform that never applies the tail, so
       // it is safe even when the local committed state is corrupt (which is why the
-      // snapshot-reload recovery calling this exists at all).
-      const rebased = rebaseChanges(committedChanges, pending);
+      // snapshot-reload recovery calling this exists at all). The tail starts at the frame the
+      // queue sits on (see the interface contract), so tail[0].rev - 1 anchors the frame-debt
+      // check: a row minted a frame behind keeps its true baseRev instead of being relabeled.
+      const rebased = this._rebasePendingPreservingFrameDebt(committedChanges, pending, committedChanges[0].rev - 1);
 
       // Install the reconciled tail AND swap the pending queue in ONE store transaction, retrying
       // if a foreign mint raced the replace (R2).
@@ -538,25 +540,68 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   /**
-   * The server requires every change in one flush batch to share a baseRev. A torn reload —
-   * reconcilePending advances the store's committed tail (rebasing pending to the new frame),
-   * then saveDoc/import faults before the open doc follows — leaves the doc a frame behind the
-   * store, so the next mint stamps its baseRev off the stale doc while the store queue already
-   * moved on. Neither the in-txn rev mint nor the conflict-safe replace expresses baseRev, so
-   * normalize the outgoing batch here: bump any straggler up to the freshest frame present (the
-   * majority, already correctly rebased). The stragglers' ops are then a frame behind their
-   * label — the server transforms them as concurrent edits and every replica converges the same
-   * way; the commit echo rebases the stored copies into agreement. A consistent queue is a no-op.
+   * The server requires every change in one flush batch to share a baseRev — the batch is a
+   * sequential program expressed against that committed frame. The queue can carry rows from
+   * more than one frame: a mint lands while its doc is a frame behind the store (a torn reload,
+   * a follower tab that hasn't received the writer's broadcast yet), so its baseRev — and its
+   * ops — sit on an older frame than siblings the receive path already rebased.
+   *
+   * Those frames are not interchangeable. Relabeling a straggler to the newest frame commits
+   * its ops WITHOUT the transform across the intervening committed changes — committed history
+   * that can never apply (the DAB-946 poison class; DAB-951). The client cannot run that
+   * transform here: the committed span the straggler missed is already collapsed into local
+   * state. The server can — it holds every committed change past any baseRev — so flush one
+   * frame at a time: return the queue's leading run of same-baseRev changes at its TRUE
+   * baseRev and leave the rest pending (flushDoc queues a follow-up pass for them; see also
+   * {@link _rebasePendingPreservingFrameDebt}, which keeps a deferred row's frame honest
+   * across receives). A consistent queue is a no-op.
    */
   private _withConsistentBaseRev(docId: string, batch: Change[]): Change[] {
-    let maxBase = batch[0].baseRev;
-    for (const c of batch) if (c.baseRev > maxBase) maxBase = c.baseRev;
-    if (batch.every(c => c.baseRev === maxBase)) return batch;
+    const baseRev = batch[0].baseRev;
+    let end = 1;
+    while (end < batch.length && batch[end].baseRev === baseRev) end++;
+    if (end === batch.length) return batch;
     console.warn(
-      `[patches] Normalizing ${batch.filter(c => c.baseRev !== maxBase).length} pending change(s) for ${docId} to ` +
-        `baseRev ${maxBase} for a consistent flush (torn-reload straggler).`
+      `[patches] Mixed baseRev in pending queue for ${docId}: flushing ${end} change(s) at baseRev ${baseRev}, ` +
+        `deferring ${batch.length - end} on other frame(s) to a follow-up flush (DAB-951).`
     );
-    return batch.map(c => (c.baseRev === maxBase ? c : { ...c, baseRev: maxBase }));
+    return batch.slice(0, end);
+  }
+
+  /**
+   * Rebase the pending queue against a committed server tail without laundering frame debt.
+   * `frameRev` is the committed frame the queue sits on — the frame `serverChanges` extends.
+   *
+   * A row minted a frame behind (`baseRev < frameRev`, see {@link _withConsistentBaseRev}) is
+   * NOT in the frame this walk crosses: transforming it against `serverChanges` and relabeling
+   * it to the new tip — what {@link rebaseChanges} does to every survivor — would silently
+   * advance its label across the span it was already behind on, recreating the mislabeled
+   * commit the flush seam refuses. Such rows keep their ops and true baseRev (dropped only when
+   * `serverChanges` echoes their id — a true-baseRev flush coming back committed) and are
+   * re-sequenced into their queue position; the server transforms them across everything past
+   * their baseRev when they flush. Later rows minted by OTHER contexts were expressed without
+   * the straggler in frame, so the walk must not advance the server ops through it either —
+   * the straggler is skipped entirely, not walked. A frame-consistent queue (the invariant
+   * case) takes the plain {@link rebaseChanges} path unchanged.
+   */
+  private _rebasePendingPreservingFrameDebt(serverChanges: Change[], pending: Change[], frameRev: number): Change[] {
+    if (serverChanges.length === 0 || pending.length === 0) return pending;
+    const staleIds = new Set(pending.filter(c => c.baseRev < frameRev).map(c => c.id));
+    if (staleIds.size === 0) return rebaseChanges(serverChanges, pending);
+
+    const serverIds = new Set(serverChanges.map(c => c.id));
+    const rebased = rebaseChanges(
+      serverChanges,
+      pending.filter(c => !staleIds.has(c.id))
+    );
+    const rebasedById = new Map(rebased.map(c => [c.id, c]));
+    let rev = serverChanges[serverChanges.length - 1].rev;
+    const result: Change[] = [];
+    for (const c of pending) {
+      const row = staleIds.has(c.id) ? (serverIds.has(c.id) ? undefined : c) : rebasedById.get(c.id);
+      if (row) result.push({ ...row, rev: ++rev });
+    }
+    return result;
   }
 
   /**

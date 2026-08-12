@@ -29,7 +29,8 @@ export interface PendingEjection {
  * inverse through the successors. Predecessors are untouched. Every survivor is then
  * renumbered contiguously off `committedRev`, preserving the OT pending invariant that all
  * pending share `baseRev === committedRev` with sequential revs (see
- * `OTAlgorithm._withConsistentBaseRev`).
+ * `OTAlgorithm._withConsistentBaseRev`). A predecessor minted a frame behind keeps its true
+ * baseRev instead — see the frame-debt note at the renumber below.
  *
  * The server accepts `newPending` as a valid poison-free queue and both sides converge on it
  * deterministically. Exact tie-resolution follows the same one-sided transform as a normal
@@ -107,24 +108,23 @@ export function computePendingEjection(
   // successor whose ops transformed away to nothing.
   //
   // A predecessor with a stale baseRev is the same mint/rebase race
-  // `OTAlgorithm._withConsistentBaseRev` re-stamps — warn on the same trigger rather than
-  // silently masking it here (the re-stamp can misplace ops if foreign changes landed in
-  // between; the strict probe above only vouches for the poison's frame, not the queue's).
+  // `OTAlgorithm._withConsistentBaseRev` defers at the flush seam. Its true baseRev is
+  // preserved here for the same reason: relabeling it to committedRev would commit its ops
+  // in a frame they were never transformed into (DAB-951). Warn — the strict probe above
+  // only vouches for the poison's frame, not the queue's.
   const staleBaseRevs = before.filter(change => change.baseRev !== committedRev);
   if (staleBaseRevs.length > 0) {
     console.warn(
-      `[patches] Ejection of ${changeId} is re-stamping ${staleBaseRevs.length} predecessor(s) from baseRev ` +
-        `${staleBaseRevs.map(c => c.baseRev).join(',')} to ${committedRev}. This indicates a mint/rebase ` +
-        `race (likely two client instances over one store) and can misplace ops if foreign ` +
-        `changes landed in between.`
+      `[patches] Ejection of ${changeId} has ${staleBaseRevs.length} predecessor(s) on older frame(s) (baseRev ` +
+        `${staleBaseRevs.map(c => c.baseRev).join(',')} vs committed ${committedRev}) — a mint/rebase race ` +
+        `(likely two client instances over one store). Their true baseRev is preserved; they flush separately.`
     );
   }
   let rev = committedRev;
-  const newPending = [...before, ...rebasedAfter].map(change => ({
-    ...change,
-    baseRev: committedRev,
-    rev: ++rev,
-  }));
+  const newPending = [
+    ...before.map(change => ({ ...change, rev: ++rev })),
+    ...rebasedAfter.map(change => ({ ...change, baseRev: committedRev, rev: ++rev })),
+  ];
 
   return { poison, newPending };
 }

@@ -93,9 +93,10 @@ export async function commitChanges(
     const continuation = changes[0].rev! > 1 && !options?.historicalImport;
 
     // Prevent stale clients from wiping existing data with a root creation op anywhere in the
-    // batch. Not keyed on baseRev: a reload re-stamps pending onto the new tip without
-    // transforming its ops (OTAlgorithm._withConsistentBaseRev), so a root op re-sent after one
-    // arrives at baseRev = tip and overwrites the doc just the same.
+    // batch. Not keyed on baseRev: a client rebase re-stamps pending onto the new tip without
+    // transforming a root op away in every case (and pre-DAB-951 clients' flush normalization
+    // re-stamped without transforming at all), so a root op re-sent after a reload can arrive
+    // at baseRev = tip and would overwrite the doc just the same.
     const rootOpChange = changes.find(c => c.ops.some(op => op.path === ''));
     if (rootOpChange && !options?.allowRootReplace && !(await isOwnUpload())) {
       throw new StatusError(

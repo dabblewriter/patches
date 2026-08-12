@@ -1175,10 +1175,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this._resplitBudgets.delete(docId);
       const stillHasPending = await algorithm.hasPending(docId);
       this._updateDocSyncState(docId, { hasPending: stillHasPending, syncStatus: 'synced' });
-      // Send the remainder the reload rebased, from the store rather than from `batches`. Sync is
+      // Send the remainder, from the store rather than from `batches`: after a mid-flush reload
+      // that rebased the queue, or when getPendingToSend still returns flushable rows — a
+      // mixed-baseRev queue flushes one frame per pass (see OTAlgorithm._withConsistentBaseRev),
+      // and without this pass a deferred run would wait for the next mint or reconnect. Sync is
       // serial-gated, so this queues exactly one follow-up pass instead of recursing, and that
       // pass flushes on the reloaded committedRev, which no longer answers docReloadRequired.
-      if (reloadedMidFlush && stillHasPending) void this.syncDoc(docId);
+      if ((reloadedMidFlush || pending.length > 0) && stillHasPending) void this.syncDoc(docId);
     } catch (err) {
       if (this._isDocDeletedError(err)) {
         await this._handleRemoteDocDeleted(docId);

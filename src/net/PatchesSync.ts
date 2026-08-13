@@ -1172,6 +1172,12 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         }
       }
 
+      // One read of the queue as it now stands, replacing the K per-batch reads this PR removed:
+      // `batches` is split once above, so those never fed the next batch, but a follow-up pass
+      // does have to compare against the queue the flush left behind rather than the array it
+      // started from (#145 gates its deferred-frame follow-up on the head row having moved).
+      pending = (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId) as PatchesDoc<any>)) ?? [];
+
       // The budget a 413 halved got this doc through, so stop paying for it: the next flush
       // starts from the configured budget again and re-halves only if the server objects again.
       this._resplitBudgets.delete(docId);

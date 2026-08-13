@@ -346,8 +346,9 @@ export function isUnsplittableChangeError(err: unknown): boolean {
  * client with server truth rather than diverging from it.
  *
  * The document is still damaged, so this is emitted through `PatchesSync.onError` — once per
- * `(docId, changeId)` — for telemetry to enumerate affected documents for repair. `cause`
- * carries the {@link ApplyChangesError}, whose own `cause` is the underlying patch error.
+ * `(docId, changeId)`, and only once the skip is durable — for telemetry to enumerate affected
+ * documents for repair. `cause` carries the {@link ApplyChangesError}, itself caused by the
+ * underlying patch error's message rather than the error, so nothing retains the offending op.
  */
 export class CommittedPoisonSkippedError extends Error {
   constructor(

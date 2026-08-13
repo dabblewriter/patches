@@ -1,5 +1,5 @@
 import { Delta } from '@dabble/delta';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { applyCommittedChanges } from '../../../../src/algorithms/ot/client/applyCommittedChanges';
 import { applyChanges } from '../../../../src/algorithms/ot/shared/applyChanges';
 import { computePendingEjection } from '../../../../src/algorithms/ot/shared/ejectPendingChange';
@@ -386,5 +386,58 @@ describe('computePendingEjection — randomized property tests', () => {
     ) as any;
     expect(ejectedState).toEqual(fullMinusPoison);
     expect(ejectedState.poisoned).toBe(0);
+  });
+});
+
+/**
+ * Ejection runs on a queue that is already sick, so a mixed-frame queue is MORE likely here
+ * than in the steady state. A row minted a frame behind never had the poison in frame and was
+ * never transformed across the span it is behind on, so it must neither ride the inverse walk
+ * nor be relabeled onto committedRev — either would mint the DAB-951 poison from inside the
+ * recovery path.
+ */
+describe('computePendingEjection frame debt (DAB-951)', () => {
+  const committed = { items: ['a', 'b', 'c'], x: 0 };
+
+  const queue: Change[] = [
+    pending('fresh', 6, [{ op: 'replace', path: '/x', value: 1 }]),
+    pending('poison', 7, [{ op: 'remove', path: '/items/0' }]),
+    // Minted by a lagging context two frames back — blind to the poison entirely.
+    { ...pending('straggler', 8, [{ op: 'replace', path: '/items/1', value: 'Z' }]), baseRev: 3 },
+    // Minted on the poison's own frame — genuinely stacked on it.
+    pending('sameFrame', 9, [{ op: 'replace', path: '/items/1', value: 'Y' }]),
+  ];
+
+  it('keeps a stale successor out of the inverse walk and off committedRev', () => {
+    const { newPending } = computePendingEjection(committed, COMMITTED_REV, queue, 'poison')!;
+
+    expect(newPending.map(c => [c.id, c.baseRev, c.rev])).toEqual([
+      ['fresh', COMMITTED_REV, 6],
+      ['straggler', 3, 7],
+      ['sameFrame', COMMITTED_REV, 8],
+    ]);
+    // Untouched: it never saw the poison, so the poison's inverse must not shift its indices.
+    expect(newPending[1].ops).toEqual([{ op: 'replace', path: '/items/1', value: 'Z' }]);
+    // Still walked: it WAS expressed on the post-poison frame, so removing the poison shifts it.
+    expect(newPending[2].ops).toEqual([{ op: 'replace', path: '/items/2', value: 'Y' }]);
+  });
+
+  it('warns about older frames on both sides of the poison, not just predecessors', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      computePendingEjection(committed, COMMITTED_REV, queue, 'poison');
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('baseRev 3');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('leaves revs strictly increasing above committedRev despite the rev/baseRev gap', () => {
+    const { newPending } = computePendingEjection(committed, COMMITTED_REV, queue, 'poison')!;
+    expect(newPending[0].rev).toBeGreaterThan(COMMITTED_REV);
+    for (let i = 1; i < newPending.length; i++) {
+      expect(newPending[i].rev).toBeGreaterThan(newPending[i - 1].rev);
+    }
   });
 });

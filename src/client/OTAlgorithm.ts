@@ -1,3 +1,4 @@
+import { signal } from 'easy-signal';
 import { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
 import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
 import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
@@ -37,6 +38,35 @@ function firstGapIndex(changes: Change[]): number {
 }
 
 /**
+ * The open doc holds a pending change the store does not, at or below the store's pending tail,
+ * so the send path withheld it from the wire (see {@link OTAlgorithm.getPendingToSend}).
+ *
+ * The withholding is the decided contract: a row the store never accepted is not durable, and
+ * putting it on the wire would let the server hold content no local rebuild reproduces. The
+ * silence is not — the editor still shows that content, and `hasPending` reads the store, so
+ * without this the doc reports itself fully synced while a change sits unsendable. A doc holding
+ * a change the store lacks is a store-integrity failure (the known producer is a store write that
+ * reported success without persisting), and this reports it as one.
+ *
+ * At-least-once: emitted on every flush that observes the row, so consumers should key on
+ * `docId` + `changeIds`.
+ */
+export class UnstoredPendingError extends Error {
+  constructor(
+    /** The doc whose queue is missing the rows. */
+    readonly docId: string,
+    /** Ids of the pending changes the open doc holds but the store does not. */
+    readonly changeIds: string[]
+  ) {
+    super(
+      `${changeIds.length} pending change(s) for ${docId} are in the open doc but not the store, ` +
+        `so they cannot be sent: ${changeIds.join(', ')}`
+    );
+    this.name = 'UnstoredPendingError';
+  }
+}
+
+/**
  * OT (Operational Transformation) algorithm implementation.
  *
  * OT uses revision-based history and rebasing for concurrent edits.
@@ -51,6 +81,13 @@ function firstGapIndex(changes: Change[]): number {
 export class OTAlgorithm implements ClientAlgorithm {
   readonly name = 'ot';
   readonly store: OTClientStore;
+
+  /**
+   * Failures this layer can report but not resolve — currently only
+   * {@link UnstoredPendingError}. PatchesSync forwards these to its own onError so they reach
+   * app telemetry without every consumer having to subscribe to the algorithm.
+   */
+  readonly onError = signal<(error: Error, context?: { docId?: string }) => void>();
 
   protected readonly _options: PatchesDocOptions;
 
@@ -142,13 +179,29 @@ export class OTAlgorithm implements ClientAlgorithm {
    * Reading the store also puts foreign-context rows minted at their own committedRev into the
    * batch, so mixed baseRevs stop being rare here; {@link _withConsistentBaseRev} must transform
    * the stragglers rather than relabel them, which is #145. Ship the two together.
+   *
+   * Store-authoritative cuts both ways: a row the doc holds that the store does not, at or below
+   * the store tail, is never put on the wire. That is deliberate (see {@link _collectPending}),
+   * but it is content the user can see, so it is reported on {@link onError} rather than
+   * withheld in silence.
    */
   async getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null> {
     const otDoc = doc as OTDoc<any> | undefined;
     // Only the doc-merge floor needs it, and that branch needs a doc; without one the store read
     // it would take is discarded, so don't pay for it (the tailRev seed is unused here).
     const committedRev = otDoc?.committedRev ?? 0;
-    const { pending } = await this._collectPending(docId, otDoc, committedRev);
+    const { pending, withheld } = await this._collectPending(docId, otDoc, committedRev);
+    // Before the empty-queue return: a withheld row is exactly the case where the rest of the
+    // queue can be empty and every other signal reads as fully synced.
+    if (withheld.length > 0) {
+      this.onError.emit(
+        new UnstoredPendingError(
+          docId,
+          withheld.map(c => c.id)
+        ),
+        { docId }
+      );
+    }
     if (pending.length === 0) return null;
     return this._withConsistentBaseRev(docId, pending);
   }
@@ -571,6 +624,18 @@ export class OTAlgorithm implements ClientAlgorithm {
    * persisted only to the doc), guarded by rev so a stale lower-frame copy the store rebased away
    * can't resurrect (P3 duplicate, fuzz seed 1000319).
    *
+   * The rev guard holds on both paths, but for two different reasons — decided here rather than
+   * inherited from one of them:
+   * - receive: a doc-only row at or below the store tail is a copy the store already rebased
+   *   away, so folding it back in resurrects it (P3 above).
+   * - send: the same row is not durable. Transmitting content the durable queue never accepted
+   *   would leave the server holding state no local rebuild reproduces — a worse divergence than
+   *   not sending — and carving the send path out re-opens the split authority this class closed.
+   *
+   * So the store stays authoritative and the row is withheld; `withheld` carries those rows out
+   * so {@link getPendingToSend} can report the condition ({@link UnstoredPendingError}) instead
+   * of leaving it indistinguishable from a fully synced doc.
+   *
    * `tailRev` is the max STORE row rev, never the doc-merged max: R2's conflict check compares it
    * against the store's own pending rows, so a doc-only rev folded in here would push tailRev past
    * the store tail and hide a foreign mint landing at store-tail+1, which the replace then wipes.
@@ -579,19 +644,22 @@ export class OTAlgorithm implements ClientAlgorithm {
     docId: string,
     doc: OTDoc<T> | undefined,
     committedRev: number
-  ): Promise<{ pending: Change[]; tailRev: number }> {
+  ): Promise<{ pending: Change[]; tailRev: number; withheld: Change[] }> {
     const storePending = await this.store.getPendingChanges(docId);
     let pending = storePending;
+    let withheld: Change[] = [];
     if (doc) {
       const inMemory = doc.getPendingChanges();
       const latestRev = storePending[storePending.length - 1]?.rev ?? committedRev;
       const storedIds = new Set(storePending.map(c => c.id));
-      const docOnly = inMemory.filter(c => c.rev > latestRev && !storedIds.has(c.id));
-      if (docOnly.length > 0) pending = [...storePending, ...docOnly];
+      const docOnly = inMemory.filter(c => !storedIds.has(c.id));
+      const merged = docOnly.filter(c => c.rev > latestRev);
+      if (merged.length > 0) pending = [...storePending, ...merged];
+      withheld = docOnly.filter(c => c.rev <= latestRev);
     }
     let tailRev = committedRev;
     for (const c of storePending) if (c.rev > tailRev) tailRev = c.rev;
-    return { pending, tailRev };
+    return { pending, tailRev, withheld };
   }
 
   /**

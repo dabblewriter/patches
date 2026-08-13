@@ -1,3 +1,4 @@
+import type { Signal } from 'easy-signal';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change, PatchesSnapshot, QuarantinedChange } from '../types.js';
 import type { PatchesDoc } from './PatchesDoc.js';
@@ -27,6 +28,13 @@ export interface ClientAlgorithm {
 
   /** Algorithm owns its store */
   readonly store: PatchesStore;
+
+  /**
+   * Optional signal for failures the algorithm can report but not resolve — e.g. OT withholding a
+   * pending change the open doc holds but the store never persisted. PatchesSync forwards these to
+   * its own onError so they reach app telemetry.
+   */
+  readonly onError?: Signal<(error: Error, context?: { docId?: string }) => void>;
 
   /**
    * Creates a doc instance appropriate for this algorithm.
@@ -96,6 +104,8 @@ export interface ClientAlgorithm {
    * context sharing it can mint at a rev the open doc's mirror already holds. When `doc` is
    * passed, OT merges its in-memory pending in as a supplement (by change id, above the store
    * tail) for a change persisted only to the doc — no state materialization. LWW ignores it.
+   * A doc-only change at or below the store tail is NOT sent — the store is authoritative about
+   * what is durable — and OT reports it on {@link onError} rather than withholding it silently.
    * Returns null if nothing to send.
    */
   getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null>;

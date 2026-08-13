@@ -217,6 +217,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // malformed server-pushed event the transport had to drop) so they reach the
       // app's telemetry instead of vanishing.
       ...(this.connection.onError ? [this.connection.onError(error => this.onError.emit(error))] : []),
+      // Same for algorithm-level failures no caller can observe — OT withholding a pending change
+      // the store never persisted is reported here and nowhere else.
+      ...Object.values(patches.algorithms).flatMap(algorithm =>
+        algorithm?.onError ? [algorithm.onError((error, context) => this.onError.emit(error, context))] : []
+      ),
       patches.onTrackDocs(this._handleDocsTracked.bind(this)),
       patches.onUntrackDocs(this._handleDocsUntracked.bind(this)),
       patches.onDeleteDoc(this._handleDocDeleted.bind(this)),

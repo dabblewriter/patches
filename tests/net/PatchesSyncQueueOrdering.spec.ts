@@ -14,7 +14,7 @@
  * transformed away by, work that was minted later than it.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { OTAlgorithm } from '../../src/client/OTAlgorithm.js';
+import { OTAlgorithm, UnstoredPendingError } from '../../src/client/OTAlgorithm.js';
 import { OTDoc } from '../../src/client/OTDoc.js';
 import { OTInMemoryStore } from '../../src/client/OTInMemoryStore.js';
 import { Patches } from '../../src/client/Patches.js';
@@ -131,6 +131,33 @@ describe('PatchesSync — flush reads the durable queue, not the open doc mirror
     await sync['syncDoc'](DOC_ID);
 
     expect(sentLabels(conn)).toEqual(['orphan']);
+  });
+
+  it('withholds a change the store lost once the tail moved past it, and reports the drop', async () => {
+    // The other half of the merge rule, and the one the two paths reach differently. The store is
+    // authoritative about what is durable, so a row it never accepted stays off the wire — but the
+    // editor still shows that content and `hasPending` reads the store, so the only thing that can
+    // make the condition distinguishable from a fully synced doc is the report.
+    doc.change((patch: any) => patch.add('/items/-', 'orphan'));
+    await waitForQueue(1);
+    const [orphan] = await store.getPendingChanges(DOC_ID);
+    // The store write that reported success without persisting: gone store-side, still mirrored.
+    await store.dropPendingChanges(DOC_ID, [orphan.id]);
+    // The other context then mints into the rev the orphan occupied, putting the store tail at it.
+    await foreignMint('later');
+    await waitForQueue(1);
+
+    const reported: UnstoredPendingError[] = [];
+    sync.onError(err => {
+      if (err instanceof UnstoredPendingError) reported.push(err);
+    });
+
+    sync['updateState']({ connected: true });
+    await sync['syncDoc'](DOC_ID);
+
+    expect(sentLabels(conn)).toEqual(['later']);
+    expect(reported.map(e => e.changeIds)).toContainEqual([orphan.id]);
+    expect(reported[0].docId).toBe(DOC_ID);
   });
 
   it('never commits an older pending change after a newer one', async () => {

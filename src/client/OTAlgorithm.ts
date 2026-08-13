@@ -138,10 +138,16 @@ export class OTAlgorithm implements ClientAlgorithm {
    * at or below it: unsent until a later echo rebuilt the queue from the store, by which point
    * changes minted after it had committed ahead of it — and the rebase against them could
    * transform it away entirely, losing content that was already persisted (DAB-946).
+   *
+   * Reading the store also puts foreign-context rows minted at their own committedRev into the
+   * batch, so mixed baseRevs stop being rare here; {@link _withConsistentBaseRev} must transform
+   * the stragglers rather than relabel them, which is #145. Ship the two together.
    */
   async getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null> {
     const otDoc = doc as OTDoc<any> | undefined;
-    const committedRev = otDoc ? otDoc.committedRev : await this.store.getCommittedRev(docId);
+    // Only the doc-merge floor needs it, and that branch needs a doc; without one the store read
+    // it would take is discarded, so don't pay for it (the tailRev seed is unused here).
+    const committedRev = otDoc?.committedRev ?? 0;
     const { pending } = await this._collectPending(docId, otDoc, committedRev);
     if (pending.length === 0) return null;
     return this._withConsistentBaseRev(docId, pending);
@@ -542,6 +548,11 @@ export class OTAlgorithm implements ClientAlgorithm {
    * majority, already correctly rebased). The stragglers' ops are then a frame behind their
    * label — the server transforms them as concurrent edits and every replica converges the same
    * way; the commit echo rebases the stored copies into agreement. A consistent queue is a no-op.
+   *
+   * The torn reload is no longer the only source. Now that getPendingToSend batches straight off
+   * the store, two tabs at different committedRevs produce a mixed batch as an ordinary event, so
+   * relabelling without transforming misframes routine multi-tab edits (DAB-951). #145 replaces
+   * the relabel with a real transform; these must ship in the same release.
    */
   private _withConsistentBaseRev(docId: string, batch: Change[]): Change[] {
     let maxBase = batch[0].baseRev;
@@ -549,7 +560,7 @@ export class OTAlgorithm implements ClientAlgorithm {
     if (batch.every(c => c.baseRev === maxBase)) return batch;
     console.warn(
       `[patches] Normalizing ${batch.filter(c => c.baseRev !== maxBase).length} pending change(s) for ${docId} to ` +
-        `baseRev ${maxBase} for a consistent flush (torn-reload straggler).`
+        `baseRev ${maxBase} for a consistent flush.`
     );
     return batch.map(c => (c.baseRev === maxBase ? c : { ...c, baseRev: maxBase }));
   }

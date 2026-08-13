@@ -92,9 +92,11 @@ export interface ClientAlgorithm {
    * - OT: Returns all pending changes (may batch)
    * - LWW: Creates single Change from pendingFields (or returns existing)
    *
-   * When `doc` (the open doc) is passed, OT trusts its in-memory pending as the source of truth
-   * and only reads the store for foreign-tab mint deltas — no state materialization. LWW ignores
-   * it. Returns null if nothing to send.
+   * The store's pending rows are the source of truth — it is the sole rev sequencer, so any
+   * context sharing it can mint at a rev the open doc's mirror already holds. When `doc` is
+   * passed, OT merges its in-memory pending in as a supplement (by change id, above the store
+   * tail) for a change persisted only to the doc — no state materialization. LWW ignores it.
+   * Returns null if nothing to send.
    */
   getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null>;
 

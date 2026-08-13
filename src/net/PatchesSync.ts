@@ -1165,9 +1165,6 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
             if (fullSnapshot) this._applySnapshotPreservingPending(docId, fullSnapshot, changeBatch);
           }
         }
-
-        // Fetch remaining pending for next batch or check completion
-        pending = (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId) as PatchesDoc<any>)) ?? [];
       }
 
       // The budget a 413 halved got this doc through, so stop paying for it: the next flush

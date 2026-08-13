@@ -29,9 +29,9 @@ interface Doc {
 
 const DOC_ID = 'doc1';
 
-/** Drain timers + microtasks so a mint's store write and its onChange dispatch have landed. */
-async function settle(turns = 3): Promise<void> {
-  for (let i = 0; i < turns; i++) await new Promise<void>(resolve => setTimeout(resolve, 0));
+/** Yield to queued microtasks and timers where no queue state is being asserted. */
+async function settle(): Promise<void> {
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
 }
 
 /** Labels appended to `/items`, in the order the wire carried them. */
@@ -48,16 +48,32 @@ describe('PatchesSync — flush reads the durable queue, not the open doc mirror
   let conn: ReturnType<typeof makeConnection>;
   let sync: PatchesSync;
   let doc: any;
+  let foreignAlgorithm: OTAlgorithm;
 
-  /** A second context over the same store, exactly as another tab would run. */
+  /**
+   * A second context over the same store, exactly as another tab would run: its own algorithm
+   * instance, so its mints share nothing but the store. Reusing the instance under test would
+   * put both contexts behind one `_docLocks` chain and serialize away the very interleaving
+   * these tests are about (see `OTAlgorithm._withDocLock`).
+   */
   async function foreignMint(label: string): Promise<void> {
-    const foreignDoc = algorithm.createDoc<Doc>(DOC_ID, (await algorithm.loadDoc(DOC_ID)) as any) as OTDoc<Doc>;
-    await algorithm.handleDocChange(DOC_ID, [{ op: 'add', path: '/items/-', value: label }], foreignDoc, {});
+    const foreignDoc = foreignAlgorithm.createDoc<Doc>(
+      DOC_ID,
+      (await foreignAlgorithm.loadDoc(DOC_ID)) as any
+    ) as OTDoc<Doc>;
+    await foreignAlgorithm.handleDocChange(DOC_ID, [{ op: 'add', path: '/items/-', value: label }], foreignDoc, {});
+  }
+
+  /** Wait for the durable queue to hold exactly `length` rows — the precondition itself, rather
+   *  than however many timer turns the in-memory store happens to need to get there. */
+  async function waitForQueue(length: number): Promise<void> {
+    await vi.waitFor(async () => expect(await store.getPendingChanges(DOC_ID)).toHaveLength(length));
   }
 
   beforeEach(async () => {
     store = new OTInMemoryStore();
     algorithm = new OTAlgorithm(store);
+    foreignAlgorithm = new OTAlgorithm(store);
     patches = new Patches({ algorithms: { ot: algorithm } });
     conn = makeConnection({
       // Echo each committed change back at the next rev, as a real commit response does.
@@ -69,12 +85,16 @@ describe('PatchesSync — flush reads the durable queue, not the open doc mirror
     await patches.trackDocs([DOC_ID]);
     // trackDocs fires onTrackDocs without awaiting _handleDocsTracked; let it settle while
     // disconnected so its auto-sync can't swallow the test's own syncDoc via @serialGate.
-    await settle(1);
+    await settle();
     sync['updateState']({ connected: true });
     doc = await patches.openDoc<Doc>(DOC_ID);
     doc.change((patch: any) => patch.replace('/items', []));
-    await settle(1);
+    await settle();
     await sync['syncDoc'](DOC_ID);
+    // Start every test from a committed `/items: []` and an empty queue, whichever of the
+    // per-change auto-sync or the explicit syncDoc above got there first.
+    await vi.waitFor(() => expect(conn.commitChanges).toHaveBeenCalled());
+    await waitForQueue(0);
     conn.commitChanges.mockClear();
     // Mint offline for the rest of each test, so the queue is assembled before any flush
     // rather than being drained one change at a time by the per-change auto-sync.
@@ -86,7 +106,7 @@ describe('PatchesSync — flush reads the durable queue, not the open doc mirror
     // store stamps it higher — so the older change now sits BELOW this doc's mirror tail.
     await foreignMint('foreign');
     doc.change((patch: any) => patch.add('/items/-', 'mine'));
-    await settle();
+    await waitForQueue(2);
 
     const queued = await store.getPendingChanges(DOC_ID);
     expect(queued.map(c => c.ops[0].value)).toEqual(['foreign', 'mine']);
@@ -98,10 +118,25 @@ describe('PatchesSync — flush reads the durable queue, not the open doc mirror
     expect(await store.getPendingChanges(DOC_ID)).toEqual([]);
   });
 
+  it('still flushes a change the store lost while the open doc mirrors it', async () => {
+    // The torn store write `_collectPending`'s doc merge exists for: the row is gone store-side
+    // and the mirror holds the only copy. Pins the case where that copy sits ABOVE the store
+    // tail, which is the half of the merge rule the send path and the receive path agree on.
+    doc.change((patch: any) => patch.add('/items/-', 'orphan'));
+    await waitForQueue(1);
+    const [orphan] = await store.getPendingChanges(DOC_ID);
+    await store.dropPendingChanges(DOC_ID, [orphan.id]);
+
+    sync['updateState']({ connected: true });
+    await sync['syncDoc'](DOC_ID);
+
+    expect(sentLabels(conn)).toEqual(['orphan']);
+  });
+
   it('never commits an older pending change after a newer one', async () => {
     await foreignMint('first');
     doc.change((patch: any) => patch.add('/items/-', 'second'));
-    await settle();
+    await waitForQueue(2);
 
     sync['updateState']({ connected: true });
     // Flush to a fixed point — however many passes it takes to drain the queue.
@@ -125,15 +160,19 @@ describe('PatchesSync — flush reads the durable queue, not the open doc mirror
 
     await foreignMint('a');
     doc.change((patch: any) => patch.add('/items/-', 'b'));
-    await settle();
+    await waitForQueue(2);
 
     sync['updateState']({ connected: true });
     await sync['syncDoc'](DOC_ID); // dies opaquely; nothing may be lost or resequenced
 
+    // Mint the retry-window edits offline so all four are queued before the next flush, rather
+    // than the auto-sync draining them one at a time — the failed flush is the window under test.
+    sync['updateState']({ connected: false });
     await foreignMint('c');
     doc.change((patch: any) => patch.add('/items/-', 'd'));
-    await settle();
+    await waitForQueue(4);
 
+    sync['updateState']({ connected: true });
     for (let i = 0; i < 4; i++) {
       await sync['syncDoc'](DOC_ID);
       await settle();

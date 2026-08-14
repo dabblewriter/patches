@@ -218,7 +218,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // app's telemetry instead of vanishing.
       ...(this.connection.onError ? [this.connection.onError(error => this.onError.emit(error))] : []),
       // Same for algorithm-level failures no caller can observe — OT withholding a pending change
-      // the store never persisted is reported here and nowhere else.
+      // the store never persisted is reported here and nowhere else. `patches.algorithms` is fixed
+      // at construction, so this one pass covers every algorithm; a later lazy registration would
+      // go unforwarded (silently, which is the condition this exists to remove).
       ...Object.values(patches.algorithms).flatMap(algorithm =>
         algorithm?.onError ? [algorithm.onError((error, context) => this.onError.emit(error, context))] : []
       ),
@@ -1176,7 +1178,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // `batches` is split once above, so those never fed the next batch, but a follow-up pass
       // does have to compare against the queue the flush left behind rather than the array it
       // started from (#145 gates its deferred-frame follow-up on the head row having moved).
-      pending = (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId) as PatchesDoc<any>)) ?? [];
+      // A peek, not `getPendingToSend`: only the head row and emptiness are wanted here, and the
+      // send-path builder would warn on mixed baseRev and re-report rows the store lost as it
+      // went. An algorithm with no durable queue to peek keeps the batch it flushed.
+      const head = await algorithm.peekPendingHead?.(docId);
+      if (head !== undefined) pending = head ? [head] : [];
 
       // The budget a 413 halved got this doc through, so stop paying for it: the next flush
       // starts from the configured budget again and re-halves only if the server objects again.
@@ -1541,9 +1547,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   protected async _handleRemoteDocDeleted(docId: string): Promise<void> {
     const algorithm = this._getAlgorithm(docId);
 
-    // Get pending changes before cleanup so app can handle them
-    const pendingChanges =
-      (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId) as PatchesDoc<any>)) ?? [];
+    // Get pending changes before cleanup so app can handle them. Deliberately without the open
+    // doc: its mirror is discarded by the close below either way, and classifying it here would
+    // report a row the store lost (`UnstoredPendingError`) at the exact moment the doc
+    // legitimately vanished — a store-integrity alarm for a collaborator losing access or a
+    // delete from another device. Passing no doc reads the durable queue, which is all this
+    // payload can meaningfully carry.
+    const pendingChanges = (await algorithm.getPendingToSend(docId)) ?? [];
 
     // Close doc if open
     const doc = this.patches.getOpenDoc(docId);

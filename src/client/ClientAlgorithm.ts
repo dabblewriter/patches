@@ -111,6 +111,17 @@ export interface ClientAlgorithm {
   getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null>;
 
   /**
+   * The head of the durable pending queue, or null when it is empty. A plain read: callers that
+   * need only "what is at the front of the queue now" must not pay {@link getPendingToSend}'s
+   * send-path work (building/normalizing a batch, warning on mixed baseRev, reporting rows the
+   * store lost), all of which would fire a second time for a status probe.
+   *
+   * Optional — only OT keeps a durable queue of changes. LWW's outgoing state is pending ops plus
+   * at most one in-flight change, so there is no head row to peek.
+   */
+  peekPendingHead?(docId: string): Promise<Change | null>;
+
+  /**
    * Applies server changes and updates the doc (if provided).
    * - OT: Calls applyCommittedChanges algorithm, rebases pending
    * - LWW: Applies with LWW merge, filters old pending fields

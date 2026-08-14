@@ -22,7 +22,7 @@ export type * from './ClientAlgorithm.js';
 // Sync-recovery errors, exported so consumers can `instanceof` instead of matching by name
 export { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
 export { ApplyChangesError } from '../algorithms/ot/shared/applyChanges.js';
-export { isUnsplittableChangeError, UnsplittableChangeError } from '../net/error.js';
+export { isUnsplittableChangeError, UnsplittableChangeError, UnstoredPendingError } from '../net/error.js';
 // The splitter itself, plus telemetry for changes it can't get under the storage
 // budget. `breakChangesIntoBatches` is public because apps commit over REST on
 // paths `PatchesSync.flushDoc` never sees (branch merges, heals); without it they

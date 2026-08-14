@@ -7,6 +7,7 @@ import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
 import { createChange } from '../data/change.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
+import { UnstoredPendingError } from '../net/error.js';
 import type { Change, PatchesSnapshot, QuarantinedChange } from '../types.js';
 import type { ClientAlgorithm } from './ClientAlgorithm.js';
 import type { OTClientStore } from './OTClientStore.js';
@@ -35,35 +36,6 @@ function firstGapIndex(changes: Change[]): number {
     if (changes[i].rev !== changes[i - 1].rev + 1) return i;
   }
   return -1;
-}
-
-/**
- * The open doc holds a pending change the store does not, at or below the store's pending tail,
- * so the send path withheld it from the wire (see {@link OTAlgorithm.getPendingToSend}).
- *
- * The withholding is the decided contract: a row the store never accepted is not durable, and
- * putting it on the wire would let the server hold content no local rebuild reproduces. The
- * silence is not — the editor still shows that content, and `hasPending` reads the store, so
- * without this the doc reports itself fully synced while a change sits unsendable. A doc holding
- * a change the store lacks is a store-integrity failure (the known producer is a store write that
- * reported success without persisting), and this reports it as one.
- *
- * At-least-once: emitted on every flush that observes the row, so consumers should key on
- * `docId` + `changeIds`.
- */
-export class UnstoredPendingError extends Error {
-  constructor(
-    /** The doc whose queue is missing the rows. */
-    readonly docId: string,
-    /** Ids of the pending changes the open doc holds but the store does not. */
-    readonly changeIds: string[]
-  ) {
-    super(
-      `${changeIds.length} pending change(s) for ${docId} are in the open doc but not the store, ` +
-        `so they cannot be sent: ${changeIds.join(', ')}`
-    );
-    this.name = 'UnstoredPendingError';
-  }
 }
 
 /**
@@ -99,6 +71,15 @@ export class OTAlgorithm implements ClientAlgorithm {
    * the receive rebased away in place.
    */
   private readonly _docLocks = new Map<string, Promise<unknown>>();
+
+  /**
+   * Change ids already reported as unstored, per doc (see {@link UnstoredPendingError}). The store
+   * cannot recover a row it never took, so the condition never clears: without this the same row
+   * is reported on every read of the queue, for the life of the doc. Mirrors
+   * `PatchesSync._surfacedSyncErrors`. Cleared when the doc is untracked or deleted — the next
+   * tracking of that doc is a fresh lifetime.
+   */
+  private readonly _reportedUnstored = new Map<string, Set<string>>();
 
   constructor(store: OTClientStore, options: PatchesDocOptions = {}) {
     this.store = store;
@@ -194,16 +175,22 @@ export class OTAlgorithm implements ClientAlgorithm {
     // Before the empty-queue return: a withheld row is exactly the case where the rest of the
     // queue can be empty and every other signal reads as fully synced.
     if (withheld.length > 0) {
-      this.onError.emit(
-        new UnstoredPendingError(
-          docId,
-          withheld.map(c => c.id)
-        ),
-        { docId }
-      );
+      const reported = this._reportedUnstored.get(docId) ?? new Set<string>();
+      const fresh = withheld.filter(c => !reported.has(c.id)).map(c => c.id);
+      if (fresh.length > 0) {
+        fresh.forEach(id => reported.add(id));
+        this._reportedUnstored.set(docId, reported);
+        this.onError.emit(new UnstoredPendingError(docId, fresh), { docId });
+      }
     }
     if (pending.length === 0) return null;
     return this._withConsistentBaseRev(docId, pending);
+  }
+
+  /** See {@link ClientAlgorithm.peekPendingHead} — the store's head row, no send-path work. */
+  async peekPendingHead(docId: string): Promise<Change | null> {
+    const pending = await this.store.getPendingChanges(docId);
+    return pending[0] ?? null;
   }
 
   async applyServerChanges<T extends object>(
@@ -545,6 +532,7 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async untrackDocs(docIds: string[]): Promise<void> {
+    docIds.forEach(id => this._reportedUnstored.delete(id));
     return this.store.untrackDocs(docIds);
   }
 
@@ -561,6 +549,7 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async confirmDeleteDoc(docId: string): Promise<void> {
+    this._reportedUnstored.delete(docId);
     return this.store.confirmDeleteDoc(docId);
   }
 
@@ -635,6 +624,15 @@ export class OTAlgorithm implements ClientAlgorithm {
    * So the store stays authoritative and the row is withheld; `withheld` carries those rows out
    * so {@link getPendingToSend} can report the condition ({@link UnstoredPendingError}) instead
    * of leaving it indistinguishable from a fully synced doc.
+   *
+   * That report names one cause — a store write that reported success without persisting — and
+   * that reading holds only while `latestRev` is a real store row. With an empty store queue it
+   * falls back to `committedRev`, where a doc-only row at or below it would be a stale mirror
+   * entry for something already committed, not a lost durable row. No reachable producer is known
+   * for that case: {@link OTDoc.applyChanges} re-sequences surviving pending strictly above the
+   * new committedRev, and {@link dropResolvedPending} re-syncs the open doc from the store on the
+   * paths that drop rows. If a change to the rev-sequencing invariant ever opens that window,
+   * split the two cases rather than let the error keep asserting the cause it can no longer prove.
    *
    * `tailRev` is the max STORE row rev, never the doc-merged max: R2's conflict check compares it
    * against the store's own pending rows, so a doc-only rev folded in here would push tailRev past

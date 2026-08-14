@@ -14,10 +14,11 @@
  * transformed away by, work that was minted later than it.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { OTAlgorithm, UnstoredPendingError } from '../../src/client/OTAlgorithm.js';
+import { OTAlgorithm } from '../../src/client/OTAlgorithm.js';
 import { OTDoc } from '../../src/client/OTDoc.js';
 import { OTInMemoryStore } from '../../src/client/OTInMemoryStore.js';
 import { Patches } from '../../src/client/Patches.js';
+import { UnstoredPendingError } from '../../src/net/error.js';
 import type { PatchesConnection } from '../../src/net/PatchesConnection.js';
 import { PatchesSync } from '../../src/net/PatchesSync.js';
 import type { Change } from '../../src/types.js';
@@ -156,8 +157,44 @@ describe('PatchesSync — flush reads the durable queue, not the open doc mirror
     await sync['syncDoc'](DOC_ID);
 
     expect(sentLabels(conn)).toEqual(['later']);
-    expect(reported.map(e => e.changeIds)).toContainEqual([orphan.id]);
+    expect(reported).toHaveLength(1);
+    expect(reported[0].changeIds).toEqual([orphan.id]);
     expect(reported[0].docId).toBe(DOC_ID);
+  });
+
+  it('reports the lost row once per doc, not once per sync attempt', async () => {
+    // The condition never clears on its own — the store cannot recover a row it did not take —
+    // so every attempt that can't drain the queue observes it again. Reporting per attempt would
+    // put an unbounded, unactionable repeat into app telemetry for one lost row.
+    doc.change((patch: any) => patch.add('/items/-', 'orphan'));
+    await waitForQueue(1);
+    const [orphan] = await store.getPendingChanges(DOC_ID);
+    await store.dropPendingChanges(DOC_ID, [orphan.id]);
+    await foreignMint('later');
+    await waitForQueue(1);
+
+    // The queue stays put: a status-less commit failure is the shape that keeps a doc cycling
+    // through the retry ladder, re-reading the same queue on every pass.
+    conn.commitChanges.mockImplementation(async () => {
+      const err = new Error('Failed to fetch');
+      err.name = 'NetworkError';
+      throw err;
+    });
+
+    const reported: UnstoredPendingError[] = [];
+    sync.onError(err => {
+      if (err instanceof UnstoredPendingError) reported.push(err);
+    });
+
+    sync['updateState']({ connected: true });
+    for (let i = 0; i < 3; i++) {
+      await sync['syncDoc'](DOC_ID);
+      await settle();
+    }
+
+    expect(await store.getPendingChanges(DOC_ID)).toHaveLength(1);
+    expect(reported).toHaveLength(1);
+    expect(reported[0].changeIds).toEqual([orphan.id]);
   });
 
   it('never commits an older pending change after a newer one', async () => {

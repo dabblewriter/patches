@@ -1,3 +1,4 @@
+import { applyPendingForView } from '../algorithms/ot/client/applyPendingForView.js';
 import { createStateFromSnapshot } from '../algorithms/ot/client/createStateFromSnapshot.js';
 import { applyChanges as applyChangesToState } from '../algorithms/ot/shared/applyChanges.js';
 import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
@@ -48,7 +49,7 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
     // If pending changes provided, recompute live state
     if (this._pendingChanges.length > 0) {
       try {
-        this.state = applyChangesToState(this._committedState, this._pendingChanges);
+        this.state = applyPendingForView(this._committedState, this._committedRev, this._pendingChanges);
       } catch {
         // Pending changes are corrupt (conflicting ops from accumulated sessions).
         // Apply one-by-one, dropping changes that fail. Later changes created on
@@ -64,6 +65,13 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         let state = this._committedState;
         const valid: Change[] = [];
         for (const c of this._pendingChanges) {
+          if (c.baseRev < this._committedRev) {
+            // Frame debt, not corruption (see applyPendingForView): this row is waiting to
+            // flush at its own baseRev for the server to transform. Keep it queued and out of
+            // the view — dropping it here would destroy an unsent edit.
+            valid.push(c);
+            continue;
+          }
           try {
             state = applyPatch(state, c.ops, { strict: true });
             valid.push(c);
@@ -174,7 +182,7 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
    * Recomputes state from committed + pending + remaining optimistic ops.
    */
   protected _recomputeState(): void {
-    let newState: T = applyChangesToState(this._committedState, this._pendingChanges);
+    let newState: T = applyPendingForView(this._committedState, this._committedRev, this._pendingChanges);
     this._optimisticOps = this._optimisticOps.filter(ops => {
       try {
         newState = applyPatch(newState, ops, { strict: true });

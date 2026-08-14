@@ -26,10 +26,11 @@ export interface PendingEjection {
  * server change: the ejected change genuinely *preceded* its successors, so its inverse is
  * the "already-happened" side those successors' position ties yield to. We invert the
  * ejected change against the state it applied to (committed + predecessors) and walk that
- * inverse through the successors. Predecessors are untouched. Every survivor is then
- * renumbered contiguously off `committedRev`, preserving the OT pending invariant that all
- * pending share `baseRev === committedRev` with sequential revs (see
- * `OTAlgorithm._withConsistentBaseRev`).
+ * inverse through the successors that share the ejected change's frame. Predecessors are
+ * untouched. Every survivor is then renumbered contiguously off `committedRev`, preserving the
+ * OT pending invariant that all pending share `baseRev === committedRev` with sequential revs
+ * (see `OTAlgorithm._withConsistentBaseRev`). A row minted a frame behind — on either side of
+ * the poison — keeps its true baseRev and sits out the walk; see the frame-debt notes below.
  *
  * The server accepts `newPending` as a valid poison-free queue and both sides converge on it
  * deterministically. Exact tie-resolution follows the same one-sided transform as a normal
@@ -98,33 +99,52 @@ export function computePendingEjection(
     // survivors are renumbered below — only the diamond walk matters. A fresh id keeps it
     // out of the successors' id set so rebaseChanges walks it rather than dropping it.
     const inverseCarrier = createChange(poison.baseRev, poison.rev, invertedOps, {});
-    rebasedAfter = rebaseChanges([inverseCarrier], after);
-  }
-
-  // Renumber survivors contiguously off committedRev. Predecessors already sit on
-  // committedRev with these very revs, so this is a no-op for them and only re-seats the
-  // rebased successors into the gap the poison left. rebaseChanges has already dropped any
-  // successor whose ops transformed away to nothing.
-  //
-  // A predecessor with a stale baseRev is the same mint/rebase race
-  // `OTAlgorithm._withConsistentBaseRev` re-stamps — warn on the same trigger rather than
-  // silently masking it here (the re-stamp can misplace ops if foreign changes landed in
-  // between; the strict probe above only vouches for the poison's frame, not the queue's).
-  const staleBaseRevs = before.filter(change => change.baseRev !== committedRev);
-  if (staleBaseRevs.length > 0) {
-    console.warn(
-      `[patches] Ejection of ${changeId} is re-stamping ${staleBaseRevs.length} predecessor(s) from baseRev ` +
-        `${staleBaseRevs.map(c => c.baseRev).join(',')} to ${committedRev}. This indicates a mint/rebase ` +
-        `race (likely two client instances over one store) and can misplace ops if foreign ` +
-        `changes landed in between.`
+    // Only successors minted in the poison's OWN frame were stacked on it. A successor from a
+    // lagging context (a different baseRev) never had the poison in frame, so the inverse —
+    // computed in the poison's frame — must not walk through it. Same rule the receive path
+    // applies (see `OTAlgorithm._rebasePendingPreservingFrameDebt`); such a row rides through
+    // untouched below.
+    rebasedAfter = rebaseChanges(
+      [inverseCarrier],
+      after.filter(change => change.baseRev === poison.baseRev)
     );
   }
+
+  // Renumber survivors contiguously off committedRev, re-seating the rebased successors into
+  // the gap the poison left. rebaseChanges has already dropped any successor whose ops
+  // transformed away to nothing.
+  //
+  // Every survivor keeps its OWN baseRev. On the invariant queue — all of it on committedRev —
+  // that is the same result as stamping committedRev on each. A row minted a frame behind (the
+  // same mint/rebase race `OTAlgorithm._withConsistentBaseRev` defers at the flush seam) keeps
+  // its true baseRev instead, on both sides of the poison: relabeling it would commit its ops
+  // in a frame they were never transformed into (DAB-951) — the very poison class this
+  // function exists to remove. Warn on both halves — the strict probe above only vouches for
+  // the poison's frame, not the queue's.
+  //
+  // Such a row is left with a rev/baseRev gap. Nothing reads that pair as a frame: rev only has
+  // to stay strictly increasing across the queue (it does — every survivor takes the next one),
+  // getPendingToSend slices the flush on baseRev and ranges the store read on rev
+  // independently, and the server reassigns rev on commit.
+  const staleBaseRevs = [...before, ...after].filter(change => change.baseRev !== committedRev);
+  if (staleBaseRevs.length > 0) {
+    console.warn(
+      `[patches] Ejection of ${changeId} has ${staleBaseRevs.length} queue neighbour(s) on older frame(s) (baseRev ` +
+        `${staleBaseRevs.map(c => c.baseRev).join(',')} vs committed ${committedRev}) — a mint/rebase race ` +
+        `(likely two client instances over one store). Their true baseRev is preserved; they flush separately.`
+    );
+  }
+  const rebasedById = new Map(rebasedAfter.map(change => [change.id, change]));
   let rev = committedRev;
-  const newPending = [...before, ...rebasedAfter].map(change => ({
-    ...change,
-    baseRev: committedRev,
-    rev: ++rev,
-  }));
+  const newPending: Change[] = before.map(change => ({ ...change, rev: ++rev }));
+  for (const change of after) {
+    const rebased = rebasedById.get(change.id);
+    if (rebased) newPending.push({ ...rebased, baseRev: change.baseRev, rev: ++rev });
+    // Absent from the walk's output for one of two reasons: it was left out of the walk (a
+    // different frame — ride it through untouched), or it was walked and transformed away to
+    // nothing under the inverse (drop it, as before).
+    else if (change.baseRev !== poison.baseRev) newPending.push({ ...change, rev: ++rev });
+  }
 
   return { poison, newPending };
 }

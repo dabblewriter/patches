@@ -1,5 +1,5 @@
 import type { PatchesSnapshot } from '../../../types.js';
-import { applyChanges } from '../shared/applyChanges.js';
+import { applyPendingForView } from './applyPendingForView.js';
 
 /**
  * Creates the in-memory state from a snapshot.
@@ -7,5 +7,5 @@ import { applyChanges } from '../shared/applyChanges.js';
  * @returns The new state.
  */
 export function createStateFromSnapshot<T = any>(snapshot: PatchesSnapshot<T>): T {
-  return applyChanges(snapshot.state, snapshot.changes);
+  return applyPendingForView(snapshot.state, snapshot.rev, snapshot.changes);
 }

@@ -155,4 +155,28 @@ describe('composePatch', () => {
       { op: '@inc', path: '/x/y', value: 2 },
     ]);
   });
+
+  // Consumers depend on this one by name, so it is pinned separately from the
+  // chain-breaking case above: an ancestor write and a later descendant write
+  // must survive as TWO ops, with the ancestor's value untouched.
+  //
+  // pup's role guard admits a write at a `comments` map root only when its value
+  // is `{}` (a populated one is indistinguishable from wiping every thread in the
+  // doc), and dw3 mirrors that check client-side. A client initialising an absent
+  // map commits the `{}` root AND the first thread in ONE change. Both sides
+  // evaluate ops individually, so this pair passes only while it stays two ops.
+  // Were a descendant ever folded into its ancestor here, that pair would arrive
+  // as a single POPULATED root write, both sides would refuse it, and the doc
+  // would latch — so this is a cross-repo invariant, not a local detail.
+  it('never folds a descendant write into an ancestor write', () => {
+    expect(
+      composePatch([
+        { op: 'replace', path: '/docs/d1/body/comments', value: {} },
+        { op: 'replace', path: '/docs/d1/body/comments/tc1', value: { id: 'tc1', change: true } },
+      ])
+    ).toEqual([
+      { op: 'replace', path: '/docs/d1/body/comments', value: {} },
+      { op: 'replace', path: '/docs/d1/body/comments/tc1', value: { id: 'tc1', change: true } },
+    ]);
+  });
 });

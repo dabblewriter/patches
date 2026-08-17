@@ -4,14 +4,16 @@ import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
 import { createChange } from '../../src/data/change';
 
 /**
- * The send choke point enforces the OT pending invariant: every pending change must share
- * `baseRev === committedRev`, since pending is a contiguous sequence applied on top of the
- * committed revision. A receive-rebase racing a local mint could persist one change with a
- * stale baseRev among rebased siblings (mixed `baseRev`), and the server rejects that batch
- * ("Client changes must have consistent baseRev"), wedging sync forever. getPendingToSend
- * re-stamps the batch to the current committedRev so an already-corrupted queue still flushes.
+ * The send choke point enforces the OT batch invariant: every change in one flush must share a
+ * baseRev, since a batch is a sequential program expressed against that committed frame. A
+ * receive-rebase racing a local mint can persist one change with a stale baseRev among rebased
+ * siblings (mixed `baseRev`). Re-stamping the straggler to the newest frame — the old behavior —
+ * committed its ops without the transform across the intervening committed changes: permanent
+ * history that can never apply (the DAB-946 poison class; DAB-951). Instead the flush is sliced
+ * to the queue's leading same-baseRev run, each run going out at its TRUE baseRev; the server
+ * holds every committed change past any baseRev and does the transform the client can't.
  */
-describe('OTAlgorithm.getPendingToSend baseRev normalization', () => {
+describe('OTAlgorithm.getPendingToSend mixed-baseRev slicing (DAB-951)', () => {
   let store: OTInMemoryStore;
   let algorithm: OTAlgorithm;
 
@@ -23,7 +25,7 @@ describe('OTAlgorithm.getPendingToSend baseRev normalization', () => {
     await store.saveDoc('doc1', { state: {}, rev: 1794 });
   });
 
-  it('re-stamps a stale baseRev in the pending queue to committedRev', async () => {
+  it('never relabels a straggler; flushes the leading frame run at its true baseRev', async () => {
     await store.savePendingChanges('doc1', [
       createChange(1794, 1795, [{ op: 'replace', path: '/docs/oHNA/title', value: 'a' }]),
       createChange(1794, 1796, [{ op: 'replace', path: '/docs/oHNA/title', value: 'ab' }]),
@@ -34,11 +36,38 @@ describe('OTAlgorithm.getPendingToSend baseRev normalization', () => {
 
     const pending = await algorithm.getPendingToSend('doc1');
 
-    expect(pending).not.toBeNull();
-    expect(new Set(pending!.map(c => c.baseRev))).toEqual(new Set([1794]));
-    // Order, revs, ids and ops are untouched — only baseRev is healed.
-    expect(pending!.map(c => c.rev)).toEqual([1795, 1796, 1797, 1798]);
-    expect(pending![2].ops).toEqual([{ op: 'replace', path: '/docs/oHNA/title', value: 'Drop by Home ' }]);
+    // Only the leading run of the queue's first frame goes out, untouched.
+    expect(pending!.map(c => c.rev)).toEqual([1795, 1796]);
+    expect(pending!.map(c => c.baseRev)).toEqual([1794, 1794]);
+    // The straggler stays pending with its true frame intact — never re-stamped.
+    const queued = await store.getPendingChanges('doc1');
+    expect(queued.map(c => c.baseRev)).toEqual([1794, 1794, 1791, 1794]);
+  });
+
+  it('flushes a straggler at the head of the queue alone, at its own true baseRev', async () => {
+    await store.savePendingChanges('doc1', [
+      createChange(1791, 1795, [{ op: 'replace', path: '/docs/oHNA/title', value: 'stale' }]),
+      createChange(1794, 1796, [{ op: 'replace', path: '/docs/oHNA/title', value: 'fresh' }]),
+    ]);
+
+    const pending = await algorithm.getPendingToSend('doc1');
+
+    expect(pending!.map(c => c.baseRev)).toEqual([1791]);
+    expect(pending![0].ops).toEqual([{ op: 'replace', path: '/docs/oHNA/title', value: 'stale' }]);
+  });
+
+  it('keeps adjacent same-frame stragglers together as one coherent run', async () => {
+    // Two mints from the same lagging context form a sequential program on their shared frame;
+    // they must flush together so the server transforms them as the program they are.
+    await store.savePendingChanges('doc1', [
+      createChange(1791, 1795, [{ op: 'replace', path: '/a', value: 1 }]),
+      createChange(1791, 1796, [{ op: 'replace', path: '/b', value: 2 }]),
+      createChange(1794, 1797, [{ op: 'replace', path: '/c', value: 3 }]),
+    ]);
+
+    const pending = await algorithm.getPendingToSend('doc1');
+
+    expect(pending!.map(c => c.baseRev)).toEqual([1791, 1791]);
   });
 
   it('returns the queue untouched when every baseRev already matches', async () => {

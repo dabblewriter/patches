@@ -1062,6 +1062,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         return; // Nothing to flush
       }
 
+      // The follow-up pass at the end of this method re-arms on every flush now, so it needs a
+      // progress signal — without one, any state where a run commits but the queue does not
+      // shrink is a continuous commit + IndexedDB cycle with nothing user-visible (an echo that
+      // never carries the ids, a straggler the server rebases away without echoing it back, a
+      // store write that silently no-ops). Serial-gating stops re-entrancy, not the loop. The
+      // queue only ever drains from the front, so the head row leaving is the cheapest sound
+      // proof that a pass accomplished something. Compared by id, NOT id@rev: a re-sequenced
+      // head is the same row that did not drain.
+      const headBefore = pending[0].id;
+
       const batches = breakChangesIntoBatches(pending, {
         maxPayloadBytes: this.maxPayloadBytes,
         maxStorageBytes: this._resplitBudgets.get(docId) ?? this.maxStorageBytes,
@@ -1189,10 +1199,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this._resplitBudgets.delete(docId);
       const stillHasPending = await algorithm.hasPending(docId);
       this._updateDocSyncState(docId, { hasPending: stillHasPending, syncStatus: 'synced' });
-      // Send the remainder the reload rebased, from the store rather than from `batches`. Sync is
-      // serial-gated, so this queues exactly one follow-up pass instead of recursing, and that
-      // pass flushes on the reloaded committedRev, which no longer answers docReloadRequired.
-      if (reloadedMidFlush && stillHasPending) void this.syncDoc(docId);
+      // Send the remainder, from the store rather than from `batches`: after a mid-flush reload
+      // that rebased the queue, or when this pass drained its run and left a deferred one behind
+      // — a mixed-baseRev queue flushes one frame per pass (see
+      // OTAlgorithm._withConsistentBaseRev), and without this a deferred run would wait for the
+      // next mint or reconnect. Gated on the head having moved (see `headBefore`) so a queue
+      // that never shrinks stops instead of spinning. Sync is serial-gated, so this queues
+      // exactly one follow-up pass instead of recursing, and that pass flushes on the reloaded
+      // committedRev, which no longer answers docReloadRequired.
+      const drained = pending.length > 0 && pending[0].id !== headBefore;
+      if ((reloadedMidFlush || drained) && stillHasPending) void this.syncDoc(docId);
     } catch (err) {
       if (this._isDocDeletedError(err)) {
         await this._handleRemoteDocDeleted(docId);

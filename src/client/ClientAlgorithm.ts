@@ -97,7 +97,9 @@ export interface ClientAlgorithm {
 
   /**
    * Gets pending data to send to the server.
-   * - OT: Returns all pending changes (may batch)
+   * - OT: Returns the pending queue's leading run of same-baseRev changes — usually the whole
+   *   queue; a mixed-baseRev queue flushes one frame per call (callers flush repeatedly until
+   *   drained, see PatchesSync.flushDoc's follow-up pass)
    * - LWW: Creates single Change from pendingFields (or returns existing)
    *
    * The store's pending rows are the source of truth — it is the sole rev sequencer, so any

@@ -15,14 +15,27 @@ import type { Branch } from '../../src/types';
 
 describe('branchUtils', () => {
   describe('branchManagerApi', () => {
-    it('should have correct API definition', () => {
-      expect(branchManagerApi).toEqual({
-        listBranches: 'read',
-        createBranch: 'write',
-        updateBranch: 'write',
-        deleteBranch: 'write',
-        mergeBranch: 'write',
-      });
+    it('lists/creates against args[0] (the source id) and merges/updates/deletes against the resolved source', () => {
+      // list/create take the source doc id as their first argument, so they authorize it directly.
+      expect(branchManagerApi.listBranches).toBe('read');
+      expect(branchManagerApi.createBranch).toBe('write');
+
+      // merge/update/delete take the *branch* id as their first argument but are governed by
+      // the source, so they carry an `authDoc` resolver that maps the branch to its source.
+      for (const method of ['updateBranch', 'deleteBranch', 'mergeBranch'] as const) {
+        const def = branchManagerApi[method];
+        expect(typeof def).toBe('object');
+        expect((def as { access: string }).access).toBe('write');
+        expect(typeof (def as { authDoc?: unknown }).authDoc).toBe('function');
+      }
+    });
+
+    it("authDoc resolves the source via the manager's getSourceDocId(args[0])", async () => {
+      const def = branchManagerApi.mergeBranch as { authDoc: (args: unknown[], mgr: unknown) => Promise<string> };
+      const mgr = { getSourceDocId: vi.fn().mockResolvedValue('docs/source') };
+      const resolved = await def.authDoc(['branch/b1'], mgr);
+      expect(mgr.getSourceDocId).toHaveBeenCalledWith('branch/b1');
+      expect(resolved).toBe('docs/source');
     });
   });
 

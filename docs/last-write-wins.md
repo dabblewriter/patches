@@ -340,6 +340,9 @@ class LWWAlgorithm implements ClientAlgorithm {
   // Builds change from pending ops, moves to sendingChange
   async getPendingToSend(docId): Promise<Change[] | null>;
 
+  // Pure read for a doc being discarded: sending change + pending ops, no side effects
+  async collectUnsyncedForDiscard(docId): Promise<Change[]>;
+
   // Applies server changes, merges with local ops
   async applyServerChanges(docId, serverChanges, doc): Promise<Change[]>;
 

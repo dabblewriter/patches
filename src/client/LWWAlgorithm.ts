@@ -150,6 +150,27 @@ export class LWWAlgorithm implements ClientAlgorithm {
     });
   }
 
+  /**
+   * See {@link ClientAlgorithm.collectUnsyncedForDiscard}. Unlike {@link getPendingToSend} this
+   * neither mints a sending change nor clears pending ops — the doc is being discarded, nothing
+   * will send — and it returns BOTH halves when both exist: the in-flight sending change and a
+   * change built from the ops that accumulated behind it (which the send path's retry branch
+   * deliberately holds back). Revs on the built change are informational for a shelf payload.
+   */
+  async collectUnsyncedForDiscard(docId: string): Promise<Change[]> {
+    return this._withDocLock(docId, async () => {
+      const changes: Change[] = [];
+      const sendingChange = await this.store.getSendingChange(docId);
+      if (sendingChange) changes.push(sendingChange);
+      const pendingOps = await this.store.getPendingOps(docId);
+      if (pendingOps.length > 0) {
+        const committedRev = await this.store.getCommittedRev(docId);
+        changes.push(createChange(committedRev, committedRev + 1, pendingOps));
+      }
+      return changes;
+    });
+  }
+
   async applyServerChanges<T extends object>(
     docId: string,
     serverChanges: Change[],

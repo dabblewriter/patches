@@ -67,6 +67,40 @@ describe('OTBranchManager', () => {
     });
   });
 
+  describe('getSourceDocId', () => {
+    it("returns the branch record's source docId", async () => {
+      const now = Date.now();
+      vi.mocked(mockStore.loadBranch).mockResolvedValue({
+        id: 'branch1',
+        docId: 'doc-source',
+        branchedAtRev: 5,
+        contentStartRev: 2,
+        createdAt: now,
+        modifiedAt: now,
+      });
+
+      await expect(branchManager.getSourceDocId('branch1')).resolves.toBe('doc-source');
+      expect(mockStore.loadBranch).toHaveBeenCalledWith('branch1');
+    });
+
+    it('throws a StatusError(404) for a missing branch, so the access check fails closed', async () => {
+      vi.mocked(mockStore.loadBranch).mockResolvedValue(null);
+      // A StatusError (not a bare Error) so the pre-authorization throw surfaces a clean 404
+      // rather than a server stack trace over the wire.
+      await expect(branchManager.getSourceDocId('nope')).rejects.toHaveProperty('code', 404);
+    });
+
+    it('throws a StatusError(404) for a tombstoned branch', async () => {
+      vi.mocked(mockStore.loadBranch).mockResolvedValue({
+        id: 'branch1',
+        docId: 'doc-source',
+        modifiedAt: Date.now(),
+        deleted: true,
+      } as Branch);
+      await expect(branchManager.getSourceDocId('branch1')).rejects.toHaveProperty('code', 404);
+    });
+  });
+
   describe('listBranches', () => {
     it('should list branches for a document', async () => {
       const now = Date.now();

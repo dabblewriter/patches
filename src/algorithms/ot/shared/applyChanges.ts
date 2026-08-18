@@ -106,10 +106,16 @@ export interface ReplayOptions {
  * - computing a history-scrubbing baseline (state before/within a version)
  *
  * A historically-invalid op (committed long ago under lenient semantics) must
- * not make that history permanently unreadable or block versioning forever;
- * skipping the whole failing change reproduces exactly what pre-strict clients
- * computed when the change was originally applied, so the reconstructed state
- * matches the settled head.
+ * not make that history permanently unreadable or block versioning forever.
+ *
+ * Skipping is CHANGE-granular: the whole failing change is dropped, not just the
+ * offending op. For a single-op change that reproduces what pre-strict clients
+ * computed; for a multi-op change it does not (lenient `applyPatch` skipped only
+ * the failing op and kept its siblings), so the reconstructed state can differ
+ * from what those clients saw. Change-granular is nonetheless the right unit,
+ * because it is the one every consumer of this function shares — version state,
+ * history baselines, and the client's own committed-poison floor all converge on
+ * the same skip, which is what keeps server and client agreeing on a settled head.
  *
  * NEVER use this for live commit application or for materializing a client's
  * current document (`applyChanges` is strict for those paths on purpose —

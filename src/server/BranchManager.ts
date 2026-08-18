@@ -50,4 +50,17 @@ export interface BranchManager {
    * @returns The changes applied to the source document.
    */
   mergeBranch(branchId: string): Promise<Change[]>;
+
+  /**
+   * Resolves a branch id to the source document it belongs to (`Branch.docId`).
+   *
+   * `merge`/`update`/`delete` are governed by the source document — a merge writes
+   * into it, and a branch belongs to its source — so the RPC layer authorizes those
+   * operations against the source, not the branch (see `branchManagerApi`'s `authDoc`).
+   * Throws if the branch is missing or a tombstone, which fails the access check closed.
+   *
+   * @param branchId - The branch document ID.
+   * @returns The source document ID.
+   */
+  getSourceDocId(branchId: string): Promise<string>;
 }

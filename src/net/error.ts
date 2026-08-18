@@ -1,3 +1,5 @@
+import type { ApplyChangesError } from '../algorithms/ot/shared/applyChanges.js';
+
 export class StatusError extends Error {
   constructor(
     public code: number,
@@ -358,6 +360,38 @@ export class UnstoredPendingError extends Error {
         `so they cannot be sent: ${changeIds.join(', ')}`
     );
     this.name = 'UnstoredPendingError';
+  }
+}
+
+/**
+ * A COMMITTED change `PatchesSync` gave up applying and skipped, so the document could
+ * converge on the rest of its history instead of latching forever.
+ *
+ * A committed change that fails strict apply deterministically (an op recorded against an
+ * index the document no longer has, say) poisons every replay across it: the recovery path
+ * reloads the authoritative snapshot, the next catch-up re-delivers the same change, and it
+ * throws again — on every device, with no way out. The server already resolves this the same
+ * way when it replays committed history (`applyChangesForReconstruction`), so once a reload
+ * has proven the history rather than this replica is the broken side, skipping converges the
+ * client with server truth rather than diverging from it.
+ *
+ * The document is still damaged, so this is emitted through `PatchesSync.onError` — once per
+ * `(docId, changeId)`, and only once the skip is durable — for telemetry to enumerate affected
+ * documents for repair. `cause` carries the {@link ApplyChangesError}, itself caused by the
+ * underlying patch error's message rather than the error, so nothing retains the offending op.
+ */
+export class CommittedPoisonSkippedError extends Error {
+  constructor(
+    /** The document whose committed history contains the change. */
+    readonly docId: string,
+    /** The id of the skipped committed change. */
+    readonly changeId: string,
+    /** The revision of the skipped committed change. */
+    readonly rev: number,
+    cause: ApplyChangesError
+  ) {
+    super(`Skipped unappliable committed change ${changeId} (rev ${rev}) in doc ${docId}: ${cause.message}`, { cause });
+    this.name = 'CommittedPoisonSkippedError';
   }
 }
 

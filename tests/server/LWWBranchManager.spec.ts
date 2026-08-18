@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { JSONPatch } from '../../src/json-patch/JSONPatch';
 import { LWWBranchManager } from '../../src/server/LWWBranchManager';
+import { branchManagerApi } from '../../src/server/branchUtils';
 import { readStreamAsString } from '../../src/server/jsonReadable';
 import { LWWMemoryStoreBackend } from '../../src/server/LWWMemoryStoreBackend';
 import { LWWServer } from '../../src/server/LWWServer';
@@ -43,14 +44,15 @@ describe('LWWBranchManager', () => {
       expect(branchManager).toBeDefined();
     });
 
-    it('should have static api definition', () => {
-      expect(LWWBranchManager.api).toEqual({
-        listBranches: 'read',
-        createBranch: 'write',
-        updateBranch: 'write',
-        deleteBranch: 'write',
-        mergeBranch: 'write',
-      });
+    it('should share the standard branch api (source-authorized merge/update/delete)', () => {
+      // Same shared definition the OT manager uses: list/create authorize args[0] (the
+      // source id); merge/update/delete carry an authDoc resolver that authorizes the source.
+      expect(LWWBranchManager.api).toBe(branchManagerApi);
+      expect(LWWBranchManager.api.listBranches).toBe('read');
+      expect(LWWBranchManager.api.createBranch).toBe('write');
+      for (const method of ['updateBranch', 'deleteBranch', 'mergeBranch'] as const) {
+        expect(typeof (LWWBranchManager.api[method] as { authDoc?: unknown }).authDoc).toBe('function');
+      }
     });
   });
 

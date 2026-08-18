@@ -6,14 +6,25 @@ import type { BranchingStoreBackend } from './types.js';
 /**
  * Standard API definition for branch managers.
  * Used with JSONRPCServer.register() to expose branch methods.
+ *
+ * `merge`/`update`/`delete` take the branch id as their first argument but are governed by
+ * the *source* document — a merge writes into it, and a branch belongs to its source — so
+ * they declare an `authDoc` resolver that authorizes the source. This mirrors the REST layer,
+ * which checks write on the source doc named in the request URL. Without it the generic RPC
+ * auth would check the *branch's* own permissions, letting anyone with branch access merge
+ * into, rename, or delete against a source document they cannot write. `create`/`list` take
+ * the source id as their first argument already, so they keep the default (authorize args[0]).
  */
+const authorizeAgainstSource = (args: readonly unknown[], mgr: unknown): Promise<string> =>
+  (mgr as { getSourceDocId(branchId: string): Promise<string> }).getSourceDocId(args[0] as string);
+
 export const branchManagerApi: ApiDefinition = {
   listBranches: 'read',
   createBranch: 'write',
-  updateBranch: 'write',
-  deleteBranch: 'write',
-  mergeBranch: 'write',
-} as const;
+  updateBranch: { access: 'write', authDoc: authorizeAgainstSource },
+  deleteBranch: { access: 'write', authDoc: authorizeAgainstSource },
+  mergeBranch: { access: 'write', authDoc: authorizeAgainstSource },
+};
 
 /**
  * Fields that cannot be modified via updateBranch().

@@ -1062,6 +1062,99 @@ describe('JSONRPCServer', () => {
     });
   });
 
+  describe('authDoc — authorizing a document other than args[0]', () => {
+    // A method whose first argument is a *branch* id but whose access is governed by the
+    // *source* document it belongs to (branch merge/update/delete). getSourceDocId is the
+    // resolver the real branch managers expose; the api declares it via `authDoc`.
+    class FakeBranchManager {
+      static api = {
+        listBranches: 'read',
+        mergeBranch: { access: 'write', authDoc: (args: readonly any[], mgr: any) => mgr.getSourceDocId(args[0]) },
+      } as const;
+      // branch id -> source doc id
+      private readonly sources: Record<string, string> = { 'branch/b1': 'docs/source' };
+      listBranches = vi.fn().mockResolvedValue([]);
+      mergeBranch = vi.fn().mockResolvedValue({ changes: [] });
+      getSourceDocId = vi.fn(async (branchId: string) => {
+        const source = this.sources[branchId];
+        if (!source) throw new StatusError(404, `branch ${branchId} not found`);
+        return source;
+      });
+    }
+
+    it('authorizes the resolved source doc, not the branch id in args[0]', async () => {
+      const auth = { canAccess: vi.fn().mockReturnValue(true) };
+      const authServer = new JSONRPCServer({ auth });
+      const fake = new FakeBranchManager();
+      authServer.register(fake);
+
+      const response = (await authServer.processMessage({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'mergeBranch',
+        params: ['branch/b1'],
+      })) as JsonRpcResponse;
+
+      expect(response.error).toBeUndefined();
+      // The access check saw the SOURCE, resolved from the branch — not 'branch/b1'.
+      expect(auth.canAccess).toHaveBeenCalledWith(undefined, 'docs/source', 'write', 'mergeBranch');
+      // The method itself still runs on the real branch id.
+      expect(fake.mergeBranch).toHaveBeenCalledWith('branch/b1');
+    });
+
+    it('denies a caller who can access the branch but not its source', async () => {
+      // Provider that would allow the branch id but denies the source doc. This is the
+      // review-copy escalation: a branch owner must not merge into a source they cannot
+      // write. Authorizing args[0] (the branch) would let it through; authorizing the
+      // source closes it.
+      const auth = { canAccess: vi.fn((_ctx: AuthContext | undefined, docId: string) => docId !== 'docs/source') };
+      const authServer = new JSONRPCServer({ auth });
+      const fake = new FakeBranchManager();
+      authServer.register(fake);
+
+      const response = (await authServer.processMessage({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'mergeBranch',
+        params: ['branch/b1'],
+      })) as JsonRpcResponse;
+
+      expect(response.error).toBeDefined();
+      expect(response.error!.code).toBe(403);
+      expect(fake.mergeBranch).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when the resolver throws (unknown branch), without consulting the provider', async () => {
+      const auth = { canAccess: vi.fn().mockReturnValue(true) };
+      const authServer = new JSONRPCServer({ auth });
+      const fake = new FakeBranchManager();
+      authServer.register(fake);
+
+      const response = (await authServer.processMessage({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'mergeBranch',
+        params: ['branch/does-not-exist'],
+      })) as JsonRpcResponse;
+
+      expect(response.error).toBeDefined();
+      expect(auth.canAccess).not.toHaveBeenCalled();
+      expect(fake.mergeBranch).not.toHaveBeenCalled();
+    });
+
+    it('leaves methods without authDoc authorizing args[0]', async () => {
+      const auth = { canAccess: vi.fn().mockReturnValue(true) };
+      const authServer = new JSONRPCServer({ auth });
+      const fake = new FakeBranchManager();
+      authServer.register(fake);
+
+      await authServer.processMessage({ jsonrpc: '2.0', id: 1, method: 'listBranches', params: ['docs/source'] });
+
+      expect(auth.canAccess).toHaveBeenCalledWith(undefined, 'docs/source', 'read', 'listBranches');
+      expect(fake.getSourceDocId).not.toHaveBeenCalled();
+    });
+  });
+
   describe('type safety and TypeScript integration', () => {
     it('should support strongly typed method handlers', async () => {
       interface CreateUserParams {

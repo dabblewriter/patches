@@ -597,6 +597,17 @@ export class OTBranchManager implements BranchManager {
   }
 
   /**
+   * Resolves a branch id to the source document it belongs to (`Branch.docId`), so the RPC
+   * layer can authorize merge/update/delete against the source rather than the branch. Throws
+   * on a missing or tombstoned branch, which fails the access check closed.
+   */
+  async getSourceDocId(branchId: string): Promise<string> {
+    const branch = await this.store.loadBranch(branchId);
+    assertBranchExists(branch, branchId);
+    return branch.docId;
+  }
+
+  /**
    * Merges changes from a branch back into its source document, in bounded windows.
    *
    * Supports multiple merges — the branch stays open and `lastMergedRev` tracks

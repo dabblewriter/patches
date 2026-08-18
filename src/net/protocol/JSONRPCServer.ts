@@ -13,8 +13,24 @@ export type MessageHandler<R = any> = (...args: any[]) => Promise<R> | R;
  * When `params` is declared, `register()` zips the names with the call arguments and
  * passes the resulting object to `AuthorizationProvider.canAccess` — required for
  * providers that validate request payloads (e.g. role-scoped commit rules on `changes`).
+ *
+ * `authDoc` names the document whose access governs the call when it is NOT the first
+ * argument. The access check defaults to authorizing `args[0]`, which is correct for
+ * `commitChanges(docId, …)` and friends; but branch `merge`/`update`/`delete` take the
+ * *branch* id as `args[0]` while they write into (merge) or govern (update/delete) the
+ * *source* document, so authorizing the branch would let anyone with branch access act on
+ * the source. When `authDoc` is present, `register()` resolves it (with the call args and
+ * the registered instance) and authorizes the returned docId instead. It may be async — a
+ * branch resolver reads the branch record to find its source — and a throw fails the access
+ * check closed.
  */
-export type ApiMethodDefinition = Access | { access: Access; params?: readonly string[] };
+export type ApiMethodDefinition =
+  | Access
+  | {
+      access: Access;
+      params?: readonly string[];
+      authDoc?: (args: readonly any[], target: any) => string | Promise<string>;
+    };
 
 /** Static API definition mapping method names to access levels */
 export type ApiDefinition = Record<string, ApiMethodDefinition>;
@@ -116,6 +132,7 @@ export class JSONRPCServer {
       }
       const access = typeof definition === 'string' ? definition : definition.access;
       const paramNames = typeof definition === 'string' ? undefined : definition.params;
+      const authDoc = typeof definition === 'string' ? undefined : definition.authDoc;
 
       this.registerMethod(method, async (...args: any[]) => {
         const docId = args[0];
@@ -130,7 +147,14 @@ export class JSONRPCServer {
         // building the named-params object (allocated on every call otherwise) in
         // that case — it would just be discarded unused.
         const params = this.auth ? buildNamedParams(paramNames, args) : undefined;
-        await this.assertAccess(access, ctx, method, args, params);
+        // The document whose access governs this call is args[0] by default, but a
+        // method may resolve it from the args instead (branch merge/update/delete take
+        // the branch id as arg 0 yet are governed by the source doc). Only the docId in
+        // slot 0 is read by assertAccess, so hand it an args list with the resolved id
+        // there — the method itself still runs on the real, unmodified args. Skip the
+        // (possibly async) resolve when there's no auth provider to consult.
+        const authArgs = this.auth && authDoc ? [await authDoc(args, obj), ...args.slice(1)] : args;
+        await this.assertAccess(access, ctx, method, authArgs, params);
         // _dispatch cleared the context during the await above; re-establish it
         // around the method's synchronous start so getClientId() works inside.
         setAuthContext(ctx);

@@ -1138,6 +1138,9 @@ describe('JSONRPCServer', () => {
       })) as JsonRpcResponse;
 
       expect(response.error).toBeDefined();
+      // A StatusError(404) from the resolver surfaces its code verbatim — not a synthetic
+      // -32000 carrying a server stack trace (the resolver runs pre-authorization).
+      expect(response.error!.code).toBe(404);
       expect(auth.canAccess).not.toHaveBeenCalled();
       expect(fake.mergeBranch).not.toHaveBeenCalled();
     });

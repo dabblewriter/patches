@@ -83,19 +83,21 @@ describe('OTBranchManager', () => {
       expect(mockStore.loadBranch).toHaveBeenCalledWith('branch1');
     });
 
-    it('throws for a missing branch, so the access check fails closed', async () => {
+    it('throws a StatusError(404) for a missing branch, so the access check fails closed', async () => {
       vi.mocked(mockStore.loadBranch).mockResolvedValue(null);
-      await expect(branchManager.getSourceDocId('nope')).rejects.toThrow();
+      // A StatusError (not a bare Error) so the pre-authorization throw surfaces a clean 404
+      // rather than a server stack trace over the wire.
+      await expect(branchManager.getSourceDocId('nope')).rejects.toHaveProperty('code', 404);
     });
 
-    it('throws for a tombstoned branch', async () => {
+    it('throws a StatusError(404) for a tombstoned branch', async () => {
       vi.mocked(mockStore.loadBranch).mockResolvedValue({
         id: 'branch1',
         docId: 'doc-source',
         modifiedAt: Date.now(),
         deleted: true,
       } as Branch);
-      await expect(branchManager.getSourceDocId('branch1')).rejects.toThrow();
+      await expect(branchManager.getSourceDocId('branch1')).rejects.toHaveProperty('code', 404);
     });
   });
 

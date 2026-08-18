@@ -23,6 +23,16 @@ export type MessageHandler<R = any> = (...args: any[]) => Promise<R> | R;
  * the registered instance) and authorizes the returned docId instead. It may be async — a
  * branch resolver reads the branch record to find its source — and a throw fails the access
  * check closed.
+ *
+ * `params` and `authDoc` describe different things and never interfere: `params` reflects the
+ * request *payload* (built from the real, unresolved args, so a provider validating e.g.
+ * `changes` sees exactly what the client sent), while `authDoc` only redirects *which docId*
+ * the check governs. A method may in principle declare both.
+ *
+ * `authDoc` runs *before* any authorization check, so its throw reaches an as-yet-unauthorized
+ * caller: keep a resolver to a single cheap record read, and throw a `StatusError` (whose code
+ * and data are returned verbatim) rather than a bare `Error` (which leaks a server stack trace).
+ * Do not make it more expensive or more revealing than looking up the governed doc.
  */
 export type ApiMethodDefinition =
   | Access

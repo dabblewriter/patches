@@ -1,4 +1,5 @@
 import type { Op } from '@dabble/delta';
+import { StatusError } from '../net/error.js';
 import { findLatestMainVersion } from '../algorithms/ot/server/getSnapshotAtRevision.js';
 import { getStateAtRevision } from '../algorithms/ot/server/getStateAtRevision.js';
 import { transformIncomingChangesWithFrame } from '../algorithms/ot/server/transformIncomingChanges.js';
@@ -599,11 +600,14 @@ export class OTBranchManager implements BranchManager {
   /**
    * Resolves a branch id to the source document it belongs to (`Branch.docId`), so the RPC
    * layer can authorize merge/update/delete against the source rather than the branch. Throws
-   * on a missing or tombstoned branch, which fails the access check closed.
+   * a `StatusError(404)` on a missing or tombstoned branch, which fails the access check
+   * closed. It is a `StatusError` — not `assertBranchExists`'s plain `Error` — because this
+   * runs *before* authorization, so the thrown value is surfaced verbatim to an unauthorized
+   * caller; a plain `Error` would return `-32000` carrying a server stack trace.
    */
   async getSourceDocId(branchId: string): Promise<string> {
     const branch = await this.store.loadBranch(branchId);
-    assertBranchExists(branch, branchId);
+    if (!branch || branch.deleted) throw new StatusError(404, `Branch ${branchId} not found`);
     return branch.docId;
   }
 

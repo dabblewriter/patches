@@ -115,6 +115,8 @@ Applies a sequence of changes to a state object. Each change's operations execut
 
 A change that fails to apply throws an `ApplyChangesError` (carrying the failing change's id, rev, and batch index, with the patch error as `cause`) — it is never silently skipped, since a skipped change would diverge that client from every other client that applied it. `PatchesSync` recovers from this on the client by reloading the authoritative snapshot from the server. Before adopting the snapshot, pending changes are reconciled against the committed tail it subsumes (`rebaseChanges` — a pure op transform, safe even when the local committed state is corrupt): a pending change the server already committed is dropped rather than re-applied on top of a state that already contains it and re-sent as a duplicate.
 
+The one exception is a COMMITTED change that fails again after that reload: the divergence argument inverts once authoritative state is in place, because the server itself skips such a change when it replays the same history (see `applyChangesForReconstruction`), so the client that keeps failing is the one diverging. `PatchesSync` applies it as a no-op and reports a `CommittedPoisonSkippedError` through `onError` — see [PatchesSync](./PatchesSync.md#document-sync-state-tracking).
+
 ### applyChangesForReconstruction
 
 ```typescript

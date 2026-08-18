@@ -245,4 +245,55 @@ describe('PatchesSync — flush reads the durable queue, not the open doc mirror
     expect(await store.getPendingChanges(DOC_ID)).toEqual([]);
     expect(sentLabels(conn)).toEqual(['a', 'b', 'a', 'b', 'c', 'd']);
   });
+
+  it('shelves the doc-only rows the store never held on a remote delete', async () => {
+    // The rows most at risk on a delete: the store lost them, the open doc holds the only copy,
+    // and the close discards that copy. The shelf payload is the app's last chance at them.
+    doc.change((patch: any) => patch.add('/items/-', 'orphan'));
+    await waitForQueue(1);
+    const [orphan] = await store.getPendingChanges(DOC_ID);
+    await store.dropPendingChanges(DOC_ID, [orphan.id]);
+
+    const payloads: Change[][] = [];
+    sync.onRemoteDocDeleted((_docId: string, pendingChanges: Change[]) => {
+      payloads.push(pendingChanges);
+    });
+    const reported: UnstoredPendingError[] = [];
+    sync.onError(err => {
+      if (err instanceof UnstoredPendingError) reported.push(err);
+    });
+
+    await sync['_handleRemoteDocDeleted'](DOC_ID);
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0].map(c => c.ops[0].value)).toEqual(['orphan']);
+    // A vanishing doc is not a store-integrity failure — no alarm.
+    expect(reported).toEqual([]);
+  });
+
+  it('raises no store-integrity alarm when a delete discards a row the tail passed', async () => {
+    doc.change((patch: any) => patch.add('/items/-', 'orphan'));
+    await waitForQueue(1);
+    const [orphan] = await store.getPendingChanges(DOC_ID);
+    await store.dropPendingChanges(DOC_ID, [orphan.id]);
+    // The other context mints into the rev the orphan occupied: the orphan is now at-or-below
+    // the tail, the case the send path reports as UnstoredPendingError.
+    await foreignMint('later');
+    await waitForQueue(1);
+
+    const payloads: Change[][] = [];
+    sync.onRemoteDocDeleted((_docId: string, pendingChanges: Change[]) => {
+      payloads.push(pendingChanges);
+    });
+    const reported: UnstoredPendingError[] = [];
+    sync.onError(err => {
+      if (err instanceof UnstoredPendingError) reported.push(err);
+    });
+
+    await sync['_handleRemoteDocDeleted'](DOC_ID);
+
+    // The durable queue still ships; the below-tail row stays store-authoritatively excluded.
+    expect(payloads[0].map(c => c.ops[0].value)).toEqual(['later']);
+    expect(reported).toEqual([]);
+  });
 });

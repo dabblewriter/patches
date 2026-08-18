@@ -108,9 +108,11 @@ export interface ClientAlgorithm {
    * tail) for a change persisted only to the doc — no state materialization. LWW ignores it.
    * A doc-only change at or below the store tail is NOT sent — the store is authoritative about
    * what is durable — and OT reports it on {@link onError} rather than withholding it silently.
+   * `options.report: false` suppresses that report for callers reading the queue off the send
+   * path (e.g. building a shelf payload for a doc that is being discarded).
    * Returns null if nothing to send.
    */
-  getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null>;
+  getPendingToSend(docId: string, doc?: PatchesDoc<any>, options?: { report?: boolean }): Promise<Change[] | null>;
 
   /**
    * The head of the durable pending queue, or null when it is empty. A plain read: callers that

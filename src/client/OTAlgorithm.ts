@@ -78,6 +78,11 @@ export class OTAlgorithm implements ClientAlgorithm {
    * is reported on every read of the queue, for the life of the doc. Mirrors
    * `PatchesSync._surfacedSyncErrors`. Cleared when the doc is untracked or deleted — the next
    * tracking of that doc is a fresh lifetime.
+   *
+   * Deliberately unbounded, unlike the poison memo's MAX_POISON_MEMO_ENTRIES cap: entries here are
+   * short id strings (not retained error graphs), growth requires the store to keep losing rows on
+   * one tracked doc, and evicting an id resumes the per-attempt alarm spam this latch exists to
+   * stop. Lifecycle clearing is the bound.
    */
   private readonly _reportedUnstored = new Map<string, Set<string>>();
 
@@ -166,15 +171,21 @@ export class OTAlgorithm implements ClientAlgorithm {
    * but it is content the user can see, so it is reported on {@link onError} rather than
    * withheld in silence.
    */
-  async getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null> {
+  async getPendingToSend(
+    docId: string,
+    doc?: PatchesDoc<any>,
+    options?: { report?: boolean }
+  ): Promise<Change[] | null> {
     const otDoc = doc as OTDoc<any> | undefined;
     // Only the doc-merge floor needs it, and that branch needs a doc; without one the store read
     // it would take is discarded, so don't pay for it (the tailRev seed is unused here).
     const committedRev = otDoc?.committedRev ?? 0;
     const { pending, withheld } = await this._collectPending(docId, otDoc, committedRev);
     // Before the empty-queue return: a withheld row is exactly the case where the rest of the
-    // queue can be empty and every other signal reads as fully synced.
-    if (withheld.length > 0) {
+    // queue can be empty and every other signal reads as fully synced. `report: false` is for
+    // callers reading the queue off the send path (the remote-delete shelf): there the doc is
+    // legitimately vanishing, so a store-integrity alarm would misfire.
+    if (withheld.length > 0 && options?.report !== false) {
       const reported = this._reportedUnstored.get(docId) ?? new Set<string>();
       const fresh = withheld.filter(c => !reported.has(c.id)).map(c => c.id);
       if (fresh.length > 0) {
@@ -189,8 +200,8 @@ export class OTAlgorithm implements ClientAlgorithm {
 
   /** See {@link ClientAlgorithm.peekPendingHead} — the store's head row, no send-path work. */
   async peekPendingHead(docId: string): Promise<Change | null> {
-    const pending = await this.store.getPendingChanges(docId);
-    return pending[0] ?? null;
+    const [head] = await this.store.getPendingChanges(docId, { limit: 1 });
+    return head ?? null;
   }
 
   async applyServerChanges<T extends object>(

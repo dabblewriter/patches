@@ -1070,7 +1070,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // queue only ever drains from the front, so the head row leaving is the cheapest sound
       // proof that a pass accomplished something. Compared by id, NOT id@rev: a re-sequenced
       // head is the same row that did not drain.
-      const headBefore = pending[0].id;
+      //
+      // Read from the store, not from `pending[0]`: the drained compare below runs against the
+      // store's post-flush head, and the send batch's [0] can be a doc-only row the store never
+      // held (an empty store queue merges to `[...merged]`), an id the store-side peek can never
+      // return — which would read any non-empty post-flush queue as progress. Both ends of the
+      // compare must read the same collection; an algorithm with no peek compares batch to batch.
+      const headBefore = algorithm.peekPendingHead ? (await algorithm.peekPendingHead(docId))?.id : pending[0].id;
 
       const batches = breakChangesIntoBatches(pending, {
         maxPayloadBytes: this.maxPayloadBytes,
@@ -1563,13 +1569,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   protected async _handleRemoteDocDeleted(docId: string): Promise<void> {
     const algorithm = this._getAlgorithm(docId);
 
-    // Get pending changes before cleanup so app can handle them. Deliberately without the open
-    // doc: its mirror is discarded by the close below either way, and classifying it here would
-    // report a row the store lost (`UnstoredPendingError`) at the exact moment the doc
-    // legitimately vanished — a store-integrity alarm for a collaborator losing access or a
-    // delete from another device. Passing no doc reads the durable queue, which is all this
-    // payload can meaningfully carry.
-    const pendingChanges = (await algorithm.getPendingToSend(docId)) ?? [];
+    // Get pending changes before cleanup so app can handle them. WITH the open doc: the rows most
+    // at risk here are the doc-only ones the store never accepted — after the close below they
+    // exist nowhere else, and this payload is the app's last chance to shelve them. But without
+    // the report: classifying would raise `UnstoredPendingError` — a store-integrity alarm — at
+    // the exact moment the doc legitimately vanished (a collaborator losing access, a delete from
+    // another device).
+    const pendingChanges =
+      (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId) as PatchesDoc<any>, {
+        report: false,
+      })) ?? [];
 
     // Close doc if open
     const doc = this.patches.getOpenDoc(docId);

@@ -253,10 +253,10 @@ export class OTIndexedDBStore implements OTClientStore {
    * @returns The pending changes.
    */
   @blockable
-  async getPendingChanges(docId: string, options?: { startAfterRev?: number }): Promise<Change[]> {
+  async getPendingChanges(docId: string, options?: { startAfterRev?: number; limit?: number }): Promise<Change[]> {
     const [tx, pendingChanges] = await this.db.transaction(['pendingChanges'], 'readonly');
     const lower = (options?.startAfterRev ?? -1) + 1;
-    const result = await pendingChanges.getAll<Change>([docId, lower], [docId, Infinity]);
+    const result = await pendingChanges.getAll<Change>([docId, lower], [docId, Infinity], options?.limit);
     await tx.complete();
     return result;
   }

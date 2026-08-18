@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OTAlgorithm } from '../../src/client/OTAlgorithm';
 import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
 import { createChange } from '../../src/data/change';
+import { UnstoredPendingError } from '../../src/net/error';
 
 /**
  * The send choke point enforces the OT batch invariant: every change in one flush must share a
@@ -165,5 +166,70 @@ describe('OTAlgorithm.getPendingToSend — open doc', () => {
     const pending = await algorithm.getPendingToSend('doc1', doc as any);
 
     expect(pending!.map(c => c.id)).toEqual([p1.id, p2.id]);
+  });
+});
+
+describe('OTAlgorithm.getPendingToSend — unstored-row reporting', () => {
+  let store: OTInMemoryStore;
+  let algorithm: OTAlgorithm;
+
+  beforeEach(async () => {
+    store = new OTInMemoryStore();
+    algorithm = new OTAlgorithm(store);
+    await store.trackDocs(['doc1']);
+    await store.saveDoc('doc1', { state: {}, rev: 10 });
+  });
+
+  it('reports a doc-only row the tail passed; { report: false } reads the same batch silently', async () => {
+    // The store's tail sits at 12; the doc still mirrors a row at 11 the store never kept.
+    const durable = createChange(10, 12, [{ op: 'add', path: '/b', value: 2 }]);
+    await store.savePendingChanges('doc1', [durable]);
+    const orphan = createChange(10, 11, [{ op: 'add', path: '/a', value: 1 }]);
+    const doc = { getPendingChanges: () => [orphan, durable], committedRev: 10 };
+
+    const reported: UnstoredPendingError[] = [];
+    algorithm.onError(err => {
+      if (err instanceof UnstoredPendingError) reported.push(err);
+    });
+
+    // Off the send path (the remote-delete shelf): same batch, no store-integrity alarm.
+    const shelf = await algorithm.getPendingToSend('doc1', doc as any, { report: false });
+    expect(shelf!.map(c => c.id)).toEqual([durable.id]);
+    expect(reported).toEqual([]);
+
+    // The silent read did not consume the once-per-doc latch: the send path still reports.
+    const sent = await algorithm.getPendingToSend('doc1', doc as any);
+    expect(sent!.map(c => c.id)).toEqual([durable.id]);
+    expect(reported).toHaveLength(1);
+    expect(reported[0].changeIds).toEqual([orphan.id]);
+  });
+});
+
+describe('OTAlgorithm.peekPendingHead', () => {
+  let store: OTInMemoryStore;
+  let algorithm: OTAlgorithm;
+
+  beforeEach(async () => {
+    store = new OTInMemoryStore();
+    algorithm = new OTAlgorithm(store);
+    await store.trackDocs(['doc1']);
+    await store.saveDoc('doc1', { state: {}, rev: 10 });
+  });
+
+  it('reads one row from the store, not the whole queue', async () => {
+    const first = createChange(10, 11, [{ op: 'add', path: '/a', value: 1 }]);
+    const second = createChange(10, 12, [{ op: 'add', path: '/b', value: 2 }]);
+    await store.savePendingChanges('doc1', [first, second]);
+    const read = vi.spyOn(store, 'getPendingChanges');
+
+    const head = await algorithm.peekPendingHead('doc1');
+
+    expect(head!.id).toBe(first.id);
+    // A peek must not materialize the pending table (a large offline queue pays per flush).
+    expect(read).toHaveBeenCalledWith('doc1', { limit: 1 });
+  });
+
+  it('returns null on an empty queue', async () => {
+    expect(await algorithm.peekPendingHead('doc1')).toBeNull();
   });
 });

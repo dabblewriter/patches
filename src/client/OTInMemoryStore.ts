@@ -36,10 +36,11 @@ export class OTInMemoryStore implements OTClientStore {
     };
   }
 
-  async getPendingChanges(docId: string, options?: { startAfterRev?: number }): Promise<Change[]> {
+  async getPendingChanges(docId: string, options?: { startAfterRev?: number; limit?: number }): Promise<Change[]> {
     const pending = this.docs.get(docId)?.pending ?? [];
     const startAfter = options?.startAfterRev ?? -1;
-    return pending.filter(change => change.rev > startAfter);
+    const matched = pending.filter(change => change.rev > startAfter);
+    return options?.limit !== undefined ? matched.slice(0, options.limit) : matched;
   }
 
   async getCommittedRev(docId: string): Promise<number> {

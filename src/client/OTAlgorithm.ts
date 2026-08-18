@@ -1,3 +1,4 @@
+import { signal } from 'easy-signal';
 import { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
 import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
 import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
@@ -6,6 +7,7 @@ import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
 import { createChange } from '../data/change.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
+import { UnstoredPendingError } from '../net/error.js';
 import type { Change, PatchesSnapshot, QuarantinedChange } from '../types.js';
 import type { ClientAlgorithm } from './ClientAlgorithm.js';
 import type { OTClientStore } from './OTClientStore.js';
@@ -52,6 +54,13 @@ export class OTAlgorithm implements ClientAlgorithm {
   readonly name = 'ot';
   readonly store: OTClientStore;
 
+  /**
+   * Failures this layer can report but not resolve — currently only
+   * {@link UnstoredPendingError}. PatchesSync forwards these to its own onError so they reach
+   * app telemetry without every consumer having to subscribe to the algorithm.
+   */
+  readonly onError = signal<(error: Error, context?: { docId?: string }) => void>();
+
   protected readonly _options: PatchesDocOptions;
 
   /**
@@ -62,6 +71,20 @@ export class OTAlgorithm implements ClientAlgorithm {
    * the receive rebased away in place.
    */
   private readonly _docLocks = new Map<string, Promise<unknown>>();
+
+  /**
+   * Change ids already reported as unstored, per doc (see {@link UnstoredPendingError}). The store
+   * cannot recover a row it never took, so the condition never clears: without this the same row
+   * is reported on every read of the queue, for the life of the doc. Mirrors
+   * `PatchesSync._surfacedSyncErrors`. Cleared when the doc is untracked or deleted — the next
+   * tracking of that doc is a fresh lifetime.
+   *
+   * Deliberately unbounded, unlike the poison memo's MAX_POISON_MEMO_ENTRIES cap: entries here are
+   * short id strings (not retained error graphs), growth requires the store to keep losing rows on
+   * one tracked doc, and evicting an id resumes the per-attempt alarm spam this latch exists to
+   * stop. Lifecycle clearing is the bound.
+   */
+  private readonly _reportedUnstored = new Map<string, Set<string>>();
 
   constructor(store: OTClientStore, options: PatchesDocOptions = {}) {
     this.store = store;
@@ -130,26 +153,55 @@ export class OTAlgorithm implements ClientAlgorithm {
     return pending.length > 0;
   }
 
-  async getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null> {
-    let batch: Change[];
-    if (doc) {
-      // Trust the open doc for pending; a ranged store read picks up any foreign tab's mints
-      // (rev past the doc's tail) and appends them raw. The serial flush and the commit echo
-      // rebase make that safe — the doc learns of them through the echo.
-      const otDoc = doc as OTDoc<any>;
-      const pending = otDoc.getPendingChanges();
-      const tail = pending[pending.length - 1]?.rev ?? otDoc.committedRev;
-      const delta = await this.store.getPendingChanges(docId, { startAfterRev: tail });
-      // Filter the delta against the doc's own pending by id: a custom store that ignores
-      // startAfterRev (back-compat) would return the whole queue, folding the doc's pending in
-      // twice — a duplicate commit the server's id dedup would otherwise have to catch.
-      const have = new Set(pending.map(c => c.id));
-      batch = [...pending, ...delta.filter(c => !have.has(c.id))];
-    } else {
-      batch = await this.store.getPendingChanges(docId);
+  /**
+   * The queue to put on the wire. Store rows are ground truth — the same contract the receive
+   * path uses (see {@link _collectPending}) — because the store is the sole rev sequencer: a
+   * context sharing it mints at the STORE's tail, which can be a rev this doc's in-memory
+   * mirror already occupies. Keying the read off the mirror's tail therefore withheld any row
+   * at or below it: unsent until a later echo rebuilt the queue from the store, by which point
+   * changes minted after it had committed ahead of it — and the rebase against them could
+   * transform it away entirely, losing content that was already persisted (DAB-946).
+   *
+   * Reading the store also puts foreign-context rows minted at their own committedRev into the
+   * batch, so mixed baseRevs stop being rare here; {@link _withConsistentBaseRev} must transform
+   * the stragglers rather than relabel them, which is #145. Ship the two together.
+   *
+   * Store-authoritative cuts both ways: a row the doc holds that the store does not, at or below
+   * the store tail, is never put on the wire. That is deliberate (see {@link _collectPending}),
+   * but it is content the user can see, so it is reported on {@link onError} rather than
+   * withheld in silence.
+   */
+  async getPendingToSend(
+    docId: string,
+    doc?: PatchesDoc<any>,
+    options?: { report?: boolean }
+  ): Promise<Change[] | null> {
+    const otDoc = doc as OTDoc<any> | undefined;
+    // Only the doc-merge floor needs it, and that branch needs a doc; without one the store read
+    // it would take is discarded, so don't pay for it (the tailRev seed is unused here).
+    const committedRev = otDoc?.committedRev ?? 0;
+    const { pending, withheld } = await this._collectPending(docId, otDoc, committedRev);
+    // Before the empty-queue return: a withheld row is exactly the case where the rest of the
+    // queue can be empty and every other signal reads as fully synced. `report: false` is for
+    // callers reading the queue off the send path (the remote-delete shelf): there the doc is
+    // legitimately vanishing, so a store-integrity alarm would misfire.
+    if (withheld.length > 0 && options?.report !== false) {
+      const reported = this._reportedUnstored.get(docId) ?? new Set<string>();
+      const fresh = withheld.filter(c => !reported.has(c.id)).map(c => c.id);
+      if (fresh.length > 0) {
+        fresh.forEach(id => reported.add(id));
+        this._reportedUnstored.set(docId, reported);
+        this.onError.emit(new UnstoredPendingError(docId, fresh), { docId });
+      }
     }
-    if (batch.length === 0) return null;
-    return this._withConsistentBaseRev(docId, batch);
+    if (pending.length === 0) return null;
+    return this._withConsistentBaseRev(docId, pending);
+  }
+
+  /** See {@link ClientAlgorithm.peekPendingHead} — the store's head row, no send-path work. */
+  async peekPendingHead(docId: string): Promise<Change | null> {
+    const [head] = await this.store.getPendingChanges(docId, { limit: 1 });
+    return head ?? null;
   }
 
   async applyServerChanges<T extends object>(
@@ -493,6 +545,7 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async untrackDocs(docIds: string[]): Promise<void> {
+    docIds.forEach(id => this._reportedUnstored.delete(id));
     return this.store.untrackDocs(docIds);
   }
 
@@ -509,6 +562,7 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async confirmDeleteDoc(docId: string): Promise<void> {
+    this._reportedUnstored.delete(docId);
     return this.store.confirmDeleteDoc(docId);
   }
 
@@ -610,6 +664,27 @@ export class OTAlgorithm implements ClientAlgorithm {
    * persisted only to the doc), guarded by rev so a stale lower-frame copy the store rebased away
    * can't resurrect (P3 duplicate, fuzz seed 1000319).
    *
+   * The rev guard holds on both paths, but for two different reasons — decided here rather than
+   * inherited from one of them:
+   * - receive: a doc-only row at or below the store tail is a copy the store already rebased
+   *   away, so folding it back in resurrects it (P3 above).
+   * - send: the same row is not durable. Transmitting content the durable queue never accepted
+   *   would leave the server holding state no local rebuild reproduces — a worse divergence than
+   *   not sending — and carving the send path out re-opens the split authority this class closed.
+   *
+   * So the store stays authoritative and the row is withheld; `withheld` carries those rows out
+   * so {@link getPendingToSend} can report the condition ({@link UnstoredPendingError}) instead
+   * of leaving it indistinguishable from a fully synced doc.
+   *
+   * That report names one cause — a store write that reported success without persisting — and
+   * that reading holds only while `latestRev` is a real store row. With an empty store queue it
+   * falls back to `committedRev`, where a doc-only row at or below it would be a stale mirror
+   * entry for something already committed, not a lost durable row. No reachable producer is known
+   * for that case: {@link OTDoc.applyChanges} re-sequences surviving pending strictly above the
+   * new committedRev, and {@link dropResolvedPending} re-syncs the open doc from the store on the
+   * paths that drop rows. If a change to the rev-sequencing invariant ever opens that window,
+   * split the two cases rather than let the error keep asserting the cause it can no longer prove.
+   *
    * `tailRev` is the max STORE row rev, never the doc-merged max: R2's conflict check compares it
    * against the store's own pending rows, so a doc-only rev folded in here would push tailRev past
    * the store tail and hide a foreign mint landing at store-tail+1, which the replace then wipes.
@@ -618,19 +693,22 @@ export class OTAlgorithm implements ClientAlgorithm {
     docId: string,
     doc: OTDoc<T> | undefined,
     committedRev: number
-  ): Promise<{ pending: Change[]; tailRev: number }> {
+  ): Promise<{ pending: Change[]; tailRev: number; withheld: Change[] }> {
     const storePending = await this.store.getPendingChanges(docId);
     let pending = storePending;
+    let withheld: Change[] = [];
     if (doc) {
       const inMemory = doc.getPendingChanges();
       const latestRev = storePending[storePending.length - 1]?.rev ?? committedRev;
       const storedIds = new Set(storePending.map(c => c.id));
-      const docOnly = inMemory.filter(c => c.rev > latestRev && !storedIds.has(c.id));
-      if (docOnly.length > 0) pending = [...storePending, ...docOnly];
+      const docOnly = inMemory.filter(c => !storedIds.has(c.id));
+      const merged = docOnly.filter(c => c.rev > latestRev);
+      if (merged.length > 0) pending = [...storePending, ...merged];
+      withheld = docOnly.filter(c => c.rev <= latestRev);
     }
     let tailRev = committedRev;
     for (const c of storePending) if (c.rev > tailRev) tailRev = c.rev;
-    return { pending, tailRev };
+    return { pending, tailRev, withheld };
   }
 
   /**

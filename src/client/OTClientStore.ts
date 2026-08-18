@@ -17,9 +17,11 @@ export interface OTClientStore extends PatchesStore {
    * @param docId Document identifier
    * @param options.startAfterRev Only return pending changes with rev > startAfterRev (a ranged
    *   read for foreign-mint deltas; no state materialization)
+   * @param options.limit Return at most this many rows from the front of the queue (a head peek
+   *   must not materialize the whole pending table)
    * @returns Array of pending changes in chronological order
    */
-  getPendingChanges(docId: string, options?: { startAfterRev?: number }): Promise<Change[]>;
+  getPendingChanges(docId: string, options?: { startAfterRev?: number; limit?: number }): Promise<Change[]>;
 
   /**
    * Appends new pending changes to the document's local change queue.

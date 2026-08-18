@@ -263,6 +263,26 @@ describe('OTIndexedDBStore', () => {
       expect(pendingStore.getAll).toHaveBeenCalled();
       expect(result).toEqual(changes);
     });
+
+    it('passes limit through as the range read count, so a head peek stays one row', async () => {
+      const pendingStore = createMockIDBStore();
+      pendingStore.getAll.mockResolvedValue([createChange('p1', 1)]);
+      mockStores.set('pendingChanges', pendingStore);
+
+      await store.getPendingChanges('doc1', { limit: 1 });
+
+      expect(pendingStore.getAll.mock.calls[0][2]).toBe(1);
+    });
+
+    it('reads the whole range when no limit is given', async () => {
+      const pendingStore = createMockIDBStore();
+      pendingStore.getAll.mockResolvedValue([]);
+      mockStores.set('pendingChanges', pendingStore);
+
+      await store.getPendingChanges('doc1');
+
+      expect(pendingStore.getAll.mock.calls[0][2]).toBeUndefined();
+    });
   });
 
   describe('applyServerChanges', () => {

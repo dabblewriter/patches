@@ -1,3 +1,4 @@
+import type { Signal } from 'easy-signal';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change, PatchesSnapshot, QuarantinedChange } from '../types.js';
 import type { PatchesDoc } from './PatchesDoc.js';
@@ -27,6 +28,13 @@ export interface ClientAlgorithm {
 
   /** Algorithm owns its store */
   readonly store: PatchesStore;
+
+  /**
+   * Optional signal for failures the algorithm can report but not resolve — e.g. OT withholding a
+   * pending change the open doc holds but the store never persisted. PatchesSync forwards these to
+   * its own onError so they reach app telemetry.
+   */
+  readonly onError?: Signal<(error: Error, context?: { docId?: string }) => void>;
 
   /**
    * Creates a doc instance appropriate for this algorithm.
@@ -94,11 +102,28 @@ export interface ClientAlgorithm {
    *   drained, see PatchesSync.flushDoc's follow-up pass)
    * - LWW: Creates single Change from pendingFields (or returns existing)
    *
-   * When `doc` (the open doc) is passed, OT trusts its in-memory pending as the source of truth
-   * and only reads the store for foreign-tab mint deltas — no state materialization. LWW ignores
-   * it. Returns null if nothing to send.
+   * The store's pending rows are the source of truth — it is the sole rev sequencer, so any
+   * context sharing it can mint at a rev the open doc's mirror already holds. When `doc` is
+   * passed, OT merges its in-memory pending in as a supplement (by change id, above the store
+   * tail) for a change persisted only to the doc — no state materialization. LWW ignores it.
+   * A doc-only change at or below the store tail is NOT sent — the store is authoritative about
+   * what is durable — and OT reports it on {@link onError} rather than withholding it silently.
+   * `options.report: false` suppresses that report for callers reading the queue off the send
+   * path (e.g. building a shelf payload for a doc that is being discarded).
+   * Returns null if nothing to send.
    */
-  getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null>;
+  getPendingToSend(docId: string, doc?: PatchesDoc<any>, options?: { report?: boolean }): Promise<Change[] | null>;
+
+  /**
+   * The head of the durable pending queue, or null when it is empty. A plain read: callers that
+   * need only "what is at the front of the queue now" must not pay {@link getPendingToSend}'s
+   * send-path work (building/normalizing a batch, warning on mixed baseRev, reporting rows the
+   * store lost), all of which would fire a second time for a status probe.
+   *
+   * Optional — only OT keeps a durable queue of changes. LWW's outgoing state is pending ops plus
+   * at most one in-flight change, so there is no head row to peek.
+   */
+  peekPendingHead?(docId: string): Promise<Change | null>;
 
   /**
    * Applies server changes and updates the doc (if provided).

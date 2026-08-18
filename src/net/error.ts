@@ -334,6 +334,36 @@ export function isUnsplittableChangeError(err: unknown): boolean {
 }
 
 /**
+ * The open doc holds a pending change the store does not, at or below the store's pending tail,
+ * so the send path withheld it from the wire (see `OTAlgorithm.getPendingToSend`).
+ *
+ * The withholding is the decided contract: a row the store never accepted is not durable, and
+ * putting it on the wire would let the server hold content no local rebuild reproduces. The
+ * silence is not — the editor still shows that content, and `hasPending` reads the store, so
+ * without this the doc reports itself fully synced while a change sits unsendable. A doc holding
+ * a change the store lacks is a store-integrity failure (the known producer is a store write that
+ * reported success without persisting), and this reports it as one.
+ *
+ * Emitted through `PatchesSync.onError` once per `(docId, changeId)` for the life of the doc: the
+ * store cannot recover a row it never took, so every later read of the queue observes the same
+ * row again (see `OTAlgorithm._reportedUnstored`).
+ */
+export class UnstoredPendingError extends Error {
+  constructor(
+    /** The doc whose queue is missing the rows. */
+    readonly docId: string,
+    /** Ids of the pending changes the open doc holds but the store does not. */
+    readonly changeIds: string[]
+  ) {
+    super(
+      `${changeIds.length} pending change(s) for ${docId} are in the open doc but not the store, ` +
+        `so they cannot be sent: ${changeIds.join(', ')}`
+    );
+    this.name = 'UnstoredPendingError';
+  }
+}
+
+/**
  * A COMMITTED change `PatchesSync` gave up applying and skipped, so the document could
  * converge on the rest of its history instead of latching forever.
  *

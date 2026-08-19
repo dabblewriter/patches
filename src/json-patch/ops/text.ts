@@ -89,9 +89,20 @@ export const text: JSONPatchOpHandler = {
 };
 
 /**
- * Fix non-insert ops (retain/delete that overran the document)
- * Convert retains to space inserts to preserve cursor positions and subsequent edits
- * Ensure document ends with a newline
+ * Drop non-insert ops (retain/delete that overran the document) and ensure the document
+ * ends with a newline.
+ *
+ * A document is insert-only, so `compose` consumes every in-bounds retain. Anything left
+ * refers to content past the end of the document — i.e. the change was authored against a
+ * longer document than the one it landed on.
+ *
+ * These used to be converted to space inserts, to keep the author's later offsets valid.
+ * That trades a misplaced edit for a corrupted one: the spaces are indistinguishable from
+ * typed text, so the document silently grows past its own content and every later offset
+ * lands in the wrong place. DAB-1064 traced a reader's scrambled manuscript to exactly
+ * this — an 11-character overrun became 11 spaces, and the author's next edit inserted
+ * itself in front of the previous one. Dropping the overrun keeps the document honest;
+ * the offending change simply lands at the end, where the author was typing anyway.
  */
 function fixBadDeltaDoc(delta: Delta): Delta {
   // Find where trailing non-inserts start (these can be dropped)
@@ -106,21 +117,20 @@ function fixBadDeltaDoc(delta: Delta): Delta {
     delta.push({ insert: '\n' });
   }
 
-  // Check if we need to fix any middle-of-doc retains
+  // Check if we need to drop any middle-of-doc retains
   const hasNonInsertOps = delta.ops.some(op => op.insert === undefined);
   if (!hasNonInsertOps) {
     return delta;
   }
-  const newDelta = new Delta();
+  log(
+    'Dropping ops that overran the document in a @txt doc',
+    delta.ops.filter(op => op.insert === undefined)
+  );
 
+  const newDelta = new Delta();
   for (const op of delta.ops) {
     if (op.insert !== undefined) {
       newDelta.push(op);
-    } else if (op.retain) {
-      // Convert retain to spaces to preserve cursor positions
-      const insertOp: Op = { insert: ''.padStart(op.retain) };
-      if (op.attributes) insertOp.attributes = op.attributes;
-      newDelta.push(insertOp);
     }
   }
   return newDelta;

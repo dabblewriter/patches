@@ -40,7 +40,9 @@ describe('@txt overrun: live apply vs historical reconstruction', () => {
     const ops = [change(1, [{ retain: BAD_RETAIN }, { insert: 'the note' }])];
 
     const live = applyChanges(structuredClone(state), ops) as any;
-    const replayed = applyChangesForReconstruction(structuredClone(state), ops) as any;
+    const replayed = applyChangesForReconstruction(structuredClone(state), ops, {
+      legacyTextOverrunPadding: true,
+    }) as any;
 
     expect(textOf(live.text)).toBe(`${DOC}the note\n`);
     expect(textOf(replayed.text)).toBe(`${DOC}${''.padStart(OPENING.length)}the note\n`);
@@ -56,7 +58,9 @@ describe('@txt overrun: live apply vs historical reconstruction', () => {
       change(2, [{ retain: DOC.length }, { delete: OPENING.length }]),
     ];
 
-    const replayed = applyChangesForReconstruction(structuredClone(state), history) as any;
+    const replayed = applyChangesForReconstruction(structuredClone(state), history, {
+      legacyTextOverrunPadding: true,
+    }) as any;
     expect(textOf(replayed.text)).toBe(`${DOC}the note\n`);
 
     // Same log, live semantics: the delete lands on prose instead of padding.
@@ -69,9 +73,11 @@ describe('@txt overrun: live apply vs historical reconstruction', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const state = { text: new Delta().insert(DOC).ops };
-      applyChangesForReconstruction(structuredClone(state), [
-        change(1, [{ retain: BAD_RETAIN }, { insert: 'the note' }]),
-      ]);
+      applyChangesForReconstruction(
+        structuredClone(state),
+        [change(1, [{ retain: BAD_RETAIN }, { insert: 'the note' }])],
+        { legacyTextOverrunPadding: true }
+      );
       expect(warn).not.toHaveBeenCalled();
 
       applyChanges(structuredClone(state), [change(1, [{ retain: BAD_RETAIN }, { insert: 'the note' }])]);
@@ -82,7 +88,27 @@ describe('@txt overrun: live apply vs historical reconstruction', () => {
     }
   });
 
-  it('only reconstruction can ask for padding — the option is off by default', () => {
+  it('does not pad unless the caller opts in — seeding a new doc must not inherit it', () => {
+    // The branch/review-copy case: reconstruction whose output is PERSISTED as the first
+    // change of a fresh document. Padding here would bake invented characters into the new
+    // doc as ordinary authored text, and a merge could carry them back into the source.
+    const state = { text: new Delta().insert(DOC).ops };
+    const ops = [change(1, [{ retain: BAD_RETAIN }, { insert: 'the note' }])];
+
+    const seeded = applyChangesForReconstruction(structuredClone(state), ops) as any;
+    const rendered = applyChangesForReconstruction(structuredClone(state), ops, {
+      legacyTextOverrunPadding: true,
+    }) as any;
+
+    expect(textOf(seeded.text)).toBe(`${DOC}the note\n`);
+    expect(textOf(seeded.text)).not.toContain('  ');
+    // And it matches what a live client computes for the same log — a branch base that
+    // disagrees with its parent is the failure this guards.
+    expect(textOf(seeded.text)).toBe(textOf((applyChanges(structuredClone(state), ops) as any).text));
+    expect(textOf(rendered.text)).not.toBe(textOf(seeded.text));
+  });
+
+  it('only an explicit opt-in gets padding — the option is off by default', () => {
     const state = { text: new Delta().insert(DOC).ops };
     const ops = [{ op: '@txt', path: '/text', value: [{ retain: BAD_RETAIN }, { insert: 'the note' }] }];
 

@@ -252,6 +252,18 @@ export async function getStateBeforeVersionAsStream(
  * @param docId - The document ID.
  * @param version - The version metadata.
  * @param changes - The changes included in this version.
+ * A version blob is a base for FURTHER replay of the same log, so it is a rendering of that
+ * log rather than new authored content: consumers building blobs for a doc whose history may
+ * contain a `@txt` overrun should pass
+ * `{ reconstruction: { legacyTextOverrunPadding: true } }`, or the changes recorded after the
+ * overrun — which were authored against its padding — will misapply on top of the blob. See
+ * `ReconstructionOptions.legacyTextOverrunPadding` (DAB-1064). No caller in this repo builds
+ * blobs; the decision belongs to the consuming server.
+ *
+ * @param store - The store backend to load previous version state from.
+ * @param docId - The document ID.
+ * @param version - The version metadata.
+ * @param changes - The changes included in this version.
  * @param options - Optional replay options; pass `{ reconstruction }` only when
  *   reconstructing settled history (see `applyChangesForReconstruction`).
  * @returns The built state for the version.

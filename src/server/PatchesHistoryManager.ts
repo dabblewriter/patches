@@ -160,9 +160,14 @@ export class PatchesHistoryManager {
     // historically-invalid committed op (from lenient-era commits) must not make
     // the scrubbing baseline permanently unreadable. Skips are surfaced through
     // the onSkippedChange telemetry hook (or console.error by default).
+    // It also RENDERS this log rather than seeding a new document, so it keeps the `@txt`
+    // overrun padding the log's later entries were authored against (DAB-1064).
     const { onSkippedChange } = this.options;
     return getStateBeforeVersionAsStream(otStore, docId, version, {
-      reconstruction: onSkippedChange ? { onSkippedChange: skipped => onSkippedChange(docId, skipped) } : {},
+      reconstruction: {
+        legacyTextOverrunPadding: true,
+        ...(onSkippedChange ? { onSkippedChange: skipped => onSkippedChange(docId, skipped) } : {}),
+      },
     });
   }
 

@@ -247,12 +247,12 @@ describe('applyChangesForReconstruction', () => {
 
     const result = applyChangesForReconstruction(state1, changes, { onSkippedChange });
 
-    // `legacyTextOverrunPadding` is part of the reconstruction contract, not an incidental
-    // extra: settled history must replay under the text semantics it was written with,
-    // which is why this differs from applyChanges' options (DAB-1064).
+    // `legacyTextOverrunPadding` is opt-in, and defaults OFF even under reconstruction: a
+    // replay that seeds a new document (branch creation) must not inherit padding as authored
+    // text. Only a caller that RENDERS this log asks for it (DAB-1064).
     expect(mockApplyPatch).toHaveBeenCalledWith(state1, changes[0].ops, {
       strict: true,
-      legacyTextOverrunPadding: true,
+      legacyTextOverrunPadding: false,
     });
     expect(result).toBe(state2);
     expect(onSkippedChange).not.toHaveBeenCalled();
@@ -282,7 +282,7 @@ describe('applyChangesForReconstruction', () => {
     // The change AFTER the bad one is applied to the state from BEFORE the bad one
     expect(mockApplyPatch).toHaveBeenNthCalledWith(3, state2, changes[2].ops, {
       strict: true,
-      legacyTextOverrunPadding: true,
+      legacyTextOverrunPadding: false,
     });
     expect(result).toBe(state3);
   });

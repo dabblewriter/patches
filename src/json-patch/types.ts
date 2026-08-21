@@ -40,6 +40,19 @@ export interface ApplyJSONPatchOptions {
    * Apply changes at a given path prefix
    */
   atPath?: string;
+
+  /**
+   * HISTORICAL-RECONSTRUCTION ONLY. Keeps the legacy handling of a `@txt` change whose retain
+   * overran the document: the overrun is materialised as padding spaces instead of dropped.
+   *
+   * That padding is the DAB-1064 corruption mechanism, so live applies must never opt in. It
+   * survives for replay because committed history has to reproduce what clients actually
+   * computed when the change was first applied — a doc whose log contains an overrun, and then
+   * an edit made against the padded text, only replays coherently under the old rule. Changing
+   * the semantics under replay would silently rewrite settled documents (see
+   * `applyChangesForReconstruction`).
+   */
+  legacyTextOverrunPadding?: boolean;
 }
 
 export interface JSONPatchOp {
@@ -66,6 +79,12 @@ export type State = {
    * instead of the default where `otherOps` — applied after `thisOps` — win. See transformPatch.
    */
   otherOpsFirst?: boolean;
+  /**
+   * Set by `applyPatch` from `ApplyJSONPatchOptions.legacyTextOverrunPadding`. Read by the
+   * `@txt` handler to keep a retain that overran the document as padding spaces, which only
+   * historical reconstruction may ask for.
+   */
+  legacyTextOverrunPadding?: boolean;
 };
 
 export type Runner = (state: State) => any;

@@ -126,7 +126,13 @@ export function applyChangesForReconstruction<T>(state: T, changes: Change[], op
   for (let i = 0; i < changes.length; i++) {
     const change = changes[i];
     try {
-      state = applyPatch(state, change.ops, { strict: true });
+      // `legacyTextOverrunPadding` belongs to this function and nowhere else. A committed log
+      // may contain a `@txt` change that overran the document, and the edits after it were
+      // authored against the padding that overrun produced. Replaying under the live rule —
+      // which drops the overrun — applies those later edits to a document that never had the
+      // padding, so an in-bounds delete lands on real prose. Settled history has to replay
+      // under the semantics it was written with. See ApplyJSONPatchOptions.
+      state = applyPatch(state, change.ops, { strict: true, legacyTextOverrunPadding: true });
     } catch (error) {
       if (options?.onSkippedChange) {
         options.onSkippedChange({ change, index: i, error });

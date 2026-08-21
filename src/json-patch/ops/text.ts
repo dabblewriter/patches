@@ -48,7 +48,7 @@ export const text: JSONPatchOpHandler = {
 
     doc = doc.compose(delta);
 
-    doc = fixBadDeltaDoc(doc);
+    doc = fixBadDeltaDoc(doc, state.legacyTextOverrunPadding === true);
 
     return replace.apply(state, path, doc);
   },
@@ -89,14 +89,44 @@ export const text: JSONPatchOpHandler = {
 };
 
 /**
- * Fix non-insert ops (retain/delete that overran the document)
- * Convert retains to space inserts to preserve cursor positions and subsequent edits
- * Ensure document ends with a newline
+ * Drop non-insert ops (retain/delete that overran the document) and ensure the document
+ * ends with a newline.
+ *
+ * A document is insert-only, so `compose` consumes every in-bounds retain. Anything left
+ * refers to content past the end of the document — i.e. the change was authored against a
+ * longer document than the one it landed on.
+ *
+ * These used to be converted to space inserts, to keep the author's later offsets valid.
+ * That trades a misplaced edit for a corrupted one: the spaces are indistinguishable from
+ * typed text, so the document silently grows past its own content and every later offset
+ * lands in the wrong place. DAB-1064 traced a reader's scrambled manuscript to exactly
+ * this — an overrun became spaces, and the author's next edit inserted itself in front of
+ * the previous one.
+ *
+ * The padding was worse than it looks, because it applied to `retain(n, attributes)` too:
+ * a formatting op that overran produced n spaces *carrying that formatting*. Invented
+ * characters that are also styled. Dropping handles both shapes the same way, which is why
+ * "could we at least keep formatting retains?" is not a rescue.
+ *
+ * What the drop costs: since a stored document always ends in a newline, the overrunning
+ * edit lands *after* that newline — its own paragraph at the end of the document, not at
+ * the author's caret. That is the accepted trade. A visibly misplaced edit the author can
+ * see and move beats silent corruption of text they have already written.
+ *
+ * `legacyPadding` keeps the old behaviour, and ONLY historical reconstruction may ask for it.
+ * Replay has to reproduce what clients actually computed at the time: in a log that contains
+ * an overrun, the edits that follow were authored against the padded text — including, very
+ * often, the author deleting the stray spaces by hand. Replaying that log under the new rule
+ * applies those later edits to a document that never had the padding, so an in-bounds delete
+ * lands on real prose instead. Same log, same code, silently different document. Hence two
+ * modes rather than one: new applies stop the corruption, settled history stays readable.
  */
-function fixBadDeltaDoc(delta: Delta): Delta {
+function fixBadDeltaDoc(delta: Delta, legacyPadding: boolean): Delta {
   // Find where trailing non-inserts start (these can be dropped)
+  let overrun = 0;
   while (delta.ops.length && delta.ops[delta.ops.length - 1].insert === undefined) {
-    delta.ops.pop();
+    const dropped = delta.ops.pop();
+    overrun += dropped?.retain ?? dropped?.delete ?? 0;
   }
   const endsWithNewline =
     delta.ops.length > 0 &&
@@ -106,22 +136,32 @@ function fixBadDeltaDoc(delta: Delta): Delta {
     delta.push({ insert: '\n' });
   }
 
-  // Check if we need to fix any middle-of-doc retains
-  const hasNonInsertOps = delta.ops.some(op => op.insert === undefined);
-  if (!hasNonInsertOps) {
-    return delta;
-  }
-  const newDelta = new Delta();
-
-  for (const op of delta.ops) {
-    if (op.insert !== undefined) {
-      newDelta.push(op);
-    } else if (op.retain) {
-      // Convert retain to spaces to preserve cursor positions
-      const insertOp: Op = { insert: ''.padStart(op.retain) };
-      if (op.attributes) insertOp.attributes = op.attributes;
-      newDelta.push(insertOp);
+  // Rebuild only if a non-insert survived in the middle of the document. `Delta.push` is
+  // load-bearing here: it merges adjacent inserts, which callers depend on.
+  if (delta.ops.some(op => op.insert === undefined)) {
+    const newDelta = new Delta();
+    for (const op of delta.ops) {
+      if (op.insert !== undefined) {
+        newDelta.push(op);
+      } else if (legacyPadding && op.retain) {
+        // Historical reconstruction only — see the docblock.
+        const insertOp: Op = { insert: ''.padStart(op.retain) };
+        if (op.attributes) insertOp.attributes = op.attributes;
+        newDelta.push(insertOp);
+      } else {
+        overrun += op.retain ?? op.delete ?? 0;
+      }
     }
+    delta = newDelta;
   }
-  return newDelta;
+
+  if (overrun > 0 && !legacyPadding) {
+    // A change should never reference content past the end of the document. Until the client
+    // bug that mints these is fixed, this is the only signal that it happened — `log` is a
+    // no-op unless someone calls `verbose(true)`, which no consumer does, so warn instead.
+    // Silent under reconstruction: replaying a log with a known historical overrun is expected,
+    // and warning per replay would drown the live signal we actually want to count.
+    console.warn(`@txt change overran the document by ${overrun}; dropped the overrun (DAB-1064)`);
+  }
+  return delta;
 }

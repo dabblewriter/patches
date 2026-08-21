@@ -547,6 +547,12 @@ export class OTBranchManager implements BranchManager {
       // lenient-era commit is skipped — matching what version builds and
       // pre-strict clients computed for the same log — rather than making the
       // source doc permanently un-branchable. Skips log via console.error.
+      //
+      // Deliberately WITHOUT `legacyTextOverrunPadding`: this state is persisted as the new
+      // branch's first change, so it is authored content, not a rendering of the source log.
+      // The branch's history begins here — nothing downstream was written against the source's
+      // overrun padding — and padding it would bake invented characters into the branch as
+      // ordinary text, which a merge could then carry back into the source (DAB-1064).
       const { state: stateAtRev } = await getStateAtRevision(this.store, docId, rev, { reconstruction: {} });
       const rootReplace = createChange(0, 1, [{ op: 'replace' as const, path: '', value: stateAtRev }], {
         createdAt: now,
@@ -1260,6 +1266,8 @@ export class OTBranchManager implements BranchManager {
     if (!triggered) return;
 
     // Only now pay for a state reconstruction — the source's current head, read once.
+    // No `legacyTextOverrunPadding`: this state is only compared against, never persisted, and
+    // comparing against what clients actually compute (live semantics) is what we want here.
     const { state } = await getStateAtRevision(this.store, sourceDocId, undefined, { reconstruction: {} });
 
     // Re-collect the resend corpus AFTER the reconstruction: a concurrent merge completing

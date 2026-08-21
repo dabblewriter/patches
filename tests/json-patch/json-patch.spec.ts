@@ -197,14 +197,17 @@ describe('JSONPatch', () => {
     expect(obj).toEqual({ test: true, sub: { name: 'Test' } });
   });
 
-  it('handles text delta that overruns document by converting retain to spaces', () => {
+  it('handles text delta that overruns document by dropping the overrun', () => {
     obj.text = new Delta().insert('Short\n');
     patch.text('/text', new Delta().retain(21).insert('Long').ops);
     obj = patch.apply(obj, { strict: true });
     // The retain(21) overruns the 6-char document, creating a retain(15) op after compose.
-    // The lenient behavior converts the retain to spaces to preserve cursor positions.
+    // That overrun is dropped rather than converted to spaces: padding would put 15
+    // characters nobody typed into the manuscript and leave the document reporting a
+    // length longer than its own text, so every later edit lands at a shifted offset
+    // (DAB-1064). Dropping it lands the insert at the end, where the author was typing.
     // Delta normalizes adjacent string inserts into one op. Ensures trailing newline.
-    expect(obj.text.ops).toEqual([{ insert: 'Short\n' + ''.padStart(15) + 'Long\n' }]);
+    expect(obj.text.ops).toEqual([{ insert: 'Short\nLong\n' }]);
   });
 
   it('handles text delta with trailing retain/delete overrun by dropping them', () => {

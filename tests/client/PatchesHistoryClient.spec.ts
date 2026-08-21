@@ -294,7 +294,9 @@ describe('PatchesHistoryClient', () => {
 
       expect(mockAPI.getVersionState).toHaveBeenCalledWith('doc1', 'v1');
       expect(mockAPI.getVersionChanges).toHaveBeenCalledWith('doc1', 'v2');
-      expect(applyChangesForReconstruction).toHaveBeenCalledWith(parentState, changes.slice(0, 2));
+      expect(applyChangesForReconstruction).toHaveBeenCalledWith(parentState, changes.slice(0, 2), {
+        legacyTextOverrunPadding: true,
+      });
       expect(client.historyState.state).toEqual(expectedState);
       expect(stateSpy).toHaveBeenCalledWith(expectedState);
     });
@@ -322,7 +324,9 @@ describe('PatchesHistoryClient', () => {
 
       expect(mockAPI.getVersionState).not.toHaveBeenCalled();
       expect(mockAPI.getVersionChanges).toHaveBeenCalledWith('doc1', 'v1');
-      expect(applyChangesForReconstruction).toHaveBeenCalledWith(undefined, changes.slice(0, 1));
+      expect(applyChangesForReconstruction).toHaveBeenCalledWith(undefined, changes.slice(0, 1), {
+        legacyTextOverrunPadding: true,
+      });
     });
 
     it('should update historyState store', async () => {

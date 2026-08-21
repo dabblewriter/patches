@@ -248,6 +248,14 @@ export async function getStateBeforeVersionAsStream(
  * should pass `{ reconstruction }` so such ops are skipped with telemetry
  * instead of aborting the build; the default remains strict.
  *
+ * A version blob is a base for FURTHER replay of the same log, so it is a rendering of that
+ * log rather than new authored content: consumers building blobs for a doc whose history may
+ * contain a `@txt` overrun should pass
+ * `{ reconstruction: { legacyTextOverrunPadding: true } }`, or the changes recorded after the
+ * overrun — which were authored against its padding — will misapply on top of the blob. See
+ * `ReconstructionOptions.legacyTextOverrunPadding` (DAB-1064). No caller in this repo builds
+ * blobs; the decision belongs to the consuming server.
+ *
  * @param store - The store backend to load previous version state from.
  * @param docId - The document ID.
  * @param version - The version metadata.

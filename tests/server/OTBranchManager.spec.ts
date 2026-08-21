@@ -1,4 +1,6 @@
+import { Delta } from '@dabble/delta';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { applyChanges } from '../../src/algorithms/ot/shared/applyChanges';
 import { MergePartialProgressError, OTBranchManager, assertBranchMetadata } from '../../src/server/OTBranchManager';
 import type { PatchesServer } from '../../src/server/PatchesServer';
 import type { BranchingStoreBackend, OTStoreBackend } from '../../src/server/types';
@@ -229,6 +231,46 @@ describe('OTBranchManager', () => {
         modifiedAt: expect.any(Number),
       });
       expect(result).toBe('generated-id');
+    });
+
+    it('seeds the branch with live semantics, not the log-rendering padding (DAB-1064)', async () => {
+      // The branch base is PERSISTED as the new doc's first change, so it must be what clients
+      // compute for the source at that revision — not the padded rendering of the source's log.
+      // Pinning the decision at this call site, not just the library default: passing
+      // `legacyTextOverrunPadding: true` here would bake invented characters into every review
+      // copy made from an affected manuscript, and a merge could carry them back.
+      const sourceText = new Delta().insert('Hello\n').ops;
+      const overrunChange: Change = {
+        id: 'overrun',
+        rev: 6,
+        baseRev: 5,
+        // retain 20 against a 6-character document — the DAB-1064 shape.
+        ops: [{ op: '@txt', path: '/text', value: [{ retain: 20 }, { insert: 'X' }] }],
+        createdAt: 1,
+        committedAt: 1,
+      };
+      vi.mocked(mockStore.loadVersionState).mockResolvedValue(JSON.stringify({ text: sourceText }));
+      vi.mocked(mockStore.listChanges).mockResolvedValue([overrunChange]);
+
+      await branchManager.createBranch('doc1', 6);
+
+      const rootReplace = vi
+        .mocked(createChange)
+        .mock.calls.map(call => (call[2] as any[])[0])
+        .find(op => op?.op === 'replace' && op?.path === '');
+      const branchBase = rootReplace.value;
+      const liveHead = applyChanges({ text: sourceText }, [overrunChange]) as any;
+
+      const textOf = (v: any) =>
+        new Delta(v).ops
+          .filter((o: any) => typeof o.insert === 'string')
+          .map((o: any) => o.insert)
+          .join('');
+
+      expect(textOf(branchBase.text)).toBe('Hello\nX\n');
+      expect(textOf(branchBase.text)).not.toContain('  ');
+      // The invariant that matters: a branch base agrees with its parent.
+      expect(textOf(branchBase.text)).toBe(textOf(liveHead.text));
     });
 
     it('should create branch without metadata', async () => {

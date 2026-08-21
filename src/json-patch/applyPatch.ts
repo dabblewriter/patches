@@ -40,6 +40,7 @@ export function applyPatch(
 
   const types = getTypes(custom);
   return runWithObject(object, types, patches.length > 1, state => {
+    if (opts.legacyTextOverrunPadding) state.legacyTextOverrunPadding = true;
     for (let i = 0, imax = patches.length; i < imax; i++) {
       const patch = patches[i];
       // Soft ops (explicit `soft: true`, plus the empty-container `add` convention)

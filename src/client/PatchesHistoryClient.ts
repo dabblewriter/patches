@@ -116,7 +116,11 @@ export class PatchesHistoryClient<T = any> {
     // commits) is skipped (with console telemetry) rather than making that part
     // of the timeline permanently unviewable.
     if (changeIndex > 0) {
-      this.historyState.state = applyChangesForReconstruction(state, changes.slice(0, changeIndex));
+      // Renders this log rather than seeding a new document, so it opts into the padding the
+      // log's later entries were authored against (DAB-1064).
+      this.historyState.state = applyChangesForReconstruction(state, changes.slice(0, changeIndex), {
+        legacyTextOverrunPadding: true,
+      });
     }
   }
 

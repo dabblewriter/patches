@@ -81,6 +81,28 @@ export interface ReconstructionOptions {
    * sweep. Defaults to logging via `console.error`.
    */
   onSkippedChange?: (skipped: SkippedChange) => void;
+
+  /**
+   * Replay `@txt` under the semantics the log was written with: a retain that overran the
+   * document stays padded with spaces instead of being dropped (see
+   * `ApplyJSONPatchOptions.legacyTextOverrunPadding`). Off by default.
+   *
+   * The distinction is NOT reconstruction-vs-live. It is whether the replayed output is a
+   * **rendering of this log**, whose later entries were authored against that padding, or
+   * **new state that starts a fresh log**:
+   *
+   * - Rendering settled history (scrubbing a version, streaming a past revision for
+   *   display) → opt IN. Later entries in the same log depend on the padded text; drop it
+   *   and an in-bounds delete authored against the padding lands on real prose instead.
+   * - Seeding a new document from a past revision (branch/review-copy creation) → leave OFF.
+   *   The new document's history begins at the snapshot, so nothing downstream depends on
+   *   the padding — and padding it would bake invented characters into a branch as ordinary
+   *   authored text, which can then merge back into the source (DAB-1064).
+   *
+   * When in doubt, leave it off: the cost is a historical view that differs from what the
+   * author saw, not corruption of live content.
+   */
+  legacyTextOverrunPadding?: boolean;
 }
 
 /**
@@ -132,7 +154,13 @@ export function applyChangesForReconstruction<T>(state: T, changes: Change[], op
   for (let i = 0; i < changes.length; i++) {
     const change = changes[i];
     try {
-      state = applyPatch(state, change.ops, { strict: true });
+      // Opt-in, not automatic: a replay that RENDERS this log needs the padding its later
+      // entries were authored against, while a replay that SEEDS a new document must not
+      // bake those invented characters in as authored text. See ReconstructionOptions.
+      state = applyPatch(state, change.ops, {
+        strict: true,
+        legacyTextOverrunPadding: options?.legacyTextOverrunPadding === true,
+      });
     } catch (error) {
       if (options?.onSkippedChange) {
         options.onSkippedChange({ change, index: i, error });

@@ -1138,6 +1138,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // held (an empty store queue merges to `[...merged]`), an id the store-side peek can never
       // return — which would read any non-empty post-flush queue as progress. Both ends of the
       // compare must read the same collection; an algorithm with no peek compares batch to batch.
+      // `undefined` (empty pre-flush store queue) is load-bearing: any non-empty post-flush queue
+      // then reads as drained — the mid-flight-arrival case, whose follow-up flushes that row.
+      // Don't normalise it to null; the compare below must distinguish "no head" from any real id.
       const headBefore = algorithm.peekPendingHead ? (await algorithm.peekPendingHead(docId))?.id : pending[0].id;
 
       const batches = breakChangesIntoBatches(pending, {
@@ -1823,16 +1826,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   protected async _handleRemoteDocDeleted(docId: string): Promise<void> {
     const algorithm = this._getAlgorithm(docId);
 
-    // Get pending changes before cleanup so app can handle them. WITH the open doc: the rows most
-    // at risk here are the doc-only ones the store never accepted — after the close below they
-    // exist nowhere else, and this payload is the app's last chance to shelve them. But without
-    // the report: classifying would raise `UnstoredPendingError` — a store-integrity alarm — at
-    // the exact moment the doc legitimately vanished (a collaborator losing access, a delete from
-    // another device).
-    const pendingChanges =
-      (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId) as PatchesDoc<any>, {
-        report: false,
-      })) ?? [];
+    // Collect everything unsynced before cleanup so the app can shelve it. WITH the open doc: the
+    // rows most at risk here are the doc-only ones the store never accepted — after the close
+    // below they exist nowhere else, and this payload is the app's last chance to shelve them.
+    const pendingChanges = await algorithm.collectUnsyncedForDiscard(
+      docId,
+      this.patches.getOpenDoc(docId) as PatchesDoc<any>
+    );
 
     // Close doc if open
     const doc = this.patches.getOpenDoc(docId);

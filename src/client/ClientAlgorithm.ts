@@ -108,11 +108,23 @@ export interface ClientAlgorithm {
    * tail) for a change persisted only to the doc — no state materialization. LWW ignores it.
    * A doc-only change at or below the store tail is NOT sent — the store is authoritative about
    * what is durable — and OT reports it on {@link onError} rather than withholding it silently.
-   * `options.report: false` suppresses that report for callers reading the queue off the send
-   * path (e.g. building a shelf payload for a doc that is being discarded).
    * Returns null if nothing to send.
    */
-  getPendingToSend(docId: string, doc?: PatchesDoc<any>, options?: { report?: boolean }): Promise<Change[] | null>;
+  getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null>;
+
+  /**
+   * Everything the doc still holds that the server does not — durable or not — for a doc being
+   * discarded (a remote delete, a collaborator losing access). This payload is the app's last
+   * chance to shelve that content before the doc closes, so it answers a different question than
+   * {@link getPendingToSend}: not "what is safe to put on the wire" but "what would vanish".
+   *
+   * A pure read with none of the send path's work or side effects: no batch normalization, no
+   * store-integrity reporting (the doc is legitimately vanishing, so the alarm would misfire),
+   * no sending-change minting (LWW). It also includes what the send path deliberately withholds
+   * — for OT, doc-only rows the store never accepted survive nowhere but the mirror being
+   * discarded, making them the one category the shelf exists for.
+   */
+  collectUnsyncedForDiscard(docId: string, doc?: PatchesDoc<any>): Promise<Change[]>;
 
   /**
    * The head of the durable pending queue, or null when it is empty. A plain read: callers that

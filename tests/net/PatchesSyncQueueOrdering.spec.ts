@@ -271,7 +271,7 @@ describe('PatchesSync — flush reads the durable queue, not the open doc mirror
     expect(reported).toEqual([]);
   });
 
-  it('raises no store-integrity alarm when a delete discards a row the tail passed', async () => {
+  it('shelves a row the tail passed on a remote delete, with no store-integrity alarm', async () => {
     doc.change((patch: any) => patch.add('/items/-', 'orphan'));
     await waitForQueue(1);
     const [orphan] = await store.getPendingChanges(DOC_ID);
@@ -292,8 +292,10 @@ describe('PatchesSync — flush reads the durable queue, not the open doc mirror
 
     await sync['_handleRemoteDocDeleted'](DOC_ID);
 
-    // The durable queue still ships; the below-tail row stays store-authoritatively excluded.
-    expect(payloads[0].map(c => c.ops[0].value)).toEqual(['later']);
+    // The durable queue ships first, and the below-tail row rides too: the send path withholds
+    // it (not durable), but on a discard the mirror holding it is about to close, so the shelf
+    // is its sole remaining copy — the one category the shelf exists for.
+    expect(payloads[0].map(c => c.ops[0].value)).toEqual(['later', 'orphan']);
     expect(reported).toEqual([]);
   });
 });

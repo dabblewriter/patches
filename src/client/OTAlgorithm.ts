@@ -171,21 +171,15 @@ export class OTAlgorithm implements ClientAlgorithm {
    * but it is content the user can see, so it is reported on {@link onError} rather than
    * withheld in silence.
    */
-  async getPendingToSend(
-    docId: string,
-    doc?: PatchesDoc<any>,
-    options?: { report?: boolean }
-  ): Promise<Change[] | null> {
+  async getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null> {
     const otDoc = doc as OTDoc<any> | undefined;
     // Only the doc-merge floor needs it, and that branch needs a doc; without one the store read
     // it would take is discarded, so don't pay for it (the tailRev seed is unused here).
     const committedRev = otDoc?.committedRev ?? 0;
     const { pending, withheld } = await this._collectPending(docId, otDoc, committedRev);
     // Before the empty-queue return: a withheld row is exactly the case where the rest of the
-    // queue can be empty and every other signal reads as fully synced. `report: false` is for
-    // callers reading the queue off the send path (the remote-delete shelf): there the doc is
-    // legitimately vanishing, so a store-integrity alarm would misfire.
-    if (withheld.length > 0 && options?.report !== false) {
+    // queue can be empty and every other signal reads as fully synced.
+    if (withheld.length > 0) {
       const reported = this._reportedUnstored.get(docId) ?? new Set<string>();
       const fresh = withheld.filter(c => !reported.has(c.id)).map(c => c.id);
       if (fresh.length > 0) {
@@ -196,6 +190,20 @@ export class OTAlgorithm implements ClientAlgorithm {
     }
     if (pending.length === 0) return null;
     return this._withConsistentBaseRev(docId, pending);
+  }
+
+  /**
+   * See {@link ClientAlgorithm.collectUnsyncedForDiscard}. The union {@link _collectPending}
+   * already computes: the sendable queue plus the withheld doc-only rows the send path refuses
+   * — refuses because they are not durable, which on a discard is the reason to include them.
+   * Raw rows, no {@link _withConsistentBaseRev}: this is a shelf payload, not a wire batch, and
+   * no report — the doc is legitimately vanishing, so the store-integrity alarm would misfire
+   * (and the once-per-doc latch stays untouched for any doc that survives).
+   */
+  async collectUnsyncedForDiscard(docId: string, doc?: PatchesDoc<any>): Promise<Change[]> {
+    const otDoc = doc as OTDoc<any> | undefined;
+    const { pending, withheld } = await this._collectPending(docId, otDoc, otDoc?.committedRev ?? 0);
+    return [...pending, ...withheld];
   }
 
   /** See {@link ClientAlgorithm.peekPendingHead} — the store's head row, no send-path work. */

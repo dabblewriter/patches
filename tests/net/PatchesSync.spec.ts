@@ -277,6 +277,24 @@ describe('PatchesSync', () => {
       expect(syncAllSpy).toHaveBeenCalledWith({ resume: false });
     });
 
+    it('a resumed connected keeps the per-doc retry ladders; a cold one drops them (DAB-941)', async () => {
+      vi.spyOn(sync as any, 'syncAllKnownDocs').mockResolvedValue(undefined);
+      const clearSpy = vi.spyOn(sync as any, '_clearAllSyncRetries');
+
+      // A resume pass won't re-attempt a clean doc, so a doc mid-ladder must keep its timer.
+      mockWebSocket.resumedStream = true;
+      await sync.connect('42');
+      sync['_handleConnectionChange']('connected');
+      expect(clearSpy).not.toHaveBeenCalled();
+
+      // A cold pass re-attempts every doc, so the ladders start over.
+      mockWebSocket.resumedStream = false;
+      sync['_handleConnectionChange']('disconnected');
+      clearSpy.mockClear();
+      sync['_handleConnectionChange']('connected');
+      expect(clearSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('a cold connect runs the next connected pass in full mode', async () => {
       const syncAllSpy = vi.spyOn(sync as any, 'syncAllKnownDocs').mockResolvedValue(undefined);
 

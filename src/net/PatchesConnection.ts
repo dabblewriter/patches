@@ -38,14 +38,15 @@ export interface PatchesConnection extends PatchesAPI {
   readonly serverInfo?: unknown;
 
   /**
-   * Whether the currently open stream was opened as a resume (with a `lastEventId`
-   * cursor) rather than a cold start — i.e. the server is replaying the missed gap.
-   * This is the authority PatchesSync consults on the `connected` transition to decide
-   * whether to run a resume-mode sync: it reflects what the transport *actually did*,
-   * so a cursor that never opened a resumed stream (offline defer, already-connected
-   * no-op, a `resync` re-anchor after the buffer expired, or a plain cold reconnect)
-   * correctly reads `false`. Transports with no resumable stream (WebSocket) leave it
-   * undefined, which reads as `false`.
+   * Whether the currently open stream was opened as a resume (with a cursor the server
+   * replayed from) rather than a cold start. A caller-supplied `lastEventId`, the
+   * browser's own auto-reconnect (which sends `Last-Event-ID`), and the transport's
+   * backoff rebuild all count. This is the authority PatchesSync consults on the
+   * `connected` transition to decide whether to run a resume-mode sync: it reflects what
+   * the transport *actually did*, so a cursor that never opened a resumed stream (offline
+   * defer, already-connected no-op, a `resync` re-anchor after the buffer expired, or a
+   * plain cold open) correctly reads `false`. Transports with no resumable stream
+   * (WebSocket) leave it undefined, which reads as `false`.
    */
   readonly resumedStream?: boolean;
 

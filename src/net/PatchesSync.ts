@@ -1663,18 +1663,21 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.updateState({ connected: isConnected, syncStatus: newSyncStatus });
 
     if (isConnected) {
-      // Fresh connection session: syncAllKnownDocs below re-attempts every doc, so
-      // drop the old retry ladders and let a still-failing doc surface once more.
-      // (On WS the drop side already cleared these; on REST the drop deliberately
-      // doesn't — see the else branch.)
-      this._clearAllSyncRetries();
+      // A resumed stream (opened with a cursor: a caller hand-off, a browser-native
+      // reconnect, or the transport's own backoff rebuild) trusts the server's replay for
+      // the gap and only flushes local pending; a cold connect re-syncs everything. The
+      // transport is the authority: `resumedStream` is true only for a stream the server
+      // actually replayed into, and a server `resync` re-anchor clears it, so that
+      // follow-up `connected` full-syncs.
+      const resume = this.connection.resumedStream ?? false;
+      // A cold connect re-attempts every doc, so drop the old retry ladders and let a
+      // still-failing doc surface once more. A resume leaves clean docs alone, so a doc
+      // mid-ladder (a pull that failed while the stream was up) keeps its timers — wiping
+      // them here would strand it until the next local edit (DAB-941). (On WS the drop side
+      // already cleared these; on REST the drop deliberately doesn't — see the else branch.)
+      if (!resume) this._clearAllSyncRetries();
       // The stream is up — live pushes resume; the degraded-mode pass hands off here.
       this._clearDegradedSync();
-      // A resumed stream (opened with a cursor) trusts the server's replay for the gap and
-      // only flushes local pending; a cold connect re-syncs everything. The transport is the
-      // authority: `resumedStream` is true only for a stream actually opened with the cursor,
-      // and a server `resync` re-anchor clears it, so that follow-up `connected` full-syncs.
-      const resume = this.connection.resumedStream ?? false;
       void this.syncAllKnownDocs({ resume });
     } else if (!isConnecting) {
       if (this.connection.sendRequiresStream !== false) {

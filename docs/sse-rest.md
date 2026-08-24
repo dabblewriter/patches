@@ -333,7 +333,9 @@ This is where SSE + REST actually shines compared to WebSocket.
 3. On reconnect, the browser automatically sends `Last-Event-ID` header
 4. The server replays buffered events from that point
 
-The cursor reaches the server two ways. The browser's own auto-reconnect sends the `Last-Event-ID` header — but only on the same `EventSource` instance. A freshly constructed `EventSource` can't set that header at all, so a caller-supplied cursor (see [Cross-Tab Hand-Off](#cross-tab-hand-off)) rides as a `?lastEventId=` query param instead, which the server reads as a header equivalent. Header wins when both are present — it's always the fresher of the two.
+The cursor reaches the server two ways. The browser's own auto-reconnect sends the `Last-Event-ID` header — but only on the same `EventSource` instance. A freshly constructed `EventSource` can't set that header at all, so a caller-supplied cursor (see [Cross-Tab Hand-Off](#cross-tab-hand-off)) rides as a `?lastEventId=` query param instead, which the server reads as a header equivalent. Header wins when both are present — it's always the fresher of the two. `PatchesREST`'s own backoff rebuild (after a fatal error or a watchdog teardown) constructs a fresh `EventSource` and passes the cursor it holds the same way.
+
+Either way `PatchesREST` re-derives `resumedStream` on every `onopen` — a native reconnect fires it on the same `EventSource` without any `connect()` call — so the sync layer sees the resume the wire already did. Until that was the case, every transient drop ran a full `syncAllKnownDocs` over every tracked doc even though the server had replayed the gap correctly (DAB-941).
 
 ### The Connected Anchor
 
@@ -382,7 +384,7 @@ On a resumed connect, `PatchesSync` skips the re-subscribe and the per-doc re-pu
 Two contracts make this work:
 
 - **Same clientId.** The server keys its replay log and restored subscriptions by clientId. A successor connecting with a fresh clientId and an old cursor degrades safely to a full sync — but the resume silently never fires. This is the sanctioned exception to "never share client IDs" ([Client ID](#client-id)): the successor adopts the id only after the predecessor is gone, so there's never two live claimants.
-- **The transport is the authority.** `PatchesSync` consults `resumedStream` — whether the stream _actually_ opened with the cursor — not the cursor you passed. A cursor that never opened a resumed stream (the connect deferred offline, the transport was already connected) falls back to a full sync instead of trusting a replay that never happened.
+- **The transport is the authority.** `PatchesSync` consults `resumedStream` — whether the stream _actually_ opened with the cursor — not the cursor you passed. A cursor that never opened a resumed stream (the connect deferred offline, the transport was already connected) falls back to a full sync instead of trusting a replay that never happened. The same flag covers the browser's native reconnect and the transport's own backoff rebuild, so those resume too; only a cold open (no cursor) or a server `resync` re-anchor runs the full pass. A resume also leaves per-doc retry ladders alone — the pass won't re-attempt a clean doc, so a doc mid-retry keeps its timer instead of being stranded.
 
 If the cursor is too old for the server's buffer, the server sends `resync` and the client full-syncs — the same fallback as every other tier. A hand-off can't invent a new failure mode; the worst case is the full re-sync you were getting anyway.
 

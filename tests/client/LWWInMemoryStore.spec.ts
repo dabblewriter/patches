@@ -480,6 +480,22 @@ describe('LWWInMemoryStore', () => {
       const docs = await store.listDocs(true);
       expect(docs.find(d => d.docId === 'doc1')).toBeUndefined();
     });
+
+    it('should drop the quarantine with the doc', async () => {
+      // A remote delete confirms without a preceding deleteDoc, so this is the only place the
+      // entries can go — left behind they outlive every other trace of the doc and keep coming
+      // back from listQuarantinedChanges() for the life of the process.
+      await store.savePendingOps('doc1', [{ op: 'replace', path: '/title', value: 'Hello', ts: 1 }]);
+      const refused = createChange('c1', 1, 0);
+      await store.saveSendingChange('doc1', refused);
+      await store.quarantineSendingChange('doc1', 'c1', 'server refused it');
+      expect(await store.listQuarantinedChanges('doc1')).toHaveLength(1);
+
+      await store.confirmDeleteDoc('doc1');
+
+      expect(await store.listQuarantinedChanges('doc1')).toEqual([]);
+      expect(await store.listQuarantinedChanges()).toEqual([]);
+    });
   });
 
   describe('untrackDocs', () => {

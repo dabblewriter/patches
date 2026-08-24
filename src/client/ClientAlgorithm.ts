@@ -113,18 +113,36 @@ export interface ClientAlgorithm {
   getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null>;
 
   /**
-   * Everything the doc still holds that the server does not — durable or not — for a doc being
-   * discarded (a remote delete, a collaborator losing access). This payload is the app's last
-   * chance to shelve that content before the doc closes, so it answers a different question than
-   * {@link getPendingToSend}: not "what is safe to put on the wire" but "what would vanish".
+   * Everything the local tiers still hold that the server does not, for a doc being discarded.
+   * The trigger is strictly the 410/`docDeleted` class — a 403 latches the doc at `'error'` and
+   * never routes here, so a revoked collaborator reaches this only on a server that signals
+   * revocation as a delete. This payload is the app's last chance to shelve that content before
+   * the doc closes, so it answers a different question than {@link getPendingToSend}: not "what
+   * is safe to put on the wire" but "what would vanish".
+   *
+   * Scoped to the store's tiers — durable pending, the withheld doc-only rows, quarantine. The
+   * un-minted optimistic tier stays out of reach: ops whose mint is still queued live only in the
+   * doc's `_optimisticOps`, and draining them first is not an option, since a doc's `flush()`
+   * never settles while its write path is latched — which is the one case where the miss is
+   * deterministic.
    *
    * A pure read with none of the send path's work or side effects: no batch normalization, no
    * store-integrity reporting (the doc is legitimately vanishing, so the alarm would misfire),
    * no sending-change minting (LWW). It also includes what the send path deliberately withholds
    * — for OT, doc-only rows the store never accepted survive nowhere but the mirror being
    * discarded, making them the one category the shelf exists for.
+   *
+   * Durable rows first, then withheld, then quarantined; not rev-ordered — revs are informational
+   * and may collide across the buckets.
+   *
+   * Optional, like the rest of the recovery surface: a partial implementation degrades the shelf
+   * to empty rather than wedging the doc that raised the delete.
+   *
+   * @param excludeIds Ids resolved earlier in the flush that raised the delete. The store has
+   *   already dropped them but the open doc still mirrors them, so without this they ride as
+   *   withheld and inflate the payload's "unsaved changes were lost" count.
    */
-  collectUnsyncedForDiscard(docId: string, doc?: PatchesDoc<any>): Promise<Change[]>;
+  collectUnsyncedForDiscard?(docId: string, doc?: PatchesDoc<any>, excludeIds?: Set<string>): Promise<Change[]>;
 
   /**
    * The head of the durable pending queue, or null when it is empty. A plain read: callers that

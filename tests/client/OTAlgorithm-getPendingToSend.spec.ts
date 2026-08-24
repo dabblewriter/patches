@@ -213,6 +213,37 @@ describe('OTAlgorithm.getPendingToSend — unstored-row reporting', () => {
 
     expect((await algorithm.collectUnsyncedForDiscard('doc1')).map(c => c.id)).toEqual([durable.id]);
   });
+
+  it('carries quarantined changes, which confirmDeleteDoc is about to drop', async () => {
+    const poison = createChange(10, 11, [{ op: 'add', path: '/a', value: 1 }]);
+    const survivor = createChange(10, 12, [{ op: 'add', path: '/b', value: 2 }]);
+    await store.savePendingChanges('doc1', [poison, survivor]);
+    await store.quarantinePendingChange('doc1', poison, 'server refused it', [{ ...survivor, rev: 11 }]);
+
+    const shelf = await algorithm.collectUnsyncedForDiscard('doc1');
+
+    // Quarantine is user content the server refused and nothing auto-discards; the shelf is its
+    // last chance too, so it rides after the live rows.
+    expect(shelf.map(c => c.id)).toEqual([survivor.id, poison.id]);
+  });
+
+  it('drops ids the flush already resolved, so committed rows do not ride as withheld', async () => {
+    // The multi-batch flush window: the batch committed and `dropResolvedPending` took it out of
+    // the store, but the doc still mirrors it while the deferred reload throws DOC_DELETED. Below
+    // the tail, it would otherwise classify as "what the server does not have".
+    const committed = createChange(10, 11, [{ op: 'add', path: '/a', value: 1 }]);
+    const durable = createChange(10, 12, [{ op: 'add', path: '/b', value: 2 }]);
+    await store.savePendingChanges('doc1', [durable]);
+    const doc = { getPendingChanges: () => [committed, durable], committedRev: 10 };
+
+    expect((await algorithm.collectUnsyncedForDiscard('doc1', doc as any)).map(c => c.id)).toEqual([
+      durable.id,
+      committed.id,
+    ]);
+    expect(
+      (await algorithm.collectUnsyncedForDiscard('doc1', doc as any, new Set([committed.id]))).map(c => c.id)
+    ).toEqual([durable.id]);
+  });
 });
 
 describe('OTAlgorithm.peekPendingHead', () => {

@@ -194,16 +194,27 @@ export class OTAlgorithm implements ClientAlgorithm {
 
   /**
    * See {@link ClientAlgorithm.collectUnsyncedForDiscard}. The union {@link _collectPending}
-   * already computes: the sendable queue plus the withheld doc-only rows the send path refuses
-   * — refuses because they are not durable, which on a discard is the reason to include them.
+   * already computes — the sendable queue plus the withheld doc-only rows the send path refuses
+   * because they are not durable, which on a discard is the reason to include them — followed by
+   * quarantine, the other durable tier holding content the user can still recover and that
+   * `confirmDeleteDoc` is about to drop.
+   *
    * Raw rows, no {@link _withConsistentBaseRev}: this is a shelf payload, not a wire batch, and
-   * no report — the doc is legitimately vanishing, so the store-integrity alarm would misfire
-   * (and the once-per-doc latch stays untouched for any doc that survives).
+   * no report. Skipping the alarm is right on the notification/push route, where nothing has
+   * probed the queue yet and the doc is legitimately vanishing. It is not a claim that the alarm
+   * never fires for a deleted doc: the discovery routes reach here from a catch whose `try`
+   * already called {@link getPendingToSend}, which reports and consumes the once-per-doc latch
+   * before DOC_DELETED is thrown. What this guarantees is that the shelf read adds no report of
+   * its own, and leaves the latch untouched for any doc that survives.
    */
-  async collectUnsyncedForDiscard(docId: string, doc?: PatchesDoc<any>): Promise<Change[]> {
+  async collectUnsyncedForDiscard(docId: string, doc?: PatchesDoc<any>, excludeIds?: Set<string>): Promise<Change[]> {
     const otDoc = doc as OTDoc<any> | undefined;
     const { pending, withheld } = await this._collectPending(docId, otDoc, otDoc?.committedRev ?? 0);
-    return [...pending, ...withheld];
+    const rows = excludeIds?.size
+      ? [...pending, ...withheld].filter(c => !excludeIds.has(c.id))
+      : [...pending, ...withheld];
+    const quarantined = await this.store.listQuarantinedChanges?.(docId);
+    return quarantined?.length ? [...rows, ...quarantined.map(q => q.change)] : rows;
   }
 
   /** See {@link ClientAlgorithm.peekPendingHead} — the store's head row, no send-path work. */

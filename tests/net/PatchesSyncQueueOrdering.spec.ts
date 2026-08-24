@@ -18,7 +18,7 @@ import { OTAlgorithm } from '../../src/client/OTAlgorithm.js';
 import { OTDoc } from '../../src/client/OTDoc.js';
 import { OTInMemoryStore } from '../../src/client/OTInMemoryStore.js';
 import { Patches } from '../../src/client/Patches.js';
-import { UnstoredPendingError } from '../../src/net/error.js';
+import { ErrorCodes, StatusError, UnstoredPendingError } from '../../src/net/error.js';
 import type { PatchesConnection } from '../../src/net/PatchesConnection.js';
 import { PatchesSync } from '../../src/net/PatchesSync.js';
 import type { Change } from '../../src/types.js';
@@ -297,5 +297,58 @@ describe('PatchesSync — flush reads the durable queue, not the open doc mirror
     // is its sole remaining copy — the one category the shelf exists for.
     expect(payloads[0].map(c => c.ops[0].value)).toEqual(['later', 'orphan']);
     expect(reported).toEqual([]);
+  });
+
+  it('shelves once when two delete routes name the same doc', async () => {
+    doc.change((patch: any) => patch.add('/items/-', 'unsent'));
+    await waitForQueue(1);
+
+    const payloads: Change[][] = [];
+    sync.onRemoteDocDeleted((_docId: string, pendingChanges: Change[]) => {
+      payloads.push(pendingChanges);
+    });
+    const collect = vi.spyOn(algorithm, 'collectUnsyncedForDiscard');
+
+    // The `onDocDeleted` push and a 410 caught mid-flush can both name this doc, and the window
+    // spans the collect and the close — so without a guard both runs collect before either wipes
+    // and the app gets the same content twice (under different ids, for LWW, which mints the
+    // change built from pending ops fresh on every call).
+    await Promise.all([sync['_handleRemoteDocDeleted'](DOC_ID), sync['_handleRemoteDocDeleted'](DOC_ID)]);
+
+    expect(collect).toHaveBeenCalledTimes(1);
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0].map(c => c.ops[0].value)).toEqual(['unsent']);
+  });
+
+  it('reaches the shelf through syncDoc when the flush takes a 410', async () => {
+    doc.change((patch: any) => patch.add('/items/-', 'unsent'));
+    await waitForQueue(1);
+    const [orphan] = await store.getPendingChanges(DOC_ID);
+    await store.dropPendingChanges(DOC_ID, [orphan.id]);
+    await foreignMint('later');
+    await waitForQueue(1);
+
+    const payloads: Change[][] = [];
+    sync.onRemoteDocDeleted((_docId: string, pendingChanges: Change[]) => {
+      payloads.push(pendingChanges);
+    });
+    const reported: UnstoredPendingError[] = [];
+    sync.onError(err => {
+      if (err instanceof UnstoredPendingError) reported.push(err);
+    });
+    conn.commitChanges.mockRejectedValue(new StatusError(ErrorCodes.DOC_DELETED, 'doc deleted'));
+
+    sync['updateState']({ connected: true });
+    await sync['syncDoc'](DOC_ID);
+
+    // Same payload as the direct call, through the route a real 410 takes.
+    expect(payloads[0].map(c => c.ops[0].value)).toEqual(['later', 'unsent']);
+    expect(sync['trackedDocs'].has(DOC_ID)).toBe(false);
+    // The alarm DID fire here, and that is not the shelf's doing: this route's `try` called
+    // getPendingToSend before the 410, which reports and consumes the once-per-doc latch. The
+    // shelf read adds no report of its own — pre-existing behavior on the discovery routes, and
+    // what `collectUnsyncedForDiscard`'s "no report" claim is scoped away from.
+    expect(reported).toHaveLength(1);
+    expect(reported[0].changeIds).toEqual([orphan.id]);
   });
 });

@@ -131,6 +131,67 @@ describe('computePendingEjection', () => {
     ];
     expect(() => computePendingEjection({ s: 'x' }, COMMITTED_REV, queue, 'poison')).toThrow(/Cannot eject/);
   });
+
+  describe('lossless flag', () => {
+    it('is true when the poison has no successors', () => {
+      const queue = [pending('only', 6, [{ op: 'replace', path: '/x', value: 1 }])];
+      expect(computePendingEjection({ x: 0 }, COMMITTED_REV, queue, 'only')!.lossless).toBe(true);
+    });
+
+    it('is true when every successor survives byte-identical (disjoint paths)', () => {
+      const committed = { a: 1, text: [{ insert: 'hello\n' }] };
+      const queue = [
+        pending('poison', 6, [{ op: 'replace', path: '/a', value: 2 }]),
+        pending('c1', 7, [{ op: 'add', path: '/comments/x', value: { body: 'hi' } }]),
+      ];
+      expect(computePendingEjection(committed, COMMITTED_REV, queue, 'poison')!.lossless).toBe(true);
+    });
+
+    it('is false when a surviving successor was rewritten by the inverse walk (@txt shift)', () => {
+      const committed = { text: [{ insert: 'hello\n' }] };
+      const queue = [
+        pending('poison', 6, [txt([{ insert: 'XXX' }])]),
+        pending('after', 7, [txt([{ retain: 3 }, { insert: 'Y' }])]),
+      ];
+      const result = computePendingEjection(committed, COMMITTED_REV, queue, 'poison')!;
+      // The successor survives, but its retain shifted — content-preserving, still not
+      // byte-identical, and the strict flag must say so.
+      expect(result.newPending.map(c => c.id)).toEqual(['after']);
+      expect(result.lossless).toBe(false);
+    });
+
+    it('is false for the root-replace wedge: descendant successors drop entirely (DAB-832)', () => {
+      // The DAB-1071 shape: a stale restore minted `replace ''`, then the user kept writing.
+      // Ejecting the restore inverts the whole-doc overwrite, and every descendant-path op
+      // stacked behind it transforms away to nothing — weeks of edits, silently gone. The
+      // flag is what lets `onlyIfLossless` callers refuse this trade.
+      const committed = { docs: { s1: { text: [{ insert: 'server\n' }] } } };
+      const restored = { docs: { s1: { text: [{ insert: 'restored\n' }] } } };
+      const queue = [
+        pending('restore', 6, [{ op: 'replace', path: '', value: restored }]),
+        pending('edit', 7, [{ op: '@txt', path: '/docs/s1/text', value: [{ insert: 'new words ' }] }]),
+      ];
+      const result = computePendingEjection(committed, COMMITTED_REV, queue, 'restore')!;
+      expect(result.newPending).toEqual([]);
+      expect(result.lossless).toBe(false);
+    });
+
+    it('is true when the only successor is a duplicate root-replace retry', () => {
+      // The retried-restore shape (one restore re-minted several times, nothing else queued):
+      // a sibling whole-doc replace re-asserts its full value regardless of the inverse, so it
+      // survives untouched and the head retry can eject losslessly, one per pass.
+      const committed = { docs: { s1: { text: [{ insert: 'server\n' }] } } };
+      const restored = { docs: { s1: { text: [{ insert: 'restored\n' }] } } };
+      const queue = [
+        pending('retry-1', 6, [{ op: 'replace', path: '', value: restored }]),
+        pending('retry-2', 7, [{ op: 'replace', path: '', value: restored }]),
+      ];
+      const result = computePendingEjection(committed, COMMITTED_REV, queue, 'retry-1')!;
+      expect(result.newPending.map(c => c.id)).toEqual(['retry-2']);
+      expect(result.newPending[0].ops).toEqual(queue[1].ops);
+      expect(result.lossless).toBe(true);
+    });
+  });
 });
 
 describe('computePendingEjection — convergence against the real OT server', () => {

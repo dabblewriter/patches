@@ -623,20 +623,27 @@ export class Patches {
    * discarded. Call it while the doc's sync is latched at 'error'; ejecting during an
    * in-flight flush can race the server accepting the change.
    *
+   * `opts.onlyIfLossless` makes the ejection refuse (by `LossyEjectionError`, checked
+   * atomically inside the algorithm's lock) when rebasing the queue past the poison would
+   * drop or rewrite successor changes — the guard for a poison other queued work was
+   * built on, e.g. a whole-doc replace with later edits stacked behind it.
+   *
    * @returns The quarantined entry, or null when nothing matched (already committed,
    *   already ejected, or an algorithm without ejection support).
    * @throws When the change matched but cannot be safely ejected (e.g. an OT queue whose
-   *   poison can't be inverted). The doc is still wedged — surface it rather than treating
-   *   it as resolved.
+   *   poison can't be inverted), or when `opts.onlyIfLossless` found the ejection would
+   *   cost successor ops (detect with `isLossyEjectionError`). The doc is still wedged —
+   *   surface it rather than treating it as resolved.
    */
   async ejectPendingChange(
     docId: string,
     changeId: string,
-    reason = 'app-requested'
+    reason = 'app-requested',
+    opts?: { onlyIfLossless?: boolean }
   ): Promise<QuarantinedChange | null> {
     const algorithm = await this._resolveAlgorithmForDoc(docId);
     if (!algorithm.ejectPendingChange) return null;
-    const quarantined = await algorithm.ejectPendingChange(docId, changeId, reason, this.getOpenDoc(docId));
+    const quarantined = await algorithm.ejectPendingChange(docId, changeId, reason, this.getOpenDoc(docId), opts);
     if (quarantined) {
       this.onChangeQuarantined.emit(docId, quarantined);
       // Nudge sync to flush the surviving pending work.

@@ -324,13 +324,17 @@ export class LWWAlgorithm implements ClientAlgorithm {
   /**
    * Eject the sending change into quarantine (one store transaction) and rebuild the
    * open doc without it; pendingOps minted since capture survive and flush next.
+   *
+   * `opts.onlyIfLossless` is accepted but has nothing to guard here: an LWW ejection
+   * removes one captured change and never rebases or drops the pendingOps minted since —
+   * it is lossless by construction.
    */
   async ejectPendingChange(
     docId: string,
     changeId: string,
     reason: string,
     doc?: PatchesDoc<any>,
-    opts?: { onlyIfUnappliable?: boolean }
+    opts?: { onlyIfUnappliable?: boolean; onlyIfLossless?: boolean }
   ): Promise<QuarantinedChange | null> {
     const quarantined = await this._withDocLock(docId, async () => {
       // Re-corroborate under the lock when asked (see ClientAlgorithm.ejectPendingChange):

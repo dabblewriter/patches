@@ -327,6 +327,59 @@ describe('OTAlgorithm quarantine', () => {
         expect(await algorithm.listQuarantinedChanges(DOC)).toEqual([]);
       });
     });
+
+    describe('onlyIfLossless (consent-path successor guard)', () => {
+      it('ejects a tail poison — no successors, trivially lossless', async () => {
+        const { store, algorithm } = await setup();
+        const poison = await mint(algorithm, [{ op: 'replace', path: '', value: { a: 9, s: 'y' } }]);
+
+        const entry = await algorithm.ejectPendingChange(DOC, poison.id, 'server-refused', undefined, {
+          onlyIfLossless: true,
+        });
+        expect(entry).not.toBeNull();
+        expect(await store.getPendingChanges(DOC)).toEqual([]);
+      });
+
+      it('ejects past a byte-identical survivor (a duplicate root-replace retry)', async () => {
+        const { store, algorithm } = await setup();
+        const value = { a: 9, s: 'y' };
+        const retry1 = await mint(algorithm, [{ op: 'replace', path: '', value }]);
+        const retry2 = await mint(algorithm, [{ op: 'replace', path: '', value }]);
+
+        const entry = await algorithm.ejectPendingChange(DOC, retry1.id, 'server-refused', undefined, {
+          onlyIfLossless: true,
+        });
+        expect(entry?.changeId).toBe(retry1.id);
+        expect((await store.getPendingChanges(DOC)).map(c => c.id)).toEqual([retry2.id]);
+      });
+
+      it('throws LossyEjectionError, mutating nothing, when successors would drop (root-replace wedge)', async () => {
+        const { store, algorithm } = await setup();
+        // The DAB-832 shape: a whole-doc replace with real work stacked behind it. The
+        // successor edits structure that only exists inside the replace's value, so the
+        // inverse walk drops it — the flag must refuse the trade and leave the latch.
+        const restore = await mint(algorithm, [{ op: 'replace', path: '', value: { a: 0, s: 'x', z: {} } }]);
+        const edit = await mint(algorithm, [{ op: 'add', path: '/z/note', value: 'weeks of writing' }]);
+
+        await expect(
+          algorithm.ejectPendingChange(DOC, restore.id, 'server-refused', undefined, { onlyIfLossless: true })
+        ).rejects.toMatchObject({ name: 'LossyEjectionError' });
+        expect((await store.getPendingChanges(DOC)).map(c => c.id)).toEqual([restore.id, edit.id]);
+        expect(await algorithm.listQuarantinedChanges(DOC)).toEqual([]);
+      });
+
+      it('without the flag, the same ejection proceeds and drops the dependent successor', async () => {
+        const { store, algorithm } = await setup();
+        // Pins the default (consent-path) behavior the flag exists to opt out of — if this
+        // ever changes, the flag's guard tests above lose their meaning.
+        const restore = await mint(algorithm, [{ op: 'replace', path: '', value: { a: 0, s: 'x', z: {} } }]);
+        await mint(algorithm, [{ op: 'add', path: '/z/note', value: 'dropped' }]);
+
+        const entry = await algorithm.ejectPendingChange(DOC, restore.id, 'server-refused');
+        expect(entry?.changeId).toBe(restore.id);
+        expect(await store.getPendingChanges(DOC)).toEqual([]);
+      });
+    });
   });
 
   describe('quarantine lifecycle vs tracking', () => {

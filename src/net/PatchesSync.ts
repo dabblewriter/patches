@@ -621,6 +621,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         // Preserve sticky isLoaded from previous lifecycle, or derive it
         const existing = this.docStates.state[doc.docId];
         entry.isLoaded = existing?.isLoaded || isDocLoaded(entry.committedRev, entry.hasPending, entry.syncStatus);
+        // A resume pass leaves a clean doc alone, so one showing an error (mid-retry, or
+        // latched) keeps showing it until its own retry re-paints — the rebuilt entry
+        // must not read synced while the doc is not.
+        if (resume && !hasPending && existing?.syncStatus === 'error') {
+          entry.syncStatus = 'error';
+          entry.syncError = existing.syncError;
+        }
         syncedEntries[doc.docId] = entry;
       }
 

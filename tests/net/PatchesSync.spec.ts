@@ -424,6 +424,26 @@ describe('PatchesSync', () => {
       expect(seen).not.toContain('syncing');
     });
 
+    it('resume: a clean doc showing an error keeps it until its own retry re-paints (DAB-941)', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'doc1', committedRev: 5 }] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      (sync as any)._subscribedIds = new Set(['doc1']);
+      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      const syncError = new Error('pull failed');
+      sync.docStates.state = {
+        doc1: { committedRev: 5, hasPending: false, syncStatus: 'error', syncError, isLoaded: true },
+      };
+
+      await sync['syncAllKnownDocs']({ resume: true });
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+      expect(sync.docStates.state['doc1'].syncError).toBe(syncError);
+
+      // A cold pass re-attempts the doc, so the rebuilt entry starts clean.
+      await sync['syncAllKnownDocs']({ resume: false });
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+      expect(sync.docStates.state['doc1'].syncError).toBeUndefined();
+    });
+
     it('resume: flushes only docs with local pending', async () => {
       mockAlgorithm.listDocs.mockResolvedValue([
         { docId: 'doc1', committedRev: 5 },

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PatchesREST } from '../../../src/net/rest/PatchesREST';
+import { onlineState } from '../../../src/net/websocket/onlineState';
 
 // Mock onlineState
 vi.mock('../../../src/net/websocket/onlineState', () => ({
@@ -240,6 +241,49 @@ describe('PatchesREST', () => {
       const cold = rest.connect();
       MockEventSource.latest.simulateOpen();
       await cold;
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123');
+      expect(rest.lastEventId).toBeUndefined();
+      expect(rest.resumedStream).toBe(false);
+    });
+
+    it('reconnects with the held cursor when connectivity returns (DAB-941)', async () => {
+      const p = rest.connect();
+      const es = MockEventSource.latest;
+      es.simulateOpen();
+      await p;
+      es.simulateEvent('connected', '{}', 'c5');
+      const onOnline = vi.mocked(onlineState.onOnlineChange).mock.calls[0][0];
+
+      onOnline(false);
+      expect(es.close).toHaveBeenCalled();
+      expect(rest.state).toBe('disconnected');
+
+      onOnline(true);
+      expect(MockEventSource.instances.length).toBe(2);
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?lastEventId=c5');
+      MockEventSource.latest.simulateOpen();
+      expect(rest.resumedStream).toBe(true);
+    });
+
+    it('holds a cursor passed while offline and opens with it once online', async () => {
+      (onlineState as any).isOffline = true;
+      try {
+        await rest.connect('42');
+        expect(MockEventSource.instances.length).toBe(0);
+        expect(rest.lastEventId).toBe('42');
+      } finally {
+        (onlineState as any).isOffline = false;
+      }
+
+      const onOnline = vi.mocked(onlineState.onOnlineChange).mock.calls[0][0];
+      onOnline(true);
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?lastEventId=42');
+    });
+
+    it('treats an empty-string cursor as no cursor', async () => {
+      const p = rest.connect('');
+      MockEventSource.latest.simulateOpen();
+      await p;
       expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123');
       expect(rest.lastEventId).toBeUndefined();
       expect(rest.resumedStream).toBe(false);

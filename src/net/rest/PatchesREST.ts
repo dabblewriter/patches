@@ -210,7 +210,10 @@ export class PatchesREST implements PatchesConnection {
     this._ensureOnlineOfflineListeners();
 
     if (onlineState.isOffline) {
-      // Defer until online — onStateChange will fire when we connect later
+      // Defer until online: the online listener reconnects with the cursor held here, so
+      // a caller's cursor survives the wait. Nothing live is overwritten — going offline
+      // already tore any stream down.
+      this._lastEventId = lastEventId || undefined;
       return Promise.resolve();
     }
 
@@ -227,9 +230,9 @@ export class PatchesREST implements PatchesConnection {
     // stream carries: seeded from the caller so a resume that yields no frames before
     // the next hand-off still carries it forward, and cleared on a cold open so a
     // previous stream's id can't pose as one the server replayed from (`onopen` derives
-    // `resumedStream` from it). The offline-defer and already-connected paths return
-    // above without opening, so they never touch either.
-    this._lastEventId = lastEventId;
+    // `resumedStream` from it). The already-connected path returns above without
+    // opening, so it touches neither.
+    this._lastEventId = lastEventId || undefined;
     this._streamResumed = false;
     const resumeQuery = lastEventId ? `?lastEventId=${encodeURIComponent(lastEventId)}` : '';
 
@@ -809,7 +812,8 @@ export class PatchesREST implements PatchesConnection {
     if (!this.onlineUnsubscriber) {
       this.onlineUnsubscriber = onlineState.onOnlineChange(isOnline => {
         if (isOnline && this.shouldBeConnected && !this.eventSource) {
-          this.connect();
+          // Carry the cursor so a short offline spell resumes off the replay buffer.
+          this.connect(this._lastEventId);
         } else if (!isOnline) {
           // Going offline: cancel any pending backoff reconnect and tear down the stream.
           // The online transition above rebuilds it when connectivity returns.

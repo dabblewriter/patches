@@ -43,10 +43,10 @@ export interface PatchesConnection extends PatchesAPI {
    * browser's own auto-reconnect (which sends `Last-Event-ID`), and the transport's
    * backoff rebuild all count. This is the authority PatchesSync consults on the
    * `connected` transition to decide whether to run a resume-mode sync: it reflects what
-   * the transport *actually did*, so a cursor that never opened a resumed stream (offline
-   * defer, already-connected no-op, a `resync` re-anchor after the buffer expired, or a
-   * plain cold open) correctly reads `false`. Transports with no resumable stream
-   * (WebSocket) leave it undefined, which reads as `false`.
+   * the transport *actually did*, so a cursor that never opened a resumed stream (an
+   * already-connected no-op, a `resync` re-anchor after the buffer expired, or a plain
+   * cold open) correctly reads `false`. Transports with no resumable stream (WebSocket)
+   * leave it undefined, which reads as `false`.
    */
   readonly resumedStream?: boolean;
 

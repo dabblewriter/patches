@@ -29,10 +29,12 @@ export class PatchesRESTSignalingTransport implements SignalingTransport {
 
   /**
    * Delegates to {@link PatchesREST.connect}. Safe to call multiple times — if
-   * the SSE stream is already open, the underlying call is a no-op.
+   * the SSE stream is already open, the underlying call is a no-op. Carries the
+   * cursor the transport holds: this fires from presence heartbeats, so during a
+   * backoff window it would otherwise open cold and discard the resume (DAB-941).
    */
   async connect(): Promise<void> {
-    await this.patches.connect();
+    await this.patches.connect(this.patches.lastEventId);
   }
 
   /** Sends a raw JSON-RPC frame upstream over the signaling REST endpoint. */

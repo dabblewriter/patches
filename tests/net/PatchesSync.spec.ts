@@ -424,19 +424,28 @@ describe('PatchesSync', () => {
       expect(seen).not.toContain('syncing');
     });
 
-    it('resume: a clean doc showing an error keeps it until its own retry re-paints (DAB-941)', async () => {
-      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'doc1', committedRev: 5 }] as TrackedDoc[]);
+    it('resume: a clean doc showing an error keeps it and is re-attempted, not reset to synced (DAB-941)', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'doc2', committedRev: 5 },
+      ] as TrackedDoc[]);
       mockAlgorithm.hasPending.mockResolvedValue(false);
-      (sync as any)._subscribedIds = new Set(['doc1']);
-      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      (sync as any)._subscribedIds = new Set(['doc1', 'doc2']);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
       const syncError = new Error('pull failed');
       sync.docStates.state = {
         doc1: { committedRev: 5, hasPending: false, syncStatus: 'error', syncError, isLoaded: true },
+        doc2: { committedRev: 5, hasPending: false, syncStatus: 'synced', isLoaded: true },
       };
 
       await sync['syncAllKnownDocs']({ resume: true });
+      // The entry keeps the error until the re-attempt paints an outcome (syncDoc is mocked here).
       expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
       expect(sync.docStates.state['doc1'].syncError).toBe(syncError);
+      // An exhausted ladder with nothing pending arms no re-probe, so the resume pass is
+      // the errored doc's only re-attempt; the clean doc rides the replay.
+      expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+      expect(syncDocSpy).not.toHaveBeenCalledWith('doc2');
 
       // A cold pass re-attempts the doc, so the rebuilt entry starts clean.
       await sync['syncAllKnownDocs']({ resume: false });

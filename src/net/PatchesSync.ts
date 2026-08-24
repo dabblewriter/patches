@@ -621,9 +621,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         // Preserve sticky isLoaded from previous lifecycle, or derive it
         const existing = this.docStates.state[doc.docId];
         entry.isLoaded = existing?.isLoaded || isDocLoaded(entry.committedRev, entry.hasPending, entry.syncStatus);
-        // A resume pass leaves a clean doc alone, so one showing an error (mid-retry, or
-        // latched) keeps showing it until its own retry re-paints — the rebuilt entry
-        // must not read synced while the doc is not.
+        // A doc showing an error keeps showing it until a sync re-paints it — the rebuilt
+        // entry must not read synced while the doc is not (a resume pass re-attempts it
+        // below; a cold pass re-attempts everything).
         if (resume && !hasPending && existing?.syncStatus === 'error') {
           entry.syncStatus = 'error';
           entry.syncError = existing.syncError;
@@ -657,9 +657,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       const syncIds = activeDocIds.filter(id => tracked.has(id));
 
       // On resume the replay covers clean docs, so sync only those still holding local
-      // pending (a mint a predecessor or this tab persisted but never flushed). A cold
-      // connect syncs every doc. hasPending was just read into syncedEntries above.
-      const flushIds = resume ? syncIds.filter(id => syncedEntries[id]?.hasPending) : syncIds;
+      // pending (a mint a predecessor or this tab persisted but never flushed) or showing
+      // an error: an exhausted ladder with nothing pending arms no re-probe, so this pass
+      // is its only re-attempt now that reconnects resume (DAB-941). A cold connect syncs
+      // every doc. hasPending was just read into syncedEntries above.
+      const flushIds = resume
+        ? syncIds.filter(id => syncedEntries[id]?.hasPending || syncedEntries[id]?.syncStatus === 'error')
+        : syncIds;
 
       // Cold connect subscribes everything. A resume subscribes the docs it will flush
       // (one may have been created offline and never subscribed by the predecessor) PLUS

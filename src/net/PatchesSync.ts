@@ -2008,12 +2008,15 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // An op with no seam to split on measures the same every time; the ladder would just burn
     // attempts before latching on the identical error.
     if (isUnsplittableChangeError(err)) return false;
-    // A 413 the server scoped to ONE change is deterministic on those bytes. By the time it
-    // reaches this decision, `_tryResplitOversized` has already declined to shrink further
-    // (no split budget configured, or the budget is at its floor), so the ladder would resend
-    // the identical request. Latch like the splitter-refused case above; the slow reprobe and
-    // any local edit still re-enter sync if the queue ever changes shape.
-    if (err instanceof StatusError && err.code === 413 && err.data?.scope === 'change') return false;
+    // A 4xx the server scoped to ONE change (`data: { changeId, scope: 'change' }`) is a
+    // deterministic verdict on that change's bytes — the ladder would resend the identical
+    // request and collect the identical refusal, forever. The root-replace 400 from
+    // `commitChanges` did exactly that for weeks per wedged client before this latch existed
+    // (DAB-832). For the 413 member of the class, `_tryResplitOversized` has already declined
+    // to shrink further by the time it reaches this decision (no split budget configured, or
+    // the budget is at its floor). Latch like the splitter-refused case above; the slow
+    // reprobe and any local edit still re-enter sync if the queue ever changes shape.
+    if (err instanceof StatusError && err.code >= 400 && err.code < 500 && err.data?.scope === 'change') return false;
     if (err instanceof StatusError) return !TERMINAL_SYNC_CODES.has(err.code);
     return true;
   }

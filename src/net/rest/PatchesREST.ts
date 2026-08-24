@@ -131,9 +131,9 @@ export class PatchesREST implements PatchesConnection {
   private onlineUnsubscriber: Unsubscriber | null = null;
   /** Timestamp (ms) of the last SSE frame received (event or heartbeat). 0 until first open. */
   private _lastEventAt = 0;
-  /** Id of the last id-bearing SSE frame received; the resume cursor (see `lastEventId`). */
+  /** The cursor the current stream carries; the resume cursor (see `lastEventId`). */
   private _lastEventId: string | undefined;
-  /** Whether the currently open stream was opened with a resume cursor (see `resumedStream`). */
+  /** Whether the server replayed into the currently open stream (see `resumedStream`). */
   private _streamResumed = false;
   /** Opaque info from the server's `connected` frame (e.g. version); undefined until connected. */
   private _serverInfo: unknown;
@@ -167,9 +167,11 @@ export class PatchesREST implements PatchesConnection {
   // --- Connection State ---
 
   /**
-   * Id of the last id-bearing SSE frame received, or undefined before the first one.
+   * The resume cursor of the current stream: the id of the last id-bearing SSE frame
+   * received, or the cursor `connect()` was opened with until the first frame arrives.
    * The server's `connected` anchor frame sets it at stream start, so a client holds
-   * a resume cursor even before any change arrives.
+   * a cursor even before any change arrives. Undefined on a cold stream before its
+   * anchor; a cold `connect()` clears it (the previous stream's id is not this one's).
    */
   get lastEventId(): string | undefined {
     return this._lastEventId;
@@ -185,10 +187,12 @@ export class PatchesREST implements PatchesConnection {
   }
 
   /**
-   * Whether the currently open stream was opened as a resume (with a `lastEventId`
-   * cursor). Set true only when an EventSource is actually opened with the cursor, and
-   * reset to false on every cold open and on a server `resync` re-anchor — so it always
-   * reflects the live stream, never a stale intent. See {@link PatchesConnection.resumedStream}.
+   * Whether the server replayed into the currently open stream — i.e. it opened with a
+   * cursor: a caller-supplied `lastEventId`, the `Last-Event-ID` header the browser sends
+   * on its own auto-reconnect, or the cursor this transport's backoff rebuild carries.
+   * Derived on every `onopen` from the cursor held at that moment, and reset to false on
+   * a cold open and on a server `resync` re-anchor — so it always reflects the live
+   * stream, never a stale intent. See {@link PatchesConnection.resumedStream}.
    */
   get resumedStream(): boolean {
     return this._streamResumed;
@@ -206,7 +210,14 @@ export class PatchesREST implements PatchesConnection {
     this._ensureOnlineOfflineListeners();
 
     if (onlineState.isOffline) {
-      // Defer until online — onStateChange will fire when we connect later
+      // Defer until online: the online listener reconnects with the cursor held here, so
+      // a caller's cursor survives the wait. Nothing live is overwritten — going offline
+      // already tore any stream down. Seed only, never clear: no stream opens on this
+      // path, so there is no `onopen` for a stale id to mislead (that is what the cold
+      // open below guards), while clearing would throw away the cursor the online
+      // listener resumes from — a bare `connect()` during an offline spell would silently
+      // cold-sync the whole fleet on reconnect, the herd DAB-941 exists to remove.
+      if (lastEventId) this._lastEventId = lastEventId;
       return Promise.resolve();
     }
 
@@ -219,16 +230,15 @@ export class PatchesREST implements PatchesConnection {
     // EventSource cannot set a `Last-Event-ID` request header on a freshly
     // constructed instance (the browser only sends it on its own auto-reconnect),
     // so a caller-supplied resume cursor rides as a query param the server reads
-    // as a `Last-Event-ID` equivalent. Seed `_lastEventId` too, so a resume that
-    // yields no frames before the next hand-off still carries the cursor forward.
-    if (lastEventId) this._lastEventId = lastEventId;
+    // as a `Last-Event-ID` equivalent. `_lastEventId` becomes exactly the cursor this
+    // stream carries: seeded from the caller so a resume that yields no frames before
+    // the next hand-off still carries it forward, and cleared on a cold open so a
+    // previous stream's id can't pose as one the server replayed from (`onopen` derives
+    // `resumedStream` from it). The already-connected path returns above without
+    // opening, so it touches neither.
+    this._lastEventId = lastEventId || undefined;
+    this._streamResumed = false;
     const resumeQuery = lastEventId ? `?lastEventId=${encodeURIComponent(lastEventId)}` : '';
-    // Record what this open actually is, so `resumedStream` reflects the live stream
-    // rather than a caller's intent: a cursor that reaches here opens a resumed stream;
-    // a cold connect (including every internal reconnect, which passes no cursor) clears
-    // it. The offline-defer and already-connected paths return above without opening, so
-    // they never flip this — the eventual cold reconnect sets it false.
-    this._streamResumed = !!lastEventId;
 
     return new Promise<void>((resolve, reject) => {
       const es = new EventSource(`${this._url}/events/${this._encodedClientId}${resumeQuery}`);
@@ -250,6 +260,14 @@ export class PatchesREST implements PatchesConnection {
       }, CONNECT_TIMEOUT_MS);
 
       es.onopen = () => {
+        // Fires on the initial open AND on every browser-native auto-reconnect (same
+        // EventSource, no `connect()` call). Either way the server got this stream's
+        // cursor if there is one — the query param on the initial open, the
+        // `Last-Event-ID` header the browser sends on its own reconnect — and replayed
+        // from it, so the stream is resumed exactly when a cursor is held (DAB-941). A
+        // cursor the server can't verify comes back as a `resync` frame, which clears
+        // this again.
+        this._streamResumed = this._lastEventId !== undefined;
         // A healthy open clears any pending reconnect and resets the backoff.
         this._cancelReconnect();
         this.reconnectBackoff = INITIAL_RECONNECT_BACKOFF_MS;
@@ -393,6 +411,11 @@ export class PatchesREST implements PatchesConnection {
     this._removeOnlineOfflineListeners();
     this._cancelReconnect();
     this._teardownStream();
+    // No stream is open, so nothing was replayed into one: `resumedStream` describes the
+    // live stream and must not keep answering for the torn-down one. `_lastEventId`
+    // deliberately survives — it is the hand-off cursor a caller reads across a stand-down,
+    // and the next open decides for itself (a cold `connect()` clears it).
+    this._streamResumed = false;
     this._setState('disconnected');
   }
 
@@ -704,15 +727,17 @@ export class PatchesREST implements PatchesConnection {
    * Mirrors WebSocketTransport's self-healing: unlike that transport, a fatal SSE error has no
    * native auto-reconnect, and the consumer (PatchesSync) only re-syncs on a fresh `connected`
    * event — it never calls `connect()` on `error`. Without this, a torn-down stream would
-   * surface `error` and never rebuild. The eventual `connected` re-emit drives the consumer's
-   * `syncAllKnownDocs` catch-up (re-subscribe + pull). Single-flight and gated on intent/online.
+   * surface `error` and never rebuild. The rebuild carries the cursor this transport holds,
+   * so the server replays the gap (or re-anchors with `resync` when the cursor is stale) and
+   * the eventual `connected` re-emit drives a resume pass rather than a full
+   * `syncAllKnownDocs` (DAB-941). Single-flight and gated on intent/online.
    */
   private _scheduleReconnect(): void {
     if (!this.shouldBeConnected || onlineState.isOffline) return;
     if (this.reconnectTimer !== null) return;
     this.reconnectTimer = globalThis.setTimeout(() => {
       this.reconnectTimer = null;
-      this.connect().catch(() => {
+      this.connect(this._lastEventId).catch(() => {
         // connect() handles its own failure (teardown + 'error' + reschedule); nothing to do here.
       });
     }, this.reconnectBackoff);
@@ -796,7 +821,8 @@ export class PatchesREST implements PatchesConnection {
     if (!this.onlineUnsubscriber) {
       this.onlineUnsubscriber = onlineState.onOnlineChange(isOnline => {
         if (isOnline && this.shouldBeConnected && !this.eventSource) {
-          this.connect();
+          // Carry the cursor so a short offline spell resumes off the replay buffer.
+          this.connect(this._lastEventId);
         } else if (!isOnline) {
           // Going offline: cancel any pending backoff reconnect and tear down the stream.
           // The online transition above rebuilds it when connectivity returns.

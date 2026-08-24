@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PatchesREST } from '../../../src/net/rest/PatchesREST';
+import { onlineState } from '../../../src/net/websocket/onlineState';
 
 // Mock onlineState
 vi.mock('../../../src/net/websocket/onlineState', () => ({
@@ -184,6 +185,148 @@ describe('PatchesREST', () => {
       MockEventSource.latest.simulateEvent('connected', JSON.stringify({ version: '0.24.0' }), 'c5');
       expect(rest.lastEventId).toBe('c5');
       expect(rest.serverInfo).toEqual({ version: '0.24.0' });
+    });
+
+    it('marks a browser-native reconnect as resumed once the stream holds a cursor (DAB-941)', async () => {
+      const p = rest.connect();
+      const es = MockEventSource.latest;
+      es.simulateOpen();
+      await p;
+      es.simulateEvent('connected', '{}', 'c5');
+      expect(rest.resumedStream).toBe(false);
+
+      const states: string[] = [];
+      rest.onStateChange(s => states.push(s));
+      // Transient drop: the browser reconnects on the SAME EventSource, sending Last-Event-ID
+      // itself — no connect() call, no new instance.
+      es.simulateError();
+      es.simulateOpen();
+
+      expect(MockEventSource.instances.length).toBe(1);
+      expect(states).toEqual(['disconnected', 'connecting', 'connected']);
+      expect(rest.resumedStream).toBe(true);
+    });
+
+    it('keeps a native reconnect cold when no id-bearing frame ever arrived (the browser has nothing to send)', async () => {
+      const p = rest.connect();
+      const es = MockEventSource.latest;
+      es.simulateOpen();
+      await p;
+
+      es.simulateError();
+      es.simulateOpen();
+      expect(rest.resumedStream).toBe(false);
+    });
+
+    it('a resync re-anchor makes the NEXT native reconnect a resume from the new id', async () => {
+      const p = rest.connect('42');
+      const es = MockEventSource.latest;
+      es.simulateOpen();
+      await p;
+      es.simulateEvent('resync', '', 'R9');
+      expect(rest.resumedStream).toBe(false);
+
+      es.simulateError();
+      es.simulateOpen();
+      expect(rest.lastEventId).toBe('R9');
+      expect(rest.resumedStream).toBe(true);
+    });
+
+    it('a cold connect after a resumed session drops the stale cursor rather than posing as a resume', async () => {
+      const p = rest.connect('42');
+      MockEventSource.latest.simulateOpen();
+      await p;
+      rest.disconnect();
+
+      const cold = rest.connect();
+      MockEventSource.latest.simulateOpen();
+      await cold;
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123');
+      expect(rest.lastEventId).toBeUndefined();
+      expect(rest.resumedStream).toBe(false);
+    });
+
+    it('reconnects with the held cursor when connectivity returns (DAB-941)', async () => {
+      const p = rest.connect();
+      const es = MockEventSource.latest;
+      es.simulateOpen();
+      await p;
+      es.simulateEvent('connected', '{}', 'c5');
+      const onOnline = vi.mocked(onlineState.onOnlineChange).mock.calls[0][0];
+
+      onOnline(false);
+      expect(es.close).toHaveBeenCalled();
+      expect(rest.state).toBe('disconnected');
+
+      onOnline(true);
+      expect(MockEventSource.instances.length).toBe(2);
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?lastEventId=c5');
+      MockEventSource.latest.simulateOpen();
+      expect(rest.resumedStream).toBe(true);
+    });
+
+    it('holds a cursor passed while offline and opens with it once online', async () => {
+      (onlineState as any).isOffline = true;
+      try {
+        await rest.connect('42');
+        expect(MockEventSource.instances.length).toBe(0);
+        expect(rest.lastEventId).toBe('42');
+      } finally {
+        (onlineState as any).isOffline = false;
+      }
+
+      const onOnline = vi.mocked(onlineState.onOnlineChange).mock.calls[0][0];
+      onOnline(true);
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?lastEventId=42');
+    });
+
+    it('a bare connect() while offline keeps the held cursor, so the online rebuild still resumes', async () => {
+      const p = rest.connect();
+      const es = MockEventSource.latest;
+      es.simulateOpen();
+      await p;
+      es.simulateEvent('connected', '{}', 'c5');
+
+      const onOnline = vi.mocked(onlineState.onOnlineChange).mock.calls[0][0];
+      onOnline(false);
+
+      // An app-level watchdog re-arming during the offline spell passes no cursor. It must
+      // not throw away the one the online listener resumes from — no stream opens here, so
+      // there is no `onopen` for a stale id to mislead.
+      (onlineState as any).isOffline = true;
+      try {
+        await rest.connect();
+        expect(MockEventSource.instances.length).toBe(1);
+        expect(rest.lastEventId).toBe('c5');
+      } finally {
+        (onlineState as any).isOffline = false;
+      }
+
+      onOnline(true);
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?lastEventId=c5');
+      MockEventSource.latest.simulateOpen();
+      expect(rest.resumedStream).toBe(true);
+    });
+
+    it('disconnect() clears resumedStream — no stream is open for it to describe', async () => {
+      const p = rest.connect('42');
+      MockEventSource.latest.simulateOpen();
+      await p;
+      expect(rest.resumedStream).toBe(true);
+
+      rest.disconnect();
+      expect(rest.resumedStream).toBe(false);
+      // The hand-off cursor survives a stand-down: a caller reads it across disconnect().
+      expect(rest.lastEventId).toBe('42');
+    });
+
+    it('treats an empty-string cursor as no cursor', async () => {
+      const p = rest.connect('');
+      MockEventSource.latest.simulateOpen();
+      await p;
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123');
+      expect(rest.lastEventId).toBeUndefined();
+      expect(rest.resumedStream).toBe(false);
     });
 
     it('adopts the re-anchor id from a resync frame so the next reconnect verifies', async () => {
@@ -405,6 +548,45 @@ describe('PatchesREST', () => {
         expect(MockEventSource.instances.length).toBe(2);
         MockEventSource.latest.simulateOpen();
         expect(rest.state).toBe('connected');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('rebuilds after a fatal error with the cursor it holds, so the server replays instead of the client full-syncing (DAB-941)', async () => {
+      vi.useFakeTimers();
+      try {
+        const p = rest.connect();
+        const es = MockEventSource.latest;
+        es.simulateOpen();
+        await p;
+        es.simulateEvent('connected', '{}', 'c5');
+        es.simulateEvent('changesCommitted', JSON.stringify({ docId: 'd', changes: [] }), '7');
+
+        es.readyState = MockEventSource.CLOSED;
+        es.simulateError();
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        const rebuilt = MockEventSource.latest;
+        expect(rebuilt).not.toBe(es);
+        expect(rebuilt.url).toBe('https://api.example.com/events/test-client-123?lastEventId=7');
+        rebuilt.simulateOpen();
+        expect(rest.resumedStream).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps retrying a failed initial resume with the same cursor', async () => {
+      vi.useFakeTimers();
+      try {
+        const p = rest.connect('42');
+        MockEventSource.latest.simulateError();
+        await expect(p).rejects.toThrow('SSE connection failed');
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(MockEventSource.instances.length).toBe(2);
+        expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?lastEventId=42');
       } finally {
         vi.useRealTimers();
       }

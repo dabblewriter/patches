@@ -277,6 +277,24 @@ describe('PatchesSync', () => {
       expect(syncAllSpy).toHaveBeenCalledWith({ resume: false });
     });
 
+    it('a resumed connected keeps the per-doc retry ladders; a cold one drops them (DAB-941)', async () => {
+      vi.spyOn(sync as any, 'syncAllKnownDocs').mockResolvedValue(undefined);
+      const clearSpy = vi.spyOn(sync as any, '_clearAllSyncRetries');
+
+      // A resume pass won't re-attempt a clean doc, so a doc mid-ladder must keep its timer.
+      mockWebSocket.resumedStream = true;
+      await sync.connect('42');
+      sync['_handleConnectionChange']('connected');
+      expect(clearSpy).not.toHaveBeenCalled();
+
+      // A cold pass re-attempts every doc, so the ladders start over.
+      mockWebSocket.resumedStream = false;
+      sync['_handleConnectionChange']('disconnected');
+      clearSpy.mockClear();
+      sync['_handleConnectionChange']('connected');
+      expect(clearSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('a cold connect runs the next connected pass in full mode', async () => {
       const syncAllSpy = vi.spyOn(sync as any, 'syncAllKnownDocs').mockResolvedValue(undefined);
 
@@ -404,6 +422,54 @@ describe('PatchesSync', () => {
       expect(syncDocSpy).not.toHaveBeenCalled();
       expect(sync.state.syncStatus).toBe('synced');
       expect(seen).not.toContain('syncing');
+    });
+
+    it('resume: a clean doc showing an error keeps it and is re-attempted, not reset to synced (DAB-941)', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'doc2', committedRev: 5 },
+      ] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      (sync as any)._subscribedIds = new Set(['doc1', 'doc2']);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      const syncError = new Error('pull failed');
+      sync.docStates.state = {
+        doc1: { committedRev: 5, hasPending: false, syncStatus: 'error', syncError, isLoaded: true },
+        doc2: { committedRev: 5, hasPending: false, syncStatus: 'synced', isLoaded: true },
+      };
+
+      await sync['syncAllKnownDocs']({ resume: true });
+      // The entry keeps the error until the re-attempt paints an outcome (syncDoc is mocked here).
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+      expect(sync.docStates.state['doc1'].syncError).toBe(syncError);
+      // An exhausted ladder with nothing pending arms no re-probe, so the resume pass is
+      // the errored doc's only re-attempt; the clean doc rides the replay.
+      expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+      expect(syncDocSpy).not.toHaveBeenCalledWith('doc2');
+
+      // A cold pass re-attempts the doc, so the rebuilt entry starts clean.
+      await sync['syncAllKnownDocs']({ resume: false });
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+      expect(sync.docStates.state['doc1'].syncError).toBeUndefined();
+    });
+
+    it('resume: a doc holding BOTH pending and an error keeps the error too', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'doc1', committedRev: 5 }] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockResolvedValue(true);
+      (sync as any)._subscribedIds = new Set(['doc1']);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      const syncError = new Error('flush rejected');
+      sync.docStates.state = {
+        doc1: { committedRev: 5, hasPending: true, syncStatus: 'error', syncError, isLoaded: true },
+      };
+
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      // Pending or not, the rebuilt entry must not read synced while the doc is not — the
+      // flush below is what repaints it (syncDoc is mocked here).
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+      expect(sync.docStates.state['doc1'].syncError).toBe(syncError);
+      expect(syncDocSpy).toHaveBeenCalledWith('doc1');
     });
 
     it('resume: flushes only docs with local pending', async () => {

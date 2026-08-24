@@ -23,10 +23,13 @@ export interface PatchesConnection extends PatchesAPI {
   connect(lastEventId?: string): Promise<void>;
 
   /**
-   * The id of the last event received on the current stream, or undefined before the
-   * first event. The server's `connected` anchor frame sets it at stream start, so a
-   * client holds a cursor even before any change arrives. Persisted cross-tab so a
-   * successor can resume from it (see `connect`).
+   * The resume cursor of the current stream: the id of the last event received on it, or
+   * the cursor `connect()` was opened with until the first id-bearing frame arrives. The
+   * server's `connected` anchor frame sets it at stream start, so a client holds a cursor
+   * even before any change arrives. Undefined on a cold stream before its anchor — a cold
+   * `connect()` clears it, since a previous stream's id is not this one's. Persisted
+   * cross-tab so a successor can resume from it (see `connect`), and read back by the
+   * transport's own reconnect paths so a rebuild resumes rather than opening cold.
    */
   readonly lastEventId?: string;
 
@@ -38,14 +41,15 @@ export interface PatchesConnection extends PatchesAPI {
   readonly serverInfo?: unknown;
 
   /**
-   * Whether the currently open stream was opened as a resume (with a `lastEventId`
-   * cursor) rather than a cold start — i.e. the server is replaying the missed gap.
-   * This is the authority PatchesSync consults on the `connected` transition to decide
-   * whether to run a resume-mode sync: it reflects what the transport *actually did*,
-   * so a cursor that never opened a resumed stream (offline defer, already-connected
-   * no-op, a `resync` re-anchor after the buffer expired, or a plain cold reconnect)
-   * correctly reads `false`. Transports with no resumable stream (WebSocket) leave it
-   * undefined, which reads as `false`.
+   * Whether the currently open stream was opened as a resume (with a cursor the server
+   * replayed from) rather than a cold start. A caller-supplied `lastEventId`, the
+   * browser's own auto-reconnect (which sends `Last-Event-ID`), and the transport's
+   * backoff rebuild all count. This is the authority PatchesSync consults on the
+   * `connected` transition to decide whether to run a resume-mode sync: it reflects what
+   * the transport *actually did*, so a cursor that never opened a resumed stream (an
+   * already-connected no-op, a `resync` re-anchor after the buffer expired, or a plain
+   * cold open) correctly reads `false`. Transports with no resumable stream (WebSocket)
+   * leave it undefined, which reads as `false`.
    */
   readonly resumedStream?: boolean;
 

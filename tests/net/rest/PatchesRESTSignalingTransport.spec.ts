@@ -11,6 +11,7 @@ function makeFakePatches() {
     onStateChange,
     onSignal,
     connect: vi.fn().mockResolvedValue(undefined),
+    lastEventId: 'c5',
     sendSignal: vi.fn().mockResolvedValue(undefined),
   } as unknown as PatchesREST & {
     onSignal: ReturnType<typeof signal>;
@@ -27,12 +28,12 @@ describe('PatchesRESTSignalingTransport', () => {
     expect(t.onStateChange).toBe(fake.onStateChange);
   });
 
-  it('delegates connect to PatchesREST', async () => {
+  it('delegates connect to PatchesREST with the cursor it holds, so a heartbeat never opens cold (DAB-941)', async () => {
     const fake = makeFakePatches();
     const t = new PatchesRESTSignalingTransport(fake);
 
     await t.connect();
-    expect(fake.connect).toHaveBeenCalled();
+    expect(fake.connect).toHaveBeenCalledWith('c5');
   });
 
   it('routes send through PatchesREST.sendSignal verbatim', async () => {

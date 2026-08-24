@@ -411,8 +411,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // Forward the resume cursor to the transport. Whether the next `connected` pass
     // actually runs in resume mode is decided from `connection.resumedStream` (what the
     // transport did), not from the cursor being passed here (what the caller intended) —
-    // so an offline defer or an already-connected no-op can't leak a resume into a later
-    // cold reconnect. See `_handleConnectionChange`.
+    // so an already-connected no-op can't leak a resume into a later cold reconnect. An
+    // offline defer is not such a no-op: the transport holds the cursor and opens with it
+    // once connectivity returns, and `resumedStream` reports that open honestly. See
+    // `_handleConnectionChange`.
     this._started = true;
     try {
       await this.connection.connect(lastEventId);
@@ -621,6 +623,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         // Preserve sticky isLoaded from previous lifecycle, or derive it
         const existing = this.docStates.state[doc.docId];
         entry.isLoaded = existing?.isLoaded || isDocLoaded(entry.committedRev, entry.hasPending, entry.syncStatus);
+        // A doc showing an error keeps showing it until a sync re-paints it — the rebuilt
+        // entry must not read synced while the doc is not (a resume pass re-attempts it
+        // below, whether it holds pending or not; a cold pass re-attempts everything).
+        if (resume && existing?.syncStatus === 'error') {
+          entry.syncStatus = 'error';
+          entry.syncError = existing.syncError;
+        }
         syncedEntries[doc.docId] = entry;
       }
 
@@ -650,9 +659,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       const syncIds = activeDocIds.filter(id => tracked.has(id));
 
       // On resume the replay covers clean docs, so sync only those still holding local
-      // pending (a mint a predecessor or this tab persisted but never flushed). A cold
-      // connect syncs every doc. hasPending was just read into syncedEntries above.
-      const flushIds = resume ? syncIds.filter(id => syncedEntries[id]?.hasPending) : syncIds;
+      // pending (a mint a predecessor or this tab persisted but never flushed) or showing
+      // an error: an exhausted ladder with nothing pending arms no re-probe, so this pass
+      // is its only re-attempt now that reconnects resume (DAB-941). A cold connect syncs
+      // every doc. hasPending was just read into syncedEntries above.
+      const flushIds = resume
+        ? syncIds.filter(id => syncedEntries[id]?.hasPending || syncedEntries[id]?.syncStatus === 'error')
+        : syncIds;
 
       // Cold connect subscribes everything. A resume subscribes the docs it will flush
       // (one may have been created offline and never subscribed by the predecessor) PLUS
@@ -1663,18 +1676,21 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.updateState({ connected: isConnected, syncStatus: newSyncStatus });
 
     if (isConnected) {
-      // Fresh connection session: syncAllKnownDocs below re-attempts every doc, so
-      // drop the old retry ladders and let a still-failing doc surface once more.
-      // (On WS the drop side already cleared these; on REST the drop deliberately
-      // doesn't — see the else branch.)
-      this._clearAllSyncRetries();
+      // A resumed stream (opened with a cursor: a caller hand-off, a browser-native
+      // reconnect, or the transport's own backoff rebuild) trusts the server's replay for
+      // the gap and only flushes local pending; a cold connect re-syncs everything. The
+      // transport is the authority: `resumedStream` is true only for a stream the server
+      // actually replayed into, and a server `resync` re-anchor clears it, so that
+      // follow-up `connected` full-syncs.
+      const resume = this.connection.resumedStream ?? false;
+      // A cold connect re-attempts every doc, so drop the old retry ladders and let a
+      // still-failing doc surface once more. A resume leaves clean docs alone, so a doc
+      // mid-ladder (a pull that failed while the stream was up) keeps its timers — wiping
+      // them here would strand it until the next local edit (DAB-941). (On WS the drop side
+      // already cleared these; on REST the drop deliberately doesn't — see the else branch.)
+      if (!resume) this._clearAllSyncRetries();
       // The stream is up — live pushes resume; the degraded-mode pass hands off here.
       this._clearDegradedSync();
-      // A resumed stream (opened with a cursor) trusts the server's replay for the gap and
-      // only flushes local pending; a cold connect re-syncs everything. The transport is the
-      // authority: `resumedStream` is true only for a stream actually opened with the cursor,
-      // and a server `resync` re-anchor clears it, so that follow-up `connected` full-syncs.
-      const resume = this.connection.resumedStream ?? false;
       void this.syncAllKnownDocs({ resume });
     } else if (!isConnecting) {
       if (this.connection.sendRequiresStream !== false) {
@@ -2255,7 +2271,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._syncRetryAttempts.clear();
     for (const timer of this._syncReprobeTimers.values()) globalThis.clearTimeout(timer);
     this._syncReprobeTimers.clear();
-    // A reconnect re-attempts every doc; let a still-failing one surface once more.
+    // A cold connect re-attempts every doc; let a still-failing one surface once more.
+    // Only cold connects reach here now (DAB-941): a resumed connect keeps the ladders,
+    // so a doc latched at 'error' surfaces once and then stays quiet while the resume pass
+    // keeps re-attempting it — the same de-duplication the REST drop branch already relies
+    // on to stop a latched 403 re-emitting to telemetry every reconnect cycle.
     this._surfacedSyncErrors.clear();
   }
 }

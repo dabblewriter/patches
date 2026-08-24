@@ -163,6 +163,9 @@ export class LWWInMemoryStore implements LWWClientStore {
    */
   async confirmDeleteDoc(docId: string): Promise<void> {
     this.docs.delete(docId);
+    // The quarantine goes with the doc, matching OTInMemoryStore — otherwise its entries outlive
+    // every other trace of the doc and keep surfacing from listQuarantinedChanges().
+    this.quarantined.delete(docId);
   }
 
   /**

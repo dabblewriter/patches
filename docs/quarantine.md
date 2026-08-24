@@ -48,7 +48,10 @@ The server's attribution is a suspicion, not a verdict:
 4. **Never auto-discarded.** Quarantined changes persist until the app calls
    `discardQuarantinedChange` (the user's decision). Untracking a doc preserves its
    quarantined changes (untracking is cache eviction, not a discard decision); only
-   deleting the doc removes them along with everything else.
+   deleting the doc removes them along with everything else. A remote delete is a
+   deletion the user never asked for, so the entries ride out on the
+   `onRemoteDocDeleted` payload (see `ClientAlgorithm.collectUnsyncedForDiscard`)
+   before the store drops them.
 
 ## Client API
 

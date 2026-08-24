@@ -150,6 +150,42 @@ export class LWWAlgorithm implements ClientAlgorithm {
     });
   }
 
+  /**
+   * See {@link ClientAlgorithm.collectUnsyncedForDiscard}. Unlike {@link getPendingToSend} this
+   * neither mints a sending change nor clears pending ops — the doc is being discarded, nothing
+   * will send — and it returns BOTH halves when both exist: the in-flight sending change and a
+   * change built from the ops that accumulated behind it (which the send path's retry branch
+   * deliberately holds back). Revs on the built change are informational for a shelf payload.
+   *
+   * Quarantine rides along last: it holds content the server refused but the user can still
+   * recover, and `confirmDeleteDoc` is about to drop it.
+   */
+  async collectUnsyncedForDiscard(docId: string): Promise<Change[]> {
+    const changes = await this._withDocLock(docId, () => this._collectLocalChanges(docId));
+    const quarantined = await this.store.listQuarantinedChanges?.(docId);
+    return quarantined?.length ? [...changes, ...quarantined.map(q => q.change)] : changes;
+  }
+
+  /**
+   * The local layers above committed, as changes: the in-flight sending change, then one change
+   * built from the pending ops behind it. `baseRev` lets a caller that already read the committed
+   * rev pair the build with its own read; omitted, it reads the store's.
+   *
+   * Must be called with the doc lock already held — `_withDocLock` chains on its own tail, so
+   * acquiring it here would deadlock both callers.
+   */
+  private async _collectLocalChanges(docId: string, baseRev?: number): Promise<Change[]> {
+    const changes: Change[] = [];
+    const sendingChange = await this.store.getSendingChange(docId);
+    if (sendingChange) changes.push(sendingChange);
+    const pendingOps = await this.store.getPendingOps(docId);
+    if (pendingOps.length > 0) {
+      const rev = baseRev ?? (await this.store.getCommittedRev(docId));
+      changes.push(createChange(rev, rev + 1, pendingOps));
+    }
+    return changes;
+  }
+
   async applyServerChanges<T extends object>(
     docId: string,
     serverChanges: Change[],
@@ -214,16 +250,11 @@ export class LWWAlgorithm implements ClientAlgorithm {
           // for replace ops but doubling delta ops (@inc). The doubled value would then bake in
           // when the commit echo pure-matches the in-flight key rebuilt from those changes.
           const { state, rev } = await this.store.getCommittedState(docId);
-          const sending = await this.store.getSendingChange(docId);
-          const pendingOps = await this.store.getPendingOps(docId);
+          const changes = await this._collectLocalChanges(docId, rev);
           // Re-check after the awaits: a concurrent applySnapshot (outside this lock) may have
           // advanced the doc to rev already, and import permits an equal-rev rebuild that would
           // just emit needless churn.
           if (rev > doc.committedRev) {
-            const changes: Change[] = [
-              ...(sending ? [sending] : []),
-              ...(pendingOps.length ? [createChange(rev, rev + 1, pendingOps)] : []),
-            ];
             (doc as LWWDoc<T>).import({ state, rev, changes });
           }
         }

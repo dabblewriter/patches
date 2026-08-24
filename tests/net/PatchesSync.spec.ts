@@ -64,6 +64,7 @@ describe('PatchesSync', () => {
       store: mockStore,
       hasPending: vi.fn().mockResolvedValue(false),
       getPendingToSend: vi.fn().mockResolvedValue(null),
+      collectUnsyncedForDiscard: vi.fn().mockResolvedValue([]),
       applyServerChanges: vi.fn().mockResolvedValue([]),
       confirmSent: vi.fn().mockResolvedValue(undefined),
       dropResolvedPending: vi.fn().mockResolvedValue(0),
@@ -2574,7 +2575,7 @@ describe('PatchesSync', () => {
       it('should remove synced entry on remote doc deleted', async () => {
         sync['_initDocSyncState']('doc1', { committedRev: 5, hasPending: false, syncStatus: 'synced' });
         sync['trackedDocs'].add('doc1');
-        mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+        mockAlgorithm.collectUnsyncedForDiscard.mockResolvedValue([]);
         mockPatches.closeDoc = vi.fn().mockResolvedValue(undefined);
 
         await sync['_handleRemoteDocDeleted']('doc1');

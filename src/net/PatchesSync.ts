@@ -328,6 +328,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   private _resplitBudgets = new Map<string, number>();
   /** Docs whose persisted quarantine entries were re-surfaced this session (see `_resurfaceQuarantined`). */
   private _quarantineResurfaced = new Set<string>();
+  /** In-flight remote-delete discards, keyed by doc (see `_handleRemoteDocDeleted`). */
+  private _remoteDeleteInFlight = new Map<string, Promise<void>>();
   /**
    * Per-doc memo of COMMITTED changes that failed strict apply this session (see
    * `_skipFlooredPoison`): how many times each failed, whether an authoritative snapshot has
@@ -1115,10 +1117,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._initDocSyncState(docId, {});
 
     const algorithm = this._getAlgorithm(docId);
+    // Ids this pass got committed and dropped from the store. The open doc still mirrors them
+    // until a reload lands, so if this pass ends in a remote delete they would be shelved as
+    // "what the server does not have" — see the catch below.
+    const resolvedIds = new Set<string>();
 
     try {
       if (!pending) {
-        pending = (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId) as PatchesDoc<any>)) ?? [];
+        pending = (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId))) ?? [];
       }
       if (!pending.length) {
         return; // Nothing to flush
@@ -1138,6 +1144,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // held (an empty store queue merges to `[...merged]`), an id the store-side peek can never
       // return — which would read any non-empty post-flush queue as progress. Both ends of the
       // compare must read the same collection; an algorithm with no peek compares batch to batch.
+      // `undefined` (empty pre-flush store queue) is load-bearing: any non-empty post-flush queue
+      // then reads as drained — the mid-flight-arrival case, whose follow-up flushes that row.
       const headBefore = algorithm.peekPendingHead ? (await algorithm.peekPendingHead(docId))?.id : pending[0].id;
 
       const batches = breakChangesIntoBatches(pending, {
@@ -1209,6 +1217,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // and re-send it on the next flush (re-committing it — the server's id
           // de-dup window `startAfter: baseRev` no longer covers the original commit).
           await algorithm.dropResolvedPending?.(docId, changeBatch, []);
+          changeBatch.forEach(c => resolvedIds.add(c.id));
           // Pass the batch as resolved so the pending-preserving import can't re-add it
           // from the open doc's stale in-memory queue.
           await this._reloadDocFromServer(docId, algorithm, false, changeBatch);
@@ -1245,6 +1254,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // without this it is resent on every flush forever. Re-sync the open doc
           // from the store when we drop so its in-memory pending stays consistent.
           const dropped = (await algorithm.dropResolvedPending?.(docId, changeBatch, committed)) ?? 0;
+          changeBatch.forEach(c => resolvedIds.add(c.id));
           if (dropped > 0 && this.patches.getOpenDoc(docId)) {
             const fullSnapshot = await algorithm.loadDoc(docId);
             if (fullSnapshot) this._applySnapshotPreservingPending(docId, fullSnapshot, changeBatch);
@@ -1279,7 +1289,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       if ((reloadedMidFlush || drained) && stillHasPending) void this.syncDoc(docId);
     } catch (err) {
       if (this._isDocDeletedError(err)) {
-        await this._handleRemoteDocDeleted(docId);
+        await this._handleRemoteDocDeleted(docId, resolvedIds);
         return;
       }
       // A status-less interruption (network-level failure or aborted request) never
@@ -1819,26 +1829,44 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   /**
    * Unified handler for remote document deletion (both real-time notifications and offline discovery).
    * Cleans up local state and notifies the application with any pending changes that were lost.
+   *
+   * De-duplicated per doc: the `onDocDeleted` push and a 410 caught mid-flush can name the same
+   * doc, and the window spans the collect and the close, so both runs would collect before either
+   * wiped and the app would get two `onRemoteDocDeleted` emits carrying the same content under
+   * freshly minted (LWW) ids. The second trigger awaits the first instead.
+   *
+   * @param resolvedIds Ids the flush that raised the delete already committed and dropped from
+   *   the store — see {@link ClientAlgorithm.collectUnsyncedForDiscard}.
    */
-  protected async _handleRemoteDocDeleted(docId: string): Promise<void> {
+  protected async _handleRemoteDocDeleted(docId: string, resolvedIds?: Set<string>): Promise<void> {
+    const inFlight = this._remoteDeleteInFlight.get(docId);
+    if (inFlight) return inFlight;
+    const run = this._discardRemoteDeletedDoc(docId, resolvedIds);
+    this._remoteDeleteInFlight.set(docId, run);
+    try {
+      await run;
+    } finally {
+      this._remoteDeleteInFlight.delete(docId);
+    }
+  }
+
+  /** The body of {@link _handleRemoteDocDeleted}, run at most once per doc at a time. */
+  private async _discardRemoteDeletedDoc(docId: string, resolvedIds?: Set<string>): Promise<void> {
     const algorithm = this._getAlgorithm(docId);
 
-    // Get pending changes before cleanup so app can handle them. WITH the open doc: the rows most
-    // at risk here are the doc-only ones the store never accepted — after the close below they
-    // exist nowhere else, and this payload is the app's last chance to shelve them. But without
-    // the report: classifying would raise `UnstoredPendingError` — a store-integrity alarm — at
-    // the exact moment the doc legitimately vanished (a collaborator losing access, a delete from
-    // another device).
+    // Collect everything unsynced before cleanup so the app can shelve it. WITH the open doc: the
+    // rows most at risk here are the doc-only ones the store never accepted, which live nowhere
+    // but the mirror the close below evicts. `confirmDeleteDoc` then drops the doc's tracking row
+    // (the in-memory stores drop its buffers with it), so this payload is the app's last chance
+    // to shelve any of it. Optional on the interface — a partial implementation must degrade the
+    // shelf to empty rather than throw out of this fire-and-forget path and leave the doc tracked.
     const pendingChanges =
-      (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId) as PatchesDoc<any>, {
-        report: false,
-      })) ?? [];
+      (await algorithm.collectUnsyncedForDiscard?.(docId, this.patches.getOpenDoc(docId), resolvedIds)) ?? [];
 
-    // Close doc if open
-    const doc = this.patches.getOpenDoc(docId);
-    if (doc) {
-      await this.patches.closeDoc(docId);
-    }
+    // `force`, as in Patches.deleteDoc: the doc is being deleted, every consumer needs to release
+    // it. Letting a refCount > 1 keep the mirror alive over the store wipe below leaves an orphan
+    // buffer that never syncs — and one still showing the withheld rows now sitting on the shelf.
+    await this.patches.closeDoc(docId, { force: true });
 
     // Clean up tracking and local storage
     this.trackedDocs.delete(docId);

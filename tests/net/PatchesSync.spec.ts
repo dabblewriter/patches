@@ -453,6 +453,25 @@ describe('PatchesSync', () => {
       expect(sync.docStates.state['doc1'].syncError).toBeUndefined();
     });
 
+    it('resume: a doc holding BOTH pending and an error keeps the error too', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'doc1', committedRev: 5 }] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockResolvedValue(true);
+      (sync as any)._subscribedIds = new Set(['doc1']);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      const syncError = new Error('flush rejected');
+      sync.docStates.state = {
+        doc1: { committedRev: 5, hasPending: true, syncStatus: 'error', syncError, isLoaded: true },
+      };
+
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      // Pending or not, the rebuilt entry must not read synced while the doc is not — the
+      // flush below is what repaints it (syncDoc is mocked here).
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+      expect(sync.docStates.state['doc1'].syncError).toBe(syncError);
+      expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+    });
+
     it('resume: flushes only docs with local pending', async () => {
       mockAlgorithm.listDocs.mockResolvedValue([
         { docId: 'doc1', committedRev: 5 },

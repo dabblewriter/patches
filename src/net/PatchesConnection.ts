@@ -23,10 +23,13 @@ export interface PatchesConnection extends PatchesAPI {
   connect(lastEventId?: string): Promise<void>;
 
   /**
-   * The id of the last event received on the current stream, or undefined before the
-   * first event. The server's `connected` anchor frame sets it at stream start, so a
-   * client holds a cursor even before any change arrives. Persisted cross-tab so a
-   * successor can resume from it (see `connect`).
+   * The resume cursor of the current stream: the id of the last event received on it, or
+   * the cursor `connect()` was opened with until the first id-bearing frame arrives. The
+   * server's `connected` anchor frame sets it at stream start, so a client holds a cursor
+   * even before any change arrives. Undefined on a cold stream before its anchor — a cold
+   * `connect()` clears it, since a previous stream's id is not this one's. Persisted
+   * cross-tab so a successor can resume from it (see `connect`), and read back by the
+   * transport's own reconnect paths so a rebuild resumes rather than opening cold.
    */
   readonly lastEventId?: string;
 

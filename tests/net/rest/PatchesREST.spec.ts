@@ -280,6 +280,46 @@ describe('PatchesREST', () => {
       expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?lastEventId=42');
     });
 
+    it('a bare connect() while offline keeps the held cursor, so the online rebuild still resumes', async () => {
+      const p = rest.connect();
+      const es = MockEventSource.latest;
+      es.simulateOpen();
+      await p;
+      es.simulateEvent('connected', '{}', 'c5');
+
+      const onOnline = vi.mocked(onlineState.onOnlineChange).mock.calls[0][0];
+      onOnline(false);
+
+      // An app-level watchdog re-arming during the offline spell passes no cursor. It must
+      // not throw away the one the online listener resumes from — no stream opens here, so
+      // there is no `onopen` for a stale id to mislead.
+      (onlineState as any).isOffline = true;
+      try {
+        await rest.connect();
+        expect(MockEventSource.instances.length).toBe(1);
+        expect(rest.lastEventId).toBe('c5');
+      } finally {
+        (onlineState as any).isOffline = false;
+      }
+
+      onOnline(true);
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?lastEventId=c5');
+      MockEventSource.latest.simulateOpen();
+      expect(rest.resumedStream).toBe(true);
+    });
+
+    it('disconnect() clears resumedStream — no stream is open for it to describe', async () => {
+      const p = rest.connect('42');
+      MockEventSource.latest.simulateOpen();
+      await p;
+      expect(rest.resumedStream).toBe(true);
+
+      rest.disconnect();
+      expect(rest.resumedStream).toBe(false);
+      // The hand-off cursor survives a stand-down: a caller reads it across disconnect().
+      expect(rest.lastEventId).toBe('42');
+    });
+
     it('treats an empty-string cursor as no cursor', async () => {
       const p = rest.connect('');
       MockEventSource.latest.simulateOpen();

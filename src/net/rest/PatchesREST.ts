@@ -212,8 +212,12 @@ export class PatchesREST implements PatchesConnection {
     if (onlineState.isOffline) {
       // Defer until online: the online listener reconnects with the cursor held here, so
       // a caller's cursor survives the wait. Nothing live is overwritten — going offline
-      // already tore any stream down.
-      this._lastEventId = lastEventId || undefined;
+      // already tore any stream down. Seed only, never clear: no stream opens on this
+      // path, so there is no `onopen` for a stale id to mislead (that is what the cold
+      // open below guards), while clearing would throw away the cursor the online
+      // listener resumes from — a bare `connect()` during an offline spell would silently
+      // cold-sync the whole fleet on reconnect, the herd DAB-941 exists to remove.
+      if (lastEventId) this._lastEventId = lastEventId;
       return Promise.resolve();
     }
 
@@ -407,6 +411,11 @@ export class PatchesREST implements PatchesConnection {
     this._removeOnlineOfflineListeners();
     this._cancelReconnect();
     this._teardownStream();
+    // No stream is open, so nothing was replayed into one: `resumedStream` describes the
+    // live stream and must not keep answering for the torn-down one. `_lastEventId`
+    // deliberately survives — it is the hand-off cursor a caller reads across a stand-down,
+    // and the next open decides for itself (a cold `connect()` clears it).
+    this._streamResumed = false;
     this._setState('disconnected');
   }
 

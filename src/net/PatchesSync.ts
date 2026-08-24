@@ -411,8 +411,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // Forward the resume cursor to the transport. Whether the next `connected` pass
     // actually runs in resume mode is decided from `connection.resumedStream` (what the
     // transport did), not from the cursor being passed here (what the caller intended) —
-    // so an offline defer or an already-connected no-op can't leak a resume into a later
-    // cold reconnect. See `_handleConnectionChange`.
+    // so an already-connected no-op can't leak a resume into a later cold reconnect. An
+    // offline defer is not such a no-op: the transport holds the cursor and opens with it
+    // once connectivity returns, and `resumedStream` reports that open honestly. See
+    // `_handleConnectionChange`.
     this._started = true;
     try {
       await this.connection.connect(lastEventId);
@@ -623,8 +625,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         entry.isLoaded = existing?.isLoaded || isDocLoaded(entry.committedRev, entry.hasPending, entry.syncStatus);
         // A doc showing an error keeps showing it until a sync re-paints it — the rebuilt
         // entry must not read synced while the doc is not (a resume pass re-attempts it
-        // below; a cold pass re-attempts everything).
-        if (resume && !hasPending && existing?.syncStatus === 'error') {
+        // below, whether it holds pending or not; a cold pass re-attempts everything).
+        if (resume && existing?.syncStatus === 'error') {
           entry.syncStatus = 'error';
           entry.syncError = existing.syncError;
         }
@@ -2266,7 +2268,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._syncRetryAttempts.clear();
     for (const timer of this._syncReprobeTimers.values()) globalThis.clearTimeout(timer);
     this._syncReprobeTimers.clear();
-    // A reconnect re-attempts every doc; let a still-failing one surface once more.
+    // A cold connect re-attempts every doc; let a still-failing one surface once more.
+    // Only cold connects reach here now (DAB-941): a resumed connect keeps the ladders,
+    // so a doc latched at 'error' surfaces once and then stays quiet while the resume pass
+    // keeps re-attempting it — the same de-duplication the REST drop branch already relies
+    // on to stop a latched 403 re-emitting to telemetry every reconnect cycle.
     this._surfacedSyncErrors.clear();
   }
 }

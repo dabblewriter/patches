@@ -10,6 +10,35 @@ export interface PendingEjection {
   poison: Change;
   /** The queue with the poison gone and every survivor renumbered off `committedRev`. */
   newPending: Change[];
+  /**
+   * True when every successor survived the inverse walk with its ops untouched — the
+   * ejection removes the poison's content and nothing else. False when any successor was
+   * dropped (it edited structure the ejection removes) or had its ops transformed, which
+   * is the documented dependent-loss case above. A poison with no successors is trivially
+   * lossless. Note the strict reading: a successor whose ops were merely position-shifted
+   * by the inverse also reports false — content-preserving, but no longer byte-identical —
+   * so gating callers err toward refusing.
+   */
+  lossless: boolean;
+}
+
+/**
+ * Thrown by an ejection the caller constrained with `onlyIfLossless` when the computed
+ * ejection would drop or alter successor changes (see {@link PendingEjection.lossless}).
+ * Nothing is mutated; the queue and the poison are exactly as they were. Distinct from
+ * both return shapes on purpose: `null` means nothing matched, a plain throw means the
+ * eject was attempted and failed — this means the eject would have SUCCEEDED but at the
+ * price of queued work the caller declared untouchable. Detect it with
+ * {@link isLossyEjectionError} rather than `instanceof`, which breaks across an RPC or
+ * worker boundary that rehydrates errors.
+ */
+export class LossyEjectionError extends Error {
+  override readonly name = 'LossyEjectionError';
+}
+
+/** Duck-typed {@link LossyEjectionError} check that survives error rehydration (name, not instanceof). */
+export function isLossyEjectionError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'LossyEjectionError';
 }
 
 /**
@@ -146,5 +175,14 @@ export function computePendingEjection(
     else if (change.baseRev !== poison.baseRev) newPending.push({ ...change, rev: ++rev });
   }
 
-  return { poison, newPending };
+  // Losslessness is judged against `after` only — predecessors are untouched by
+  // construction. Ops-identity by JSON: renumbering doesn't touch ops, so any difference
+  // here is the inverse walk's doing.
+  const survivorsById = new Map(newPending.map(change => [change.id, change]));
+  const lossless = after.every(change => {
+    const survivor = survivorsById.get(change.id);
+    return !!survivor && JSON.stringify(survivor.ops) === JSON.stringify(change.ops);
+  });
+
+  return { poison, newPending, lossless };
 }

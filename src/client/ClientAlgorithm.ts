@@ -261,18 +261,26 @@ export interface ClientAlgorithm {
    * the gap can make the change valid again — ejecting it then would quarantine
    * committable work.
    *
+   * `opts.onlyIfLossless` refuses (by throw, under the same lock) an ejection whose
+   * successor rebase would drop or rewrite queued ops — the app-consent guard for a
+   * poison other work was built on, e.g. a whole-doc replace with edits stacked behind
+   * it, where ejecting the replace silently discards the edits. Algorithms whose
+   * ejections never touch other changes (LWW) accept it as a no-op.
+   *
    * @returns The quarantined entry, or null when nothing was ejected (docId/changeId
    *   don't match a pending change, or `opts.onlyIfUnappliable` found it applies cleanly).
    * @throws When the change matched but cannot be safely ejected (the algorithm can't
-   *   compute a trustworthy rebase of its successors). Nothing is mutated. Callers must
-   *   not treat this as the benign null — the doc is still wedged behind the change.
+   *   compute a trustworthy rebase of its successors), or `opts.onlyIfLossless` found the
+   *   ejection would cost successor ops (a `LossyEjectionError`, detectable with
+   *   `isLossyEjectionError`). Nothing is mutated. Callers must not treat this as the
+   *   benign null — the doc is still wedged behind the change.
    */
   ejectPendingChange?(
     docId: string,
     changeId: string,
     reason: string,
     doc?: PatchesDoc<any>,
-    opts?: { onlyIfUnappliable?: boolean }
+    opts?: { onlyIfUnappliable?: boolean; onlyIfLossless?: boolean }
   ): Promise<QuarantinedChange | null>;
 
   /** Lists quarantined changes for one doc, or all docs when docId is omitted. */

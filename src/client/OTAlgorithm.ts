@@ -2,7 +2,7 @@ import { signal } from 'easy-signal';
 import { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
 import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
 import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
-import { computePendingEjection } from '../algorithms/ot/shared/ejectPendingChange.js';
+import { computePendingEjection, LossyEjectionError } from '../algorithms/ot/shared/ejectPendingChange.js';
 import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
 import { createChange } from '../data/change.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
@@ -466,13 +466,16 @@ export class OTAlgorithm implements ClientAlgorithm {
    *   The throw is deliberate: callers must be able to tell "nothing to eject" (null)
    *   from "eject impossible" — collapsing both into null lets an app dismiss a consent
    *   flow as resolved while the doc is still wedged.
+   * @throws {LossyEjectionError} When `opts.onlyIfLossless` is set and the computed
+   *   ejection would drop or rewrite successor ops (see {@link PendingEjection.lossless}).
+   *   Nothing is mutated; the caller chose the latch over the loss.
    */
   async ejectPendingChange(
     docId: string,
     changeId: string,
     reason: string,
     doc?: PatchesDoc<any>,
-    opts?: { onlyIfUnappliable?: boolean }
+    opts?: { onlyIfUnappliable?: boolean; onlyIfLossless?: boolean }
   ): Promise<QuarantinedChange | null> {
     for (let attempt = 0; attempt < APPLY_CONFLICT_RETRIES; attempt++) {
       const snapshot = await this.store.getDoc(docId);
@@ -520,6 +523,19 @@ export class OTAlgorithm implements ClientAlgorithm {
 
       const ejection = computePendingEjection(snapshot.state, snapshot.rev, snapshot.changes, changeId);
       if (!ejection) return null;
+
+      // Checked HERE, inside the converge loop on the freshly-read snapshot, not by a
+      // caller-side probe: the queue can rebase (or the user can mint a successor) between
+      // any outside read and this run, and a gate with that gap would approve an ejection
+      // that drops the successor minted inside it. A whole-doc poison (the root-replace
+      // wedge, DAB-832) fails this for any real successor — its inverse drops every
+      // descendant-path op behind it — which is exactly the caller's signal to leave the
+      // queue latched instead.
+      if (opts?.onlyIfLossless && !ejection.lossless) {
+        throw new LossyEjectionError(
+          `Ejecting change ${changeId} from doc ${docId} would drop or rewrite queued successor changes`
+        );
+      }
 
       const quarantined = await this.store.quarantinePendingChange(
         docId,

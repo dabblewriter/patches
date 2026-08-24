@@ -22,6 +22,9 @@ export type * from './ClientAlgorithm.js';
 // Sync-recovery errors, exported so consumers can `instanceof` instead of matching by name
 export { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
 export { ApplyChangesError } from '../algorithms/ot/shared/applyChanges.js';
+// (isLossyEjectionError deliberately checks by name, not instanceof — it must survive
+// an RPC/worker boundary that rehydrates errors.)
+export { LossyEjectionError, isLossyEjectionError } from '../algorithms/ot/shared/ejectPendingChange.js';
 export { isUnsplittableChangeError, UnsplittableChangeError, UnstoredPendingError } from '../net/error.js';
 // The splitter itself, plus telemetry for changes it can't get under the storage
 // budget. `breakChangesIntoBatches` is public because apps commit over REST on

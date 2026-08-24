@@ -40,12 +40,21 @@ The server's attribution is a suspicion, not a verdict:
    with the ejection itself (`opts.onlyIfUnappliable`): a server rebase between probe and
    eject can make the change valid again, and ejecting it then would quarantine committable
    work.
-2. **Circuit breaker.** At most 3 auto-ejections per doc per session; past that the doc
+2. **Successor-loss gate (consent path, opt-in).** Ejecting an OT change rebases its
+   successors through the poison's inverse, and a successor scoped to structure the poison
+   created transforms away to nothing — for a whole-doc replace, that is every queued edit
+   behind it. `patches.ejectPendingChange(docId, changeId, reason, { onlyIfLossless: true })`
+   refuses that trade: it throws `LossyEjectionError` (detect with `isLossyEjectionError`,
+   which checks by name so it survives RPC/worker rehydration) and mutates nothing, checked
+   atomically inside the ejection's own lock so a successor minted mid-eject can't slip
+   through. Without the flag the consent path keeps its documented lossy behavior. LWW
+   ejections never touch other changes and accept the flag as a no-op.
+3. **Circuit breaker.** At most 3 auto-ejections per doc per session; past that the doc
    latches like any definitive failure, so a systematic mis-attribution can't serially
    drain an offline queue into quarantine.
-3. **Atomic quarantine.** The quarantine write and the pending-queue removal are one store
+4. **Atomic quarantine.** The quarantine write and the pending-queue removal are one store
    transaction; a crash between them cannot lose the change.
-4. **Never auto-discarded.** Quarantined changes persist until the app calls
+5. **Never auto-discarded.** Quarantined changes persist until the app calls
    `discardQuarantinedChange` (the user's decision). Untracking a doc preserves its
    quarantined changes (untracking is cache eviction, not a discard decision); only
    deleting the doc removes them along with everything else. A remote delete is a
@@ -57,7 +66,9 @@ The server's attribution is a suspicion, not a verdict:
 
 ```ts
 patches.onChangeQuarantined((docId, entry: QuarantinedChange) => { ... });
-await patches.ejectPendingChange(docId, changeId, reason?);   // app-consent path
+await patches.ejectPendingChange(docId, changeId, reason?, opts?);   // app-consent path
+// opts.onlyIfLossless: throw (LossyEjectionError) instead of ejecting when successors
+// would be dropped or rewritten — see "Safety gates".
 await patches.listQuarantinedChanges(docId?);
 await patches.discardQuarantinedChange(docId, changeId);
 ```

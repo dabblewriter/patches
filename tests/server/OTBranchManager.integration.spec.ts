@@ -2288,3 +2288,191 @@ describe('windowed merge with concurrent source edits', () => {
     expect((await store.loadBranch(branchId))!.mergeFrame).toBeDefined();
   });
 });
+
+/**
+ * A branch whose seed is NOT a verbatim copy of the source.
+ *
+ * The merge lifts branch changes through a frame holding only the source's post-branch changes,
+ * which assumes the branch's state at `contentStartRev` equals the source's at the merge base.
+ * A consumer that seeds altered content (dw3 resolves inherited track changes out of a reader's
+ * review copy — DAB-1139) breaks that assumption, and every positional branch op merges back
+ * shifted by however much the seed differs. `Branch.seedDelta` closes it by re-expressing branch
+ * ops through the seed→source delta before they meet the source's own changes.
+ */
+describe('branch seed delta (altered seed re-anchoring)', () => {
+  const SOURCE_BODY = 'head REMOVED tail';
+  const SEED_BODY = 'head tail';
+  /**
+   * What the creator did TO the source to get the seed: drop the run at offset 5. Stated in
+   * this direction it is a length, not the text — which is the point, since branch records are
+   * readable by branch invitees. The server inverts it against its own copy of the source.
+   */
+  const SEED_DELTA = JSON.stringify([txtOp('/docs/d1/body/content', [{ retain: 5 }, { delete: 8 }])]);
+
+  function body(state: any): string {
+    const c = state?.docs?.d1?.body?.content;
+    const ops: any[] = Array.isArray(c) ? c : (c?.ops ?? []);
+    return ops.map(o => (typeof o.insert === 'string' ? o.insert : '')).join('');
+  }
+
+  function docState(text: string) {
+    return { docs: { d1: { id: 'd1', body: { content: { ops: [{ insert: text }] } } } } };
+  }
+
+  /** Source holds SOURCE_BODY; the branch is seeded with the shorter SEED_BODY. */
+  async function seedAlteredBranch(seedDelta?: string, managerOptions?: OTBranchManagerOptions) {
+    const { store, server, manager } = setup(managerOptions);
+    await server.commitChanges('doc1', [rootChange('s1', docState(SOURCE_BODY))]);
+
+    const branchId = 'branchSeedDelta';
+    await manager.createBranch('doc1', 1, { id: branchId, contentStartRev: 2, ...(seedDelta ? { seedDelta } : {}) });
+    // rev 1 is the seed itself — below contentStartRev, so the merge never replays it.
+    await store.saveChanges(branchId, [
+      createChange(0, 1, [{ op: 'replace', path: '', value: docState(SEED_BODY) }], { committedAt: 0 }) as Change,
+    ]);
+    return { store, server, manager, branchId };
+  }
+
+  it('lands a branch edit at the source offset the branch author meant, not the raw seed offset', async () => {
+    const { server, manager, branchId } = await seedAlteredBranch(SEED_DELTA);
+
+    // Insert 'X' inside `tail` at SEED offset 7 (…ta|il) — source offset 15.
+    await server.commitChanges(branchId, [
+      txtChange('e1', 1, '/docs/d1/body/content', [{ retain: 7 }, { insert: 'X' }]),
+    ]);
+    await manager.mergeBranch(branchId);
+
+    expect(body((await coldLoad(server, 'doc1')).state)).toBe('head REMOVED taXil\n');
+  });
+
+  it('without a seed delta the same branch lands the edit at the wrong offset — the bug being fixed', async () => {
+    const { server, manager, branchId } = await seedAlteredBranch();
+
+    await server.commitChanges(branchId, [
+      txtChange('e1', 1, '/docs/d1/body/content', [{ retain: 7 }, { insert: 'X' }]),
+    ]);
+    await manager.mergeBranch(branchId);
+
+    // Raw seed offset 7 falls inside `REMOVED`. Pinned so the fix cannot regress into it.
+    expect(body((await coldLoad(server, 'doc1')).state)).toBe('head REXMOVED tail\n');
+  });
+
+  it('re-anchors every op of a multi-change branch, not just the first', async () => {
+    const { server, manager, branchId } = await seedAlteredBranch(SEED_DELTA);
+
+    await server.commitChanges(branchId, [
+      txtChange('e1', 1, '/docs/d1/body/content', [{ retain: 7 }, { insert: 'X' }]),
+    ]);
+    await server.commitChanges(branchId, [
+      txtChange('e2', 2, '/docs/d1/body/content', [{ retain: 9 }, { insert: 'Y' }]),
+    ]);
+    await manager.mergeBranch(branchId);
+
+    // Seed after e1 is 'head taXil'; e2 at offset 9 sits between 'i' and 'l'.
+    expect(body((await coldLoad(server, 'doc1')).state)).toBe('head REMOVED taXiYl\n');
+  });
+
+  it('composes with the source moving on independently', async () => {
+    const { server, manager, branchId } = await seedAlteredBranch(SEED_DELTA);
+
+    await server.commitChanges(branchId, [
+      txtChange('e1', 1, '/docs/d1/body/content', [{ retain: 7 }, { insert: 'X' }]),
+    ]);
+    await server.commitChanges('doc1', [txtChange('s2', 1, '/docs/d1/body/content', [{ insert: 'NEW ' }])]);
+    await manager.mergeBranch(branchId);
+
+    // Both shifts apply: the seed delta re-anchors onto the source frame, then the source's own
+    // concurrent insert pushes the result along.
+    expect(body((await coldLoad(server, 'doc1')).state)).toBe('NEW head REMOVED taXil\n');
+  });
+
+  it('applies once across a windowed merge, not once per window', async () => {
+    // One change per window, so the second window resumes the carried frame — which already
+    // folded the delta in. Re-seeding per window would shift the second edit twice.
+    const { server, manager, branchId } = await seedAlteredBranch(SEED_DELTA, { maxChangesPerMerge: 1 });
+    await server.commitChanges(branchId, [
+      txtChange('e1', 1, '/docs/d1/body/content', [{ retain: 7 }, { insert: 'X' }]),
+    ]);
+    await server.commitChanges(branchId, [
+      txtChange('e2', 2, '/docs/d1/body/content', [{ retain: 9 }, { insert: 'Y' }]),
+    ]);
+
+    await manager.mergeBranch(branchId);
+
+    expect(body((await coldLoad(server, 'doc1')).state)).toBe('head REMOVED taXiYl\n');
+  });
+
+  it('applies once across separate merges, where the second reads the persisted frame', async () => {
+    // The other resume path: a later merge call rebuilds from `branch.mergeFrame` rather than
+    // an in-memory carry. The delta is already in that frame; seeding it again would double.
+    const { server, manager, branchId } = await seedAlteredBranch(SEED_DELTA);
+    await server.commitChanges(branchId, [
+      txtChange('e1', 1, '/docs/d1/body/content', [{ retain: 7 }, { insert: 'X' }]),
+    ]);
+    await manager.mergeBranch(branchId);
+
+    await server.commitChanges(branchId, [
+      txtChange('e2', 2, '/docs/d1/body/content', [{ retain: 9 }, { insert: 'Y' }]),
+    ]);
+    await manager.mergeBranch(branchId);
+
+    expect(body((await coldLoad(server, 'doc1')).state)).toBe('head REMOVED taXiYl\n');
+  });
+
+  it('needs no dropped text in the stored delta — the server recovers it from the source', () => {
+    // The property the whole direction choice exists for. A branch record is readable by branch
+    // invitees, so a delta carrying the removed run would hand a review-copy reader exactly the
+    // suggestions the copy was built to withhold (DAB-1139).
+    expect(SEED_DELTA).not.toContain('REMOVED');
+    expect(JSON.parse(SEED_DELTA)[0].value.some((op: any) => typeof op.insert === 'string')).toBe(false);
+  });
+
+  it('merges without the correction rather than wedging when the seed delta is unreadable', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { server, manager, branchId } = await seedAlteredBranch('{not json');
+
+    await server.commitChanges(branchId, [
+      txtChange('e1', 1, '/docs/d1/body/content', [{ retain: 7 }, { insert: 'X' }]),
+    ]);
+    // Creation-only, so refusing would strand the branch forever. Degrade to the pre-field
+    // behaviour — wrong offset, but a merge — and say so.
+    await manager.mergeBranch(branchId);
+    expect(body((await coldLoad(server, 'doc1')).state)).toBe('head REXMOVED tail\n');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('unparseable seedDelta'));
+    warn.mockRestore();
+  });
+
+  it('treats an empty op array as no delta', async () => {
+    const { server, manager, branchId } = await seedAlteredBranch('[]');
+    await server.commitChanges(branchId, [
+      txtChange('e1', 1, '/docs/d1/body/content', [{ retain: 7 }, { insert: 'X' }]),
+    ]);
+    await manager.mergeBranch(branchId);
+    expect(body((await coldLoad(server, 'doc1')).state)).toBe('head REXMOVED tail\n');
+  });
+
+  it('merges without the correction when the delta does not fit the state it claims to describe', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Well-formed JSON, but names a doc the source has never had, so inversion cannot read a
+    // prior value for it. Degrade, do not wedge.
+    const { server, manager, branchId } = await seedAlteredBranch(
+      JSON.stringify([txtOp('/docs/nope/body/content', [{ retain: 5 }, { delete: 8 }])])
+    );
+
+    await server.commitChanges(branchId, [
+      txtChange('e1', 1, '/docs/d1/body/content', [{ retain: 7 }, { insert: 'X' }]),
+    ]);
+    await manager.mergeBranch(branchId);
+
+    expect(body((await coldLoad(server, 'doc1')).state)).toBe('head REXMOVED tail\n');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('will not invert'), expect.anything());
+    warn.mockRestore();
+  });
+
+  it('rejects a later attempt to change the seed delta', async () => {
+    const { manager, branchId } = await seedAlteredBranch(SEED_DELTA);
+    // Same class as contentStartRev: re-anchoring after the fact would silently move every
+    // merge that follows.
+    await expect(manager.updateBranch(branchId, { seedDelta: '[]' } as any)).rejects.toThrow(/seedDelta/);
+  });
+});

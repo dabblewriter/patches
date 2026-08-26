@@ -146,6 +146,37 @@ export interface Branch {
   mergeBaseRev?: number;
 
   /**
+   * How the branch's seed was altered from the source — a JSON-serialized `JSONPatchOp[]`
+   * describing the patch the creator applied TO the source's branch-point state to produce the
+   * seed. Only needed when the seed is not a verbatim copy.
+   *
+   * Why it exists: the merge lifts branch changes through a frame holding only the source's
+   * post-branch changes, which silently assumes the branch's state at `contentStartRev` equals
+   * the source's at the merge base. A consumer that seeds altered content breaks that — branch
+   * ops are positional, so every one of them merges back shifted by however much the seed
+   * differs. Mis-anchored comment highlights at best; text written to the wrong place as soon as
+   * the branch's role can insert or delete.
+   *
+   * The direction matters, and it is the opposite of what the merge needs. The merge needs
+   * seed→source, to re-express branch ops before they meet the source's own changes; this field
+   * stores source→seed, and the server inverts it against the source state it already holds
+   * ({@link invertPatch}). That is deliberate: a seed→source patch would have to carry the text
+   * the seed dropped, and branch records are readable by branch invitees — for the case this
+   * exists for (dw3 withholding an author's unaccepted suggestions from a review copy —
+   * DAB-1139) storing that text would hand the reader exactly what the branch was built to keep
+   * from them. Stated source→seed, a removal is a `delete` of a length, and the text stays on
+   * the source where only the source's readers can see it.
+   *
+   * The inverse is used as the frame's first program and is never committed to the source: the
+   * source already has that content, and the program exists only to re-express positions.
+   *
+   * Absent (the overwhelmingly common case: a verbatim seed) the frame starts empty and the
+   * merge behaves exactly as before. Client-supplied at creation and fixed thereafter, like
+   * `contentStartRev` — a later change would silently re-anchor every subsequent merge.
+   */
+  seedDelta?: string;
+
+  /**
    * The merge frame persisted by windowed merges: the source's concurrent (foreign) changes
    * re-expressed in the branch's frame after every branch change at or below `lastMergedRev`.
    * `sourceRev` is the source revision the frame covers — foreign changes at or below it are
@@ -193,21 +224,34 @@ export interface MergeFrame {
 
 export type EditableBranchMetadata = Disallowed<
   Branch,
-  'id' | 'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'contentStartRev' | 'pendingOp' | 'deleted'
+  | 'id'
+  | 'docId'
+  | 'branchedAtRev'
+  | 'createdAt'
+  | 'modifiedAt'
+  | 'contentStartRev'
+  | 'seedDelta'
+  | 'pendingOp'
+  | 'deleted'
 >;
 
 /**
  * Metadata for creating a new branch.
- * Allows `id` and `contentStartRev` in addition to the fields allowed by `EditableBranchMetadata`.
+ * Allows `id`, `contentStartRev` and `seedDelta` in addition to the fields allowed by
+ * {@link EditableBranchMetadata}.
  * - `id`: Client-provided branch document ID. Required for offline branch creation.
  * - `contentStartRev`: The first revision of user content. Set by the client when creating
  *   initial changes offline (the server uses this to know where user content begins during merge).
+ * - `seedDelta`: How the seed differs from the source at the branch point, for consumers that
+ *   seed altered content. Creation-only for the same reason as `contentStartRev` — see
+ *   {@link Branch.seedDelta}.
  */
 export type CreateBranchMetadata = Omit<
   Disallowed<Branch, 'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'pendingOp' | 'deleted'>,
-  'contentStartRev'
+  'contentStartRev' | 'seedDelta'
 > & {
   contentStartRev?: number;
+  seedDelta?: string;
 };
 
 /**

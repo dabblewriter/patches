@@ -71,12 +71,18 @@ export const text: JSONPatchOpHandler = {
     });
   },
 
-  invert(state, { path, value }, oldValue: Delta, changedObj) {
+  invert(state, { path, value }, oldValue: Delta | { ops?: Op[] } | undefined, changedObj) {
     if (path.endsWith('/-')) path = path.slice(0, -1) + changedObj.length;
     if (oldValue === undefined) return { op: 'remove', path };
     const ops = toOps(value);
     if (!ops) throw new Error(`Cannot invert @txt op at ${path}: value is not a Delta ops array`);
-    return { op: '@txt', path, value: new Delta(ops).invert(oldValue).ops };
+    // The prior value comes off the document, where a text field is stored as a plain
+    // `{ ops }` object as often as a Delta instance — `Delta.invert` needs the instance and
+    // fails with `base.slice is not a function` on the bare object. `apply`, `transform` and
+    // `compose` all normalize through `toOps` already; this one did not.
+    const baseOps = toOps(oldValue);
+    if (!baseOps) throw new Error(`Cannot invert @txt op at ${path}: prior value is not a Delta ops array`);
+    return { op: '@txt', path, value: new Delta(ops).invert(new Delta(baseOps)).ops };
   },
 
   compose(state, delta1, delta2) {

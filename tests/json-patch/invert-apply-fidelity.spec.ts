@@ -1,3 +1,4 @@
+import { Delta } from '@dabble/delta';
 import { describe, expect, it } from 'vitest';
 import { applyPatch } from '../../src/json-patch/applyPatch.js';
 import { composePatch } from '../../src/json-patch/composePatch.js';
@@ -103,5 +104,27 @@ describe('composePatch sequential equivalence', () => {
     ];
     const composed = composePatch(patch);
     expect(applyPatch({}, composed)).toEqual(applyPatch({}, patch));
+  });
+
+  // A text field is stored as a plain `{ ops }` object as often as a Delta instance —
+  // `apply`, `transform` and `compose` all normalize through `toOps`, but `invert` read the
+  // prior value straight off the document and handed it to `Delta.invert`, which needs the
+  // instance and died with `base.slice is not a function`.
+  it('inverts an @txt op whose prior value is a bare { ops } object, not a Delta', () => {
+    const doc = { body: { content: { ops: [{ insert: 'head REMOVED tail\n' }] } } };
+    const patch: JSONPatchOp[] = [{ op: '@txt', path: '/body/content', value: [{ retain: 5 }, { delete: 8 }] }];
+
+    expect(() => invertPatch(doc, patch)).not.toThrow();
+    // The inverse restores the deleted run from the document's own copy of the text.
+    expect(roundTrip(doc, patch)).toEqual(doc);
+  });
+
+  it('still inverts an @txt op whose prior value is a real Delta instance', () => {
+    const doc = { body: { content: new Delta([{ insert: 'head REMOVED tail\n' }]) } };
+    const patch: JSONPatchOp[] = [{ op: '@txt', path: '/body/content', value: [{ retain: 5 }, { delete: 8 }] }];
+
+    const inverse = invertPatch(doc, patch);
+    expect(inverse[0]).toMatchObject({ op: '@txt', path: '/body/content' });
+    expect((inverse[0].value as any[]).some(op => op.insert === 'REMOVED ')).toBe(true);
   });
 });

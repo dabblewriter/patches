@@ -1220,6 +1220,54 @@ describe('PatchesSync', () => {
       expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
       expect((sync as any)._syncReprobeTimers.size).toBe(0);
     });
+
+    // DAB-1074. The pending-changes gate above reads as "only a doc with local work is worth
+    // re-probing", but it silently abandoned the opposite case: a doc that has never hydrated has
+    // no state AT ALL. `_handleDocsTracked` gives it one attempt, the ladder spends its retries,
+    // and then nothing in this instance touches it again. `projects/<id>/roles` is exactly such a
+    // doc — the client only reads it — and losing it let a collaborator run a whole session with
+    // no roles data (DAB-1024).
+    describe('a doc that never hydrated (committedRev 0, nothing pending)', () => {
+      beforeEach(() => {
+        mockAlgorithm.getPendingToSend.mockResolvedValue(null);
+        mockAlgorithm.getCommittedRev.mockResolvedValue(0);
+      });
+
+      it('is re-probed after a terminal latch, unlike a hydrated doc with nothing pending', async () => {
+        mockWebSocket.getDoc.mockRejectedValue(new StatusError(403, 'Forbidden'));
+
+        await sync['syncDoc']('doc1');
+
+        expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+        expect((sync as any)._syncReprobeTimers.size).toBe(1);
+      });
+
+      it('is re-probed after the fast ladder is exhausted', async () => {
+        mockWebSocket.getDoc.mockRejectedValue(new StatusError(500, 'Server Error'));
+
+        await sync['syncDoc']('doc1');
+        await vi.advanceTimersByTimeAsync(200_000); // initial attempt + 10 retries
+
+        expect(sync.docStates.state['doc1'].syncStatus).toBe('error');
+        expect((sync as any)._syncReprobeTimers.size).toBe(1);
+      });
+
+      it('hydrates when the probe finds the server healthy — the recovery that was missing', async () => {
+        mockWebSocket.getDoc.mockRejectedValue(new StatusError(403, 'Forbidden'));
+
+        await sync['syncDoc']('doc1');
+        expect((sync as any)._syncReprobeTimers.size).toBe(1);
+
+        // Access is granted (or the outage ends) after the doc was already latched. Nothing else
+        // would notice: no local edit is coming for a doc the client only reads.
+        mockWebSocket.getDoc.mockResolvedValue({ state: { users: {} }, rev: 3 });
+        mockAlgorithm.getCommittedRev.mockResolvedValue(3);
+        await vi.advanceTimersByTimeAsync(REPROBE_TERMINAL_MS);
+
+        expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
+        expect((sync as any)._syncReprobeTimers.size).toBe(0);
+      });
+    });
   });
 
   describe('network-class failures defer to connection recovery (no per-doc error latch)', () => {

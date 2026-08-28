@@ -167,6 +167,12 @@ export interface Branch {
    * from them. Stated source→seed, a removal is a `delete` of a length, and the text stays on
    * the source where only the source's readers can see it.
    *
+   * That holds for any consumer, not only one that just removes things. An insert in a
+   * source→seed patch is by definition content the SEED has and the source does not — content
+   * the branch invitee already holds. So the direction is leak-proof by construction: no seed
+   * alteration has a source→seed statement that discloses something its reader cannot already
+   * see. Worth keeping in mind when a consumer seeds content that ADDS text.
+   *
    * The inverse is used as the frame's first program and is never committed to the source: the
    * source already has that content, and the program exists only to re-express positions.
    *

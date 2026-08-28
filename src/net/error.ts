@@ -267,6 +267,7 @@ const DEFECTIVE_CHANGE_ERROR_NAMES: ReadonlySet<string> = new Set([
   'DataError',
   'ConstraintError',
   'UnsplittableChangeError',
+  'NonCloneableOpError',
 ]);
 
 /**
@@ -331,6 +332,69 @@ export class UnsplittableChangeError extends Error {
 /** True for an {@link UnsplittableChangeError}, matched by `name` for the cross-realm reasons on {@link isStorageError}. */
 export function isUnsplittableChangeError(err: unknown): boolean {
   return (err as { name?: unknown } | null | undefined)?.name === 'UnsplittableChangeError';
+}
+
+/**
+ * A pending op whose `value` the structured-clone algorithm refuses — the browser's own
+ * `DataCloneError`, re-thrown with the OP AND PATH that carried it.
+ *
+ * The raw DOMException says only `Failed to execute 'put' on 'IDBObjectStore': #<Object> could
+ * not be cloned.` It names neither the op nor the path, so the one thing needed to find the
+ * offending call site is exactly what it withholds. In practice the value is a `PathProxy` read
+ * off a change mutator's `root` as if it were data (DAB-1000 / DABBLE-WRITER-3-PQ), and the fix
+ * is always at a specific `root.…` read — findable only if the failure says which path it wrote.
+ *
+ * This is a DIAGNOSTIC, not a recovery. It classifies as a defective change exactly as the raw
+ * `DataCloneError` did ({@link DEFECTIVE_CHANGE_ERROR_NAMES}), so the change is still rolled back
+ * and still surfaced: `isDefectiveChangeError`'s contract stands — silently dropping or mutating
+ * the value to make the write succeed would corrupt the user's document without their knowledge.
+ * Only the message improves.
+ *
+ * Raised only AFTER a write has already failed, so identifying the culprit costs nothing on the
+ * path that works.
+ */
+export class NonCloneableOpError extends Error {
+  constructor(
+    /** Paths of the ops whose values could not be cloned, in the order they were written. */
+    readonly paths: string[],
+    /** The doc whose pending ops were being saved. */
+    readonly docId: string,
+    /** The original `DataCloneError` the store raised. */
+    options?: { cause?: unknown }
+  ) {
+    super(
+      `Pending op value${paths.length === 1 ? '' : 's'} at ${paths.map(p => `"${p}"`).join(', ')} in doc "${docId}" ` +
+        `cannot be stored: the structured-clone algorithm refused ${paths.length === 1 ? 'it' : 'them'}. ` +
+        `A value read off a change mutator's \`root\` is a path proxy, not data.`,
+      options
+    );
+    this.name = 'NonCloneableOpError';
+  }
+}
+
+/** True for a {@link NonCloneableOpError}, matched by `name` for the cross-realm reasons on {@link isStorageError}. */
+export function isNonCloneableOpError(err: unknown): boolean {
+  return (err as { name?: unknown } | null | undefined)?.name === 'NonCloneableOpError';
+}
+
+/**
+ * Which of `ops` carry a value the structured-clone algorithm refuses.
+ *
+ * Deliberately probe-per-op rather than one probe over the batch: the point is to name the
+ * culprit, and a single probe only says that one of them is bad. Call this only on a write that
+ * already failed — each probe is a real `structuredClone`.
+ */
+export function findNonCloneableOpPaths(ops: readonly { path: string; value?: unknown }[]): string[] {
+  return ops
+    .filter(op => {
+      try {
+        structuredClone(op.value);
+        return false;
+      } catch {
+        return true;
+      }
+    })
+    .map(op => op.path);
 }
 
 /**

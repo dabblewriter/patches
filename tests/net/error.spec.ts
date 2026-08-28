@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
+  findNonCloneableOpPaths,
   isAbortError,
   isDefectiveChangeError,
   isNetworkError,
+  isNonCloneableOpError,
   isStorageError,
   NetworkError,
+  NonCloneableOpError,
   StatusError,
   StorageError,
   StorageTimeoutError,
@@ -351,6 +354,61 @@ describe('StatusError', () => {
       expect(wrapped).toBeInstanceOf(StorageError);
       expect((wrapped as StorageError).message).toBe('Unable to store record in object store');
       expect((wrapped as StorageError).cause).toBe(oldShape);
+    });
+  });
+
+  describe('NonCloneableOpError', () => {
+    it('names the paths and the doc, and keeps the browser error as cause', () => {
+      const cause = new DOMException('#<Object> could not be cloned.', 'DataCloneError');
+      const error = new NonCloneableOpError(['/docs/abc/body'], 'doc1', { cause });
+
+      expect(error.name).toBe('NonCloneableOpError');
+      expect(error.paths).toEqual(['/docs/abc/body']);
+      expect(error.docId).toBe('doc1');
+      expect(error.cause).toBe(cause);
+      expect(error.message).toContain('/docs/abc/body');
+      expect(error.message).toContain('doc1');
+      // Points at the actual cause, which is always a `root.…` read.
+      expect(error.message).toContain('path proxy');
+    });
+
+    it('reads naturally for one path and for several', () => {
+      expect(new NonCloneableOpError(['/a'], 'd').message).toContain('op value at "/a"');
+      expect(new NonCloneableOpError(['/a', '/b'], 'd').message).toContain('op values at "/a", "/b"');
+    });
+
+    // It is a better message for the same refusal — not a recovery. Silently
+    // dropping or mutating the value would corrupt the document; see
+    // isDefectiveChangeError's contract.
+    it('classifies as a defective change, exactly as the raw DataCloneError did', () => {
+      const error = new NonCloneableOpError(['/a'], 'doc1');
+      expect(isDefectiveChangeError(error)).toBe(true);
+      expect(isNonCloneableOpError(error)).toBe(true);
+      expect(isStorageError(error)).toBe(false); // never retryable
+    });
+
+    it('classifies by name without an instanceof gate, like its neighbours', () => {
+      expect(isNonCloneableOpError({ name: 'NonCloneableOpError' })).toBe(true);
+      expect(isNonCloneableOpError(new Error('nope'))).toBe(false);
+      expect(isNonCloneableOpError(undefined)).toBe(false);
+    });
+  });
+
+  describe('findNonCloneableOpPaths', () => {
+    it('names only the ops whose values the clone algorithm refuses', () => {
+      const proxy = new Proxy(function () {} as any, { get: () => proxy });
+      const paths = findNonCloneableOpPaths([
+        { path: '/title', value: 'a string' },
+        { path: '/body', value: proxy },
+        { path: '/count', value: 42 },
+        { path: '/fn', value: () => {} },
+      ]);
+
+      expect(paths).toEqual(['/body', '/fn']);
+    });
+
+    it('returns nothing when every op is storable', () => {
+      expect(findNonCloneableOpPaths([{ path: '/a', value: { nested: [1, 2] } }, { path: '/b' }])).toEqual([]);
     });
   });
 

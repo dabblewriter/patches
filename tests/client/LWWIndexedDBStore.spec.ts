@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { LWWIndexedDBStore } from '../../src/client/LWWIndexedDBStore';
 import type { Change, PatchesState } from '../../src/types';
 import type { JSONPatchOp } from '../../src/json-patch/types';
+import { isDefectiveChangeError, isNonCloneableOpError } from '../../src/net/error';
 
 // Mock dependencies
 vi.mock('../../src/utils/concurrency');
@@ -435,6 +436,64 @@ describe('LWWIndexedDBStore', () => {
 
       expect(pendingStore.delete).toHaveBeenCalledWith(['doc1', '/user/name']);
       expect(pendingStore.delete).toHaveBeenCalledWith(['doc1', '/user/email']);
+    });
+
+    // DAB-1121 / DAB-1000. The browser's DataCloneError names neither the op nor
+    // the path, so the one thing needed to find the offending `root.…` read is
+    // exactly what it withholds. The change must still be refused — only the
+    // message improves.
+    describe('when an op value cannot be structured-cloned', () => {
+      /** A `PathProxy` read off a change mutator's `root` as if it were data. */
+      const pathProxy = () => new Proxy(function () {} as any, { get: () => pathProxy() });
+
+      function storeThatRefusesClones() {
+        const pendingStore = createMockIDBStore();
+        pendingStore.put.mockImplementation((record: any) => {
+          try {
+            structuredClone(record);
+          } catch {
+            return Promise.reject(new DOMException('#<Object> could not be cloned.', 'DataCloneError'));
+          }
+          return Promise.resolve();
+        });
+        mockStores.set('pendingOps', pendingStore);
+        return pendingStore;
+      }
+
+      it('names the offending path instead of raising a bare DataCloneError', async () => {
+        storeThatRefusesClones();
+        const ops: JSONPatchOp[] = [
+          { op: 'replace', path: '/title', value: 'fine', ts: 1 },
+          { op: 'replace', path: '/docs/abc/body', value: pathProxy(), ts: 1 },
+        ];
+
+        await expect(store.savePendingOps('doc1', ops)).rejects.toMatchObject({
+          name: 'NonCloneableOpError',
+          paths: ['/docs/abc/body'],
+          docId: 'doc1',
+        });
+      });
+
+      it('still classifies as a defective change, so the change is rolled back as before', async () => {
+        storeThatRefusesClones();
+        const ops: JSONPatchOp[] = [{ op: 'replace', path: '/body', value: pathProxy(), ts: 1 }];
+
+        const error = await store.savePendingOps('doc1', ops).catch(e => e);
+        expect(isDefectiveChangeError(error)).toBe(true);
+        expect(isNonCloneableOpError(error)).toBe(true);
+        // The browser's original is kept, not swallowed.
+        expect((error as Error).cause).toMatchObject({ name: 'DataCloneError' });
+      });
+
+      it('keeps the original error when no op owns the failure', async () => {
+        // The poison is elsewhere in the record; inventing a path would mislead.
+        const pendingStore = createMockIDBStore();
+        pendingStore.put.mockRejectedValue(new DOMException('#<Object> could not be cloned.', 'DataCloneError'));
+        mockStores.set('pendingOps', pendingStore);
+
+        const ops: JSONPatchOp[] = [{ op: 'replace', path: '/title', value: 'perfectly fine', ts: 1 }];
+        await expect(store.savePendingOps('doc1', ops)).rejects.toMatchObject({ name: 'DataCloneError' });
+      });
     });
   });
 

@@ -495,6 +495,11 @@ describe('PatchesSync', () => {
         const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
 
         // Park doc1 (live retry ladder), then an intentional disconnect kills its timer.
+        // Real transports emit 'disconnected' synchronously from inside disconnect(),
+        // and the stream-bound drop branch clears the timer maps — the harvest must
+        // already have run by then.
+        const stateHandler = mockWebSocket.onStateChange.mock.calls[0][0];
+        mockWebSocket.disconnect.mockImplementation(() => stateHandler('disconnected'));
         sync['updateState']({ connected: true });
         expect((sync as any)._scheduleSyncRetry('doc1')).toBe(true);
         sync.disconnect();
@@ -514,6 +519,70 @@ describe('PatchesSync', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('a retry timer firing mid-offline hands its doc to the next resume pass (DAB-941)', async () => {
+      vi.useFakeTimers();
+      try {
+        mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'doc1', committedRev: 5 }] as TrackedDoc[]);
+        mockAlgorithm.hasPending.mockResolvedValue(false);
+        const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+        // Arm the ladder while connected, then drop offline before it fires: the
+        // callback self-bails, leaving no timer and a clean-looking doc.
+        sync['updateState']({ connected: true });
+        expect((sync as any)._scheduleSyncRetry('doc1')).toBe(true);
+        setOffline(true);
+        sync['updateState']({ connected: false });
+        await vi.runAllTimersAsync();
+        expect(syncDocSpy).not.toHaveBeenCalled();
+        expect((sync as any)._syncRetryTimers.size).toBe(0);
+
+        // The transport auto-reconnects with its held cursor — disconnect() never ran,
+        // so its timer harvest can't be what saves the doc here.
+        setOffline(false);
+        (sync as any)._started = true;
+        sync['updateState']({ connected: true });
+        (sync as any)._subscribedIds = new Set(['doc1']);
+        await sync['syncAllKnownDocs']({ resume: true });
+        expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('parking a doc while the send path is down feeds the carryover directly (DAB-941)', () => {
+      // A syncDoc failure landing after disconnect()'s harvest (in-flight fetch, timer
+      // already fired): both schedulers decline, so the defer itself must hand off.
+      sync['updateState']({ connected: false });
+      (sync as any)._deferDocToConnectionRecovery('doc1', undefined, null, new NetworkError('net down'));
+      expect((sync as any)._recoveryCarryover.has('doc1')).toBe(true);
+    });
+
+    it('a tombstone the server answers "already deleted" clears as success', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'dead1', committedRev: 5, deleted: true }] as TrackedDoc[]);
+      mockWebSocket.deleteDoc.mockRejectedValue(new StatusError(410, 'Doc deleted'));
+      const errorSpy = vi.fn();
+      sync.onError(errorSpy);
+
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      expect(mockAlgorithm.confirmDeleteDoc).toHaveBeenCalledWith('dead1');
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('a failing tombstone delete surfaces once, not on every resume pass', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'dead1', committedRev: 5, deleted: true }] as TrackedDoc[]);
+      mockWebSocket.deleteDoc.mockRejectedValue(new StatusError(403, 'Forbidden'));
+      const errorSpy = vi.fn();
+      sync.onError(errorSpy);
+
+      await sync['syncAllKnownDocs']({ resume: true });
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      expect(mockWebSocket.deleteDoc).toHaveBeenCalledTimes(2);
+      expect(mockAlgorithm.confirmDeleteDoc).not.toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledTimes(1);
     });
 
     it('resume: flushes only docs with local pending', async () => {

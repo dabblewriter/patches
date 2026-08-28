@@ -379,7 +379,7 @@ const sync = new PatchesSync(patches, rest);
 await sync.connect(lastEventId);
 ```
 
-On a resumed connect, `PatchesSync` skips the re-subscribe and the per-doc re-pull — the server restored the client's subscriptions from its own store and replays the committed gap over the stream — and re-attempts only docs that need it: local pending, a visible error, or a doc handed over from a `disconnect()` that killed its recovery timers. Delete tombstones drain on every pass, resumed or cold — a delete deferred while offline must not wait for a cold pass that may never come. A clean hand-off never flashes "syncing".
+On a resumed connect, `PatchesSync` skips the re-subscribe and the per-doc re-pull — the server restored the client's subscriptions from its own store and replays the committed gap over the stream — and re-attempts only docs that need it: local pending, a visible error, or a doc parked for connection recovery whose retry timers were killed or never armed while the send path was down (an explicit `disconnect()`, a retry firing mid-offline, a failure landing after the intent cleared). That parked-doc hand-off is per-instance — a successor tab's fresh `PatchesSync` cannot see what its predecessor had parked (DAB-1144 tracks a server-side signal for this). Delete tombstones drain on every pass, resumed or cold — a delete deferred while offline must not wait for a cold pass that may never come; a tombstone the server answers "already deleted" clears as success. A clean hand-off never flashes "syncing".
 
 Two contracts make this work:
 

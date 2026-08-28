@@ -289,16 +289,18 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   /** Per-doc buffers for committed-change broadcasts landing while `_reloadDocFromServer` is in flight. */
   private _reloadBuffers = new Map<string, Change[]>();
   /** Pending per-doc slow re-probe timers for docs the retry ladder gave up on (see `_scheduleSyncReprobe`). */
+  private _syncReprobeTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
   /**
-   * Docs whose recovery timers (retry ladder / re-probe) were killed by `disconnect()`,
-   * carried over so the next pass re-attempts them. A doc parked for connection recovery
+   * Docs parked for connection recovery whose timers were killed or never armed because
+   * the send path was down, carried over so the next pass re-attempts them. A parked doc
    * is deliberately clean-looking (stable status, often no pending), so a resume pass
    * cannot see it needs work — without this hand-off its missed pull would sit behind
-   * the resume cursor until a local edit (DAB-941). Consumed by every pass; a cold pass
-   * re-attempts everything anyway.
+   * the resume cursor until a local edit (DAB-941). Fed by `disconnect()`'s timer harvest
+   * and by every parking site that can't keep a timer alive: a retry/re-probe firing
+   * while the send path is down, and `_deferDocToConnectionRecovery` when both schedulers
+   * decline. Consumed by every pass; a cold pass re-attempts everything anyway.
    */
   private _recoveryCarryover = new Set<string>();
-  private _syncReprobeTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
   /** Pending timer for the next degraded-mode catch-up pass (see `_syncAllDegraded`); null when idle. */
   private _degradedSyncTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   /**
@@ -454,13 +456,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // docs and its finally's re-schedule guards on `_started`, so this is what makes
     // an explicit stop actually stop the send path (not just the stream).
     this._started = false;
-    this.connection.disconnect();
-    this.updateState({ connected: false, syncStatus: 'unsynced' });
-    // Hand parked docs to the next pass before the clear kills their timers: the
+    // Hand parked docs to the next pass before anything kills their timers: the
     // reconnect may resume, and a resume pass only re-attempts docs it can see need it.
-    // Union, so repeated disconnects without an intervening pass lose nothing.
+    // Harvested ahead of the transport disconnect because a transport may emit its
+    // 'disconnected' synchronously from inside disconnect(), and on a stream-bound
+    // transport that drop branch clears both maps. Union, so repeated disconnects
+    // without an intervening pass lose nothing.
     for (const id of this._syncRetryTimers.keys()) this._recoveryCarryover.add(id);
     for (const id of this._syncReprobeTimers.keys()) this._recoveryCarryover.add(id);
+    this.connection.disconnect();
+    this.updateState({ connected: false, syncStatus: 'unsynced' });
     this._clearAllSyncRetries();
     this._clearDegradedSync();
     this._resetSyncingStatuses();
@@ -733,9 +738,21 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           await algorithm.confirmDeleteDoc(docId);
           console.info(`Successfully deleted and untracked doc: ${docId}`);
         } catch (err) {
-          // If server delete fails (e.g., offline, already deleted), keep tombstone for retry
+          // Already deleted server-side (another device or a predecessor won the race):
+          // that's success — clear the tombstone instead of retrying it forever.
+          if (this._isDocDeletedError(err)) {
+            await this._getAlgorithm(docId).confirmDeleteDoc(docId);
+            return;
+          }
+          // Otherwise keep the tombstone for retry, but surface the failure only once
+          // per latched period: this loop runs on every resume pass now, so a terminal
+          // rejection (e.g. 403) would re-emit on every reconnect cycle. A cold connect
+          // clears the latch and lets a still-failing delete surface again.
           console.warn(`Server delete failed for ${docId}, keeping tombstone:`, err);
-          this.onError.emit(err as Error, { docId });
+          if (!this._surfacedSyncErrors.has(docId)) {
+            this._surfacedSyncErrors.add(docId);
+            this.onError.emit(err as Error, { docId });
+          }
         }
       });
 
@@ -2202,8 +2219,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * (SSE alive, or a half-open stream the watchdog hasn't caught yet), and then no
    * reconnect resync is coming to re-attempt the pull — without the probe the doc
    * would neither probe nor recover. When disconnected/offline both schedulers
-   * decline and the reconnect's `syncAllKnownDocs` owns recovery — the existing
-   * offline path.
+   * decline and the doc is handed to `_recoveryCarryover`, so the reconnect's
+   * `syncAllKnownDocs` re-attempts it even when that reconnect resumes and skips
+   * clean-looking docs (DAB-941).
    *
    * Surfacing: network-class failures stay quiet at every stage — the connection
    * state is their user-facing signal, and one unreachable server would otherwise
@@ -2230,6 +2248,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this.onError.emit(failure, { docId });
     }
     this._scheduleSyncReprobe(docId, true);
+    // Both schedulers decline while the send path is down; with no timer to harvest
+    // and a clean-looking status, only this hand-off keeps the doc visible to a
+    // resumed reconnect's pass.
+    if (!this._canSend() && this.trackedDocs.has(docId)) this._recoveryCarryover.add(docId);
   }
 
   /**
@@ -2251,7 +2273,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (existing !== undefined) globalThis.clearTimeout(existing);
     const timer = globalThis.setTimeout(() => {
       this._syncRetryTimers.delete(docId);
-      if (!this._canSend() || !this.trackedDocs.has(docId)) return;
+      if (!this.trackedDocs.has(docId)) return;
+      if (!this._canSend()) {
+        // Fired while the send path was down (e.g. mid-offline): no timer remains and
+        // the doc looks clean, so a resumed reconnect — which never runs disconnect()'s
+        // harvest — would skip it. Hand it to the next pass directly (DAB-941).
+        this._recoveryCarryover.add(docId);
+        return;
+      }
       void this.syncDoc(docId);
     }, delay);
     this._syncRetryTimers.set(docId, timer);
@@ -2280,7 +2309,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (existing !== undefined) globalThis.clearTimeout(existing);
     const timer = globalThis.setTimeout(() => {
       this._syncReprobeTimers.delete(docId);
-      if (!this._canSend() || !this.trackedDocs.has(docId)) return;
+      if (!this.trackedDocs.has(docId)) return;
+      if (!this._canSend()) {
+        // Same hand-off as the retry ladder above: a probe that self-bails mid-offline
+        // must not strand the doc past a resumed reconnect.
+        this._recoveryCarryover.add(docId);
+        return;
+      }
       void this.syncDoc(docId);
     }, delay);
     this._syncReprobeTimers.set(docId, timer);

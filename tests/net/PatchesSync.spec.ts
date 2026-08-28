@@ -472,6 +472,50 @@ describe('PatchesSync', () => {
       expect(syncDocSpy).toHaveBeenCalledWith('doc1');
     });
 
+    it('resume: drains delete tombstones — a deferred offline delete must not wait for a cold pass (DAB-941)', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'dead1', committedRev: 5, deleted: true },
+      ] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      (sync as any)._subscribedIds = new Set(['doc1']);
+      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      expect(mockWebSocket.deleteDoc).toHaveBeenCalledWith('dead1');
+      expect(mockAlgorithm.confirmDeleteDoc).toHaveBeenCalledWith('dead1');
+    });
+
+    it('a doc parked for recovery survives disconnect() into the next resume pass (DAB-941)', async () => {
+      vi.useFakeTimers();
+      try {
+        mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'doc1', committedRev: 5 }] as TrackedDoc[]);
+        mockAlgorithm.hasPending.mockResolvedValue(false);
+        const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+        // Park doc1 (live retry ladder), then an intentional disconnect kills its timer.
+        sync['updateState']({ connected: true });
+        expect((sync as any)._scheduleSyncRetry('doc1')).toBe(true);
+        sync.disconnect();
+        expect((sync as any)._syncRetryTimers.size).toBe(0);
+
+        // The reconnect resumes; the parked doc must ride the carryover into this pass.
+        (sync as any)._started = true;
+        sync['updateState']({ connected: true });
+        (sync as any)._subscribedIds = new Set(['doc1']);
+        await sync['syncAllKnownDocs']({ resume: true });
+        expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+
+        // Consumed: the next resume leaves the now-healthy doc alone.
+        syncDocSpy.mockClear();
+        await sync['syncAllKnownDocs']({ resume: true });
+        expect(syncDocSpy).not.toHaveBeenCalledWith('doc1');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('resume: flushes only docs with local pending', async () => {
       mockAlgorithm.listDocs.mockResolvedValue([
         { docId: 'doc1', committedRev: 5 },
@@ -539,18 +583,6 @@ describe('PatchesSync', () => {
       vi.mocked(mockWebSocket.subscribe).mockClear();
       await sync['syncAllKnownDocs']({ resume: true });
       expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc1', 'doc2']);
-    });
-
-    it('resume: defers tombstone deletes to the next cold sync', async () => {
-      mockAlgorithm.listDocs.mockResolvedValue([
-        { docId: 'doc1', committedRev: 5 },
-        { docId: 'doc2', deleted: true, committedRev: 5 },
-      ] as TrackedDoc[]);
-      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
-
-      await sync['syncAllKnownDocs']({ resume: true });
-
-      expect(mockWebSocket.deleteDoc).not.toHaveBeenCalled();
     });
 
     it('should keep docs tracked concurrently during the rebuild window', async () => {

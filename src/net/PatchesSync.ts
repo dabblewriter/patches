@@ -289,6 +289,15 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   /** Per-doc buffers for committed-change broadcasts landing while `_reloadDocFromServer` is in flight. */
   private _reloadBuffers = new Map<string, Change[]>();
   /** Pending per-doc slow re-probe timers for docs the retry ladder gave up on (see `_scheduleSyncReprobe`). */
+  /**
+   * Docs whose recovery timers (retry ladder / re-probe) were killed by `disconnect()`,
+   * carried over so the next pass re-attempts them. A doc parked for connection recovery
+   * is deliberately clean-looking (stable status, often no pending), so a resume pass
+   * cannot see it needs work — without this hand-off its missed pull would sit behind
+   * the resume cursor until a local edit (DAB-941). Consumed by every pass; a cold pass
+   * re-attempts everything anyway.
+   */
+  private _recoveryCarryover = new Set<string>();
   private _syncReprobeTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
   /** Pending timer for the next degraded-mode catch-up pass (see `_syncAllDegraded`); null when idle. */
   private _degradedSyncTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
@@ -447,6 +456,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._started = false;
     this.connection.disconnect();
     this.updateState({ connected: false, syncStatus: 'unsynced' });
+    // Hand parked docs to the next pass before the clear kills their timers: the
+    // reconnect may resume, and a resume pass only re-attempts docs it can see need it.
+    // Union, so repeated disconnects without an intervening pass lose nothing.
+    for (const id of this._syncRetryTimers.keys()) this._recoveryCarryover.add(id);
+    for (const id of this._syncReprobeTimers.keys()) this._recoveryCarryover.add(id);
     this._clearAllSyncRetries();
     this._clearDegradedSync();
     this._resetSyncingStatuses();
@@ -659,12 +673,17 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       const syncIds = activeDocIds.filter(id => tracked.has(id));
 
       // On resume the replay covers clean docs, so sync only those still holding local
-      // pending (a mint a predecessor or this tab persisted but never flushed) or showing
-      // an error: an exhausted ladder with nothing pending arms no re-probe, so this pass
-      // is its only re-attempt now that reconnects resume (DAB-941). A cold connect syncs
-      // every doc. hasPending was just read into syncedEntries above.
+      // pending (a mint a predecessor or this tab persisted but never flushed), showing
+      // an error (an exhausted ladder with nothing pending arms no re-probe, so this pass
+      // is its only re-attempt), or handed over from a disconnect's parked recovery —
+      // reconnects resume by default now (DAB-941). A cold connect syncs every doc.
+      // hasPending was just read into syncedEntries above.
+      const carryover = this._recoveryCarryover;
+      this._recoveryCarryover = new Set();
       const flushIds = resume
-        ? syncIds.filter(id => syncedEntries[id]?.hasPending || syncedEntries[id]?.syncStatus === 'error')
+        ? syncIds.filter(
+            id => syncedEntries[id]?.hasPending || syncedEntries[id]?.syncStatus === 'error' || carryover.has(id)
+          )
         : syncIds;
 
       // Cold connect subscribes everything. A resume subscribes the docs it will flush
@@ -701,24 +720,24 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // Sync each active doc
       const activeSyncPromises = flushIds.map((id: string) => this.syncDoc(id));
 
-      // Attempt to delete docs marked with tombstones — deferred to the next cold sync on
-      // resume (rare, and the predecessor most likely already pushed the delete).
-      const deletePromises = resume
-        ? []
-        : deletedDocs.map(async ({ docId }) => {
-            try {
-              console.info(`Attempting server delete for tombstoned doc: ${docId}`);
-              await this.connection.deleteDoc(docId);
-              // If server delete succeeds, remove tombstone and all data locally
-              const algorithm = this._getAlgorithm(docId);
-              await algorithm.confirmDeleteDoc(docId);
-              console.info(`Successfully deleted and untracked doc: ${docId}`);
-            } catch (err) {
-              // If server delete fails (e.g., offline, already deleted), keep tombstone for retry
-              console.warn(`Server delete failed for ${docId}, keeping tombstone:`, err);
-              this.onError.emit(err as Error, { docId });
-            }
-          });
+      // Attempt to delete docs marked with tombstones. Independent of stream continuity,
+      // so resume passes run it too: reconnects resume by default now (DAB-941), and a
+      // delete deferred while offline would otherwise wait for a cold pass that may never
+      // come — leaving the doc alive on the server and every other device.
+      const deletePromises = deletedDocs.map(async ({ docId }) => {
+        try {
+          console.info(`Attempting server delete for tombstoned doc: ${docId}`);
+          await this.connection.deleteDoc(docId);
+          // If server delete succeeds, remove tombstone and all data locally
+          const algorithm = this._getAlgorithm(docId);
+          await algorithm.confirmDeleteDoc(docId);
+          console.info(`Successfully deleted and untracked doc: ${docId}`);
+        } catch (err) {
+          // If server delete fails (e.g., offline, already deleted), keep tombstone for retry
+          console.warn(`Server delete failed for ${docId}, keeping tombstone:`, err);
+          this.onError.emit(err as Error, { docId });
+        }
+      });
 
       // Wait for all sync and delete operations
       await Promise.all([...activeSyncPromises, ...deletePromises]);

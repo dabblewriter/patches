@@ -730,24 +730,30 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // delete deferred while offline would otherwise wait for a cold pass that may never
       // come — leaving the doc alive on the server and every other device.
       const deletePromises = deletedDocs.map(async ({ docId }) => {
+        const algorithm = this._getAlgorithm(docId);
         try {
           console.info(`Attempting server delete for tombstoned doc: ${docId}`);
-          await this.connection.deleteDoc(docId);
-          // If server delete succeeds, remove tombstone and all data locally
-          const algorithm = this._getAlgorithm(docId);
+          try {
+            await this.connection.deleteDoc(docId);
+          } catch (err) {
+            // Already gone server-side: DOC_DELETED when another device's delete won the
+            // race, DOC_NOT_FOUND for a doc created and deleted entirely offline that
+            // never reached the server. Both mean the delete has nothing left to do —
+            // fall through to clearing the tombstone instead of retrying it forever.
+            const alreadyGone =
+              this._isDocDeletedError(err) || (err instanceof StatusError && err.code === ErrorCodes.DOC_NOT_FOUND);
+            if (!alreadyGone) throw err;
+          }
+          // Inside the outer try so a local-store failure (an IndexedDB abort under
+          // storage pressure) keeps the tombstone and stays contained — one doc's failed
+          // cleanup must not reject the Promise.all and fail the whole pass.
           await algorithm.confirmDeleteDoc(docId);
           console.info(`Successfully deleted and untracked doc: ${docId}`);
         } catch (err) {
-          // Already deleted server-side (another device or a predecessor won the race):
-          // that's success — clear the tombstone instead of retrying it forever.
-          if (this._isDocDeletedError(err)) {
-            await this._getAlgorithm(docId).confirmDeleteDoc(docId);
-            return;
-          }
-          // Otherwise keep the tombstone for retry, but surface the failure only once
-          // per latched period: this loop runs on every resume pass now, so a terminal
-          // rejection (e.g. 403) would re-emit on every reconnect cycle. A cold connect
-          // clears the latch and lets a still-failing delete surface again.
+          // Keep the tombstone for retry, but surface the failure only once per latched
+          // period: this loop runs on every resume pass now, so a terminal rejection
+          // (e.g. 403) would re-emit on every reconnect cycle. A cold connect clears
+          // the latch and lets a still-failing delete surface again.
           console.warn(`Server delete failed for ${docId}, keeping tombstone:`, err);
           if (!this._surfacedSyncErrors.has(docId)) {
             this._surfacedSyncErrors.add(docId);
@@ -1385,6 +1391,17 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   @blockable
   protected async _receiveCommittedChanges(docId: string, serverChanges: Change[]): Promise<void> {
+    // A push for a doc this instance no longer tracks must not reach the store. The acute
+    // case is a resumed stream replaying pre-delete changes for a doc whose tombstone the
+    // same pass is draining — the drain runs inside the replay window now that resume
+    // passes drain tombstones (DAB-941) — and `applyServerChanges` has no tracking-row
+    // guard, so a batch landing after `confirmDeleteDoc` would recreate orphaned store
+    // rows for a doc the server already deleted. Every delete path untracks before the
+    // drain runs (Patches.deleteDoc untracks before tombstoning; the pass drops
+    // `deletedDocs` from `trackedDocs` before its delete loop), so this gate covers each
+    // post-confirm window; a batch landing before the untrack is wiped by
+    // `confirmDeleteDoc` itself.
+    if (!this.trackedDocs.has(docId)) return;
     // A broadcast landing while the doc's snapshot reload is in flight can't be applied yet —
     // the store may not have the doc, so the algorithm would drop it silently while
     // committedRev still advanced. Park it; the reload reconciles it after the save.

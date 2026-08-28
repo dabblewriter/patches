@@ -585,6 +585,82 @@ describe('PatchesSync', () => {
       expect(errorSpy).toHaveBeenCalledTimes(1);
     });
 
+    it('a tombstone the server answers "not found" clears as success (created + deleted offline)', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'dead1', committedRev: 0, deleted: true }] as TrackedDoc[]);
+      mockWebSocket.deleteDoc.mockRejectedValue(new StatusError(404, 'Not found'));
+      const errorSpy = vi.fn();
+      sync.onError(errorSpy);
+
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      expect(mockAlgorithm.confirmDeleteDoc).toHaveBeenCalledWith('dead1');
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('a failing local tombstone cleanup keeps the tombstone without failing the pass', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'dead1', committedRev: 5, deleted: true },
+      ] as TrackedDoc[]);
+      mockAlgorithm.confirmDeleteDoc.mockRejectedValue(new Error('idb abort'));
+      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      expect(sync.state.syncStatus).toBe('synced');
+    });
+
+    it('a replayed batch for a drained tombstone is dropped, not resurrected (DAB-941)', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'dead1', committedRev: 5, deleted: true }] as TrackedDoc[]);
+      (sync as any).trackedDocs = new Set(['dead1']);
+
+      // The resume pass drains the tombstone; the server's replay of the committed gap
+      // can still be streaming pre-delete changes for the same doc.
+      await sync['syncAllKnownDocs']({ resume: true });
+      expect(mockAlgorithm.confirmDeleteDoc).toHaveBeenCalledWith('dead1');
+
+      await (sync as any)._receiveCommittedChanges('dead1', [{ id: 'c1', rev: 6, baseRev: 5, ops: [] }]);
+      expect(mockAlgorithm.applyServerChanges).not.toHaveBeenCalled();
+    });
+
+    it('repeated disconnects union their parked docs into one pass (DAB-941)', async () => {
+      vi.useFakeTimers();
+      try {
+        mockAlgorithm.listDocs.mockResolvedValue([
+          { docId: 'doc1', committedRev: 5 },
+          { docId: 'doc2', committedRev: 5 },
+        ] as TrackedDoc[]);
+        mockAlgorithm.hasPending.mockResolvedValue(false);
+        const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+        sync['updateState']({ connected: true });
+        expect((sync as any)._scheduleSyncRetry('doc1')).toBe(true);
+        sync.disconnect();
+        sync['updateState']({ connected: true });
+        expect((sync as any)._scheduleSyncRetry('doc2')).toBe(true);
+        sync.disconnect();
+
+        (sync as any)._started = true;
+        sync['updateState']({ connected: true });
+        (sync as any)._subscribedIds = new Set(['doc1', 'doc2']);
+        await sync['syncAllKnownDocs']({ resume: true });
+        expect(syncDocSpy).toHaveBeenCalledWith('doc1');
+        expect(syncDocSpy).toHaveBeenCalledWith('doc2');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a cold pass consumes the carryover so a stale id cannot re-flush later (DAB-941)', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'doc1', committedRev: 5 }] as TrackedDoc[]);
+      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      (sync as any)._recoveryCarryover.add('doc1');
+
+      await sync['syncAllKnownDocs']();
+
+      expect((sync as any)._recoveryCarryover.size).toBe(0);
+    });
+
     it('resume: flushes only docs with local pending', async () => {
       mockAlgorithm.listDocs.mockResolvedValue([
         { docId: 'doc1', committedRev: 5 },

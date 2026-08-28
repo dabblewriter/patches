@@ -823,6 +823,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       baseDoc.updateSyncStatus('syncing');
     }
     let pending: Change[] | null | undefined;
+    // The doc's committed rev as this attempt found it. Read only on the no-pending path (the
+    // flush path never needs it), and consulted by the failure handling below to tell a doc that
+    // has never hydrated from one that is merely behind. Left undefined where it wasn't read —
+    // the `pending?.length` half covers that case anyway.
+    let committedRevAtEntry: number | undefined;
     try {
       // Use algorithm to get pending changes to send
       pending = await algorithm.getPendingToSend(docId, doc as PatchesDoc<any> | undefined);
@@ -830,9 +835,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       if (pending && pending.length > 0) {
         await this.flushDoc(docId, pending);
       } else {
-        const committedRev = await algorithm.getCommittedRev(docId);
-        if (committedRev) {
-          const serverChanges = await this.connection.getChangesSince(docId, committedRev);
+        committedRevAtEntry = await algorithm.getCommittedRev(docId);
+        if (committedRevAtEntry) {
+          const serverChanges = await this.connection.getChangesSince(docId, committedRevAtEntry);
           if (serverChanges.length > 0) {
             await this._applyServerChangesToDoc(docId, serverChanges);
           }
@@ -930,12 +935,23 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           console.error(`Error syncing doc ${docId}:`, failure);
           this.onError.emit(syncError, { docId });
         }
-        // Left at 'error' with pending changes while the connection is up: nothing else
-        // re-attempts this doc until a local edit or reconnect, so a server-side recovery
-        // (a commit-path outage ending after the ladder, or a policy fix un-rejecting the
-        // pending change) would never be noticed. Keep probing slowly in the background.
+        // Left at 'error' while the connection is up: nothing else re-attempts this doc until a
+        // local edit or reconnect, so a server-side recovery (a commit-path outage ending after
+        // the ladder, or a policy fix un-rejecting the pending change) would never be noticed.
+        // Keep probing slowly in the background.
         // 410 never reaches here — it diverted to the remote-delete path above.
-        if (pending?.length) {
+        //
+        // Two docs need this, for opposite reasons:
+        // - one holding PENDING changes, which has local work the server hasn't taken yet;
+        // - one that has NEVER HYDRATED (`committedRev === 0`), which has no state at all.
+        //
+        // Only the first was covered, on the reasoning that a doc with local work is the one with
+        // something to lose. But a doc the client merely READS never has pending changes, so a
+        // never-hydrated one was abandoned outright: `_handleDocsTracked` gives it a single
+        // attempt, the ladder above spends its retries, and then nothing in this instance ever
+        // touches it again. `projects/<id>/roles` is exactly that doc, and losing it is what let a
+        // collaborator run a whole session with no roles data (DAB-1024 / DAB-1074).
+        if (pending?.length || committedRevAtEntry === 0) {
           this._scheduleSyncReprobe(docId, retryable);
         }
       }

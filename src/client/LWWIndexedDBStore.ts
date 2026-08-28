@@ -2,6 +2,7 @@ import { consolidateFieldOp } from '../algorithms/lww/consolidateOps.js';
 import { createChange } from '../data/change.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
+import { findNonCloneableOpPaths, NonCloneableOpError } from '../net/error.js';
 import type { Change, PatchesSnapshot, PatchesState, QuarantinedChange } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
 import { IDBStoreWrapper, IndexedDBStore, type StorageGuardOptions } from './IndexedDBStore.js';
@@ -334,9 +335,28 @@ export class LWWIndexedDBStore implements LWWClientStore {
 
   /**
    * Save pending ops, optionally deleting paths.
+   *
+   * A value the structured-clone algorithm refuses fails this write with a bare `DataCloneError`
+   * that names neither the op nor the path. That failure is CORRECT — the change is defective and
+   * must be rolled back, never worked around (see {@link isDefectiveChangeError}) — but it is
+   * undiagnosable as raised. Re-throw it as a {@link NonCloneableOpError} naming the offending
+   * paths, which classifies identically and changes no behaviour.
    */
   @blockable
   async savePendingOps(docId: string, ops: JSONPatchOp[], pathsToDelete?: string[]): Promise<void> {
+    try {
+      await this._savePendingOps(docId, ops, pathsToDelete);
+    } catch (err) {
+      if ((err as { name?: unknown } | null | undefined)?.name !== 'DataCloneError') throw err;
+      const paths = findNonCloneableOpPaths(ops);
+      // No op owns it — the poison is elsewhere in the record. Keep the original
+      // error rather than inventing a location for it.
+      if (paths.length === 0) throw err;
+      throw new NonCloneableOpError(paths, docId, { cause: err });
+    }
+  }
+
+  private async _savePendingOps(docId: string, ops: JSONPatchOp[], pathsToDelete?: string[]): Promise<void> {
     const [tx, pendingOpsStore, docsStore] = await this.db.transaction(['pendingOps', 'docs'], 'readwrite');
 
     let docMeta = await docsStore.get<TrackedDoc>(docId);

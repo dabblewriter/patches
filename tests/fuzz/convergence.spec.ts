@@ -250,6 +250,33 @@ describe('convergence fuzz — OT panel', () => {
     }, 30_000);
   }
 
+  // NEW-FINDING (nightly soak, DAB-1236): the consumed-source class needs NEITHER faults NOR
+  // the rich mix — this seed runs the plain derived config (clientStoreFailP 0,
+  // serverBackendFailP 0, richOps false) and still commits a move whose source a concurrent
+  // commit consumed. The two pins below both require a special mode to reach it (faults for
+  // seed 1000393, the rich mix for seed 10), which made the class look more exotic than it is;
+  // this one is ordinary co-authoring: concurrent moves + duplicate delivery + an offline batch.
+  //
+  // Shape: c0 goes offline holding `move /sections/m6 -> m0` while c1 walks the SAME subtree
+  // through a chain of committed single-op moves (m0 -> m2 -> m6 -> m18 -> m40 -> m21) and
+  // flushes first. c0 reconnects and flushes 14 queued changes; the transformed rev 52 points at
+  // a source that no longer exists and fails strict apply on delivery as
+  // "[op:add] require value, but got undefined" — `move.apply` plucks `undefined` from the
+  // object parent (only the ARRAY branch bounds-checks) and hands it to its internal add, so the
+  // error names the wrong op. Guarding that would fix the message, not the divergence: the
+  // transform should not have emitted the move.
+  //
+  // Suspected: `findMirrorKiller` follows `op.from === src` within ONE transform call, but this
+  // relocation chain spans several committed changes, so no single call sees m6's whole path.
+  // Unverified — see DAB-1236.
+  //
+  // This is why the nightly soak has been red every night since 2026-08-14 (patches#95): the
+  // pins keep the CI panel green, but the soak explores fresh date-derived seeds and keeps
+  // rediscovering the class. It stays red until the class is fixed.
+  it.skip('NEW-FINDING: chained offline-batch moves commit a consumed-source move with NO faults (seed 20260833764)', async () => {
+    await runOTFuzz(20260833764);
+  }, 30_000);
+
   // NEW-FINDING (post-torn-reload-fix soak): the transform-layer consumed-source class is
   // reachable WITHOUT the rich mix — a chain of plain single-op `move` changes inside one
   // offline batch (session-timeout path), transformed against concurrent commits, produces a

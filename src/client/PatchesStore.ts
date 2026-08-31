@@ -6,7 +6,18 @@ export type AlgorithmName = 'ot' | 'lww';
 /** Represents metadata for a document tracked by the store. */
 export interface TrackedDoc {
   docId: string;
-  /** The last revision number confirmed by the server. */
+  /**
+   * The last revision number confirmed by the server.
+   *
+   * A tombstone row (`deleted: true`) MUST still carry the pre-delete committed rev,
+   * even though `deleteDoc` wipes the doc's data. The sync layer's tombstone drain
+   * keys delete outcomes on it: a server 404 clears the tombstone as "already gone"
+   * only when `committedRev === 0` (a doc created and deleted entirely offline that
+   * never reached the server) — for a committed doc a 404 is indistinguishable from
+   * routing/gateway noise and must keep the tombstone. A store that resets the rev to
+   * 0 on delete makes that guard unconditionally true and lets routing noise
+   * permanently abandon the delete.
+   */
   committedRev: number;
   /** Optional flag indicating the document has been locally deleted. */
   deleted?: true;

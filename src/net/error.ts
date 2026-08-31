@@ -66,7 +66,7 @@ export function isRejectionError(err: unknown): boolean {
  * into a generic, code-less error (which would strip the retryable/authoritative verdict the
  * code carries). Node system errors use *string* codes (`'ENOENT'`), so they stay unmatched.
  */
-export function isStatusError(err: unknown): err is Error & { code: number } {
+export function isStatusError(err: unknown): err is Error & { code: number; data?: Record<string, any> } {
   return err instanceof Error && typeof (err as { code?: unknown }).code === 'number';
 }
 

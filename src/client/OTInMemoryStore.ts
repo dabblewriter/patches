@@ -8,6 +8,15 @@ interface DocBuffers {
   committed: Change[];
   pending: Change[];
   deleted?: true;
+  /**
+   * Pre-delete committed rev, captured by `deleteDoc` when it wipes the buffers. A
+   * tombstone row must keep reporting it from `listDocs` (see `TrackedDoc.committedRev`)
+   * — the sync layer's delete drain treats a 404 as authoritative only for a doc that
+   * never reached the server (`committedRev === 0`), so resetting to 0 here would let
+   * routing noise clear a committed doc's tombstone and permanently abandon the delete.
+   * Mirrors how `LWWInMemoryStore` and the IndexedDB stores already behave.
+   */
+  committedRev?: number;
 }
 
 /**
@@ -54,7 +63,9 @@ export class OTInMemoryStore implements OTClientStore {
       .filter(([, b]) => includeDeleted || !b.deleted)
       .map(([docId, buf]) => ({
         docId,
-        committedRev: buf.snapshot?.rev ?? buf.committed.at(-1)?.rev ?? 0,
+        // A tombstone's buffers were wiped by deleteDoc; its preserved committedRev is
+        // the row's truth (see the DocBuffers field doc).
+        committedRev: buf.committedRev ?? buf.snapshot?.rev ?? buf.committed.at(-1)?.rev ?? 0,
         deleted: buf.deleted,
       }));
   }
@@ -159,6 +170,10 @@ export class OTInMemoryStore implements OTClientStore {
     for (const docId of docIds) {
       const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
       buf.deleted = undefined; // Ensure not marked as deleted
+      // A reactivated tombstone starts over at rev 0 — the preserved pre-delete rev is
+      // tombstone metadata, not live state, and keeping it would make listDocs report a
+      // committed head the buffers no longer hold.
+      buf.committedRev = undefined;
       if (!this.docs.has(docId)) {
         this.docs.set(docId, buf);
       }
@@ -172,6 +187,9 @@ export class OTInMemoryStore implements OTClientStore {
   // ─── Misc / Lifecycle ────────────────────────────────────────────────
   async deleteDoc(docId: string): Promise<void> {
     const buf = this.docs.get(docId) ?? ({ committed: [], pending: [] } as DocBuffers);
+    // Capture the committed head before wiping the buffers that derive it: the
+    // tombstone must keep reporting the pre-delete rev (see DocBuffers.committedRev).
+    buf.committedRev = buf.committed.at(-1)?.rev ?? buf.snapshot?.rev ?? 0;
     buf.deleted = true;
     buf.committed = [];
     buf.pending = [];

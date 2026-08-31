@@ -87,6 +87,8 @@ describe('PatchesSync', () => {
       getOpenDoc: vi.fn().mockReturnValue(null),
       applySnapshot: vi.fn(),
       getDocAlgorithm: vi.fn().mockReturnValue(mockAlgorithm),
+      closeDoc: vi.fn().mockResolvedValue(undefined),
+      untrackDocs: vi.fn().mockResolvedValue(undefined),
       onTrackDocs: vi.fn(),
       onUntrackDocs: vi.fn(),
       onDeleteDoc: vi.fn(),
@@ -600,10 +602,23 @@ describe('PatchesSync', () => {
       expect(mockAlgorithm.confirmDeleteDoc).not.toHaveBeenCalled();
       expect(errorSpy).toHaveBeenCalledTimes(1);
 
-      // A cold connect clears the latch so a server-side policy change can heal it.
-      (sync as any)._clearAllSyncRetries();
-      await sync['syncAllKnownDocs']({ resume: true });
-      expect(mockWebSocket.deleteDoc).toHaveBeenCalledTimes(2);
+      // Driven through the real connection-change path, not _clearAllSyncRetries
+      // directly: on this spec's stream-bound mock EVERY drop reaches
+      // _clearAllSyncRetries, so the latch must survive a drop + resumed reconnect —
+      // clearing it there would re-issue the rejected delete on every WS cycle.
+      sync['_handleConnectionChange']('disconnected');
+      mockWebSocket.resumedStream = true;
+      sync['_handleConnectionChange']('connected');
+      await vi.waitFor(() => expect(sync.state.syncStatus).toBe('synced'));
+      expect(mockWebSocket.deleteDoc).toHaveBeenCalledTimes(1);
+
+      // A true cold connect clears the latch so a server-side policy change can heal
+      // it — and lets the still-failing delete surface once more.
+      sync['_handleConnectionChange']('disconnected');
+      mockWebSocket.resumedStream = false;
+      sync['_handleConnectionChange']('connected');
+      await vi.waitFor(() => expect(mockWebSocket.deleteDoc).toHaveBeenCalledTimes(2));
+      expect(errorSpy).toHaveBeenCalledTimes(2);
     });
 
     it('a 404 for a tombstone the server has committed keeps the tombstone and retries', async () => {
@@ -792,6 +807,31 @@ describe('PatchesSync', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('a transport-initiated drop hands docs mid-ladder to the next resume pass (DAB-941)', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'doc1', committedRev: 5 }] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      // A pull fails transiently while the stream is up: _canSend() is true, so
+      // _parkForRecovery would no-op and the ladder arms a timer instead.
+      sync['updateState']({ connected: true });
+      expect((sync as any)._scheduleSyncRetry('doc1')).toBe(true);
+
+      // The transport drops the connection on its own — the everyday path every real
+      // reconnect takes; disconnect() never runs, so its harvest can't be what saves
+      // the doc. The stream-bound drop branch wipes the timer maps, and must hand the
+      // parked ids over first.
+      sync['_handleConnectionChange']('disconnected');
+      expect((sync as any)._syncRetryTimers.size).toBe(0);
+
+      // The transport reconnects with its held cursor — a resume, the default now.
+      // The doc looks clean (no pending, stable status), so only the carryover can
+      // make the resume pass re-attempt its missed pull.
+      mockWebSocket.resumedStream = true;
+      sync['_handleConnectionChange']('connected');
+      await vi.waitFor(() => expect(syncDocSpy).toHaveBeenCalledWith('doc1'));
     });
 
     it('a cold pass consumes the carryover so a stale id cannot re-flush later (DAB-941)', async () => {

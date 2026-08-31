@@ -529,6 +529,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           createdAt: _ca,
           modifiedAt: _ma,
           contentStartRev: _csr,
+          seedDelta: _sd,
           pendingOp: _po,
           deleted: _del,
           ...metadata

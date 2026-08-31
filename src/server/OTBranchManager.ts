@@ -5,6 +5,7 @@ import { getStateAtRevision } from '../algorithms/ot/server/getStateAtRevision.j
 import { transformIncomingChangesWithFrame } from '../algorithms/ot/server/transformIncomingChanges.js';
 import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
 import { createChange } from '../data/change.js';
+import { invertPatch } from '../json-patch/invertPatch.js';
 import { toOps } from '../json-patch/ops/text.js';
 import { createVersionMetadata } from '../data/version.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
@@ -780,7 +781,18 @@ export class OTBranchManager implements BranchManager {
     } else if (branch.mergeFrame && branch.mergeFrame.sourceRev >= mergeBase) {
       frame = parseFrame(branch.mergeFrame);
     } else {
-      frame = { sourceRev: mergeBase, branchRev: (branch.contentStartRev ?? 2) - 1, programs: [] };
+      // A fresh frame starts with the seed delta, if the branch carries one — see
+      // `Branch.seedDelta`. It goes in as program zero, ahead of every foreign change the
+      // catch-up below folds on top, because that is where it sits in real time: it re-expresses
+      // the branch's ops from the seed into the source's branch-point frame, which is exactly the
+      // frame the source's own concurrent changes are already expressed in. Only fresh frames
+      // need it — a resumed frame (carry or persisted) has it folded in already, advanced
+      // through every branch change it has been walked past.
+      frame = {
+        sourceRev: mergeBase,
+        branchRev: (branch.contentStartRev ?? 2) - 1,
+        programs: await this.seedDeltaProgram(branch, sourceDocId, mergeBase),
+      };
     }
 
     // 1. Catch the frame up to the source tip: fold foreign changes in commit order; advance
@@ -956,6 +968,43 @@ export class OTBranchManager implements BranchManager {
       const observed = byRev([...resumed.own, ...resumed.foreign, ...(result ?? [])]);
       if (observed.length === 0) throw error;
       throw new MergeWindowFault(observed, committedThroughRev, error);
+    }
+  }
+
+  /**
+   * A fresh frame's opening program: the branch's seed delta, inverted. See `Branch.seedDelta`.
+   *
+   * The stored patch runs source→seed; the frame needs seed→source, so it is inverted against
+   * the source's own state at the merge base — which is both what the patch was applied to and
+   * where the text it dropped still lives. That inversion is the whole reason the stored
+   * direction is the one that carries no text.
+   *
+   * Every failure degrades to no program rather than throwing: an unparseable value, a patch
+   * that does not fit the state it claims to describe, an unknown op. The program is a
+   * correction, and a merge without it lands changes where it would have landed them before the
+   * field existed — the old behaviour, wrong in the same direction, but still a merge. Refusing
+   * would strand every future merge of that branch on a field the client can no longer fix (it
+   * is creation-only), which is a worse failure than the skew it prevents. Each case is logged,
+   * because a silently-dropped correction looks exactly like a branch that never needed one.
+   */
+  private async seedDeltaProgram(branch: Branch, sourceDocId: string, mergeBase: number): Promise<JSONPatchOp[][]> {
+    if (typeof branch.seedDelta !== 'string' || branch.seedDelta.length === 0) return [];
+    let ops: unknown;
+    try {
+      ops = JSON.parse(branch.seedDelta);
+    } catch {
+      console.warn(`[patches] branch ${branch.id} has an unparseable seedDelta; merging without it`);
+      return [];
+    }
+    // An empty array is a legitimate "the seed matches the source" and needs no program.
+    if (!Array.isArray(ops) || ops.length === 0) return [];
+    try {
+      const { state } = await getStateAtRevision(this.store, sourceDocId, mergeBase, { reconstruction: {} });
+      const inverted = invertPatch(state, ops as JSONPatchOp[]);
+      return inverted.length > 0 ? [inverted] : [];
+    } catch (error) {
+      console.warn(`[patches] branch ${branch.id} has a seedDelta that will not invert; merging without it`, error);
+      return [];
     }
   }
 

@@ -36,6 +36,9 @@ const nonModifiableBranchFields = new Set([
   'createdAt',
   'modifiedAt',
   'contentStartRev',
+  // Creation-only for the same reason as `contentStartRev`: both describe where the branch
+  // started, and a later edit would silently re-anchor every merge that follows.
+  'seedDelta',
   'pendingOp',
   'deleted',
 ]);

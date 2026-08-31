@@ -571,9 +571,9 @@ describe('PatchesSync', () => {
       expect(errorSpy).not.toHaveBeenCalled();
     });
 
-    it('a failing tombstone delete surfaces once, not on every resume pass', async () => {
+    it('a failing tombstone delete retries every pass but surfaces once', async () => {
       mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'dead1', committedRev: 5, deleted: true }] as TrackedDoc[]);
-      mockWebSocket.deleteDoc.mockRejectedValue(new StatusError(403, 'Forbidden'));
+      mockWebSocket.deleteDoc.mockRejectedValue(new StatusError(500, 'Server error'));
       const errorSpy = vi.fn();
       sync.onError(errorSpy);
 
@@ -581,6 +581,87 @@ describe('PatchesSync', () => {
       await sync['syncAllKnownDocs']({ resume: true });
 
       expect(mockWebSocket.deleteDoc).toHaveBeenCalledTimes(2);
+      expect(mockAlgorithm.confirmDeleteDoc).not.toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('a terminally rejected tombstone delete is not re-issued within the session', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'dead1', committedRev: 5, deleted: true }] as TrackedDoc[]);
+      mockWebSocket.deleteDoc.mockRejectedValue(new StatusError(403, 'Forbidden'));
+      const errorSpy = vi.fn();
+      sync.onError(errorSpy);
+
+      // e.g. a doc in a workspace the user lost access to, on a flapping stream: the
+      // drain runs on every reconnect, but the verdict won't change by retrying.
+      await sync['syncAllKnownDocs']({ resume: true });
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      expect(mockWebSocket.deleteDoc).toHaveBeenCalledTimes(1);
+      expect(mockAlgorithm.confirmDeleteDoc).not.toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+
+      // A cold connect clears the latch so a server-side policy change can heal it.
+      (sync as any)._clearAllSyncRetries();
+      await sync['syncAllKnownDocs']({ resume: true });
+      expect(mockWebSocket.deleteDoc).toHaveBeenCalledTimes(2);
+    });
+
+    it('a 404 for a tombstone the server has committed keeps the tombstone and retries', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'dead1', committedRev: 5, deleted: true }] as TrackedDoc[]);
+      mockWebSocket.deleteDoc.mockRejectedValue(new StatusError(404, 'Not found'));
+      const errorSpy = vi.fn();
+      sync.onError(errorSpy);
+
+      await sync['syncAllKnownDocs']({ resume: true });
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      // A committed doc answering 404 is routing/gateway/deploy noise, not "never
+      // existed" — clearing the tombstone would abandon the delete while the doc
+      // lives on the server and every other device.
+      expect(mockAlgorithm.confirmDeleteDoc).not.toHaveBeenCalled();
+      expect(mockWebSocket.deleteDoc).toHaveBeenCalledTimes(2);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('delete outcomes rehydrated across a worker boundary (plain Error + numeric code) classify the same', async () => {
+      // A 410 arriving as a plain Error carrying `code` — the shape a SharedWorker
+      // boundary rehydrates — must still count as already-gone.
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'dead1', committedRev: 5, deleted: true }] as TrackedDoc[]);
+      mockWebSocket.deleteDoc.mockRejectedValue(Object.assign(new Error('Doc deleted'), { code: 410 }));
+      const errorSpy = vi.fn();
+      sync.onError(errorSpy);
+
+      await sync['syncAllKnownDocs']({ resume: true });
+      expect(mockAlgorithm.confirmDeleteDoc).toHaveBeenCalledWith('dead1');
+
+      // Same for a rehydrated 404 on a doc that never reached the server.
+      vi.mocked(mockAlgorithm.confirmDeleteDoc).mockClear();
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'dead2', committedRev: 0, deleted: true }] as TrackedDoc[]);
+      mockWebSocket.deleteDoc.mockRejectedValue(Object.assign(new Error('Not found'), { code: 404 }));
+
+      await sync['syncAllKnownDocs']({ resume: true });
+      expect(mockAlgorithm.confirmDeleteDoc).toHaveBeenCalledWith('dead2');
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it("a tombstoned doc whose algorithm isn't registered fails alone, not the pass", async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'dead1', committedRev: 5, deleted: true, algorithm: 'lww' as AlgorithmName },
+      ] as TrackedDoc[]);
+      // Force the registry fallback in _getAlgorithm — the open-doc shortcut would
+      // mask the unregistered-algorithm throw.
+      mockPatches.getDocAlgorithm.mockReturnValue(undefined);
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      const errorSpy = vi.fn();
+      sync.onError(errorSpy);
+
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      // Contained per-doc: the pass completes, the healthy doc reads synced, and the
+      // bad doc's tombstone survives for a later pass (nothing confirmed it).
+      expect(sync.state.syncStatus).toBe('synced');
+      expect(sync.docStates.state['doc1'].syncStatus).toBe('synced');
       expect(mockAlgorithm.confirmDeleteDoc).not.toHaveBeenCalled();
       expect(errorSpy).toHaveBeenCalledTimes(1);
     });
@@ -602,12 +683,27 @@ describe('PatchesSync', () => {
         { docId: 'doc1', committedRev: 5 },
         { docId: 'dead1', committedRev: 5, deleted: true },
       ] as TrackedDoc[]);
-      mockAlgorithm.confirmDeleteDoc.mockRejectedValue(new Error('idb abort'));
+      const idbAbort = new Error('idb abort');
+      mockAlgorithm.confirmDeleteDoc.mockRejectedValue(idbAbort);
       vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      const errorSpy = vi.fn();
+      sync.onError(errorSpy);
 
       await sync['syncAllKnownDocs']({ resume: true });
 
       expect(sync.state.syncStatus).toBe('synced');
+      // The server delete succeeded; the LOCAL confirm is what failed — the tombstone
+      // survives and the replay-drop gate must not arm for a doc whose rows survived.
+      expect(mockWebSocket.deleteDoc).toHaveBeenCalledWith('dead1');
+      expect(mockAlgorithm.confirmDeleteDoc).toHaveBeenCalledWith('dead1');
+      expect((sync as any)._confirmedDeletedDocs.has('dead1')).toBe(false);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy.mock.calls[0][0]).toBe(idbAbort);
+
+      // The kept tombstone is retried on the next pass; the latch keeps it to one emit.
+      await sync['syncAllKnownDocs']({ resume: true });
+      expect(mockWebSocket.deleteDoc).toHaveBeenCalledTimes(2);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
     });
 
     it('a replayed batch for a drained tombstone is dropped, not resurrected (DAB-941)', async () => {
@@ -615,12 +711,59 @@ describe('PatchesSync', () => {
       (sync as any).trackedDocs = new Set(['dead1']);
 
       // The resume pass drains the tombstone; the server's replay of the committed gap
-      // can still be streaming pre-delete changes for the same doc.
+      // can still be streaming pre-delete changes for the same doc — including after
+      // the pass has ended.
       await sync['syncAllKnownDocs']({ resume: true });
       expect(mockAlgorithm.confirmDeleteDoc).toHaveBeenCalledWith('dead1');
 
       await (sync as any)._receiveCommittedChanges('dead1', [{ id: 'c1', rev: 6, baseRev: 5, ops: [] }]);
       expect(mockAlgorithm.applyServerChanges).not.toHaveBeenCalled();
+    });
+
+    it('a replayed batch racing ahead of the pass is applied, not dropped', async () => {
+      // On a resumed connect the replay starts before syncAllKnownDocs repopulates
+      // trackedDocs — a batch for a doc this instance simply doesn't know yet must
+      // still reach the store, or its committedRev freezes with no recovery (a resume
+      // pass only flushes docs with pending, an error, or carryover).
+      (sync as any).trackedDocs = new Set();
+
+      await (sync as any)._receiveCommittedChanges('doc1', [{ id: 'c1', rev: 6, baseRev: 5, ops: [] }]);
+
+      expect(mockAlgorithm.applyServerChanges).toHaveBeenCalledWith(
+        'doc1',
+        [expect.objectContaining({ id: 'c1' })],
+        null
+      );
+    });
+
+    it('re-tracking a confirmed-deleted doc lifts the replay drop gate (restore within the session)', async () => {
+      (sync as any)._confirmedDeletedDocs.add('docX');
+      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+      await (sync as any)._receiveCommittedChanges('docX', [{ id: 'c1', rev: 6, baseRev: 5, ops: [] }]);
+      expect(mockAlgorithm.applyServerChanges).not.toHaveBeenCalled();
+
+      const trackHandler = vi.mocked(mockPatches.onTrackDocs).mock.calls[0][0];
+      await trackHandler(['docX'], 'ot');
+
+      await (sync as any)._receiveCommittedChanges('docX', [{ id: 'c2', rev: 7, baseRev: 6, ops: [] }]);
+      expect(mockAlgorithm.applyServerChanges).toHaveBeenCalledTimes(1);
+    });
+
+    it('a pass that dies mid-flight hands the consumed carryover back (DAB-941)', async () => {
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'doc1', committedRev: 5 }] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      (sync as any)._subscribedIds = new Set(['doc1']);
+      (sync as any)._recoveryCarryover.add('doc1');
+      vi.spyOn(sync as any, 'syncDoc').mockRejectedValue(new Error('boom'));
+
+      await sync['syncAllKnownDocs']({ resume: true });
+
+      expect(sync.state.syncStatus).toBe('error');
+      // doc1 was consumed from the carryover, then the pass failed before completing
+      // its re-attempt — it must ride into the next pass instead of stranding
+      // clean-looking behind the resume cursor.
+      expect((sync as any)._recoveryCarryover.has('doc1')).toBe(true);
     });
 
     it('repeated disconnects union their parked docs into one pass (DAB-941)', async () => {

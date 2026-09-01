@@ -469,6 +469,19 @@ describe('LWWInMemoryStore', () => {
       const result = await store.getDoc('doc1');
       expect(result).toBeUndefined();
     });
+
+    it('preserves the pre-delete committedRev on the tombstone', async () => {
+      // The sync layer's delete drain treats a server 404 as authoritative only when
+      // committedRev === 0 (a doc that never reached the server) — the tombstone row
+      // must keep reporting the pre-delete committed head (see TrackedDoc.committedRev).
+      await store.saveDoc('doc1', createState({ title: 'Hello' }, 5));
+
+      await store.deleteDoc('doc1');
+
+      const doc = (await store.listDocs(true)).find(d => d.docId === 'doc1');
+      expect(doc?.deleted).toBe(true);
+      expect(doc?.committedRev).toBe(5);
+    });
   });
 
   describe('confirmDeleteDoc', () => {

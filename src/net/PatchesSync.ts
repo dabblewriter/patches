@@ -17,9 +17,10 @@ import {
   ErrorCodes,
   isAbortError,
   isNetworkError,
+  isRejectionError,
+  isStatusError,
   isUnsplittableChangeError,
   NetworkError,
-  StatusError,
   TERMINAL_STATUS_CODES,
 } from './error.js';
 import type { PatchesConnection } from './PatchesConnection.js';
@@ -290,6 +291,20 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   private _reloadBuffers = new Map<string, Change[]>();
   /** Pending per-doc slow re-probe timers for docs the retry ladder gave up on (see `_scheduleSyncReprobe`). */
   private _syncReprobeTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
+  /**
+   * Docs parked for connection recovery whose timers were killed or never armed because
+   * the send path was down, carried over so the next pass re-attempts them. A parked doc
+   * is deliberately clean-looking (stable status, often no pending), so a resume pass
+   * cannot see it needs work — without this hand-off its missed pull would sit behind
+   * the resume cursor until a local edit (DAB-941). Fed exclusively through
+   * `_parkForRecovery` — the single definition of the parking rule — from the timer
+   * harvests (`disconnect()`, and the stream-bound drop branch in
+   * `_handleConnectionChange` — the path every transport-initiated drop takes), a
+   * retry/re-probe firing while the send path is down, and
+   * `_deferDocToConnectionRecovery` when both schedulers decline. Consumed by every
+   * pass; a cold pass re-attempts everything anyway.
+   */
+  private _recoveryCarryover = new Set<string>();
   /** Pending timer for the next degraded-mode catch-up pass (see `_syncAllDegraded`); null when idle. */
   private _degradedSyncTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   /**
@@ -322,6 +337,46 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * still-failing doc re-surfaces at most once per connection session.
    */
   private _surfacedSyncErrors = new Set<string>();
+  /**
+   * Doc ids whose server delete this session confirmed locally (`confirmDeleteDoc`
+   * succeeded — from the tombstone drain, a live `_handleDocDeleted`, or a remote-delete
+   * discard). A resumed stream can replay pre-delete committed changes for such a doc
+   * during or after the pass that drained it, and `applyServerChanges` has no
+   * tracking-row guard — so `_receiveCommittedChanges` drops pushes for these ids.
+   * Deliberately outlives the pass (a replayed batch can land after the drain ends);
+   * an id is released when the doc is re-tracked (`_handleDocsTracked` — a restore
+   * within the session), and the whole set on a cold connect (`_handleConnectionChange`)
+   * — a cold stream has no old cursor to replay from, so the gate has nothing left to
+   * guard and would otherwise grow for the life of a long-lived SharedWorker session.
+   */
+  private _confirmedDeletedDocs = new Set<string>();
+  /**
+   * Tombstoned docs whose delete failure has been surfaced (console + `onError`) this
+   * latched period. Separate from `_surfacedSyncErrors`, which latches per-doc SYNC
+   * failures with its own lifecycle (cleared on recovery, untrack, and remote delete):
+   * a tombstoned doc is already untracked by the time its delete fails, so those
+   * clears either never fire for it or fire before the latch is even set — and
+   * sharing the set would let a doc's earlier sync latch swallow its delete failure
+   * (and vice versa, after a restore from trash). Cleared per-doc on a successful
+   * confirm, on remote delete, and on re-track (a restore from trash must not inherit
+   * the old latch), wholesale at the cold-connect site in `_handleConnectionChange` —
+   * NOT in `_clearAllSyncRetries`, which every stream-bound drop also reaches — so a
+   * still-failing delete surfaces at most once per cold-connect session.
+   */
+  private _surfacedDeleteErrors = new Set<string>();
+  /**
+   * Tombstoned docs whose server delete was rejected with an authoritative verdict
+   * (`isRejectionError`, minus the committed-doc 404 case — see the drain in
+   * `syncAllKnownDocs`). The drain runs on every reconnect now, so without this a
+   * terminally-failed delete (e.g. a 403 on a doc in a workspace the user lost) would
+   * be re-issued on every pass for the life of the session. Cleared alongside
+   * `_surfacedDeleteErrors` (same sites, same reasoning): per-doc on re-track — a
+   * delete→restore→delete flow mints a fresh tombstone that must drain — and
+   * wholesale at the cold-connect site in `_handleConnectionChange`, so a cold
+   * connect re-attempts once more — a server-side policy change is the only way such
+   * a delete heals.
+   */
+  private _terminalDeleteFailures = new Set<string>();
   /** Per-doc auto-ejection counts for the circuit breaker (see MAX_DOC_EJECTIONS). Session-scoped. */
   private _ejectionCounts = new Map<string, number>();
   /** Per-doc storage budgets halved down from `maxStorageBytes` by a 413 (see `_tryResplitOversized`). */
@@ -445,8 +500,18 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // docs and its finally's re-schedule guards on `_started`, so this is what makes
     // an explicit stop actually stop the send path (not just the stream).
     this._started = false;
-    this.connection.disconnect();
+    // State next, so `_parkForRecovery`'s send-path guard sees the connection as down
+    // during the harvest below.
     this.updateState({ connected: false, syncStatus: 'unsynced' });
+    // Hand parked docs to the next pass before anything kills their timers: the
+    // reconnect may resume, and a resume pass only re-attempts docs it can see need it.
+    // Harvested ahead of the transport disconnect because a transport may emit its
+    // 'disconnected' synchronously from inside disconnect(), and on a stream-bound
+    // transport that drop branch clears both maps. Union, so repeated disconnects
+    // without an intervening pass lose nothing.
+    for (const id of this._syncRetryTimers.keys()) this._parkForRecovery(id);
+    for (const id of this._syncReprobeTimers.keys()) this._parkForRecovery(id);
+    this.connection.disconnect();
     this._clearAllSyncRetries();
     this._clearDegradedSync();
     this._resetSyncingStatuses();
@@ -567,14 +632,18 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
-   * Syncs all known docs when initially connected.
+   * Syncs all known docs when connected.
    *
-   * `resume` (a successor tab reconnecting with the predecessor's event cursor): the
-   * server is replaying the committed gap over the stream and restored this client's
-   * subscriptions server-side, so this pass skips the re-subscribe and the per-doc
-   * re-pull and only flushes docs still holding local pending. It stays on 'synced'
-   * unless there is pending to flush, so a clean hand-off never flashes 'syncing'. A
-   * cold connect (`resume` false) subscribes, syncs, and processes tombstones as before.
+   * A cold connect (`resume` false) subscribes every active doc, syncs each one, and
+   * drains delete tombstones. A resume pass (a reconnect that kept its event cursor —
+   * the default for reconnects now, DAB-941): the server is replaying the committed
+   * gap over the stream and restored this client's subscriptions server-side, so the
+   * pass re-subscribes only docs missing a subscription (DAB-865) and flushes only
+   * docs that need work — local pending, a latched error, or a doc handed over from
+   * parked recovery (`_recoveryCarryover`). Tombstones are drained on EVERY pass: a
+   * delete deferred while offline must not wait for a cold pass that may never come.
+   * A resume stays on 'synced' unless there is something to flush, so a clean
+   * hand-off never flashes 'syncing'.
    */
   protected async syncAllKnownDocs(opts?: { resume?: boolean }): Promise<void> {
     const resume = opts?.resume ?? false;
@@ -582,6 +651,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (!resume) this.updateState({ syncStatus: 'syncing' });
 
     this._untrackedDuringResync = new Set();
+    // Swapped out mid-pass below, held here so the catch can hand it back: the pass
+    // consumes the set before the work it schedules commits, and a throw mid-pass
+    // would otherwise strand the parked docs (they look clean, so no later resume
+    // re-attempts them).
+    let carryover: Set<string> = new Set();
     try {
       // Sync pending branch metas first — branches must exist on the server
       // before their document content can be synced.
@@ -660,12 +734,17 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       const syncIds = activeDocIds.filter(id => tracked.has(id));
 
       // On resume the replay covers clean docs, so sync only those still holding local
-      // pending (a mint a predecessor or this tab persisted but never flushed) or showing
-      // an error: an exhausted ladder with nothing pending arms no re-probe, so this pass
-      // is its only re-attempt now that reconnects resume (DAB-941). A cold connect syncs
-      // every doc. hasPending was just read into syncedEntries above.
+      // pending (a mint a predecessor or this tab persisted but never flushed), showing
+      // an error (an exhausted ladder with nothing pending arms no re-probe, so this pass
+      // is its only re-attempt), or handed over from a disconnect's parked recovery —
+      // reconnects resume by default now (DAB-941). A cold connect syncs every doc.
+      // hasPending was just read into syncedEntries above.
+      carryover = this._recoveryCarryover;
+      this._recoveryCarryover = new Set();
       const flushIds = resume
-        ? syncIds.filter(id => syncedEntries[id]?.hasPending || syncedEntries[id]?.syncStatus === 'error')
+        ? syncIds.filter(
+            id => syncedEntries[id]?.hasPending || syncedEntries[id]?.syncStatus === 'error' || carryover.has(id)
+          )
         : syncIds;
 
       // Cold connect subscribes everything. A resume subscribes the docs it will flush
@@ -702,30 +781,84 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // Sync each active doc
       const activeSyncPromises = flushIds.map((id: string) => this.syncDoc(id));
 
-      // Attempt to delete docs marked with tombstones — deferred to the next cold sync on
-      // resume (rare, and the predecessor most likely already pushed the delete).
-      const deletePromises = resume
-        ? []
-        : deletedDocs.map(async ({ docId }) => {
-            try {
-              console.info(`Attempting server delete for tombstoned doc: ${docId}`);
-              await this.connection.deleteDoc(docId);
-              // If server delete succeeds, remove tombstone and all data locally
-              const algorithm = this._getAlgorithm(docId);
-              await algorithm.confirmDeleteDoc(docId);
-              console.info(`Successfully deleted and untracked doc: ${docId}`);
-            } catch (err) {
-              // If server delete fails (e.g., offline, already deleted), keep tombstone for retry
-              console.warn(`Server delete failed for ${docId}, keeping tombstone:`, err);
-              this.onError.emit(err as Error, { docId });
-            }
-          });
+      // Attempt to delete docs marked with tombstones. Independent of stream continuity,
+      // so resume passes run it too: reconnects resume by default now (DAB-941), and a
+      // delete deferred while offline would otherwise wait for a cold pass that may never
+      // come — leaving the doc alive on the server and every other device.
+      const deletePromises = deletedDocs.map(async ({ docId, committedRev }) => {
+        // A delete the server already rejected with an authoritative verdict fails
+        // identically on every pass, and this loop runs on every reconnect now — skip
+        // re-issuing it until a cold connect clears the latch (see
+        // `_handleConnectionChange`) or a re-track releases it (`_handleDocsTracked`).
+        // Logged: this is otherwise the only drain outcome with no console line, and a
+        // permanently-skipped tombstone would be indistinguishable from no tombstone.
+        if (this._terminalDeleteFailures.has(docId)) {
+          console.info(`Skipping server delete for tombstoned doc ${docId}: latched after an authoritative rejection`);
+          return;
+        }
+        try {
+          // Inside the try: an unregistered algorithm for a tombstoned doc (e.g. an LWW
+          // tombstone in a build that only registers OT) must fail that one doc, not
+          // reject the Promise.all and fail the whole pass on every resume.
+          const algorithm = this._getAlgorithm(docId);
+          console.info(`Attempting server delete for tombstoned doc: ${docId}`);
+          try {
+            await this.connection.deleteDoc(docId);
+          } catch (err) {
+            // Already gone server-side. DOC_DELETED (410) is authoritative for any doc:
+            // another device's delete won the race. DOC_NOT_FOUND (404) counts only for
+            // a doc created and deleted entirely offline (`committedRev` 0) that never
+            // reached the server — for a doc the server HAS committed, a 404 is
+            // indistinguishable from routing/gateway/deploy noise (a stale base URL, a
+            // moved route, an auth layer masking docs as 404), and clearing the
+            // tombstone on it would permanently abandon the delete while the doc lives
+            // on the server and every other device. Duck-typed (`isStatusError`): an
+            // `instanceof` check misses errors rehydrated across a worker boundary
+            // (dw3 runs sync behind a SharedWorker).
+            const alreadyGone = this._isDocDeletedError(err) || (committedRev === 0 && this._isDocNotFoundError(err));
+            if (!alreadyGone) throw err;
+          }
+          // Still inside the outer try so a local-store failure (an IndexedDB abort under
+          // storage pressure) keeps the tombstone and stays contained — one doc's failed
+          // cleanup must not reject the Promise.all and fail the whole pass.
+          await algorithm.confirmDeleteDoc(docId);
+          // Replayed committed batches for this doc may still be streaming (or land
+          // after this pass ends); the gate in `_receiveCommittedChanges` drops them.
+          this._confirmedDeletedDocs.add(docId);
+          this._surfacedDeleteErrors.delete(docId);
+          console.info(`Successfully deleted and untracked doc: ${docId}`);
+        } catch (err) {
+          // Keep the tombstone for retry, but surface the failure only once per latched
+          // period: this loop runs on every resume pass now. A cold connect clears both
+          // latches and lets a still-failing delete re-issue and surface again.
+          console.warn(`Server delete failed for ${docId}, keeping tombstone:`, err);
+          // An authoritative rejection won't heal by retrying this session. 404 is
+          // excluded: for a committed doc it reads as routing noise (see above), so it
+          // stays retryable rather than latching.
+          if (isRejectionError(err) && !this._isDocNotFoundError(err)) {
+            this._terminalDeleteFailures.add(docId);
+          }
+          if (!this._surfacedDeleteErrors.has(docId)) {
+            this._surfacedDeleteErrors.add(docId);
+            this.onError.emit(err as Error, { docId });
+          }
+        }
+      });
 
       // Wait for all sync and delete operations
       await Promise.all([...activeSyncPromises, ...deletePromises]);
 
       this.updateState({ syncStatus: 'synced' });
     } catch (error) {
+      // Hand the consumed carryover back: this pass never completed the re-attempts it
+      // consumed the set for, and a parked doc looks clean, so without this the next
+      // resume pass would skip it — the exact stranding DAB-941 exists to fix, made
+      // reachable through its own fix. Union into the live set so docs parked while
+      // this pass ran are kept; a doc that did complete before the throw just gets one
+      // redundant re-attempt.
+      for (const id of carryover) {
+        if (this.trackedDocs.has(id)) this._recoveryCarryover.add(id);
+      }
       console.error('Error during global sync:', error);
       const syncError = error instanceof Error ? error : new Error(String(error));
       this.updateState({ syncStatus: 'error', syncError });
@@ -1350,6 +1483,23 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   @blockable
   protected async _receiveCommittedChanges(docId: string, serverChanges: Change[]): Promise<void> {
+    // A push for a doc whose server delete has been confirmed must not reach the store.
+    // The acute case is a resumed stream replaying pre-delete changes for a doc whose
+    // tombstone the same pass drained — the drain runs inside the replay window now that
+    // resume passes drain tombstones (DAB-941) — and `applyServerChanges` has no
+    // tracking-row guard, so a batch landing after `confirmDeleteDoc` would recreate
+    // orphaned store rows for a doc the server already deleted. Keyed on the confirmed
+    // ids, NOT on `trackedDocs`: on a resumed connect the replay starts before
+    // `syncAllKnownDocs` repopulates `trackedDocs`, so a tracking gate would silently
+    // drop replayed batches for legitimately tracked docs and freeze their committedRev
+    // with nothing left to recover them. The set outlives the pass (a replayed batch can
+    // land after the drain ends — a batch landing before the confirm is wiped by
+    // `confirmDeleteDoc` itself) and releases an id only when the doc is re-tracked; see
+    // `_confirmedDeletedDocs`.
+    if (this._confirmedDeletedDocs.has(docId)) {
+      console.warn(`Dropping committed changes for doc ${docId}: its delete was confirmed this session`);
+      return;
+    }
     // A broadcast landing while the doc's snapshot reload is in flight can't be applied yet —
     // the store may not have the doc, so the algorithm would drop it silently while
     // committedRev still advanced. Park it; the reload reconciles it after the save.
@@ -1664,6 +1814,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         const algorithm = this._getAlgorithm(docId);
         await this.connection.deleteDoc(docId);
         await algorithm.confirmDeleteDoc(docId);
+        // A later resumed stream can still replay this doc's pre-delete changes; the
+        // gate in `_receiveCommittedChanges` drops them.
+        this._confirmedDeletedDocs.add(docId);
       } catch (err) {
         console.error(`Server delete failed for doc ${docId}, will retry on reconnect/resync.`, err);
         this.onError.emit(err as Error, { docId });
@@ -1704,16 +1857,43 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // still-failing doc surface once more. A resume leaves clean docs alone, so a doc
       // mid-ladder (a pull that failed while the stream was up) keeps its timers — wiping
       // them here would strand it until the next local edit (DAB-941). (On WS the drop side
-      // already cleared these; on REST the drop deliberately doesn't — see the else branch.)
-      if (!resume) this._clearAllSyncRetries();
+      // already cleared these, harvesting the parked docs first; on REST the drop
+      // deliberately doesn't — see the else branch.)
+      if (!resume) {
+        this._clearAllSyncRetries();
+        // The delete-failure latches clear HERE — the one place that is actually a cold
+        // connect — not in `_clearAllSyncRetries`, which every stream-bound drop also
+        // reaches: clearing there re-issued and re-surfaced a terminally-rejected
+        // tombstone delete on every WS reconnect cycle, exactly what the latch exists
+        // to stop. A cold connect re-attempts the delete once more (a server-side
+        // policy change is its only path to healing) and lets it surface once more.
+        this._surfacedDeleteErrors.clear();
+        this._terminalDeleteFailures.clear();
+        // The replay-drop gate empties on the same cadence: it guards against a resumed
+        // stream replaying pre-delete committed changes, and a cold stream has no old
+        // cursor to replay from — the pass re-pulls and re-subscribes everything, and a
+        // deleted doc gets pushes again only via a re-track (which releases the id
+        // anyway). Without this the set grows monotonically in a long-lived
+        // SharedWorker session.
+        this._confirmedDeletedDocs.clear();
+      }
       // The stream is up — live pushes resume; the degraded-mode pass hands off here.
       this._clearDegradedSync();
       void this.syncAllKnownDocs({ resume });
     } else if (!isConnecting) {
       if (this.connection.sendRequiresStream !== false) {
-        // Sends ride the stream, so they're blocked now. Drop pending retries — the
-        // next reconnect's syncAllKnownDocs re-syncs everything — and reset any
-        // stale 'syncing' statuses.
+        // Sends ride the stream, so they're blocked now. Hand parked docs to the next
+        // pass BEFORE dropping the retry/re-probe timers: this drop is the everyday way
+        // a connection goes down (disconnect()'s harvest only covers the explicit app
+        // call), the reconnect resumes by default now (DAB-941), and a doc mid-ladder
+        // looks clean to a resume pass — a failed pull leaves no pending and a stable
+        // status — so wiping its timer with no hand-off strands it behind the resume
+        // cursor until a local edit. `_canSend()` already reads false here (`connected`
+        // was set above and this branch is stream-bound), so `_parkForRecovery`'s
+        // guard admits these. The reconnect's syncAllKnownDocs re-attempts them; a
+        // cold pass re-attempts everything anyway.
+        for (const id of this._syncRetryTimers.keys()) this._parkForRecovery(id);
+        for (const id of this._syncReprobeTimers.keys()) this._parkForRecovery(id);
         this._clearAllSyncRetries();
         this._resetSyncingStatuses();
       }
@@ -1738,6 +1918,15 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
     newIds.forEach(id => {
       this.trackedDocs.add(id);
+      // Re-tracking lifts the confirmed-deleted drop gate: a doc restored within the
+      // session must receive committed pushes again (see `_confirmedDeletedDocs`).
+      this._confirmedDeletedDocs.delete(id);
+      // The delete latches release with it: a restore from trash followed by a second
+      // delete mints a fresh tombstone, and inheriting the old doc's latch would leave
+      // that delete silently skipped (and its failure silently swallowed) for the rest
+      // of the session.
+      this._terminalDeleteFailures.delete(id);
+      this._surfacedDeleteErrors.delete(id);
       // A doc untracked then re-tracked inside one resync window must not keep its
       // untracked mark: syncAllKnownDocs' merge treats the set as "untracked during the
       // window and still untracked", and a stale mark there excludes the doc's fresh
@@ -1833,6 +2022,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this._surfacedSyncErrors.delete(id);
       this._resplitBudgets.delete(id);
       this._committedApplyFailures.delete(id);
+      // The carryover invariant is "docs still awaiting recovery": a doc leaving
+      // tracking must leave it too, or an untrack-then-retrack inside one session gets
+      // a flush it was never parked for.
+      this._recoveryCarryover.delete(id);
     });
     batch(() => {
       existingIds.forEach(id => this._updateDocSyncState(id, undefined));
@@ -1899,7 +2092,19 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // `force`, as in Patches.deleteDoc: the doc is being deleted, every consumer needs to release
     // it. Letting a refCount > 1 keep the mirror alive over the store wipe below leaves an orphan
     // buffer that never syncs — and one still showing the withheld rows now sitting on the shelf.
+    // NOT `untrack: true` — Patches.closeDoc no-ops for a doc that isn't open, and a remote
+    // delete discovered via tombstone drain routinely names a closed doc.
     await this.patches.closeDoc(docId, { force: true });
+
+    // Release the id from Patches' OWN trackedDocs set, not just this instance's: a retained
+    // id there filters a later `patches.trackDocs([docId])` to empty, so `onTrackDocs` never
+    // fires and the `_confirmedDeletedDocs` gate armed below has no reachable release — a
+    // delete→restore-from-trash flow would leave the restored doc silently dropping every
+    // committed push for the rest of the session (it also leaves `patches.trackedDocs`
+    // reporting a phantom id). `onUntrackDocs` → `_handleDocsUntracked` performs this
+    // instance's ordinary tracking cleanup; the manual scrubs below stay as the remote-delete
+    // extras it doesn't know about, and are idempotent where they overlap.
+    await this.patches.untrackDocs([docId]);
 
     // Clean up tracking and local storage
     this.trackedDocs.delete(docId);
@@ -1908,8 +2113,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._surfacedSyncErrors.delete(docId);
     this._resplitBudgets.delete(docId);
     this._committedApplyFailures.delete(docId);
+    // Same scrub as `_handleDocsUntracked`: a doc leaving tracking leaves the carryover
+    // too, and a remote delete moots any latched local-delete failure for the doc.
+    this._recoveryCarryover.delete(docId);
+    this._surfacedDeleteErrors.delete(docId);
+    this._terminalDeleteFailures.delete(docId);
     this._updateDocSyncState(docId, undefined);
     await algorithm.confirmDeleteDoc(docId);
+    // A resumed stream can still replay this doc's pre-delete changes; the gate in
+    // `_receiveCommittedChanges` drops them.
+    this._confirmedDeletedDocs.add(docId);
 
     // Notify application (with any pending changes that were lost). Awaited so an app that
     // shelves those changes has landed the write before we proceed, but bounded: subscribers
@@ -2020,23 +2233,45 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   }
 
   /**
-   * Helper to detect DOC_DELETED (410) errors from the server.
+   * Helper to detect DOC_DELETED (410) errors from the server. Duck-typed via
+   * `isStatusError` rather than `instanceof`: dw3 runs sync behind a SharedWorker, and
+   * a 410 rehydrated across that boundary arrives as a plain Error carrying a numeric
+   * `code` — an `instanceof` check would misclassify it as a retryable failure.
    */
   protected _isDocDeletedError(err: unknown): boolean {
-    return err instanceof StatusError && err.code === ErrorCodes.DOC_DELETED;
+    return isStatusError(err) && err.code === ErrorCodes.DOC_DELETED;
+  }
+
+  /**
+   * Helper to detect DOC_NOT_FOUND (404) errors from the server — duck-typed via
+   * `isStatusError` like {@link _isDocDeletedError}, for the same worker-boundary
+   * reason. Deliberately carries NO `committedRev` condition: whether a 404 is
+   * authoritative ("never reached the server", rev 0) or routing noise (a committed
+   * doc) is the call site's decision, kept visible where it applies (the tombstone
+   * drain in `syncAllKnownDocs`).
+   */
+  protected _isDocNotFoundError(err: unknown): boolean {
+    return isStatusError(err) && err.code === ErrorCodes.DOC_NOT_FOUND;
   }
 
   /**
    * A 409 the server scoped to the whole doc: the submission is unusable against the doc's
    * current history (a stale baseRev-0 continuation, or a baseRev ahead of the server head)
    * and resending it verbatim can never succeed — only a reload re-bases the queue onto the
-   * doc's real history.
+   * doc's real history. Duck-typed (`isStatusError`) so a 409 rehydrated across a worker
+   * boundary classifies the same.
    */
   protected _isStaleDocError(err: unknown): boolean {
-    return err instanceof StatusError && err.code === 409 && err.data?.scope === 'doc';
+    return isStatusError(err) && err.code === 409 && err.data?.scope === 'doc';
   }
 
-  /** Retryable = any failure except a definitive auth/payment/permission/not-found/gone StatusError. */
+  /**
+   * Retryable = any failure except a definitive auth/payment/permission/not-found/gone
+   * status error. Duck-typed (`isStatusError`, never `instanceof`): a terminal 403/410
+   * rehydrated across a worker boundary must latch here exactly as a live StatusError
+   * would — falling through to retryable would burn the full ladder resending a request
+   * the server refuses identically every time (the DAB-832 failure mode).
+   */
   protected _isRetryableSyncError(err: unknown): boolean {
     // An op with no seam to split on measures the same every time; the ladder would just burn
     // attempts before latching on the identical error.
@@ -2049,8 +2284,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // to shrink further by the time it reaches this decision (no split budget configured, or
     // the budget is at its floor). Latch like the splitter-refused case above; the slow
     // reprobe and any local edit still re-enter sync if the queue ever changes shape.
-    if (err instanceof StatusError && err.code >= 400 && err.code < 500 && err.data?.scope === 'change') return false;
-    if (err instanceof StatusError) return !TERMINAL_SYNC_CODES.has(err.code);
+    if (isStatusError(err) && err.code >= 400 && err.code < 500 && err.data?.scope === 'change') return false;
+    if (isStatusError(err)) return !TERMINAL_SYNC_CODES.has(err.code);
     return true;
   }
 
@@ -2064,7 +2299,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * and inventing one here would start re-cutting changes for a consumer that never asked.
    */
   private _tryResplitOversized(docId: string, failure: unknown): boolean {
-    if (!(failure instanceof StatusError) || failure.code !== 413 || failure.data?.scope !== 'change') return false;
+    if (!isStatusError(failure) || failure.code !== 413 || failure.data?.scope !== 'change') return false;
     if (!this.maxStorageBytes) return false;
     const current = this._resplitBudgets.get(docId) ?? this.maxStorageBytes;
     if (current <= MIN_RESPLIT_STORAGE_BYTES) return false;
@@ -2088,7 +2323,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   private async _tryEjectPoisonChange(docId: string, algorithm: ClientAlgorithm, failure: unknown): Promise<boolean> {
     try {
-      if (!(failure instanceof StatusError) || failure.code < 400 || failure.code >= 500) return false;
+      if (!isStatusError(failure) || failure.code < 400 || failure.code >= 500) return false;
       const data = failure.data;
       if (!data || typeof data.changeId !== 'string' || data.scope !== 'change') return false;
       if (!algorithm.verifyPendingChange || !algorithm.ejectPendingChange) return false;
@@ -2184,8 +2419,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * (SSE alive, or a half-open stream the watchdog hasn't caught yet), and then no
    * reconnect resync is coming to re-attempt the pull — without the probe the doc
    * would neither probe nor recover. When disconnected/offline both schedulers
-   * decline and the reconnect's `syncAllKnownDocs` owns recovery — the existing
-   * offline path.
+   * decline and the doc is handed to `_recoveryCarryover`, so the reconnect's
+   * `syncAllKnownDocs` re-attempts it even when that reconnect resumes and skips
+   * clean-looking docs (DAB-941).
    *
    * Surfacing: network-class failures stay quiet at every stage — the connection
    * state is their user-facing signal, and one unreachable server would otherwise
@@ -2212,6 +2448,20 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this.onError.emit(failure, { docId });
     }
     this._scheduleSyncReprobe(docId, true);
+    // Both schedulers decline while the send path is down; with no timer to harvest
+    // and a clean-looking status, only this hand-off keeps the doc visible to a
+    // resumed reconnect's pass.
+    this._parkForRecovery(docId);
+  }
+
+  /**
+   * Hand a doc to `_recoveryCarryover` so the next `syncAllKnownDocs` pass re-attempts
+   * it. The single definition of what counts as parked: only a doc still tracked, and
+   * only while the send path is down — with the path up, the live retry/re-probe
+   * machinery owns recovery and a hand-off would just double-sync the doc.
+   */
+  private _parkForRecovery(docId: string): void {
+    if (!this._canSend() && this.trackedDocs.has(docId)) this._recoveryCarryover.add(docId);
   }
 
   /**
@@ -2233,7 +2483,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (existing !== undefined) globalThis.clearTimeout(existing);
     const timer = globalThis.setTimeout(() => {
       this._syncRetryTimers.delete(docId);
-      if (!this._canSend() || !this.trackedDocs.has(docId)) return;
+      if (!this._canSend()) {
+        // Fired while the send path was down (e.g. mid-offline): no timer remains and
+        // the doc looks clean, so a resumed reconnect would skip it. Hand it to the
+        // next pass directly (DAB-941). `_parkForRecovery` owns the still-tracked
+        // guard, and `syncDoc` no-ops for an untracked doc.
+        this._parkForRecovery(docId);
+        return;
+      }
       void this.syncDoc(docId);
     }, delay);
     this._syncRetryTimers.set(docId, timer);
@@ -2262,7 +2519,13 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     if (existing !== undefined) globalThis.clearTimeout(existing);
     const timer = globalThis.setTimeout(() => {
       this._syncReprobeTimers.delete(docId);
-      if (!this._canSend() || !this.trackedDocs.has(docId)) return;
+      if (!this._canSend()) {
+        // Same hand-off as the retry ladder above: a probe that self-bails mid-offline
+        // must not strand the doc past a resumed reconnect. The helper and `syncDoc`
+        // own the still-tracked guard.
+        this._parkForRecovery(docId);
+        return;
+      }
       void this.syncDoc(docId);
     }, delay);
     this._syncReprobeTimers.set(docId, timer);
@@ -2289,10 +2552,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     for (const timer of this._syncReprobeTimers.values()) globalThis.clearTimeout(timer);
     this._syncReprobeTimers.clear();
     // A cold connect re-attempts every doc; let a still-failing one surface once more.
-    // Only cold connects reach here now (DAB-941): a resumed connect keeps the ladders,
-    // so a doc latched at 'error' surfaces once and then stays quiet while the resume pass
-    // keeps re-attempting it — the same de-duplication the REST drop branch already relies
-    // on to stop a latched 403 re-emitting to telemetry every reconnect cycle.
+    // NOT only cold connects reach here: on a stream-bound transport every drop does
+    // too (and disconnect()). The delete-failure latches deliberately do NOT clear
+    // here for that reason — they clear at the actual cold-connect site in
+    // `_handleConnectionChange`, so "cleared on cold connect, latched across resumes"
+    // holds on both transports.
     this._surfacedSyncErrors.clear();
   }
 }

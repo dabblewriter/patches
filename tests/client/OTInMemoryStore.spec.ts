@@ -335,7 +335,7 @@ describe('OTInMemoryStore', () => {
       expect(docs.find(d => d.docId === 'doc1')?.deleted).toBe(true);
     });
 
-    it('should clear document data', async () => {
+    it('should clear document data but preserve the pre-delete committedRev on the tombstone', async () => {
       const snapshot = createState({ text: 'hello' }, 5);
       await store.saveDoc('doc1', snapshot);
       await store.savePendingChanges('doc1', [createChange('p1', 6)]);
@@ -343,8 +343,37 @@ describe('OTInMemoryStore', () => {
 
       await store.deleteDoc('doc1');
 
+      expect(await store.getDoc('doc1')).toBeUndefined();
+      expect(await store.getPendingChanges('doc1')).toEqual([]);
+      // The tombstone must keep reporting the pre-delete committed head: the sync
+      // layer's delete drain treats a server 404 as authoritative only when
+      // committedRev === 0 (a doc that never reached the server) — a tombstone
+      // reset to 0 would let routing noise permanently abandon the delete.
       const docs = await store.listDocs(true);
       const doc = docs.find(d => d.docId === 'doc1');
+      expect(doc?.deleted).toBe(true);
+      expect(doc?.committedRev).toBe(7);
+    });
+
+    it('a doc that never reached the server tombstones at committedRev 0', async () => {
+      await store.trackDocs(['doc1']);
+      await store.savePendingChanges('doc1', [createChange('p1', 1)]);
+
+      await store.deleteDoc('doc1');
+
+      const doc = (await store.listDocs(true)).find(d => d.docId === 'doc1');
+      expect(doc?.deleted).toBe(true);
+      expect(doc?.committedRev).toBe(0);
+    });
+
+    it('re-tracking a tombstoned doc resets the preserved committedRev', async () => {
+      await store.saveDoc('doc1', createState({ text: 'hello' }, 5));
+      await store.deleteDoc('doc1');
+
+      await store.trackDocs(['doc1']);
+
+      const doc = (await store.listDocs()).find(d => d.docId === 'doc1');
+      expect(doc?.deleted).toBeUndefined();
       expect(doc?.committedRev).toBe(0);
     });
   });

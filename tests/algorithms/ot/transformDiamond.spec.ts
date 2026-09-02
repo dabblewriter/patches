@@ -209,4 +209,21 @@ describe('DAB-1236 — dropped committed ops keep their destructive residue in t
     expect(clientRebased.map(c => c.ops)).toEqual(serverCommitted.map(c => c.ops));
     expect(replayStrict(base, committed, clientRebased)).toEqual(expected);
   });
+
+  it('a killed copy into an array index is ghost-killed so later queue indexes shift back', () => {
+    // The queue's insert at /x/1 is real on the client and nothing on the server undoes it, so
+    // the ghost must go from the frame or every later queue index stays one too high. Without
+    // the kill the second change commits `replace /x/2` — the wrong element, silently.
+    const base = { y: { n: 1 }, x: [1, 2, 3] };
+    const { committed, serverCommitted, clientRebased } = diamondChain(
+      [[{ op: 'remove', path: '/y' }]],
+      [[{ op: 'copy', from: '/y', path: '/x/1' }], [{ op: 'replace', path: '/x/2', value: 'q' }]]
+    );
+    const expected = { x: [1, 'q', 3] };
+
+    expect(replayStrict(base, committed, serverCommitted)).toEqual(expected);
+    expect(serverCommitted.map(c => c.ops)).toEqual([[{ op: 'replace', path: '/x/1', value: 'q' }]]);
+    expect(clientRebased.map(c => c.ops)).toEqual(serverCommitted.map(c => c.ops));
+    expect(replayStrict(base, committed, clientRebased)).toEqual(expected);
+  });
 });

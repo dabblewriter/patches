@@ -1,7 +1,7 @@
 import type { JSONPatchOp, State } from '../types.js';
 import { getTypeLike } from './getType.js';
 import { log } from './log.js';
-import { isArrayPath } from './paths.js';
+import { isArrayPath, isEntangled } from './paths.js';
 import { updateArrayIndexes } from './updateArrayIndexes.js';
 
 /**
@@ -117,10 +117,7 @@ export function updateRemovedOps(
   const isComposableSet = (op: JSONPatchOp) =>
     op.op === 'add' ||
     op.op === 'replace' ||
-    ((op.op === 'copy' || op.op === 'move') &&
-      !!op.from &&
-      !op.from.startsWith(`${thisPath}/`) &&
-      !thisPath.startsWith(`${op.from}/`));
+    ((op.op === 'copy' || op.op === 'move') && !!op.from && !isEntangled(op.from, thisPath));
 
   /** Does `op` touch the superseded copy/move source (invalidating by-reference composition)? */
   const touchesSource = (op: JSONPatchOp): boolean => {
@@ -215,9 +212,7 @@ export function updateRemovedOps(
           const composedOp = superseded.op === 'move' && opLike === 'move' && owedRemove ? 'move' : 'copy';
           composed = { op: composedOp, from: superseded.from, path: op.path };
         }
-        const entangled =
-          composed?.from &&
-          (composed.path.startsWith(`${composed.from}/`) || composed.from.startsWith(`${composed.path}/`));
+        const entangled = composed?.from && isEntangled(composed.from, composed.path);
         if (composed && !entangled) {
           const result: JSONPatchOp[] = [];
           // A composed move/copy back onto its own source is a no-op — emit only the edits,

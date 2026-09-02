@@ -97,7 +97,7 @@ function otConfigFromSeed(seed: number): OTFuzzConfig {
     // rich seeds committing a compound move whose source a concurrent commit consumed — frame
     // erasure, DAB-1236) is fixed; a 20,000-seed rich soak now fails only ~1 in 5,000, all one
     // remaining rich-only class (an edit inside a subtree the queue copied, minted against the
-    // pre-commit content — see the NEW-FINDING pins). It stays OFF in derived configs until
+    // pre-commit content — DAB-1268, see its pins). It stays OFF in derived configs until
     // that class is fixed, so the nightly stays green on real findings; OT_RICH_PANEL_SEEDS
     // keeps the CI coverage on and FUZZ_RICH=1 runs the soak with it.
     richOps: false,
@@ -256,8 +256,8 @@ describe('convergence fuzz — OT panel', () => {
     }, 30_000);
   }
 
-  // NEW-FINDING (rich soak run while fixing DAB-1236 — the 2026-09-03 nightly window with the
-  // rich mix on, 4 of 20,000 seeds): a committed `remove .../meta/pins/0` fails strict replay
+  // NEW-FINDING → DAB-1268 (rich soak run while fixing DAB-1236 — the 2026-09-03 nightly window
+  // with the rich mix on, 4 of 20,000 seeds): a committed `remove .../meta/pins/0` fails strict replay
   // on an EMPTY pins list under a copied section (`/sections/k*`). Fails at main with and
   // without the DAB-1236 fix, so it is a different class. Read from the seed-20260914563
   // script: the queue copies a section and then unpins inside the copy, while a commit that
@@ -267,21 +267,21 @@ describe('convergence fuzz — OT panel', () => {
   // per the suite convention; not root-caused in the transform here.
   // Repro: FUZZ_RICH=1 FUZZ_SEED=<seed> FUZZ_ITERATIONS=1 npm test -- tests/fuzz/convergence.spec.ts
   for (const seed of [20260911522, 20260914563, 20260917731, 20260919064]) {
-    it.skip(`NEW-FINDING: an edit inside a copied subtree outruns the copy's source (seed ${seed}, rich mix)`, async () => {
+    it.skip(`DAB-1268: an edit inside a copied subtree outruns the copy's source (seed ${seed}, rich mix)`, async () => {
       await runOTFuzz(seed, { richOps: true });
     }, 30_000);
   }
 
-  // NEW-FINDING (fault soak run while fixing DAB-1236 — seeds 1000000-1001999 with faults): three
-  // seeds fail at main with and without the DAB-1236 fix, so they are a different class. Not
-  // root-caused; pinned per the suite convention so the seeds are not lost.
+  // NEW-FINDING → DAB-1269 (fault soak run while fixing DAB-1236 — seeds 1000000-1001999 with
+  // faults): three seeds fail at main with and without the DAB-1236 fix, so they are a different
+  // class. Not root-caused; pinned per the suite convention so the seeds are not lost.
   // - 1000358: SILENT divergence — P1, c0's live doc state diverges from the server head.
   // - 1001528: committed "[op:add] invalid array index: /tags/8" wedges strict replay.
   // - 1001636: committed "[op:replace] invalid array index: /tags/2" wedges strict replay.
   // Repro: FUZZ_FAULTS=1 FUZZ_SEED=<seed> FUZZ_ITERATIONS=1 npm test -- tests/fuzz/convergence.spec.ts
   // (repro-era knobs: found with the rich mix off).
   for (const seed of [1000358, 1001528, 1001636]) {
-    it.skip(`NEW-FINDING: array-index poison / silent divergence under substrate faults (seed ${seed})`, async () => {
+    it.skip(`DAB-1269: array-index poison / silent divergence under substrate faults (seed ${seed})`, async () => {
       await runOTFuzz(seed, { richOps: false, clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
     }, 30_000);
   }
@@ -464,9 +464,10 @@ describe.runIf(FUZZ_SEED !== undefined && FUZZ_ITERATIONS === 0)('convergence fu
 // deliberately low: a fault on ~1 in 25 substrate calls perturbs plenty of
 // flushes/applies per run without starving the scenario of successful traffic.
 // FUZZ_RICH=1 runs the OT soak with the rich edit mix on (off in derived configs, see
-// otConfigFromSeed); the two modifiers combine.
+// otConfigFromSeed); the two modifiers combine. The rich mix is an OT knob, so it is ignored
+// — and not written into the seed label — for an LWW soak.
 const FUZZ_FAULTS = process.env.FUZZ_FAULTS === '1';
-const FUZZ_RICH = process.env.FUZZ_RICH === '1';
+const FUZZ_RICH = process.env.FUZZ_RICH === '1' && FUZZ_ALGO !== 'lww';
 const FAULT_OVERRIDES = { clientStoreFailP: 0.04, serverBackendFailP: 0.04 };
 const OT_SOAK_OVERRIDES: Partial<OTFuzzConfig> = {
   ...(FUZZ_FAULTS ? FAULT_OVERRIDES : {}),

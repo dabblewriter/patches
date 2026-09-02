@@ -24,6 +24,16 @@ export function getPropAfter(path: string, index: number): string {
   return path.slice(index, lastSlash === -1 ? undefined : lastSlash);
 }
 
+/**
+ * Is one path strictly inside the other? Equal paths are not entangled — callers treat "same
+ * path" as its own case. Used wherever a residue or composition must not reach across a
+ * containment boundary (a set at `/a` already covers `/a/b`; a move into its own subtree is
+ * not something a stateless transform can reason about).
+ */
+export function isEntangled(a: string, b: string): boolean {
+  return a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
 export function isArrayPath(path: string, state?: State) {
   if (!arrayPathExp.test(path)) return false;
   if (!state || !state.root || !state.root['']) return true;

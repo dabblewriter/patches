@@ -3,7 +3,7 @@ import { getOpData } from '../utils/getOpData.js';
 import { getTypeLike } from '../utils/getType.js';
 import { log } from '../utils/log.js';
 import { isAdd, isHardSet, mapAndFilterOps, updateRemovedOps } from '../utils/ops.js';
-import { getArrayPrefixAndIndex, getIndexAndEnd, isArrayPath } from '../utils/paths.js';
+import { getArrayPrefixAndIndex, getIndexAndEnd, isArrayPath, isEntangled } from '../utils/paths.js';
 import { getValue, pluckWithShallowCopy } from '../utils/pluck.js';
 import { toArrayIndex } from '../utils/toArrayIndex.js';
 import { updateArrayIndexes } from '../utils/updateArrayIndexes.js';
@@ -110,8 +110,7 @@ export const move: JSONPatchOpHandler = {
         // element back out (net zero). Entangled paths (one inside the other) are left alone:
         // the queue move's own clobber already covers them.
         const dest = otherOp.path;
-        const entangled = dest.startsWith(`${path}/`) || path.startsWith(`${dest}/`);
-        if (!entangled && isHardSet(state, otherOp, dest)) {
+        if (!isEntangled(dest, path) && isHardSet(state, otherOp, dest)) {
           return [protectOp({ op: 'remove', path: dest }), ...mapped];
         }
         return mapped;

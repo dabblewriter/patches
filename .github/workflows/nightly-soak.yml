@@ -44,7 +44,10 @@ jobs:
           echo "Seed base: $BASE"
       - name: OT soak
         run: FUZZ_SEED=${{ steps.seeds.outputs.base }} FUZZ_ITERATIONS=${{ github.event.inputs.ot_iterations || 20000 }} npm test -- tests/fuzz/convergence.spec.ts
+      # The two soaks are independent signals: a red OT night must not leave LWW unexplored
+      # (it went dark for 20 nights behind DAB-1236).
       - name: LWW soak
+        if: ${{ !cancelled() }}
         run: FUZZ_ALGO=lww FUZZ_SEED=${{ steps.seeds.outputs.base }} FUZZ_ITERATIONS=${{ github.event.inputs.lww_iterations || 10000 }} npm test -- tests/fuzz/convergence.spec.ts
 
       # Failure-only Slack ping (#sentry-alerts). No-op until the

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { applyPatch } from '../../src/json-patch/applyPatch.js';
 import { transformPatch } from '../../src/json-patch/transformPatch.js';
+import type { JSONPatchOp } from '../../src/json-patch/types.js';
 
 const matrix = [[], [], [], [], [], [], []];
 const arr = [{}, {}, {}, {}, {}, {}, {}];
@@ -1473,11 +1475,34 @@ describe('transformPatch', () => {
 
     it('drops an earlier same-source move in favor of the later one', () => {
       // Default direction: the other move re-moves the value from our destination. Advance
-      // direction: the earlier move's residual after the later one is nothing.
+      // direction: the earlier move loses the value's final home — but on the server it still
+      // clobbered whatever lived at ITS destination before the later move carried the value
+      // on, so its residual records that clobber (DAB-1236).
       expect(
         transformPatch(
           obj,
           [{ op: 'move', from: '/y', path: '/x' }],
+          [{ op: 'move', from: '/y', path: '/foo' }],
+          undefined,
+          true
+        )
+      ).toEqual([{ op: 'remove', path: '/foo' }]);
+      // An array-index destination inserted rather than clobbered, and the later move takes
+      // the element back out again: nothing to record.
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'move', from: '/y', path: '/foo' }],
+          [{ op: 'move', from: '/y', path: '/x/2' }],
+          undefined,
+          true
+        )
+      ).toEqual([]);
+      // Identical destinations: the frames already agree.
+      expect(
+        transformPatch(
+          obj,
+          [{ op: 'move', from: '/y', path: '/foo' }],
           [{ op: 'move', from: '/y', path: '/foo' }],
           undefined,
           true
@@ -1497,7 +1522,201 @@ describe('transformPatch', () => {
           undefined,
           true
         )
-      ).toEqual([{ op: 'replace', path: '/x/name', value: 'a' }]);
+      ).toEqual([
+        { op: 'remove', path: '/foo' },
+        { op: 'replace', path: '/x/name', value: 'a' },
+      ]);
+    });
+
+    // DAB-1236: the advanced ops are also the frame every LATER queue entry is transformed
+    // against. An op dropped here must still leave behind whatever it destroyed on the server,
+    // or a later queue move whose source sits on that path commits untransformed — pointing at
+    // a path that no longer exists — and fails strict apply on every replay.
+    describe('DAB-1236 — dropped ops leave their destructive residue in the frame', () => {
+      /**
+       * The diamond property: the committed ops advanced through the queue must reach the same
+       * state, from the same base, as the queue transformed against the committed ops (what
+       * the server actually commits).
+       */
+      function expectFramesConverge(base: any, committed: JSONPatchOp[], queue: JSONPatchOp[]) {
+        const queueOnServer = transformPatch(base, committed, queue);
+        const committedInFrame = transformPatch(base, queue, committed, undefined, true);
+        const server = applyPatch(applyPatch(base, committed, { strict: true }), queueOnServer, { strict: true });
+        const frame = applyPatch(applyPatch(base, queue, { strict: true }), committedInFrame, { strict: true });
+        expect(frame).toEqual(server);
+        return { queueOnServer, committedInFrame };
+      }
+
+      it('a dropped same-source committed move still clobbered its destination', () => {
+        // Committed: y -> foo (foo's old value destroyed). Queue: y -> z wins the value's final
+        // home and the mirror carries the value on from foo; the frame must still lose foo.
+        const base = { y: 'v', foo: 'old', keep: 1 };
+        const { queueOnServer, committedInFrame } = expectFramesConverge(
+          base,
+          [{ op: 'move', from: '/y', path: '/foo' }],
+          [{ op: 'move', from: '/y', path: '/z' }]
+        );
+        expect(queueOnServer).toEqual([{ op: 'move', from: '/foo', path: '/z' }]);
+        expect(committedInFrame).toEqual([{ op: 'remove', path: '/foo' }]);
+        // A later queue entry written against foo now dies instead of committing a move whose
+        // source no longer exists (the seed-20260833764 shape).
+        expect(transformPatch(base, committedInFrame, [{ op: 'move', from: '/foo', path: '/w' }])).toEqual([]);
+        // Array-index destination: inserted, then moved back out by the mirror — net zero.
+        expectFramesConverge(
+          { y: 'v', x: [1, 2, 3] },
+          [{ op: 'move', from: '/y', path: '/x/1' }],
+          [{ op: 'move', from: '/y', path: '/z' }]
+        );
+      });
+
+      it('a queue remove of a committed move-in source still clobbers the move destination', () => {
+        const base = { y: 'v', foo: 'old' };
+        const { queueOnServer, committedInFrame } = expectFramesConverge(
+          base,
+          [{ op: 'move', from: '/y', path: '/foo' }],
+          [{ op: 'remove', path: '/y' }]
+        );
+        expect(queueOnServer).toEqual([{ op: 'remove', path: '/foo' }]);
+        expect(committedInFrame).toEqual([{ op: 'remove', path: '/foo' }]);
+        // Array-index destination: inserted, and the mirror's follow-on remove takes it out.
+        expect(
+          transformPatch(
+            obj,
+            [{ op: 'remove', path: '/y' }],
+            [{ op: 'move', from: '/y', path: '/x/1' }],
+            undefined,
+            true
+          )
+        ).toEqual([]);
+        // Default direction is untouched: the queue move never happened on the server.
+        expect(transformPatch(obj, [{ op: 'remove', path: '/y' }], [{ op: 'move', from: '/y', path: '/foo' }])).toEqual(
+          []
+        );
+      });
+
+      it('a queue copy the mirror killed leaves a ghost-kill of its destination', () => {
+        // The committed remove ran first, so the copy never happened on the server; the frame
+        // must lose the ghost the queue left at the destination (the seed-10 shape).
+        const base = { y: { n: 1 } };
+        const { queueOnServer, committedInFrame } = expectFramesConverge(
+          base,
+          [{ op: 'remove', path: '/y' }],
+          [{ op: 'copy', from: '/y', path: '/foo' }]
+        );
+        expect(queueOnServer).toEqual([]);
+        expect(committedInFrame).toEqual([
+          { op: 'remove', path: '/foo' },
+          { op: 'remove', path: '/y' },
+        ]);
+        expect(transformPatch(base, committedInFrame, [{ op: 'move', from: '/foo', path: '/w' }])).toEqual([]);
+        // Killed by a committed hard set at the source.
+        expect(
+          transformPatch(
+            obj,
+            [{ op: 'copy', from: '/y', path: '/foo' }],
+            [{ op: 'replace', path: '/y', value: 1 }],
+            undefined,
+            true
+          )
+        ).toEqual([
+          { op: 'remove', path: '/foo' },
+          { op: 'replace', path: '/y', value: 1 },
+        ]);
+        // Followed through a committed same-source move, then killed.
+        expect(
+          transformPatch(
+            obj,
+            [{ op: 'copy', from: '/y', path: '/foo' }],
+            [
+              { op: 'move', from: '/y', path: '/z' },
+              { op: 'remove', path: '/z' },
+            ],
+            undefined,
+            true
+          )
+        ).toEqual([
+          { op: 'remove', path: '/foo' },
+          { op: 'move', from: '/y', path: '/z' },
+          { op: 'remove', path: '/z' },
+        ]);
+        // Array destination: the ghost element goes, and the committed ops stay unshifted.
+        expect(
+          transformPatch(
+            obj,
+            [{ op: 'copy', from: '/y', path: '/x/1' }],
+            [
+              { op: 'remove', path: '/y' },
+              { op: 'replace', path: '/x/3', value: 1 },
+            ],
+            undefined,
+            true
+          )
+        ).toEqual([
+          { op: 'remove', path: '/x/1' },
+          { op: 'remove', path: '/y' },
+          { op: 'replace', path: '/x/3', value: 1 },
+        ]);
+        // A surviving copy still claims its destination as the later writer.
+        expect(
+          transformPatch(
+            obj,
+            [{ op: 'copy', from: '/y', path: '/foo' }],
+            [{ op: 'add', path: '/foo', value: 1 }],
+            undefined,
+            true
+          )
+        ).toEqual([]);
+        // Default direction is untouched.
+        expect(transformPatch(obj, [{ op: 'copy', from: '/y', path: '/foo' }], [{ op: 'remove', path: '/y' }])).toEqual(
+          [{ op: 'remove', path: '/y' }]
+        );
+      });
+
+      it('the copy ghost-kill is gated like the sibling residues', () => {
+        // A soft copy may not have written anything (that depends on state the transform does
+        // not have, and killing a live value is worse than a stale ghost), and a `/-` append has
+        // no addressable index: neither emits a kill.
+        expect(
+          transformPatch(
+            { y: { n: 1 }, foo: { real: 'data' } },
+            [{ op: 'copy', from: '/y', path: '/foo', soft: true }],
+            [{ op: 'remove', path: '/y' }],
+            undefined,
+            true
+          )
+        ).toEqual([{ op: 'remove', path: '/y' }]);
+        expect(
+          transformPatch(
+            obj,
+            [{ op: 'copy', from: '/y', path: '/x/-' }],
+            [{ op: 'remove', path: '/y' }],
+            undefined,
+            true
+          )
+        ).toEqual([{ op: 'remove', path: '/y' }]);
+      });
+
+      it('a ghost-killed object key is not read by the rest of the frame', () => {
+        // Committed ops that read the killed key are re-transformed through the kill so the
+        // frame stays strictly applicable. The shape itself cannot converge: the queue's copy
+        // destroyed foo's original value locally, so nothing can rebuild /z from this side —
+        // the dropped move-in still leaves its own residue at /z (see updateRemovedOps).
+        const base = { y: { n: 1 }, foo: 'old' };
+        const queue: JSONPatchOp[] = [{ op: 'copy', from: '/y', path: '/foo' }];
+        const committed: JSONPatchOp[] = [
+          { op: 'remove', path: '/y' },
+          { op: 'move', from: '/foo', path: '/z' },
+        ];
+        const committedInFrame = transformPatch(base, queue, committed, undefined, true);
+        expect(committedInFrame).toEqual([
+          { op: 'remove', path: '/foo' },
+          { op: 'remove', path: '/y' },
+          { op: 'remove', path: '/z' },
+        ]);
+        expect(() =>
+          applyPatch(applyPatch(base, queue, { strict: true }), committedInFrame, { strict: true })
+        ).not.toThrow();
+      });
     });
 
     it('an earlier set at a later move source carries a ghost-kill for the move destination', () => {

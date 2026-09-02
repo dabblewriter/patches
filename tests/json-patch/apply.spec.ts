@@ -414,3 +414,31 @@ describe('applyPatch', () => {
     });
   });
 });
+
+describe('move failure messages (DAB-1236)', () => {
+  // A missing object-key source used to fall through to the internal add and surface as
+  // "[op:add] require value, but got undefined" — the wrong op and the wrong path, which sent
+  // a whole investigation looking at add. The array branch named the destination instead of
+  // the source it was actually checking.
+  it('names the move and its missing object-key source', () => {
+    expect(() => applyPatch({ a: { b: 1 } }, [{ op: 'move', from: '/a/c', path: '/a/d' }], { strict: true })).toThrow(
+      '[op:move] path not found: /a/c'
+    );
+  });
+
+  it('names the out-of-range source index, not the destination', () => {
+    expect(() =>
+      applyPatch({ arr: [1, 2], x: 0 }, [{ op: 'move', from: '/arr/5', path: '/x' }], { strict: true })
+    ).toThrow('[op:move] invalid array index: /arr/5');
+  });
+
+  it('a failed move leaves the source untouched when not strict', () => {
+    // The source key is no longer deleted before the failure is reported: the op is skipped
+    // whole. A key that is present but undefined is the one shape where that is observable.
+    const base = { a: { b: 1, c: undefined } };
+    const result = applyPatch(base, [{ op: 'move', from: '/a/c', path: '/a/d' }], { silent: true });
+    expect(result).toEqual({ a: { b: 1 } });
+    expect('c' in result.a).toBe(true);
+    expect('d' in result.a).toBe(false);
+  });
+});

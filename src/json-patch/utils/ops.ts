@@ -1,7 +1,7 @@
 import type { JSONPatchOp, State } from '../types.js';
 import { getTypeLike } from './getType.js';
 import { log } from './log.js';
-import { isArrayPath } from './paths.js';
+import { isArrayPath, isEntangled } from './paths.js';
 import { updateArrayIndexes } from './updateArrayIndexes.js';
 
 /**
@@ -117,10 +117,7 @@ export function updateRemovedOps(
   const isComposableSet = (op: JSONPatchOp) =>
     op.op === 'add' ||
     op.op === 'replace' ||
-    ((op.op === 'copy' || op.op === 'move') &&
-      !!op.from &&
-      !op.from.startsWith(`${thisPath}/`) &&
-      !thisPath.startsWith(`${op.from}/`));
+    ((op.op === 'copy' || op.op === 'move') && !!op.from && !isEntangled(op.from, thisPath));
 
   /** Does `op` touch the superseded copy/move source (invalidating by-reference composition)? */
   const touchesSource = (op: JSONPatchOp): boolean => {
@@ -215,9 +212,7 @@ export function updateRemovedOps(
           const composedOp = superseded.op === 'move' && opLike === 'move' && owedRemove ? 'move' : 'copy';
           composed = { op: composedOp, from: superseded.from, path: op.path };
         }
-        const entangled =
-          composed?.from &&
-          (composed.path.startsWith(`${composed.from}/`) || composed.from.startsWith(`${composed.path}/`));
+        const entangled = composed?.from && isEntangled(composed.from, composed.path);
         if (composed && !entangled) {
           const result: JSONPatchOp[] = [];
           // A composed move/copy back onto its own source is a no-op — emit only the edits,
@@ -239,7 +234,16 @@ export function updateRemovedOps(
       if (opLike === 'move') {
         // We need the rest of the otherOps to be adjusted against this "move"
         breakAfter();
-        return emit(transformRemove(state, op.path, otherOps.slice(index + 1)));
+        const rest = transformRemove(state, op.path, otherOps.slice(index + 1));
+        // otherOpsFirst with thisPath simply removed (no thisOp): the committed move-in ran
+        // BEFORE the removal, so on the server it clobbered its destination and the mirror
+        // follows the removal on to that destination. The frame must record the clobber, or
+        // later queue entries still see the old value there (DAB-1236). Object keys only —
+        // an array-index move-in inserted, and the mirror's follow-on removal takes it back out.
+        if (state.otherOpsFirst && !thisOp && isHardSet(state, op, op.path)) {
+          return emit([{ op: 'remove', path: op.path }, ...rest]);
+        }
+        return emit(rest);
       } else if (opLike === 'copy') {
         // We need future ops on the copied object to be removed
         breakAfter();

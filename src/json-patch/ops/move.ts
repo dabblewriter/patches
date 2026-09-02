@@ -24,12 +24,17 @@ export const move: JSONPatchOpHandler = {
     if (Array.isArray(target)) {
       const index = toArrayIndex(target, lastKey);
       if (index < 0 || target.length <= index) {
-        return `[op:move] invalid array index: ${path}`;
+        return `[op:move] invalid array index: ${from}`;
       }
       value = target[index];
       pluckWithShallowCopy(state, keys, true).splice(index, 1);
     } else {
       value = target[lastKey];
+      // Name the real failure: a missing object key used to surface from the internal add as
+      // "[op:add] require value, but got undefined", blaming the wrong op and path.
+      if (value === undefined) {
+        return `[op:move] path not found: ${from}`;
+      }
       delete pluckWithShallowCopy(state, keys, true)[lastKey];
     }
 
@@ -95,7 +100,21 @@ export const move: JSONPatchOpHandler = {
         breakAfter();
         const rest = inputOps.slice(index + 1);
         if (otherOp.path === path) return rest.map(protectOp); // identical move — frames already agree
-        return move.transform(state, { op: 'move', from: otherOp.path, path }, rest).map(protectOp);
+        const mapped = move.transform(state, { op: 'move', from: otherOp.path, path }, rest).map(protectOp);
+        // Dropping the committed move must not forget what it did to its DESTINATION: on the
+        // server it clobbered whatever lived there before the mirror carried the value on to
+        // `path`, so in this frame that value is gone too. Record the clobber, or later queue
+        // entries are transformed against a frame where it still exists and commit ops that
+        // fail strict apply everywhere they replay (DAB-1236). Only an object-key move-in
+        // clobbers; an array-index move-in inserted, and the mirror's follow-on move takes the
+        // element back out (net zero). Entangled paths (one inside the other) are left alone:
+        // the queue move's own clobber already covers them.
+        const dest = otherOp.path;
+        const entangled = dest.startsWith(`${path}/`) || path.startsWith(`${dest}/`);
+        if (!entangled && isHardSet(state, otherOp, dest)) {
+          return [protectOp({ op: 'remove', path: dest }), ...mapped];
+        }
+        return mapped;
       }
       if (mirrorKiller?.op === otherOp) {
         if (mirrorKiller.kind === 'move') {
@@ -308,10 +327,16 @@ interface MirrorKiller {
  * killers (`isHardSet` excludes them); a literal `replace` overwrites even at an array index.
  * Exact-path set detection keeps parity with the pre-DAB-601 rule (array-path sources excluded)
  * so in-place @-ops continue to ride the move. An exact remove of the un-followed source is not
- * a killer here: the plain translation path already follows it to the destination, which kills
- * the ghost naturally.
+ * a killer for a move: the plain translation path already follows it to the destination, which
+ * kills the ghost naturally. A COPY has no such translation (`copy.transform` never follows the
+ * source), so it asks for `exactRemoveKills` to treat that remove as the kill it is.
  */
-function findMirrorKiller(state: State, otherOps: JSONPatchOp[], from: string): MirrorKiller | undefined {
+export function findMirrorKiller(
+  state: State,
+  otherOps: JSONPatchOp[],
+  from: string,
+  exactRemoveKills = false
+): MirrorKiller | undefined {
   let src = from;
   let followedMove: JSONPatchOp | undefined;
   for (const op of otherOps) {
@@ -335,7 +360,8 @@ function findMirrorKiller(state: State, otherOps: JSONPatchOp[], from: string): 
     const kills =
       exactKill ||
       (op.path && src.startsWith(op.path + '/') && isHardSet(state, op, op.path)) ||
-      (opLike === 'remove' && (src.startsWith(op.path + '/') || (op.path === src && src !== from)));
+      (opLike === 'remove' &&
+        (src.startsWith(op.path + '/') || (op.path === src && (src !== from || exactRemoveKills))));
     if (kills) {
       return followedMove ? { op: followedMove, kind: 'move' } : { op, kind: 'set' };
     }

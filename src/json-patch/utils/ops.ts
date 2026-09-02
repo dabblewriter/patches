@@ -239,7 +239,16 @@ export function updateRemovedOps(
       if (opLike === 'move') {
         // We need the rest of the otherOps to be adjusted against this "move"
         breakAfter();
-        return emit(transformRemove(state, op.path, otherOps.slice(index + 1)));
+        const rest = transformRemove(state, op.path, otherOps.slice(index + 1));
+        // otherOpsFirst with thisPath simply removed (no thisOp): the committed move-in ran
+        // BEFORE the removal, so on the server it clobbered its destination and the mirror
+        // follows the removal on to that destination. The frame must record the clobber, or
+        // later queue entries still see the old value there (DAB-1236). Object keys only —
+        // an array-index move-in inserted, and the mirror's follow-on removal takes it back out.
+        if (state.otherOpsFirst && !thisOp && isHardSet(state, op, op.path)) {
+          return emit([{ op: 'remove', path: op.path }, ...rest]);
+        }
+        return emit(rest);
       } else if (opLike === 'copy') {
         // We need future ops on the copied object to be removed
         breakAfter();

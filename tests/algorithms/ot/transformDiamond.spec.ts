@@ -34,6 +34,17 @@ function replayStrict(base: any, ...changeSets: Change[][]): any {
   return state;
 }
 
+/** Several committed changes (a chain), each walked through the queue in order. */
+function diamondChain(committedOpsList: ChangeInput['ops'][], queueOps: ChangeInput['ops'][]) {
+  const committed = committedOpsList.map((ops, i) => ({ ...createChange(i, i + 1, ops), id: `A${i + 1}` }));
+  const queue = queueOps.map((ops, i) => ({ ...createChange(0, 0, ops), id: `B${i + 1}` }));
+
+  const serverCommitted = transformIncomingChanges(queue, committed, committed.length);
+  const clientRebased = rebaseChanges(committed, queue);
+
+  return { committed, serverCommitted, clientRebased };
+}
+
 function diamond(base: any, committedOps: ChangeInput['ops'], queueOps: ChangeInput['ops'][]) {
   const committed = [{ ...createChange(0, 1, committedOps), id: 'A1' }];
   const queue = queueOps.map((ops, i) => ({ ...createChange(0, 0, ops), id: `B${i + 1}` }));
@@ -134,5 +145,68 @@ describe('DAB-601 — advance/mirror diamond agreement for queue moves', () => {
 
     expect(clientRebased.map(c => c.ops)).toEqual(serverCommitted.map(c => c.ops));
     expect(replayStrict(base, committed, clientRebased)).toEqual({ q: { w: 5 } });
+  });
+});
+
+/**
+ * DAB-1236 — frame erasure. The walk threads ONE advanced committed-ops value through the whole
+ * queue, so it is also the frame every LATER queue entry is transformed against. When a queue
+ * entry supersedes a committed op, dropping that op wholesale erased what it still did on the
+ * server — the next queue move whose source sat on that path then committed untransformed,
+ * pointing at nothing, and failed strict apply on every replay (the nightly soak's red class).
+ */
+describe('DAB-1236 — dropped committed ops keep their destructive residue in the frame', () => {
+  it('a same-source annihilation still clobbers the committed destination (seed 20260833764 shape)', () => {
+    const base = { sections: { s29: { name: 'theirs' }, m6: { name: 'mine' } } };
+    const { committed, serverCommitted, clientRebased } = diamondChain(
+      [
+        [{ op: 'move', from: '/sections/s29', path: '/sections/m0' }],
+        [{ op: 'move', from: '/sections/m0', path: '/sections/m2' }],
+        // Lands ON the queue's m6: "mine" is clobbered on the server here.
+        [{ op: 'move', from: '/sections/m2', path: '/sections/m6' }],
+        [{ op: 'move', from: '/sections/m6', path: '/sections/m18' }],
+      ],
+      [
+        // Same source as the first hop: the queue wins the value's final home, and the walk used
+        // to drop each hop from the frame without its clobber.
+        [{ op: 'move', from: '/sections/s29', path: '/sections/m40' }],
+        // Its source died at the third hop; it used to commit byte-identical, pointing at nothing.
+        [{ op: 'move', from: '/sections/m6', path: '/sections/m0' }],
+      ]
+    );
+    const expected = { sections: { m40: { name: 'theirs' } } };
+
+    expect(replayStrict(base, committed, serverCommitted)).toEqual(expected);
+    expect(serverCommitted.map(c => c.ops)).toEqual([[{ op: 'move', from: '/sections/m18', path: '/sections/m40' }]]);
+    expect(clientRebased.map(c => c.ops)).toEqual(serverCommitted.map(c => c.ops));
+    expect(replayStrict(base, committed, clientRebased)).toEqual(expected);
+  });
+
+  it('a queue copy killed by a committed remove is ghost-killed in the frame (seed 10 shape)', () => {
+    const base = { sections: { m4: { name: 'a' } }, tags: ['t0'] };
+    const { committed, serverCommitted, clientRebased } = diamondChain(
+      [[{ op: 'remove', path: '/sections/m4' }]],
+      [
+        [
+          { op: 'move', from: '/sections/m4', path: '/sections/c2' },
+          { op: 'add', path: '/tags/0', value: 'x' },
+        ],
+        // The copy's source is gone on the server, so the copy never happened there; the frame
+        // used to keep the ghost at k19.
+        [
+          { op: 'copy', from: '/sections/c2', path: '/sections/k19' },
+          { op: 'replace', path: '/sections/k19/name', value: 'k' },
+        ],
+        // Used to commit untransformed against the ghost.
+        [{ op: 'move', from: '/sections/k19', path: '/sections/m23' }],
+        [{ op: 'replace', path: '/sections/m23/name', value: 'z' }],
+      ]
+    );
+    const expected = { sections: {}, tags: ['x', 't0'] };
+
+    expect(replayStrict(base, committed, serverCommitted)).toEqual(expected);
+    expect(serverCommitted.map(c => c.ops)).toEqual([[{ op: 'add', path: '/tags/0', value: 'x' }]]);
+    expect(clientRebased.map(c => c.ops)).toEqual(serverCommitted.map(c => c.ops));
+    expect(replayStrict(base, committed, clientRebased)).toEqual(expected);
   });
 });

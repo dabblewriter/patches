@@ -56,6 +56,8 @@
  *   FUZZ_ITERATIONS=500 npm test -- tests/fuzz/convergence.spec.ts            # OT soak
  *   FUZZ_ALGO=lww FUZZ_ITERATIONS=500 npm test -- tests/fuzz/convergence.spec.ts
  *   FUZZ_ITERATIONS=500 FUZZ_SEED=42000 npm test -- tests/fuzz/convergence.spec.ts
+ *   FUZZ_RICH=1 FUZZ_ITERATIONS=500 npm test -- tests/fuzz/convergence.spec.ts  # rich edit mix
+ *   FUZZ_FAULTS=1 FUZZ_ITERATIONS=500 npm test -- tests/fuzz/convergence.spec.ts # substrate faults
  *
  * (soak seeds are FUZZ_SEED..FUZZ_SEED+N-1, default base 1000000). A found bug should be
  * captured as a pinned `it.skip` with its seed and divergence notes, not fixed in the same
@@ -91,11 +93,13 @@ function otConfigFromSeed(seed: number): OTFuzzConfig {
     moveOps: true,
     // DAB-601: richer edit mix (compound move+array changes, copies, nested containers) —
     // a CONSTANT, not an rng.pick: drawing here would shift the config-derivation sequence
-    // and change every existing seed's derived knobs. OFF until the class it exposes is
-    // fixed: ~6% of rich-mix seeds commit a compound change whose move source a concurrent
-    // commit consumed (surfacing as "[op:add] require value" from move.apply's pluck) — the
-    // FINDING-1 family reached through multi-op changes. See OT_RICH_PANEL_SEEDS for the CI
-    // coverage that stays on, and the NEW-FINDING skip for the repro.
+    // and change every existing seed's derived knobs. The class that first kept it off (~6% of
+    // rich seeds committing a compound move whose source a concurrent commit consumed — frame
+    // erasure, DAB-1236) is fixed; a 20,000-seed rich soak now fails only ~1 in 5,000, all one
+    // remaining rich-only class (an edit inside a subtree the queue copied, minted against the
+    // pre-commit content — see the NEW-FINDING pins). It stays OFF in derived configs until
+    // that class is fixed, so the nightly stays green on real findings; OT_RICH_PANEL_SEEDS
+    // keeps the CI coverage on and FUZZ_RICH=1 runs the soak with it.
     richOps: false,
     // Phase 3 substrate faults (see faultInjection.ts) — CONSTANTS for the same reason as
     // richOps: a draw here would shift every existing seed's derived knobs. Off in derived
@@ -214,6 +218,11 @@ const LWW_FAULT_PANEL_SEEDS = [
   1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 1000008, 1000009,
 ];
 
+// Rich-mix CI coverage (DAB-601): screened-green seeds run the extended edit mix (compound
+// move+array changes, copy ops, nested containers) so the new kinds stay exercised while
+// `richOps` is off in derived configs (see otConfigFromSeed).
+const OT_RICH_PANEL_SEEDS = [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 1000008, 1000009];
+
 // Substrate-fault CI coverage (Phase 3): screened-green seeds run with store/backend fault
 // injection armed (see faultInjection.ts) so the fault paths stay exercised while faults are
 // off in derived configs. Two of these seeds are fixed findings, kept as regressions:
@@ -225,11 +234,6 @@ const LWW_FAULT_PANEL_SEEDS = [
 const OT_FAULT_PANEL_SEEDS = [
   1000000, 1000001, 1000002, 1000126, 1000212, 1000228, 1000275, 1000319, 1000003, 1000004, 1000005,
 ];
-
-// Rich-mix CI coverage (DAB-601): screened-green seeds run the extended edit mix (compound
-// move+array changes, copy ops, nested containers) so the new kinds stay exercised while
-// `richOps` is off in derived configs (see otConfigFromSeed).
-const OT_RICH_PANEL_SEEDS = [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 1000008, 1000009];
 
 describe('convergence fuzz — OT panel', () => {
   for (const seed of OT_PANEL_SEEDS) {
@@ -244,61 +248,75 @@ describe('convergence fuzz — OT panel', () => {
     }, 30_000);
   }
 
+  // Repro-era knobs: these seeds were screened and fixed with the rich mix off (see
+  // otConfigFromSeed), so it is pinned off here to keep each script byte-identical.
   for (const seed of OT_FAULT_PANEL_SEEDS) {
     it(`converges under substrate faults (seed ${seed})`, async () => {
-      await runOTFuzz(seed, { clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
+      await runOTFuzz(seed, { richOps: false, clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
     }, 30_000);
   }
 
-  // NEW-FINDING (nightly soak, DAB-1236): the consumed-source class needs NEITHER faults NOR
-  // the rich mix — this seed runs the plain derived config (clientStoreFailP 0,
-  // serverBackendFailP 0, richOps false) and still commits a move whose source a concurrent
-  // commit consumed. The two pins below both require a special mode to reach it (faults for
-  // seed 1000393, the rich mix for seed 10), which made the class look more exotic than it is;
-  // this one is ordinary co-authoring: concurrent moves + duplicate delivery + an offline batch.
-  //
-  // Shape: c0 goes offline holding `move /sections/m6 -> m0` while c1 walks the SAME subtree
-  // through a chain of committed single-op moves (m0 -> m2 -> m6 -> m18 -> m40 -> m21) and
-  // flushes first. c0 reconnects and flushes 14 queued changes; the transformed rev 52 points at
-  // a source that no longer exists and fails strict apply on delivery as
-  // "[op:add] require value, but got undefined" — `move.apply` plucks `undefined` from the
-  // object parent (only the ARRAY branch bounds-checks) and hands it to its internal add, so the
-  // error names the wrong op. Guarding that would fix the message, not the divergence: the
-  // transform should not have emitted the move.
-  //
-  // Suspected: `findMirrorKiller` follows `op.from === src` within ONE transform call, but this
-  // relocation chain spans several committed changes, so no single call sees m6's whole path.
-  // Unverified — see DAB-1236.
-  //
-  // This is why the nightly soak has been red every night since 2026-08-14 (patches#95): the
-  // pins keep the CI panel green, but the soak explores fresh date-derived seeds and keeps
-  // rediscovering the class. It stays red until the class is fixed.
-  it.skip('NEW-FINDING: chained offline-batch moves commit a consumed-source move with NO faults (seed 20260833764)', async () => {
-    await runOTFuzz(20260833764);
-  }, 30_000);
+  // NEW-FINDING (rich soak run while fixing DAB-1236 — the 2026-09-03 nightly window with the
+  // rich mix on, 4 of 20,000 seeds): a committed `remove .../meta/pins/0` fails strict replay
+  // on an EMPTY pins list under a copied section (`/sections/k*`). Fails at main with and
+  // without the DAB-1236 fix, so it is a different class. Read from the seed-20260914563
+  // script: the queue copies a section and then unpins inside the copy, while a commit that
+  // landed between the copy's base and its flush had already unpinned inside the SOURCE. On
+  // the server the copy runs after that commit and takes the shorter list, but the queue's
+  // unpin was minted against the longer one and is never re-rooted through the copy. Pinned
+  // per the suite convention; not root-caused in the transform here.
+  // Repro: FUZZ_RICH=1 FUZZ_SEED=<seed> FUZZ_ITERATIONS=1 npm test -- tests/fuzz/convergence.spec.ts
+  for (const seed of [20260911522, 20260914563, 20260917731, 20260919064]) {
+    it.skip(`NEW-FINDING: an edit inside a copied subtree outruns the copy's source (seed ${seed}, rich mix)`, async () => {
+      await runOTFuzz(seed, { richOps: true });
+    }, 30_000);
+  }
 
-  // NEW-FINDING (post-torn-reload-fix soak): the transform-layer consumed-source class is
-  // reachable WITHOUT the rich mix — a chain of plain single-op `move` changes inside one
-  // offline batch (session-timeout path), transformed against concurrent commits, produces a
-  // committed move whose source an earlier leg consumed. Fails strict apply on delivery as
-  // "[op:add] require value, but got undefined" — the same family as the seed-10 compound
-  // pin above, via a different mint shape, so fixing the compound case must cover chained
-  // batches too. Repro: FUZZ_FAULTS=1 FUZZ_SEED=1000393 FUZZ_ITERATIONS=1 (faults only
-  // shape the interleaving; the poison commit itself is the server transform's).
-  it.skip('NEW-FINDING: chained offline-batch moves commit a consumed-source move (seed 1000393, faults)', async () => {
-    await runOTFuzz(1000393, { clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
-  }, 30_000);
+  // NEW-FINDING (fault soak run while fixing DAB-1236 — seeds 1000000-1001999 with faults): three
+  // seeds fail at main with and without the DAB-1236 fix, so they are a different class. Not
+  // root-caused; pinned per the suite convention so the seeds are not lost.
+  // - 1000358: SILENT divergence — P1, c0's live doc state diverges from the server head.
+  // - 1001528: committed "[op:add] invalid array index: /tags/8" wedges strict replay.
+  // - 1001636: committed "[op:replace] invalid array index: /tags/2" wedges strict replay.
+  // Repro: FUZZ_FAULTS=1 FUZZ_SEED=<seed> FUZZ_ITERATIONS=1 npm test -- tests/fuzz/convergence.spec.ts
+  // (repro-era knobs: found with the rich mix off).
+  for (const seed of [1000358, 1001528, 1001636]) {
+    it.skip(`NEW-FINDING: array-index poison / silent divergence under substrate faults (seed ${seed})`, async () => {
+      await runOTFuzz(seed, { richOps: false, clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
+    }, 30_000);
+  }
 
-  // NEW-FINDING (DAB-601 harness extension, day one): with the rich mix on, ~6% of soak
-  // seeds commit a compound change whose `move` source a concurrent commit already consumed.
-  // Strict replay fails inside move.apply — the plucked source is undefined and surfaces as
-  // "[op:add] require value, but got undefined" from the move's internal add. PRE-EXISTING
-  // (reproduces with the DAB-601 src fixes stashed); the single-op mix could never mint the
-  // shape. Pinned per the suite convention (found bugs are pinned, not fixed, in the PR that
-  // changes the fuzzer). More repro seeds: 1000017, 1000021, 1000025 (+56 more per 1000).
-  it.skip('NEW-FINDING: compound move with consumed source commits and wedges strict replay (seed 10, rich mix)', async () => {
+  // DAB-1236 regressions (fixed): the "consumed-source move" class. The server's advance walk
+  // threads ONE committed-ops value through the queue; when a queue entry superseded a
+  // committed op the walk dropped it wholesale, and every LATER queue entry was transformed
+  // against a frame missing what that op still did on the server — a clobbered move
+  // destination, or a copy whose destination never came to exist. The next queue move whose
+  // source sat on that path then committed untransformed, pointing at nothing, and failed
+  // strict apply on every replay ("[op:add] require value, but got undefined", from move.apply's
+  // pluck — it now names the move and the missing source). Dropped ops leave their destructive
+  // residue in the frame now (move.transform, copy.transform, updateRemovedOps). Repro-era knobs
+  // are pinned so each script stays byte-identical to the original finding.
+  //
+  // Seed 20260833764 (nightly soak, plain derived config — no faults, no rich mix): c0 goes
+  // offline holding `move /sections/m6 -> m0` while c1 walks the same subtree through a chain
+  // of committed single-op moves whose third hop lands ON m6; c0's earlier queued same-source
+  // move annihilated that hop in the frame, erasing the clobber. Fails without the fix.
+  it('DAB-1236 regression: a same-source annihilation keeps its destination clobber (seed 20260833764)', async () => {
+    await runOTFuzz(20260833764, { richOps: false });
+  }, 60_000);
+
+  // Seed 1000393 (fault soak): the chained-offline-batch shape of the same class. It already
+  // converged at HEAD before this fix — kept for the shape's coverage, not as a discriminating pin.
+  it('DAB-1236 regression: chained offline-batch moves converge under faults (seed 1000393)', async () => {
+    await runOTFuzz(1000393, { richOps: false, clientStoreFailP: 0.04, serverBackendFailP: 0.04 });
+  }, 60_000);
+
+  // Seed 10 (rich mix): a compound `copy` whose source a committed remove had already consumed
+  // died in the mirror, but the frame kept the ghost it left at the copy destination, and the
+  // next queue move of that ghost committed untransformed. Fails without the fix.
+  it('DAB-1236 regression: a mirror-killed copy is ghost-killed in the frame (seed 10, rich mix)', async () => {
     await runOTFuzz(10, { richOps: true });
-  }, 30_000);
+  }, 60_000);
 
   // FINDING-1 regression (fixed): a client's `move` whose source path was concurrently
   // moved/removed used to be committed pointing at a path that no longer existed, producing
@@ -445,16 +463,24 @@ describe.runIf(FUZZ_SEED !== undefined && FUZZ_ITERATIONS === 0)('convergence fu
 // FUZZ_FAULTS=1 runs the soak with substrate faults armed (both harnesses). Rates are
 // deliberately low: a fault on ~1 in 25 substrate calls perturbs plenty of
 // flushes/applies per run without starving the scenario of successful traffic.
+// FUZZ_RICH=1 runs the OT soak with the rich edit mix on (off in derived configs, see
+// otConfigFromSeed); the two modifiers combine.
 const FUZZ_FAULTS = process.env.FUZZ_FAULTS === '1';
+const FUZZ_RICH = process.env.FUZZ_RICH === '1';
 const FAULT_OVERRIDES = { clientStoreFailP: 0.04, serverBackendFailP: 0.04 };
+const OT_SOAK_OVERRIDES: Partial<OTFuzzConfig> = {
+  ...(FUZZ_FAULTS ? FAULT_OVERRIDES : {}),
+  ...(FUZZ_RICH ? { richOps: true } : {}),
+};
+const SOAK_LABEL = [FUZZ_FAULTS && 'faults', FUZZ_RICH && 'rich'].filter(Boolean).join(', ');
 
 describe.runIf(FUZZ_ITERATIONS > 0)('convergence fuzz — soak', () => {
   const base = FUZZ_SEED ?? 1_000_000;
   for (let i = 0; i < FUZZ_ITERATIONS; i++) {
     const seed = base + i;
-    it(`soak ${FUZZ_ALGO} seed ${seed}${FUZZ_FAULTS ? ' (faults)' : ''}`, async () => {
+    it(`soak ${FUZZ_ALGO} seed ${seed}${SOAK_LABEL ? ` (${SOAK_LABEL})` : ''}`, async () => {
       if (FUZZ_ALGO === 'lww') await runLWWFuzz(seed, FUZZ_FAULTS ? FAULT_OVERRIDES : {});
-      else await runOTFuzz(seed, FUZZ_FAULTS ? FAULT_OVERRIDES : {});
+      else await runOTFuzz(seed, OT_SOAK_OVERRIDES);
     }, 60_000);
   }
 });

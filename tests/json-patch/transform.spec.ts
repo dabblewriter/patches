@@ -1671,6 +1671,52 @@ describe('transformPatch', () => {
           [{ op: 'remove', path: '/y' }]
         );
       });
+
+      it('the copy ghost-kill is gated like the sibling residues', () => {
+        // A soft copy may not have written anything (that depends on state the transform does
+        // not have, and killing a live value is worse than a stale ghost), and a `/-` append has
+        // no addressable index: neither emits a kill.
+        expect(
+          transformPatch(
+            { y: { n: 1 }, foo: { real: 'data' } },
+            [{ op: 'copy', from: '/y', path: '/foo', soft: true }],
+            [{ op: 'remove', path: '/y' }],
+            undefined,
+            true
+          )
+        ).toEqual([{ op: 'remove', path: '/y' }]);
+        expect(
+          transformPatch(
+            obj,
+            [{ op: 'copy', from: '/y', path: '/x/-' }],
+            [{ op: 'remove', path: '/y' }],
+            undefined,
+            true
+          )
+        ).toEqual([{ op: 'remove', path: '/y' }]);
+      });
+
+      it('a ghost-killed object key is not read by the rest of the frame', () => {
+        // Committed ops that read the killed key are re-transformed through the kill so the
+        // frame stays strictly applicable. The shape itself cannot converge: the queue's copy
+        // destroyed foo's original value locally, so nothing can rebuild /z from this side —
+        // the dropped move-in still leaves its own residue at /z (see updateRemovedOps).
+        const base = { y: { n: 1 }, foo: 'old' };
+        const queue: JSONPatchOp[] = [{ op: 'copy', from: '/y', path: '/foo' }];
+        const committed: JSONPatchOp[] = [
+          { op: 'remove', path: '/y' },
+          { op: 'move', from: '/foo', path: '/z' },
+        ];
+        const committedInFrame = transformPatch(base, queue, committed, undefined, true);
+        expect(committedInFrame).toEqual([
+          { op: 'remove', path: '/foo' },
+          { op: 'remove', path: '/y' },
+          { op: 'remove', path: '/z' },
+        ]);
+        expect(() =>
+          applyPatch(applyPatch(base, queue, { strict: true }), committedInFrame, { strict: true })
+        ).not.toThrow();
+      });
     });
 
     it('an earlier set at a later move source carries a ghost-kill for the move destination', () => {

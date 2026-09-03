@@ -33,7 +33,19 @@ const textOf = (state: any) => {
  * `len(previous insert)` too far, minted while the author's own previous change was in
  * flight. These drive OTDoc through that window and check what the author's editor would
  * have seen — because the retain is computed from the view, a view that double-applies the
- * author's own change produces a "correct" op at a wrong offset.
+ * author's own change produces a "correct" op at a wrong offset. It does not: this client is
+ * eliminated as the producer, and that negative result is most of why these are here.
+ *
+ * What each case is worth, measured by mutation rather than assumed — the two are not the
+ * same, and only one of these is a regression pin:
+ *
+ * - `queued keystrokes survive an echo batched with a foreign change` FAILS when the
+ *   own-change splice in `rebaseChanges` is removed. That is the regression pin.
+ * - `keystrokes queued during the in-flight window…` fails only when BOTH the splice and
+ *   `isPureEcho` are broken, because either guard alone already closes the window.
+ * - the two view cases did not fail under any of those mutations. They document the
+ *   invariant — the author's own change appears exactly once — rather than guarding the
+ *   echo path, and are kept on that basis, not as regression coverage.
  */
 describe('OTDoc — own change echoing back must not shift the view or queued ops', () => {
   const BASE = 'x'.repeat(20);
@@ -80,10 +92,19 @@ describe('OTDoc — own change echoing back must not shift the view or queued op
 
     doc.applyChanges([makeChange('c1', 1, 2, first, true)]); // echo lands
 
+    // Asserted BEFORE the text, deliberately. Both assertions fail together when the window
+    // breaks, and the text one reports an anonymous diff ("…ABCDE\nFG\n" vs "…ABCDEFG\n") while
+    // this one names the shape being guarded. Whichever runs first is the message a maintainer
+    // actually reads.
+    //
+    // Note this case does NOT fail on any single-guard regression: the window is protected
+    // twice and either guard alone suffices. With `isPureEcho` true, `_rebaseOptimisticOps` is
+    // never called, so the splice is never reached; disable `isPureEcho` and `rebaseChanges`
+    // splices `c1` out anyway, because it is still in `_pendingChanges`. The case below is the
+    // one that bites on a single break — see its note.
+    expect((second[0].value as any[])[0].retain).toBe(25);
     expect(textOf(doc.state)).toBe(`${BASE}ABCDEFG
 `);
-    // The queued op must still target 25 — a shift to 30 is the DAB-1064 signature.
-    expect((second[0].value as any[])[0].retain).toBe(25);
   });
 
   it('queued keystrokes survive an echo batched with a foreign change', () => {
@@ -97,9 +118,28 @@ describe('OTDoc — own change echoing back must not shift the view or queued op
     const foreign = txt([{ insert: 'Z' }]);
     doc.applyChanges([makeChange('c1', 1, 2, first, true), makeChange('other', 2, 3, foreign, true)]);
 
+    // THIS is the case that carries the regression value. A foreign change in the batch makes
+    // `isPureEcho` false, so `_rebaseOptimisticOps` runs for real and the own-change splice in
+    // `rebaseChanges` is the only thing standing between the queued op and a double-count.
+    // Disable that splice alone and this fails with the corrupted-text shape.
+    //
+    // The discriminating assertion is 26 rather than 31: it separates "correctly rebased by a
+    // remote change" (shifted by the foreign insert, 1 char) from "doubled by our own"
+    // (shifted by `first`'s insert, 5 chars). A test that only asserted "not 25" would pass
+    // under the bug.
+    expect((second[0].value as any[])[0].retain).toBe(26);
     expect(textOf(doc.state)).toBe(`Z${BASE}ABCDEFG
 `);
-    // Foreign insert at 0 legitimately shifts us by 1 — to 26, never 31.
-    expect((second[0].value as any[])[0].retain).toBe(26);
   });
+
+  // The one shape in this window that WOULD double-count, and the shape the consumer-side
+  // telemetry is now hunting: an echo whose id matches no pending change. `rebaseChanges`
+  // splices our own change out by id, so an echo arriving after its pending entry has already
+  // been dropped is indistinguishable from a foreign change — and the queued ops get
+  // transformed against our own insert, shifting them by exactly its length.
+  //
+  // Left as a todo rather than a test because reaching that state through the public surface
+  // needs a pending-queue divergence this spec has no honest way to construct; forcing it by
+  // mutating internals would pin the mock, not the behaviour.
+  it.todo('unrecognized echo: an echo matching no pending change must not shift queued ops');
 });

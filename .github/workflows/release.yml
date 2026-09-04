@@ -1,0 +1,73 @@
+name: Release
+
+# Conventional commits on main drive the whole release. release-please keeps a
+# single open "release PR" carrying the computed version + changelog; merging it
+# tags, creates the GitHub release, and publishes to npm.
+#
+# Feature PRs must NOT bump the version — see docs/releases.md. The bump lives
+# only in the release PR, which is why two branches landing the same day can no
+# longer claim the same version.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      # The org's release bot, so the release PR and the tag are attributed to
+      # an app rather than to github-actions[bot] (which cannot satisfy the
+      # "unattributed changes" rule on main).
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+  publish:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      # Build from the tag, not from main: main may already have moved on.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Configure npm
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > .npmrc
+
+      # A rotated or read-only NPM_TOKEN is the likeliest reason this job ever
+      # fails, and `npm publish`'s own error for it is easy to misread. Fail
+      # here instead, before spending a build on it.
+      - name: Check the npm token is live
+        run: |
+          if ! npm whoami; then
+            echo "::error::NPM_TOKEN cannot authenticate to npm. It is probably expired or rotated." \
+                 "Mint a granular token with publish access to @dabble/patches and update the repo secret," \
+                 "then re-run this job — the tag and GitHub release already exist, so nothing is lost."
+            exit 1
+          fi
+
+      # `prepare` builds dist/ on install, and again on publish.
+      - run: npm ci
+
+      - name: Publish to npm
+        run: npm publish

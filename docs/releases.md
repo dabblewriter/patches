@@ -33,15 +33,18 @@ collide over until the release PR is cut.
 Write [conventional commits](https://www.conventionalcommits.org/). That is the
 whole contract:
 
-| Commit subject                                  | Effect on the next release          |
-| ----------------------------------------------- | ----------------------------------- |
-| `fix: …`                                        | patch — `0.30.1` → `0.30.2`         |
-| `feat: …`                                       | minor — `0.30.1` → `0.31.0`         |
-| `feat!: …` / `BREAKING CHANGE:` footer          | minor while below 1.0.0 (see below) |
-| `chore: …`, `test: …`, `refactor: …`, `docs: …` | none — no release is cut            |
+| Commit subject                                           | Effect on the next release          |
+| -------------------------------------------------------- | ----------------------------------- |
+| `fix: …`                                                 | patch — `0.30.1` → `0.30.2`         |
+| `feat: …`                                                | minor — `0.30.1` → `0.31.0`         |
+| `feat!: …` / `BREAKING CHANGE:` footer                   | minor while below 1.0.0 (see below) |
+| `chore: …`, `test: …`, `refactor: …`, `docs: …`, `ci: …` | none — no release is cut            |
 
 A PR of nothing but `test:` and `chore:` commits produces no release PR at all.
 That is correct: there is nothing for a consumer to install.
+
+⚠️ **Use `ci:` for workflow-only changes, not `fix(ci):`.** release-please reads
+the _type_, not the scope, so `fix(ci):` is a `fix` and cuts a patch release — it happened in quill-ui, which ended up with a release carrying nothing but a workflow change. Harmless, but it puts a meaningless entry in the consumer-facing changelog.
 
 ### Pre-1.0 breaking changes
 
@@ -83,13 +86,47 @@ prevent.
 
 ### If the publish fails
 
-The tag and the GitHub release already exist, so nothing is lost. Fix the cause
-and **re-run the failed job** — do not cut a new version.
+The tag and the GitHub release already exist, so nothing is lost — the version
+just has no tarball yet. Fix the cause, then republish that same tag:
 
-The likeliest cause is `NPM_TOKEN`. The job runs `npm whoami` before building so
-an expired or rotated token fails immediately with that diagnosis rather than
-halfway through a publish. Mint a granular token with publish access to
-`@dabble/patches` and update the repo secret.
+**Actions → Release → Run workflow → tag = `vX.Y.Z`**
+
+That path skips release-please entirely and publishes the tag you name. It is
+safe to run twice: if the version turns out to be on npm already, the job says
+so and exits clean.
+
+> ⚠️ **Do not use "Re-run all jobs" on the failed run.** release-please is
+> idempotent but not repeatable — on a second run it finds the release already
+> cut, reports `release_created: false`, and the publish job is _skipped_ rather
+> than retried. You then can't "re-run failed jobs" either, because nothing
+> failed. ("Re-run failed jobs" on the original run does work, because it reuses
+> the successful release-please job's outputs — but "Run workflow" above is the
+> path that always works.)
+
+Never cut a new version to work around a failed publish.
+
+**Backfilling an old tag is safe.** npm points `latest` at whatever was published
+most recently, not at the highest version, so republishing an older tag once a newer one is already out would otherwise drag
+`latest` backwards. The job detects that and publishes the older version under a
+`backfill` dist-tag instead. You can also just skip it: a newer tag's tarball
+already contains everything the older one did, and a release with no tarball
+costs nothing but tidiness.
+
+The likeliest cause is `NPM_TOKEN`. The job tells three failures apart, because
+npm's own errors do not:
+
+| Symptom                                               | Cause                                                             |
+| ----------------------------------------------------- | ----------------------------------------------------------------- |
+| `npm whoami` fails                                    | token expired or rotated                                          |
+| `whoami` prints a name, publish gives `E403` on `PUT` | token authenticates but is **read-only**                          |
+| publish gives `EOTP`                                  | token is a classic **Publish** token — those still prompt for 2FA |
+
+**Token type matters more than the permission checkbox.** A classic _Publish_
+token cannot work unattended on a 2FA account: npm asks it for a one-time
+password, which no CI job can answer. Use a classic **Automation** token or a
+**Granular Access Token** with read+write on `@dabble/patches` — both are designed to
+bypass 2FA. Update the `NPM_TOKEN` repo secret, then republish the tag with Run
+workflow.
 
 ## Consumers
 

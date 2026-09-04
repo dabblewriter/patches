@@ -104,6 +104,34 @@ describe('OTAlgorithm quarantine', () => {
       await store.savePendingChanges(DOC, [badPredecessor, named]);
       await expect(algorithm.verifyPendingChange(DOC, 'named')).resolves.toBe(true);
     });
+
+    it('still corroborates when the un-appliable predecessor is on an OLDER frame (DAB-1028)', async () => {
+      const { store, algorithm } = await setup();
+      // Same un-appliable predecessor as above, but minted a frame behind (baseRev 0): a lagging
+      // context that was never in the named change's frame. It must not be folded into the probe
+      // — treating it as un-reconstructable frame made a genuinely poisoned doc uncorroborable,
+      // so it could never auto-eject and simply stayed latched, silently.
+      const straggler: Change = {
+        id: 'straggler',
+        rev: 2,
+        baseRev: 0,
+        ops: [{ op: 'replace', path: '/s/a/b', value: 1 }],
+        createdAt: 0,
+        committedAt: 0,
+      };
+      const named: Change = {
+        id: 'named',
+        rev: 3,
+        baseRev: 1,
+        ops: [{ op: 'replace', path: '/s/x/y', value: 1 }],
+        createdAt: 0,
+        committedAt: 0,
+      };
+      await store.savePendingChanges(DOC, [straggler, named]);
+      // The named change descends through the same string primitive, so on its OWN frame it is
+      // genuinely un-appliable: false, and PatchesSync may auto-eject it.
+      await expect(algorithm.verifyPendingChange(DOC, 'named')).resolves.toBe(false);
+    });
   });
 
   describe('ejectPendingChange', () => {

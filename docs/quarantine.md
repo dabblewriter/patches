@@ -103,8 +103,8 @@ survive and flush next. No rebasing; LWW pending is path-keyed.
 frame the changes before it produce — so ejecting one change from the middle can't be a plain
 splice: its successors were built on top of it and must be rebased into the frame that skips
 it. `computePendingEjection` (`src/algorithms/ot/shared/ejectPendingChange.ts`) inverts the
-ejected change against the state it applied to (committed + predecessors) and walks that
-inverse through the successors with the same one-sided diamond `rebaseChanges` runs for an
+ejected change against the state it applied to (committed + its in-frame predecessors) and
+walks that inverse through the successors with the same one-sided diamond `rebaseChanges` runs for an
 incoming server change — the ejected change genuinely preceded them, so its inverse is the
 "already-happened" side their position ties yield to. Predecessors are untouched; survivors
 are renumbered contiguously off `committedRev`, preserving the pending invariant (all
@@ -119,8 +119,22 @@ the benign null ("nothing matched"): an app running the consent flow must be abl
 resolved eject from a doc still wedged behind the change. In practice this means an
 un-appliable poison with successors cannot be ejected (only quarantined-at-tail poisons
 skip the invert); a queue in that state needs snapshot-reload recovery instead.
-`verifyPendingChange` probes the named change in its own frame (committed + predecessors),
-not committed-only.
+`verifyPendingChange` probes the named change in its own frame (committed + its in-frame
+predecessors), not committed-only.
+
+"In-frame" is load-bearing on both, and it is `reconstructMintFrame`
+(`src/algorithms/ot/shared/applyChanges.ts`) that enforces it. A queue neighbour minted a frame
+behind — the mint/rebase race `OTAlgorithm._withConsistentBaseRev` defers at the flush seam —
+came from a lagging context the named change never saw, and its ops were never transformed
+across the committed span it missed, so strict-applying it to the committed state can fail on
+its own. Folding such a row in took the whole ejection down with it: a throw on the last-resort
+path, with nothing behind it to recover, and on the auto path a doc that could never corroborate
+and so stayed latched silently (DAB-1028). Predecessors on a different `baseRev` are therefore
+skipped, exactly as the inverse walk skips successors on one. This excuses frame debt, not
+corruption — an in-frame predecessor that will not strict-apply still throws, because the frame
+genuinely cannot be reconstructed. And when the named change is ITSELF the straggler, its true
+frame is unreachable (the span it missed is already collapsed into committed state), so it is
+probed against the closest available frame and a miss lands on the same throw-and-latch path.
 
 Caveat on the "never silently drops content" guarantee below: it covers the ejected change
 (preserved in quarantine). A _successor_ whose edits were scoped to structure the ejected

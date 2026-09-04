@@ -174,3 +174,42 @@ export function applyChangesForReconstruction<T>(state: T, changes: Change[], op
   }
   return state;
 }
+
+/**
+ * Rebuild the committed-plus-predecessors frame one pending change was minted against.
+ *
+ * The queue is a sequential program, so the change at `index` was expressed on top of the
+ * changes before it — but only the ones that were actually IN ITS FRAME. A neighbour minted a
+ * frame behind (an older `baseRev` — the mint/rebase race `OTAlgorithm._withConsistentBaseRev`
+ * defers at the flush seam) came from a lagging context this change never saw, so its ops are
+ * not part of this change's frame and must not be applied here. That is the same rule
+ * `computePendingEjection` already applies on the other side of the queue, where the inverse
+ * walk skips successors on a different `baseRev`.
+ *
+ * Filtering is what keeps the frame reconstructable at all. Applying an older-frame row to the
+ * committed state is not merely off-model — it can throw, because that row's ops were never
+ * transformed across the committed span it missed (a `remove /items/3` that was valid at its
+ * own baseRev is out of range now). Strict-applying it took the whole ejection down with it,
+ * latching the quarantine path with nothing behind it to recover (DAB-1028).
+ *
+ * Note the bound on what this reconstructs: `committedState` is the CURRENT committed frame, so
+ * when the named change is itself the straggler its own frame is unreachable — the committed
+ * span it missed is already collapsed into local state, exactly as
+ * `OTAlgorithm._rebasePendingPreservingFrameDebt` documents. This returns the best available
+ * approximation there; callers still probe the change against it and treat a miss as "cannot
+ * safely act", which is the documented latch.
+ *
+ * @param committedState Committed-only doc state.
+ * @param pending        The full ordered pending queue.
+ * @param index          Index of the change whose mint frame is wanted.
+ * @returns The state that change was minted against.
+ * @throws {ApplyChangesError} When an in-frame predecessor fails strict apply — a genuinely
+ *   corrupt queue, not the frame-debt case above.
+ */
+export function reconstructMintFrame<T>(committedState: T, pending: Change[], index: number): T {
+  const { baseRev } = pending[index];
+  return applyChanges(
+    committedState,
+    pending.slice(0, index).filter(change => change.baseRev === baseRev)
+  );
+}

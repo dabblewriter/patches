@@ -2,7 +2,7 @@ import { createChange } from '../../../data/change.js';
 import { applyPatch } from '../../../json-patch/applyPatch.js';
 import { invertPatch } from '../../../json-patch/invertPatch.js';
 import type { Change } from '../../../types.js';
-import { applyChanges } from './applyChanges.js';
+import { reconstructMintFrame } from './applyChanges.js';
 import { rebaseChanges } from './rebaseChanges.js';
 
 export interface PendingEjection {
@@ -105,10 +105,12 @@ export function computePendingEjection(
     // the invert path below.)
     rebasedAfter = [];
   } else {
-    // The state the poison applied to = committed state advanced through its predecessors.
-    // invertPatch reads each op's prior value (e.g. the base Delta of a `@txt` op) from this
-    // state, so it must be the exact frame the poison was minted against.
-    const preState = applyChanges(committedState, before);
+    // The state the poison applied to = committed state advanced through the predecessors that
+    // were in its frame. invertPatch reads each op's prior value (e.g. the base Delta of a
+    // `@txt` op) from this state, so it must be the exact frame the poison was minted against —
+    // which is why a predecessor from a lagging context is filtered out rather than applied
+    // (DAB-1028; the same rule the successor filter below applies). See reconstructMintFrame.
+    const preState = reconstructMintFrame(committedState, pending, index);
     // invertPatch's contract requires ops that apply to the state it reads from. On a
     // mismatched poison it doesn't reliably throw: a one-level miss (e.g. `replace /arr/5`
     // over a 3-element array) reads `undefined` silently and fabricates an inverse for an

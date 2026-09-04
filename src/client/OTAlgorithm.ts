@@ -1,6 +1,6 @@
 import { signal } from 'easy-signal';
 import { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
-import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
+import { reconstructMintFrame } from '../algorithms/ot/shared/applyChanges.js';
 import { breakChanges } from '../algorithms/ot/shared/changeBatching.js';
 import { computePendingEjection, LossyEjectionError } from '../algorithms/ot/shared/ejectPendingChange.js';
 import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
@@ -432,13 +432,15 @@ export class OTAlgorithm implements ClientAlgorithm {
     if (!snapshot) return true;
     const index = snapshot.changes.findIndex(change => change.id === changeId);
     if (index === -1) return true;
-    // Reconstruct the frame the named change was minted in. If a PREDECESSOR won't strict-apply,
-    // we can't build that frame — so we can't corroborate the server's suspicion about THIS
-    // change. Fail toward true (don't auto-eject; the doc latches for app consent), never toward
-    // a false that would auto-discard a change we couldn't probe.
+    // Reconstruct the frame the named change was minted in — in-frame predecessors only, so a
+    // straggler from a lagging context can't fail a probe it was never part of (DAB-1028). If an
+    // in-frame PREDECESSOR won't strict-apply, we can't build that frame — so we can't
+    // corroborate the server's suspicion about THIS change. Fail toward true (don't auto-eject;
+    // the doc latches for app consent), never toward a false that would auto-discard a change we
+    // couldn't probe.
     let preState;
     try {
-      preState = applyChanges(snapshot.state, snapshot.changes.slice(0, index));
+      preState = reconstructMintFrame(snapshot.state, snapshot.changes, index);
     } catch {
       return true;
     }
@@ -509,7 +511,7 @@ export class OTAlgorithm implements ClientAlgorithm {
         if (index === -1) return null;
         let preState;
         try {
-          preState = applyChanges(snapshot.state, snapshot.changes.slice(0, index));
+          preState = reconstructMintFrame(snapshot.state, snapshot.changes, index);
         } catch {
           return null;
         }

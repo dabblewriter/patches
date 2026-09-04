@@ -502,3 +502,70 @@ describe('computePendingEjection frame debt (DAB-951)', () => {
     }
   });
 });
+
+/**
+ * The PREDECESSOR half of the same frame-debt rule, which the block above only covers on the
+ * successor side. A row minted a frame behind was never in the poison's frame, so it must not be
+ * folded into the state the inverse is read from. Strict-applying it there took the whole
+ * ejection down with it — on the quarantine path, the last resort, with nothing behind it to
+ * recover (DAB-1028).
+ */
+describe('computePendingEjection frame debt — predecessors (DAB-1028)', () => {
+  const committed = { items: ['a', 'b', 'c'], x: 0 };
+
+  // Minted at baseRev 3, when /items still had a fourth entry. The committed span it missed
+  // removed that entry, so its ops no longer apply to the CURRENT committed frame — while it
+  // remains a legitimate queue row that the server transforms when it flushes at its true baseRev.
+  const straggler: Change = { ...pending('straggler', 6, [{ op: 'remove', path: '/items/3' }]), baseRev: 3 };
+  const poison = pending('poison', 7, [{ op: 'remove', path: '/items/0' }]);
+  const successor = pending('after', 8, [{ op: 'replace', path: '/items/1', value: 'Y' }]);
+  const queue = [straggler, poison, successor];
+
+  const eject = (changes: Change[]) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      return computePendingEjection(committed, COMMITTED_REV, changes, 'poison');
+    } finally {
+      warn.mockRestore();
+    }
+  };
+
+  it('ejects a poison whose stale predecessor no longer applies to the committed frame', () => {
+    const result = eject(queue);
+    expect(result).not.toBeNull();
+    expect(result!.poison.id).toBe('poison');
+    expect(result!.newPending.map(c => c.id)).toEqual(['straggler', 'after']);
+  });
+
+  it('rides the stale predecessor through untouched, at its true baseRev', () => {
+    const { newPending } = eject(queue)!;
+    const survivor = newPending.find(c => c.id === 'straggler')!;
+    // Predecessors are never walked, so its ops must be byte-identical — and relabeling it onto
+    // committedRev would commit them in a frame they were never transformed into (DAB-951).
+    expect(survivor.ops).toEqual([{ op: 'remove', path: '/items/3' }]);
+    expect(survivor.baseRev).toBe(3);
+    expect(survivor.rev).toBeGreaterThan(COMMITTED_REV);
+  });
+
+  it('rebases the same-frame successor exactly as it would with no straggler in the queue', () => {
+    // The straggler is not in the poison's frame, so its presence must not perturb the inverse
+    // walk: the successor comes out identical either way.
+    const withStraggler = eject(queue)!;
+    const without = eject([poison, successor])!;
+    expect(withStraggler.newPending.find(c => c.id === 'after')!.ops).toEqual(
+      without.newPending.find(c => c.id === 'after')!.ops
+    );
+    // And it is genuinely walked, not just passed through: the poison removed /items/0.
+    expect(without.newPending[0].ops).toEqual([{ op: 'replace', path: '/items/2', value: 'Y' }]);
+  });
+
+  it('still throws when an IN-FRAME predecessor is genuinely un-appliable', () => {
+    // The filter excuses frame debt, not corruption. A predecessor on the poison's own frame that
+    // will not strict-apply means the frame cannot be reconstructed, and the inverse computed
+    // from it could not be trusted — that must stay a throw-and-latch.
+    const broken = pending('broken', 6, [{ op: 'remove', path: '/items/9' }]);
+    expect(() => computePendingEjection(committed, COMMITTED_REV, [broken, poison, successor], 'poison')).toThrow(
+      /Failed to apply change broken/
+    );
+  });
+});

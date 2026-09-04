@@ -108,3 +108,14 @@ After making code changes, always verify that type, lint, and format checks pass
 2. `npm run lint`
 3. `npm run format:check`
 4. `npm run test`
+
+## Releasing
+
+**Never bump the version in a feature PR.** CI fails the PR if you do. Releases
+are cut by release-please: write conventional commits (`fix:` → patch, `feat:` →
+minor, breaking → minor while pre-1.0), merge your PR, and release-please
+maintains a `chore(main): release X.Y.Z` PR on `main`. Merging *that* tags the
+release and publishes to npm automatically — no local `npm publish`.
+
+See `docs/releases.md` for the full flow, how to cut `1.0.0` deliberately, and
+what to do if a publish fails.

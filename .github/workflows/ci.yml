@@ -20,6 +20,21 @@ jobs:
           node-version: 22
           cache: 'npm'
 
+      # Versions are cut only by the release PR (docs/releases.md). A bump in a
+      # feature PR is how two branches used to end up claiming the same version.
+      - name: Guard against a manual version bump
+        if: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please--') }}
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          git show FETCH_HEAD:package.json > /tmp/base-package.json
+          base=$(node -p "require('/tmp/base-package.json').version")
+          head=$(node -p "require('$PWD/package.json').version")
+          if [ "$base" != "$head" ]; then
+            echo "::error file=package.json::Version changed $base → $head. Feature PRs must not bump the version — release-please cuts it in the release PR when this merges. Revert package.json and package-lock.json to $base. See docs/releases.md."
+            exit 1
+          fi
+          echo "Version unchanged ($head)"
+
       - name: Configure npm for private packages
         run: |
           echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > .npmrc

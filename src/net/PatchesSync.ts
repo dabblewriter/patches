@@ -2119,6 +2119,21 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._surfacedDeleteErrors.delete(docId);
     this._terminalDeleteFailures.delete(docId);
     this._updateDocSyncState(docId, undefined);
+    // Wipe the doc's data before dropping its tracking row. `confirmDeleteDoc` alone removes
+    // only the `docs` row; the snapshots, committed history, pending queue and quarantine rows
+    // live in other stores and are reachable only through that row, so every remote delete
+    // used to orphan them for the life of the database — unbounded growth for a client that
+    // sees many remote deletes (DAB-1141). `deleteDoc` is the local-delete wipe (it also
+    // tombstones the row, which the confirm below removes). Best-effort: a wipe the store
+    // refuses must not keep the doc tracked — that is the pre-fix state, not a worse one.
+    try {
+      await algorithm.deleteDoc(docId);
+    } catch (err) {
+      console.warn(
+        `Could not wipe local data for remotely deleted doc ${docId}; its tracking row is still removed:`,
+        err
+      );
+    }
     await algorithm.confirmDeleteDoc(docId);
     // A resumed stream can still replay this doc's pre-delete changes; the gate in
     // `_receiveCommittedChanges` drops them.

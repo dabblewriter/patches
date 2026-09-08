@@ -148,24 +148,43 @@ describe('OTAlgorithm outbox (store-refused changes sent from memory)', () => {
     expect(batch.map(c => c.id)).toEqual(['refused']); // once, from the store
   });
 
-  it('a queued id is not queued twice', () => {
+  it('a queued id is not queued twice — a re-drive that fails again gets the row it already has', () => {
     const refusedOps = type('u');
-    expect(algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused')).not.toBeNull();
-    expect(algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused')).toBeNull();
+    const first = algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused');
+    expect(first).not.toBeNull();
+    expect(algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused')).toBe(first); // still unstored
     expect(algorithm.queueUnstoredChange('doc1', [], doc, {}, 'empty')).toBeNull();
     expect(algorithm.queueUnstoredChange('doc1', refusedOps, undefined, {}, 'no-doc')).toBeNull();
     expect(algorithm.listUnstoredChanges('doc1').map(c => c.id)).toEqual(['refused']);
   });
 
-  it('accepts rows minted by another context as they stand, deduped by id', async () => {
+  it('refuses to queue an entry the doc no longer holds (confirmed through another path meanwhile)', () => {
+    const gone = type('u');
+    doc.applyChanges([createChange(5, 6, gone)]); // local confirm shifted it out of the optimistic queue
+    expect(algorithm.queueUnstoredChange('doc1', gone, doc, {}, 'late')).toBeNull();
+    expect(algorithm.hasUnstoredChanges('doc1')).toBe(false);
+  });
+
+  it('accepts rows minted by another context, deduped by id, and sends them only beside the rows they were expressed over', async () => {
+    // The follower expressed this row on top of the shared store's pending row P (frame 4).
+    const stored = createChange(4, 6, [{ op: 'add', path: '/items/-', value: 'p' }], {}, 'stored');
+    await store.savePendingChanges('doc1', [stored]);
     const foreign = createChange(4, 9, [{ op: 'add', path: '/items/-', value: 'f' }], {}, 'from-follower');
     expect(algorithm.acceptUnstoredChanges('doc1', [foreign, foreign])).toBe(1);
     expect(algorithm.acceptUnstoredChanges('doc1', [foreign])).toBe(0);
 
-    const batch = (await algorithm.getPendingToSend('doc1'))!;
+    // With P still pending: one batch, P first, the accepted row behind it at its own frame.
+    let batch = (await algorithm.getPendingToSend('doc1'))!;
+    expect(batch.map(c => c.id)).toEqual(['stored', 'from-follower']);
+    expect(batch[1]).toMatchObject({ baseRev: 4, ops: foreign.ops });
+    expect(batch[1].ops).not.toBe(foreign.ops);
+
+    // P committed (the queue drained): sent alone at ITS OWN baseRev the server would transform
+    // it against P again, so it is re-minted at this instance's committed frame instead.
+    await store.applyServerChanges('doc1', [{ ...stored, rev: 6, committedAt: 1 }], [], 6);
+    batch = (await algorithm.getPendingToSend('doc1'))!;
     expect(batch).toHaveLength(1);
-    expect(batch[0]).toMatchObject({ id: 'from-follower', baseRev: 4, ops: foreign.ops }); // its own frame
-    expect(batch[0].ops).not.toBe(foreign.ops);
+    expect(batch[0]).toMatchObject({ id: 'from-follower', baseRev: 6, ops: foreign.ops });
   });
 
   it('collectUnsyncedForDiscard includes outbox rows (content the user can still see)', async () => {
@@ -187,6 +206,51 @@ describe('OTAlgorithm outbox (store-refused changes sent from memory)', () => {
 
     const batch = (await algorithm.getPendingToSend('doc1'))!; // no open doc any more
     expect(batch[0]).toMatchObject({ id: 'refused', baseRev: 6, ops: [{ op: 'add', path: '/items/-', value: 'u' }] });
+    expect(algorithm.listUnstoredChanges('doc1')[0].baseRev).toBe(6); // frozen rows keep their frame
+  });
+
+  it('walks live rows through the committed tail before a rebuild-from-store import, so the ops go out in the new frame', async () => {
+    // Doc at rev 5 with items [a]; an outbox row inserts at /items/1 (after a) in that frame.
+    let refusedOps: any[] = [];
+    const off = doc.onChange(ops => (refusedOps = ops));
+    doc.change(patch => patch.add('/items/1', 'u'));
+    off();
+    algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused');
+    // A torn earlier apply: the store took rev 6 (an insert at 0) that memory never applied.
+    await store.applyServerChanges(
+      'doc1',
+      [{ ...createChange(5, 6, [{ op: 'add', path: '/items/0', value: 'Z' }]), committedAt: 1 }],
+      [],
+      5
+    );
+    // Rev 7 arrives misaligned for the doc: it rebuilds from the store (an import).
+    await algorithm.applyServerChanges(
+      'doc1',
+      [{ ...createChange(6, 7, [{ op: 'add', path: '/other', value: 1 }]), committedAt: 1 }],
+      doc
+    );
+    expect(doc.committedRev).toBe(7);
+
+    const [sent] = (await algorithm.getPendingToSend('doc1', doc))!;
+    // Re-minted at 7 WITH the path transformed across rev 6 (Z landed at 0, so u's slot moved
+    // to 2), not the raw /items/1 the import would re-apply: every other client sees Z, a, u.
+    expect(sent).toMatchObject({ id: 'refused', baseRev: 7, ops: [{ op: 'add', path: '/items/2', value: 'u' }] });
+    expect(doc.state).toEqual({ items: ['Z', 'a', 'u'], other: 1 });
+  });
+
+  it("walks live rows through a snapshot reload's reconciled tail as well", async () => {
+    let refusedOps: any[] = [];
+    const off = doc.onChange(ops => (refusedOps = ops));
+    doc.change(patch => patch.add('/items/1', 'u'));
+    off();
+    algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused');
+    await store.savePendingChanges('doc1', [createChange(5, 6, [{ op: 'add', path: '/x', value: 1 }], {}, 'p')]);
+
+    // The reload's reconcile: committed 6 (an insert at 0) that this doc never received.
+    await algorithm.reconcilePending('doc1', [
+      { ...createChange(5, 6, [{ op: 'add', path: '/items/0', value: 'Z' }]), committedAt: 1 },
+    ]);
+    expect(refusedOps).toEqual([{ op: 'add', path: '/items/2', value: 'u' }]); // the live array moved
   });
 
   it('noteUnstoredCommitted from another context drops the row and tells the doc', () => {

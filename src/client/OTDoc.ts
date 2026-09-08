@@ -146,11 +146,14 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
    * `OTAlgorithm.queueUnstoredChange` when the store has refused the entry's persist and the
    * change will be sent from memory instead. `ops` must be the entry's own array (the reference
    * `change()` emitted and the optimistic queue holds), so rebases stay shared and the echo can
-   * find the entry to confirm.
+   * find the entry to confirm. Returns whether the entry is still held — an array that has left
+   * the queue (a write confirmed through another path while the last attempt timed out) takes
+   * no mark, and the caller must queue nothing for it.
    */
-  _markUnstored(id: string, ops: JSONPatchOp[]): void {
-    if (!this._optimisticOps.includes(ops)) return;
+  _markUnstored(id: string, ops: JSONPatchOp[]): boolean {
+    if (!this._optimisticOps.includes(ops)) return false;
     this._unstored.set(id, ops);
+    return true;
   }
 
   /**

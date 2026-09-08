@@ -183,15 +183,19 @@ export class OTAlgorithm implements ClientAlgorithm {
 
       // The store took a row the outbox was carrying (a retrySavingChanges re-drive under the
       // same stable id): the pending row is now the copy that gets sent and confirmed, so the
-      // outbox copy must go before the local confirm below shifts the entry — or the row goes
-      // out twice in one batch and the doc keeps an outbox id for an entry it no longer holds.
-      if (id) {
-        this._removeOutboxRows(docId, [id]);
-        (doc as OTDoc<T> | undefined)?._forgetUnstored(id);
-      }
-
-      if (doc) {
-        (doc as OTDoc<T>).applyChanges(changes);
+      // outbox copy must go — or the row goes out twice in one batch. Retired AFTER the local
+      // confirm, in a finally: if applyChanges throws, the doc still holds the entry, and an
+      // outbox that had already forgotten the row would leave nothing to resend it while the
+      // next store rebuild re-applied the entry on top of the committed copy.
+      try {
+        if (doc) {
+          (doc as OTDoc<T>).applyChanges(changes);
+        }
+      } finally {
+        if (id) {
+          this._removeOutboxRows(docId, [id]);
+          (doc as OTDoc<T> | undefined)?._forgetUnstored(id);
+        }
       }
 
       return changes;
@@ -244,7 +248,10 @@ export class OTAlgorithm implements ClientAlgorithm {
     // against committed changes that are not the sender's own — so a pending row that has
     // already committed (resent here, deduped there) is walked out of the transform set
     // untouched rather than applied to the outbox row a second time. Sent alone it would be.
-    const toSend = [...pending, ...this._outboxToSend(docId, otDoc, pending, committedRev)];
+    // Without an open doc the committed frame comes from the store — only read when the
+    // outbox has rows to place, so the ordinary send path stays store-read-free here.
+    const outboxRev = otDoc || !this.hasUnstoredChanges(docId) ? committedRev : await this.store.getCommittedRev(docId);
+    const toSend = [...pending, ...this._outboxToSend(docId, otDoc, pending, outboxRev)];
     if (toSend.length === 0) return null;
     return this._withConsistentBaseRev(docId, toSend);
   }
@@ -274,12 +281,17 @@ export class OTAlgorithm implements ClientAlgorithm {
   ): Change | null {
     if (ops.length === 0 || !doc) return null;
     const rows = this._outbox.get(docId) ?? [];
-    if (rows.some(row => row.change.id === id)) return null;
+    // Already queued (a re-drive that failed again): still unstored, still on its way.
+    const queued = rows.find(row => row.change.id === id);
+    if (queued) return queued.change;
     const otDoc = doc as OTDoc<T>;
+    // The entry must still be held: a write that landed and was confirmed through another
+    // path while the last attempt was timing out has left the queue, and a row for it would
+    // carry the id onto the wire a second time.
+    if (!otDoc._markUnstored(id, ops)) return null;
     const change = this._mintOutboxChange(otDoc, ops, metadata, id, rows.length);
     rows.push({ change, ops, doc: otDoc, metadata });
     this._outbox.set(docId, rows);
-    otDoc._markUnstored(id, ops);
     return change;
   }
 
@@ -303,12 +315,12 @@ export class OTAlgorithm implements ClientAlgorithm {
     return accepted;
   }
 
-  /** The outbox rows for a doc as they would go on the wire now (copies). */
+  /** The outbox rows for a doc as they stand now (copies); frozen rows keep their own frame. */
   listUnstoredChanges(docId: string): Change[] {
     const rows = this._outbox.get(docId);
     if (!rows?.length) return [];
     const doc = rows.find(row => row.doc)?.doc;
-    return this._outboxToSend(docId, doc, [], doc?.committedRev ?? 0);
+    return this._outboxToSend(docId, doc, [], undefined);
   }
 
   hasUnstoredChanges(docId: string): boolean {
@@ -327,15 +339,71 @@ export class OTAlgorithm implements ClientAlgorithm {
    * transforms from there.
    */
   detachUnstoredChanges<T extends object>(docId: string, doc: PatchesDoc<T>): void {
-    const rows = this._outbox.get(docId);
-    if (!rows?.length) return;
-    const otDoc = doc as OTDoc<T>;
-    for (const row of rows) {
-      if (row.doc !== otDoc) continue;
-      row.change = { ...row.change, baseRev: otDoc.committedRev, ops: [...(row.ops ?? row.change.ops)] };
-      delete row.ops;
-      delete row.doc;
+    this._freezeOutboxRows(docId, doc as OTDoc<T>);
+  }
+
+  /** Freeze every live row of `doc` at the frame it is in now (see {@link _freezeOutboxRow}). */
+  private _freezeOutboxRows(docId: string, doc: OTDoc<any>): void {
+    for (const row of this._outbox.get(docId) ?? []) if (row.doc === doc) this._freezeOutboxRow(row, doc);
+  }
+
+  /**
+   * Walk the live outbox rows of `doc` through a committed tail the doc is about to jump over
+   * without the contiguous receive path (a rebuild from the store, a snapshot reload). The
+   * rows' arrays are the doc's own optimistic entries, so — exactly like _rebaseOptimisticOps —
+   * they are rewritten IN PLACE, threaded behind the doc's pending queue, so both the doc's
+   * view (the import re-applies them raw) and the next re-mint are in the new frame. Rows
+   * whose ops transform away are emptied (the send skips them). `frameRev` is the committed
+   * frame the rows sit on; `tail` defaults to the store's committed changes past it. If the
+   * tail cannot be read the rows are frozen at `frameRev` instead: an honest baseRev the
+   * server transforms from, never a re-mint in a frame the ops are not in.
+   */
+  private async _rebaseOutboxRows(docId: string, doc: OTDoc<any>, frameRev: number, tail?: Change[]): Promise<void> {
+    const rows = (this._outbox.get(docId) ?? []).filter(row => row.doc === doc && row.ops);
+    if (rows.length === 0) return;
+    let committed = tail;
+    if (!committed) {
+      try {
+        committed = this.store.listChanges ? await this.store.listChanges(docId, { startAfter: frameRev }) : undefined;
+      } catch {
+        committed = undefined;
+      }
     }
+    if (!committed) {
+      for (const row of rows) this._freezeOutboxRow(row, doc);
+      return;
+    }
+    committed = committed.filter(c => c.rev > frameRev);
+    if (committed.length === 0) return;
+    const tag = `outbox-${Math.random().toString(36).slice(2)}`;
+    const synthetic: Change[] = rows.map((row, i) => ({
+      id: `${tag}-${i}`,
+      ops: row.ops!,
+      rev: 0,
+      baseRev: 0,
+      createdAt: 0,
+      committedAt: 0,
+    }));
+    const rebased = rebaseChanges(committed, [...doc.getPendingChanges(), ...synthetic]);
+    const opsById = new Map(rebased.map(c => [c.id, c.ops]));
+    rows.forEach((row, i) => {
+      const next = [...(opsById.get(`${tag}-${i}`) ?? [])];
+      row.ops!.length = 0;
+      row.ops!.push(...next);
+    });
+  }
+
+  /**
+   * Stop re-minting a row from its doc: copy the live ops as they stand and stamp the doc's
+   * committedRev as the row's true baseRev. From here it goes on the wire as it is and the
+   * server transforms it across whatever committed after that frame. The doc keeps its
+   * optimistic entry (and its `_unstored` mark), so the echo still confirms it.
+   */
+  private _freezeOutboxRow(row: OutboxRow, doc: OTDoc<any>): void {
+    if (!row.ops) return;
+    row.change = { ...row.change, baseRev: doc.committedRev, ops: [...row.ops] };
+    delete row.ops;
+    delete row.doc;
   }
 
   /**
@@ -379,11 +447,11 @@ export class OTAlgorithm implements ClientAlgorithm {
     docId: string,
     otDoc: OTDoc<any> | undefined,
     pending: Change[],
-    committedRev: number
+    committedRev: number | undefined
   ): Change[] {
     const rows = this._outbox.get(docId);
     if (!rows?.length) return [];
-    let rev = pending[pending.length - 1]?.rev ?? committedRev;
+    let rev = pending[pending.length - 1]?.rev ?? committedRev ?? 0;
     const out: Change[] = [];
     for (const row of rows) {
       if (row.ops && row.doc) {
@@ -391,6 +459,14 @@ export class OTAlgorithm implements ClientAlgorithm {
         // createdAt is the original mint's: the server's offline-session versioning keys on it.
         const minted = this._mintOutboxChange(row.doc, row.ops, row.metadata ?? {}, row.change.id, 0, rev);
         out.push({ ...minted, createdAt: row.change.createdAt });
+      } else if (pending.length === 0 && committedRev !== undefined) {
+        // A row accepted from another context is only safe in the SAME batch as the store rows
+        // its frame was expressed over: sent alone at its own baseRev after those rows have
+        // committed, the server would transform it against them (they are not this request's
+        // ids) and double-apply their effect (the #145 class). Once the shared queue has drained
+        // those rows are in the committed frame, so the row is re-minted at this instance's
+        // committedRev — the frame it was really expressed in.
+        out.push({ ...row.change, baseRev: committedRev, rev: rev + 1 });
       } else {
         out.push({ ...row.change, rev: rev + 1 });
       }
@@ -571,6 +647,12 @@ export class OTAlgorithm implements ClientAlgorithm {
           // rebuild from the store — the complete, authoritative committed state — the only
           // remaining getDoc in the receive path, paid on the rare path only.
           otDoc._dropUnstored(echoedIds);
+          // import() re-applies the surviving optimistic ops RAW on the new snapshot — it
+          // does not transform them into its frame — so a live outbox row would go out with
+          // ops in the old frame under the new committedRev. Walk the rows through the
+          // committed tail the doc is about to jump over (the store holds it), the way
+          // _rebaseOptimisticOps walks a contiguous receive, so the re-mint is in frame.
+          await this._rebaseOutboxRows(docId, otDoc, otDoc.committedRev);
           const snapshot = await this.loadDoc(docId);
           if (snapshot) otDoc.import(snapshot as PatchesSnapshot<T>);
         }
@@ -631,6 +713,11 @@ export class OTAlgorithm implements ClientAlgorithm {
 
   async reconcilePending(docId: string, committedChanges: Change[]): Promise<void> {
     if (committedChanges.length === 0) return;
+    // The snapshot reload that calls this ends in an import that re-applies optimistic ops
+    // raw (see applyServerChanges' misaligned branch): walk the live outbox rows through the
+    // same tail first, so a later re-mint from the doc is in the reloaded frame.
+    const outboxDoc = (this._outbox.get(docId) ?? []).find(row => row.doc)?.doc;
+    if (outboxDoc) await this._rebaseOutboxRows(docId, outboxDoc, committedChanges[0].rev - 1, committedChanges);
     for (let attempt = 0; attempt < APPLY_CONFLICT_RETRIES; attempt++) {
       const pending = await this.store.getPendingChanges(docId);
       if (pending.length === 0) return;

@@ -37,6 +37,12 @@ export interface ClientAlgorithm {
   readonly onError?: Signal<(error: Error, context?: { docId?: string }) => void>;
 
   /**
+   * Optional: outbox rows (see {@link queueUnstoredChange}) confirmed committed by their server
+   * echo, carrying the committed copies. `Patches` forwards this as `onUnstoredCommitted`.
+   */
+  readonly onUnstoredCommitted?: Signal<(docId: string, changes: Change[]) => void>;
+
+  /**
    * Creates a doc instance appropriate for this algorithm.
    * OT creates OTDoc, LWW creates LWWDoc.
    *
@@ -74,6 +80,46 @@ export interface ClientAlgorithm {
     metadata: Record<string, any>,
     id?: string
   ): Promise<Change[]>;
+
+  /**
+   * Optional: hand a change the store REFUSED to an in-memory outbox, to be sent on the next
+   * flush behind the store's queue. `Patches` calls this on the exhausted-retry branch of a
+   * persist (and for changes made while that doc's write path is latched) — never on the normal
+   * path, which still writes the store first. `ops` is the entry's own optimistic-queue array and
+   * `id` the stable id the failed persist used, so a later successful persist under it cannot
+   * double-commit. Returns the provisional change, or null when nothing was queued.
+   *
+   * Only OT implements it; an algorithm without it keeps refused changes memory-only until the
+   * app retries.
+   */
+  queueUnstoredChange?<T extends object>(
+    docId: string,
+    ops: JSONPatchOp[],
+    doc: PatchesDoc<T> | undefined,
+    metadata: Record<string, any>,
+    id: string
+  ): Change | null;
+
+  /**
+   * Optional: accept outbox rows minted by another context (a tab that cannot send), deduped by
+   * id, to go out with this instance's next flush as they stand. Returns the number accepted.
+   */
+  acceptUnstoredChanges?(docId: string, changes: Change[]): number;
+
+  /** Optional: the outbox rows for a doc as they would go on the wire now (copies). */
+  listUnstoredChanges?(docId: string): Change[];
+
+  /** Optional: drop every outbox row for a doc (its optimistic queue was rolled back). */
+  discardUnstoredChanges?(docId: string): void;
+
+  /** Optional: an open doc is closing — freeze its outbox rows in their current frame. */
+  detachUnstoredChanges?<T extends object>(docId: string, doc: PatchesDoc<T>): void;
+
+  /**
+   * Optional: another context reports outbox rows committed. Rows still queued here are dropped
+   * and any open doc that minted them drops its memory-only entries once its state covers them.
+   */
+  noteUnstoredCommitted?(docId: string, committed: Change[]): void;
 
   /**
    * Lists all changes (committed + pending) for a document.

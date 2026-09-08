@@ -259,6 +259,43 @@ whether the ops were kept for re-submission. There are three classes:
 While a doc is latched, further changes stay applied optimistically (the user's text remains
 visible) but are not persisted; each emits `onError` with `latched: true`.
 
+### Store-refused changes are still sent: the outbox
+
+With the OT algorithm, a change whose persist exhausted its attempts is not only latched — it is
+handed to an in-memory **outbox** and sent to the server on the next flush, behind whatever the
+store's queue holds, under the same stable change id the failed persist used. The store refused the
+change; the server can still take it. `context.unstored` on the `onError` emit says whether that
+happened (`false` for an algorithm without an outbox, such as LWW).
+
+- The outbox is the **failure branch** of the write path, not a bypass of local durability: the
+  store is still written first on every change, and only rows the store never accepted enter the
+  outbox.
+- A row leaves the outbox when its committed echo arrives, when the server resolves it away, or
+  when the store accepts it after all (a `retrySavingChanges` re-drive minting under the same id).
+  The open doc recognises the echo as its own and confirms the memory-only entry exactly once.
+- The outbox is **memory only** — a reload loses it. `onUnstoredQueued` fires with the provisional
+  change so the app can shelve it elsewhere as well.
+
+```typescript
+patches.onUnstoredQueued((docId, change) => {
+  // The store refused this change; it is queued to be sent from memory.
+  shelfSomewhereDurable(docId, change);
+});
+
+patches.onUnstoredCommitted((docId, changes) => {
+  // Outbox rows the server has now committed (their committed copies).
+  telemetry('sync_unstored_sent', { docId, count: changes.length });
+});
+
+patches.listUnstoredChanges(docId); // the rows still queued, as they would go on the wire
+```
+
+**One elected sender.** If only one tab syncs, a non-sending tab cannot flush its own outbox.
+Forward its `onUnstoredQueued` payload to the sender, which calls
+`patches.acceptUnstoredChanges(docId, [change])`; when the sender's `onUnstoredCommitted` fires,
+forward the committed copies back so the minting tab can call
+`patches.noteUnstoredCommitted(docId, changes)` and drop its memory-only entries.
+
 ### Recovering from a latched write path
 
 ```typescript

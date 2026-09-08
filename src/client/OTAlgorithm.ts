@@ -50,9 +50,50 @@ function firstGapIndex(changes: Change[]): number {
  * a pendingTailRev) keeps a foreign tab's mint from being wiped by a rebase. Any tab may mint;
  * the receive-side mutations here run only in the elected writer.
  */
+/**
+ * A change in the outbox: a row the store refused (see {@link OTAlgorithm.queueUnstoredChange})
+ * or one accepted from another context ({@link OTAlgorithm.acceptUnstoredChanges}). `ops` and
+ * `doc` are set only for rows queued from an open doc on this instance: `ops` is the live
+ * optimistic-queue array, so receive-rebases keep the row in frame and it is re-minted from the
+ * doc's pointers at send time; a row without them goes on the wire as `change` stands.
+ */
+interface OutboxRow {
+  change: Change;
+  ops?: JSONPatchOp[];
+  doc?: OTDoc<any>;
+  metadata?: Record<string, any>;
+}
+
 export class OTAlgorithm implements ClientAlgorithm {
   readonly name = 'ot';
   readonly store: OTClientStore;
+
+  /**
+   * Outbox rows committed by the server, keyed on the echo that confirmed them (see
+   * {@link applyServerChanges}). Carries the committed copies — the app reports and, in a
+   * multi-tab deployment, forwards them to the context that minted the row so it can drop its
+   * memory-only entry (`Patches.noteUnstoredCommitted`).
+   */
+  readonly onUnstoredCommitted = signal<(docId: string, changes: Change[]) => void>();
+
+  /**
+   * The outbox: per doc, changes with NO store row that still have to reach the server.
+   *
+   * The send path reads the store (see {@link _collectPending}) because the store is the sole
+   * rev sequencer, and a doc-only copy of a row the store already rebased away must never go on
+   * the wire. A change the store REFUSED is a different thing — there is no store row for it to
+   * conflict with and no rebased copy to duplicate — and until this existed it had exactly one
+   * fate: kept in memory until the tab closed, then gone (the DAB-830 loss pattern; storage
+   * hardening A1). Only rows the store never accepted enter here, only after the persist has
+   * exhausted its bounded retries, and only via {@link queueUnstoredChange} /
+   * {@link acceptUnstoredChanges}. A row leaves when its committed echo arrives
+   * ({@link applyServerChanges}), when the server resolves it away ({@link dropResolvedPending}),
+   * or when the store accepts it after all ({@link handleDocChange} under the same id).
+   *
+   * Memory only, by design: a reload loses the outbox. Nothing here is a second durability
+   * tier — the app's shelf and the server's shelf back it.
+   */
+  private readonly _outbox = new Map<string, OutboxRow[]>();
 
   /**
    * Failures this layer can report but not resolve — currently only
@@ -140,6 +181,15 @@ export class OTAlgorithm implements ClientAlgorithm {
       // Re-stamps each change's rev in place from the persisted tail; the objects below carry it.
       await this.store.savePendingChanges(docId, changes);
 
+      // The store took a row the outbox was carrying (a retrySavingChanges re-drive under the
+      // same stable id): the pending row is now the copy that gets sent and confirmed, so the
+      // outbox copy must go before the local confirm below shifts the entry — or the row goes
+      // out twice in one batch and the doc keeps an outbox id for an entry it no longer holds.
+      if (id) {
+        this._removeOutboxRows(docId, [id]);
+        (doc as OTDoc<T> | undefined)?._forgetUnstored(id);
+      }
+
       if (doc) {
         (doc as OTDoc<T>).applyChanges(changes);
       }
@@ -149,6 +199,7 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async hasPending(docId: string): Promise<boolean> {
+    if (this.hasUnstoredChanges(docId)) return true;
     const pending = await this.store.getPendingChanges(docId);
     return pending.length > 0;
   }
@@ -188,8 +239,176 @@ export class OTAlgorithm implements ClientAlgorithm {
         this.onError.emit(new UnstoredPendingError(docId, fresh), { docId });
       }
     }
-    if (pending.length === 0) return null;
-    return this._withConsistentBaseRev(docId, pending);
+    // Outbox rows ride BEHIND the store queue, in one batch with it: a memory-only change was
+    // expressed on top of the doc's pending rows, and the server transforms a batch member only
+    // against committed changes that are not the sender's own — so a pending row that has
+    // already committed (resent here, deduped there) is walked out of the transform set
+    // untouched rather than applied to the outbox row a second time. Sent alone it would be.
+    const toSend = [...pending, ...this._outboxToSend(docId, otDoc, pending, committedRev)];
+    if (toSend.length === 0) return null;
+    return this._withConsistentBaseRev(docId, toSend);
+  }
+
+  // --- Outbox (store-refused changes sent from memory) ---
+
+  /**
+   * Hand an optimistic entry the store refused to the outbox, to be sent from memory on the next
+   * flush. Called by `Patches` on the exhausted-retry branch of a persist (and for changes made
+   * while that doc's write path is latched), never from the normal path: the store is still
+   * written first on every change, and this only runs once the persist has failed its bounded
+   * attempts. `ops` must be the entry's own array — the reference `change()` emitted, which the
+   * doc's optimistic queue holds — so a receive-rebase keeps the row in frame and the echo can
+   * confirm the entry (see `OTDoc._markUnstored`). `id` is the stable id the failed persist used,
+   * so a later successful persist and resend under it cannot double-commit (server id dedup).
+   *
+   * Returns the provisional change (baseRev = the doc's committedRev now, a rev after its
+   * pending tail; both re-stamped at send time), or null when there is nothing to send (empty
+   * ops, no open doc to mint from, or the id is already queued).
+   */
+  queueUnstoredChange<T extends object>(
+    docId: string,
+    ops: JSONPatchOp[],
+    doc: PatchesDoc<T> | undefined,
+    metadata: Record<string, any>,
+    id: string
+  ): Change | null {
+    if (ops.length === 0 || !doc) return null;
+    const rows = this._outbox.get(docId) ?? [];
+    if (rows.some(row => row.change.id === id)) return null;
+    const otDoc = doc as OTDoc<T>;
+    const change = this._mintOutboxChange(otDoc, ops, metadata, id, rows.length);
+    rows.push({ change, ops, doc: otDoc, metadata });
+    this._outbox.set(docId, rows);
+    otDoc._markUnstored(id, ops);
+    return change;
+  }
+
+  /**
+   * Accept outbox rows minted by ANOTHER context (a follower tab whose store refused them and
+   * that cannot send), to go out with this instance's next flush as they stand — their baseRev is
+   * the frame they were expressed in and the server transforms from there. Deduped by id against
+   * rows already queued. Returns the number accepted.
+   */
+  acceptUnstoredChanges(docId: string, changes: Change[]): number {
+    const rows = this._outbox.get(docId) ?? [];
+    const queued = new Set(rows.map(row => row.change.id));
+    let accepted = 0;
+    for (const change of changes) {
+      if (queued.has(change.id) || change.ops.length === 0) continue;
+      queued.add(change.id);
+      rows.push({ change: { ...change, ops: [...change.ops] } });
+      accepted++;
+    }
+    if (accepted > 0) this._outbox.set(docId, rows);
+    return accepted;
+  }
+
+  /** The outbox rows for a doc as they would go on the wire now (copies). */
+  listUnstoredChanges(docId: string): Change[] {
+    const rows = this._outbox.get(docId);
+    if (!rows?.length) return [];
+    const doc = rows.find(row => row.doc)?.doc;
+    return this._outboxToSend(docId, doc, [], doc?.committedRev ?? 0);
+  }
+
+  hasUnstoredChanges(docId: string): boolean {
+    return (this._outbox.get(docId)?.length ?? 0) > 0;
+  }
+
+  /** Drop every outbox row for a doc (the doc's optimistic queue was rolled back). */
+  discardUnstoredChanges(docId: string): void {
+    this._outbox.delete(docId);
+  }
+
+  /**
+   * The open doc is closing: freeze its rows in the frame they are in now. The live arrays stop
+   * being rebased once the doc is gone, so the rows go on the wire as they stand — still
+   * correct, because their baseRev is the doc's committedRev at this moment and the server
+   * transforms from there.
+   */
+  detachUnstoredChanges<T extends object>(docId: string, doc: PatchesDoc<T>): void {
+    const rows = this._outbox.get(docId);
+    if (!rows?.length) return;
+    const otDoc = doc as OTDoc<T>;
+    for (const row of rows) {
+      if (row.doc !== otDoc) continue;
+      row.change = { ...row.change, baseRev: otDoc.committedRev, ops: [...(row.ops ?? row.change.ops)] };
+      delete row.ops;
+      delete row.doc;
+    }
+  }
+
+  /**
+   * Another context reports outbox rows committed (see {@link onUnstoredCommitted} on the sending
+   * side). Rows this instance still carries are dropped — their content is on the server — and
+   * an open doc drops its memory-only entries once its state covers the committed rev.
+   */
+  noteUnstoredCommitted(docId: string, committed: Change[]): void {
+    if (committed.length === 0) return;
+    const removed = this._removeOutboxRows(
+      docId,
+      committed.map(c => c.id)
+    );
+    for (const row of removed) {
+      const rev = committed.find(c => c.id === row.change.id)?.rev;
+      if (rev !== undefined) row.doc?._noteUnstoredCommitted(row.change.id, rev);
+    }
+  }
+
+  /** Mint an outbox row's wire form from the doc's pointers as they stand. */
+  private _mintOutboxChange(
+    otDoc: OTDoc<any>,
+    ops: JSONPatchOp[],
+    metadata: Record<string, any>,
+    id: string,
+    offset: number,
+    pendingTail?: number
+  ): Change {
+    const pendingChanges = otDoc.getPendingChanges();
+    const tail = pendingTail ?? pendingChanges[pendingChanges.length - 1]?.rev ?? otDoc.committedRev;
+    return createChange(otDoc.committedRev, tail + 1 + offset, [...ops], metadata, id);
+  }
+
+  /**
+   * The outbox rows for a doc in wire order, re-sequenced after `pending`. Rows queued from an
+   * open doc are re-minted from its pointers now (their ops may have been rebased since they
+   * were queued, and their baseRev is wherever the doc's committedRev sits); rows without a doc
+   * go as they stand.
+   */
+  private _outboxToSend(
+    docId: string,
+    otDoc: OTDoc<any> | undefined,
+    pending: Change[],
+    committedRev: number
+  ): Change[] {
+    const rows = this._outbox.get(docId);
+    if (!rows?.length) return [];
+    let rev = pending[pending.length - 1]?.rev ?? committedRev;
+    const out: Change[] = [];
+    for (const row of rows) {
+      if (row.ops && row.doc) {
+        if (row.ops.length === 0) continue; // rebased away; nothing left to send
+        // createdAt is the original mint's: the server's offline-session versioning keys on it.
+        const minted = this._mintOutboxChange(row.doc, row.ops, row.metadata ?? {}, row.change.id, 0, rev);
+        out.push({ ...minted, createdAt: row.change.createdAt });
+      } else {
+        out.push({ ...row.change, rev: rev + 1 });
+      }
+      rev++;
+    }
+    return out;
+  }
+
+  private _removeOutboxRows(docId: string, ids: string[]): OutboxRow[] {
+    const rows = this._outbox.get(docId);
+    if (!rows?.length) return [];
+    const drop = new Set(ids);
+    const removed = rows.filter(row => drop.has(row.change.id));
+    if (removed.length === 0) return [];
+    const kept = rows.filter(row => !drop.has(row.change.id));
+    if (kept.length > 0) this._outbox.set(docId, kept);
+    else this._outbox.delete(docId);
+    return removed;
   }
 
   /**
@@ -210,9 +429,10 @@ export class OTAlgorithm implements ClientAlgorithm {
   async collectUnsyncedForDiscard(docId: string, doc?: PatchesDoc<any>, excludeIds?: Set<string>): Promise<Change[]> {
     const otDoc = doc as OTDoc<any> | undefined;
     const { pending, withheld } = await this._collectPending(docId, otDoc, otDoc?.committedRev ?? 0);
+    const outbox = this._outboxToSend(docId, otDoc, pending, otDoc?.committedRev ?? 0);
     const rows = excludeIds?.size
-      ? [...pending, ...withheld].filter(c => !excludeIds.has(c.id))
-      : [...pending, ...withheld];
+      ? [...pending, ...withheld, ...outbox].filter(c => !excludeIds.has(c.id))
+      : [...pending, ...withheld, ...outbox];
     const quarantined = await this.store.listQuarantinedChanges?.(docId);
     return quarantined?.length ? [...rows, ...quarantined.map(q => q.change)] : rows;
   }
@@ -324,6 +544,16 @@ export class OTAlgorithm implements ClientAlgorithm {
 
       const changesToBroadcast = [...serverChanges, ...rebased];
 
+      // Echoes of outbox rows: the store never held them, so this is the one place they are
+      // confirmed. The doc drops its entries on its own aligned path (applyChanges recognises
+      // the ids); the misaligned rebuild below imports a snapshot that already holds them, so
+      // the entries are dropped first there or the import re-applies them on top.
+      const echoed = this._removeOutboxRows(
+        docId,
+        serverChanges.map(c => c.id)
+      );
+      const echoedIds = new Set(echoed.map(row => row.change.id));
+
       if (otDoc) {
         // `serverChanges` is internally contiguous when the frame passed the gap check above,
         // EXCEPT when the store-rev re-check re-anchored the frame off a higher store rev and so
@@ -340,9 +570,17 @@ export class OTAlgorithm implements ClientAlgorithm {
           // Misaligned (root-replace catchup, a stale re-delivery, or an interior-gapped batch):
           // rebuild from the store — the complete, authoritative committed state — the only
           // remaining getDoc in the receive path, paid on the rare path only.
+          otDoc._dropUnstored(echoedIds);
           const snapshot = await this.loadDoc(docId);
           if (snapshot) otDoc.import(snapshot as PatchesSnapshot<T>);
         }
+      }
+
+      if (echoedIds.size > 0) {
+        this.onUnstoredCommitted.emit(
+          docId,
+          serverChanges.filter(c => echoedIds.has(c.id))
+        );
       }
 
       return changesToBroadcast;
@@ -381,7 +619,13 @@ export class OTAlgorithm implements ClientAlgorithm {
     const survived = new Set(committedChanges.map(c => c.id));
     const droppedIds = sentChanges.filter(c => !survived.has(c.id)).map(c => c.id);
     if (droppedIds.length === 0) return 0;
-    await this.store.dropPendingChanges(docId, droppedIds);
+    // Outbox rows have no store row to drop, but the same fate: unechoed means resolved away,
+    // and their memory-only entries must leave the doc's queue or the caller's re-sync from the
+    // store re-applies them on top of the state that already holds their content.
+    const outboxRows = this._removeOutboxRows(docId, droppedIds);
+    for (const row of outboxRows) row.doc?._dropUnstored([row.change.id]);
+    const storeIds = droppedIds.filter(id => !outboxRows.some(row => row.change.id === id));
+    if (storeIds.length > 0) await this.store.dropPendingChanges(docId, storeIds);
     return droppedIds.length;
   }
 
@@ -582,7 +826,10 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   async untrackDocs(docIds: string[]): Promise<void> {
-    docIds.forEach(id => this._reportedUnstored.delete(id));
+    docIds.forEach(id => {
+      this._reportedUnstored.delete(id);
+      this._outbox.delete(id);
+    });
     return this.store.untrackDocs(docIds);
   }
 
@@ -600,10 +847,13 @@ export class OTAlgorithm implements ClientAlgorithm {
 
   async confirmDeleteDoc(docId: string): Promise<void> {
     this._reportedUnstored.delete(docId);
+    this._outbox.delete(docId);
     return this.store.confirmDeleteDoc(docId);
   }
 
   async close(): Promise<void> {
+    this._outbox.clear();
+    this.onUnstoredCommitted.clear();
     return this.store.close();
   }
 

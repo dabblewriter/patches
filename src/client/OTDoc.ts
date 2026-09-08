@@ -3,6 +3,7 @@ import { createStateFromSnapshot } from '../algorithms/ot/client/createStateFrom
 import { applyChanges as applyChangesToState } from '../algorithms/ot/shared/applyChanges.js';
 import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
+import type { JSONPatchOp } from '../json-patch/types.js';
 import type { Change, PatchesSnapshot } from '../types.js';
 import { BaseDoc } from './BaseDoc.js';
 
@@ -20,6 +21,8 @@ import { BaseDoc } from './BaseDoc.js';
  * - `_committedState`: Base state from server (at `_committedRev`)
  * - `_pendingChanges`: Local changes not yet committed by server
  * - `_optimisticOps` (from BaseDoc): Ops applied by change() but not yet confirmed
+ * - `_unstored`: the subset of optimistic entries the store refused and the outbox sends from
+ *   memory instead (see `OTAlgorithm.queueUnstoredChange`); confirmed by their committed echo
  * - `state`: Live state = committedState + pendingChanges + optimistic ops applied
  *
  * ## Wire Efficiency
@@ -33,6 +36,21 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
   protected _committedRev: number;
   /** Local changes not yet committed by server. */
   protected _pendingChanges: Change[];
+  /**
+   * Optimistic entries the store refused that the outbox has taken over, keyed by the stable
+   * change id they were queued under (see `OTAlgorithm.queueUnstoredChange`). The value is the
+   * SAME array the optimistic queue holds, so an in-place rebase keeps both in step. An entry
+   * here is confirmed by its committed echo arriving with that id — the one path a change that
+   * never had a store row can be confirmed on — and must then leave the queue, or its ops apply
+   * a second time on top of the committed copy.
+   */
+  private _unstored = new Map<string, JSONPatchOp[]>();
+  /**
+   * Committed revs reported for outbox rows before their echo reached this doc (a follower tab
+   * told by the writer, see `_noteUnstoredCommitted`). Consulted by `import()`: a snapshot at
+   * or past that rev already holds the change, so the entry must not re-apply on top of it.
+   */
+  private _unstoredCommittedRevs = new Map<string, number>();
 
   /**
    * Creates an instance of OTDoc.
@@ -118,6 +136,101 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
     return this._pendingChanges;
   }
 
+  /** Ids of optimistic entries currently handed to the outbox (store-refused, memory-only). */
+  get unstoredChangeIds(): string[] {
+    return [...this._unstored.keys()];
+  }
+
+  /**
+   * Internal: hand an optimistic entry to the outbox under `id`. Called by
+   * `OTAlgorithm.queueUnstoredChange` when the store has refused the entry's persist and the
+   * change will be sent from memory instead. `ops` must be the entry's own array (the reference
+   * `change()` emitted and the optimistic queue holds), so rebases stay shared and the echo can
+   * find the entry to confirm.
+   */
+  _markUnstored(id: string, ops: JSONPatchOp[]): void {
+    if (!this._optimisticOps.includes(ops)) return;
+    this._unstored.set(id, ops);
+  }
+
+  /**
+   * Internal: the store accepted the row after all (a `retrySavingChanges` re-drive minted it
+   * under the same id). The normal local-confirm shift owns the entry from here, and its echo
+   * will match the pending row rather than an outbox entry.
+   */
+  _forgetUnstored(id: string): void {
+    this._unstored.delete(id);
+    this._unstoredCommittedRevs.delete(id);
+  }
+
+  /**
+   * Internal: drop outbox entries from the optimistic queue WITHOUT recomputing state. Used when
+   * their content is known to be on the server already — the server resolved them away (their
+   * ops were a no-op against the committed tip) or a snapshot about to be imported holds them —
+   * and the caller is about to re-sync the doc from that authoritative state. Returns the ids
+   * actually dropped. Emptied in place so a mint still queued for the entry skips it.
+   */
+  _dropUnstored(ids: Iterable<string>): string[] {
+    const dropped: string[] = [];
+    for (const id of ids) {
+      const ops = this._unstored.get(id);
+      if (!ops) continue;
+      ops.length = 0;
+      this._optimisticOps = this._optimisticOps.filter(entry => entry !== ops);
+      this._unstored.delete(id);
+      this._unstoredCommittedRevs.delete(id);
+      dropped.push(id);
+    }
+    return dropped;
+  }
+
+  /**
+   * Internal: an outbox row of this doc is known to be committed at `rev` — told by another
+   * context (the writer tab that sent it) rather than by an echo through `applyChanges`. If this
+   * doc is already at or past that rev the committed copy is in its state and the entry is
+   * dropped now (the view was double-applying it); otherwise the rev is remembered so the
+   * import or echo that brings this doc up to it drops the entry then.
+   */
+  _noteUnstoredCommitted(id: string, rev: number): void {
+    if (!this._unstored.has(id)) return;
+    if (rev <= this._committedRev) {
+      this._dropUnstored([id]);
+      this._recomputeState();
+      return;
+    }
+    this._unstoredCommittedRevs.set(id, rev);
+  }
+
+  /** Drop bookkeeping for entries that have left the optimistic queue by any path. */
+  private _pruneUnstored(): void {
+    if (this._unstored.size === 0) return;
+    for (const [id, ops] of this._unstored) {
+      if (!this._optimisticOps.includes(ops)) {
+        this._unstored.delete(id);
+        this._unstoredCommittedRevs.delete(id);
+      }
+    }
+  }
+
+  /**
+   * Committed echoes of outbox entries: the committed copy is (about to be) in
+   * `_committedState`, so the entry must leave the optimistic queue. On the mixed path
+   * `_rebaseOptimisticOps` has already dropped it (rebaseChanges walks an echoed id out of the
+   * queue untransformed); on the pure-echo path nothing else touches the queue, so it is
+   * removed here. Idempotent either way.
+   */
+  private _confirmUnstoredEchoes(serverChanges: Change[]): void {
+    if (this._unstored.size === 0) return;
+    for (const change of serverChanges) {
+      const ops = this._unstored.get(change.id);
+      if (!ops) continue;
+      ops.length = 0;
+      this._optimisticOps = this._optimisticOps.filter(entry => entry !== ops);
+      this._unstored.delete(change.id);
+      this._unstoredCommittedRevs.delete(change.id);
+    }
+  }
+
   /**
    * Imports document state from a snapshot (e.g., for recovery when out of sync).
    * Resets committed/pending state from the snapshot but PRESERVES outstanding
@@ -151,8 +264,19 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // equality, consuming each pending change at most once so genuinely-distinct
       // identical edits are preserved. See OTDoc.spec "SNAPIMP-1".
       const pendingOpKeys = snapshot.changes.map(c => JSON.stringify(c.ops));
+      // Outbox entries a writer has reported committed at a rev this snapshot covers: the
+      // snapshot state already holds them, so re-applying the entry would duplicate it.
+      const committedUnstored = new Set<JSONPatchOp[]>();
+      for (const [id, rev] of this._unstoredCommittedRevs) {
+        const ops = this._unstored.get(id);
+        if (ops && rev <= snapshot.rev) committedUnstored.add(ops);
+      }
       const surviving: typeof this._optimisticOps = [];
       for (const ops of this._optimisticOps) {
+        if (committedUnstored.has(ops)) {
+          ops.length = 0;
+          continue;
+        }
         const matchIndex = pendingOpKeys.indexOf(JSON.stringify(ops));
         if (matchIndex !== -1) {
           // Already applied via createStateFromSnapshot — consume the match and skip.
@@ -174,6 +298,7 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         }
       }
       this._optimisticOps = surviving;
+      this._pruneUnstored();
     }
     this.state = newState;
   }
@@ -194,6 +319,7 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         return false;
       }
     });
+    this._pruneUnstored();
     this.state = newState;
   }
 
@@ -210,8 +336,15 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
    */
   private _rebaseOptimisticOps(serverChanges: Change[]): void {
     const tag = `optimistic-${Math.random().toString(36).slice(2)}`;
+    // An outbox entry rides under its real change id: rebaseChanges then treats its committed
+    // echo as one of ours (dropped from the queue untransformed, successors' frames already
+    // include it) instead of as a foreign change to transform the entry against — which would
+    // re-express the entry on top of its own committed copy and apply it twice.
+    const idByOps = new Map<JSONPatchOp[], string>();
+    for (const [id, ops] of this._unstored) idByOps.set(ops, id);
+    const syntheticId = (ops: JSONPatchOp[], i: number) => idByOps.get(ops) ?? `${tag}-${i}`;
     const synthetic: Change[] = this._optimisticOps.map((ops, i) => ({
-      id: `${tag}-${i}`,
+      id: syntheticId(ops, i),
       ops,
       rev: 0,
       baseRev: 0,
@@ -228,7 +361,7 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // otherwise a no-op rebase (a foreign change on unrelated paths, the common
       // case) empties both aliases and destroys the in-flight ops instead of
       // keeping them.
-      const newOps = [...(opsById.get(`${tag}-${i}`) ?? [])];
+      const newOps = [...(opsById.get(syntheticId(ops, i)) ?? [])];
       ops.length = 0;
       ops.push(...newOps);
       return ops.length > 0;
@@ -291,8 +424,11 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // The `serverChanges.length > 0` guard is currently redundant (the outer branch only
       // runs when `changes[0].committedAt > 0`, which guarantees at least one server change),
       // but defends against `[].every() === true` if a future refactor weakens the invariant.
+      // Outbox entries (`_unstored`) count as ours too: a change sent from memory has no
+      // pending row, so its committed echo is recognised by the id it was queued under.
       const priorPendingIds = new Set(this._pendingChanges.map(c => c.id));
-      const isPureEcho = serverChanges.length > 0 && serverChanges.every(c => priorPendingIds.has(c.id));
+      const isOwn = (c: Change) => priorPendingIds.has(c.id) || this._unstored.has(c.id);
+      const isPureEcho = serverChanges.length > 0 && serverChanges.every(isOwn);
 
       // Must run against the OLD pending queue (the frame the optimistic ops live in),
       // so before _pendingChanges is replaced below. Pure echoes need no rebase — the
@@ -300,6 +436,10 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       if (!isPureEcho && this._optimisticOps.length > 0) {
         this._rebaseOptimisticOps(serverChanges);
       }
+      // The committed copies of echoed outbox entries land in _committedState below; the entries
+      // themselves must leave the optimistic queue (already gone on the rebase path; removed
+      // here on the pure-echo path) or their ops apply a second time on top.
+      this._confirmUnstoredEchoes(serverChanges);
 
       this._committedState = applyChangesToState(this._committedState, serverChanges);
       this._committedRev = serverChanges[serverChanges.length - 1].rev;
@@ -314,6 +454,7 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
 
       if (this._optimisticOps.length > 0) {
         this._optimisticOps.shift();
+        this._pruneUnstored();
       } else {
         // No prior optimistic apply (Worker-Tab sync or direct call).
         this.state = applyChangesToState(this.state, changes);

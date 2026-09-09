@@ -428,6 +428,69 @@ export class UnstoredPendingError extends Error {
 }
 
 /**
+ * The in-memory outbox for a doc is full, so a store-refused change was NOT queued to be sent
+ * from memory (see `OTAlgorithm.queueUnstoredChange` / `acceptUnstoredChanges`). The row stays
+ * applied in the open doc and is reported on the persist's own `onError` with `unstored: false`;
+ * this error is the outbox's side of it, emitted once per doc while the outbox stays full (the
+ * latch clears when the outbox drains), so the app can move that doc's changes to its shelf.
+ *
+ * The outbox exists for a store that keeps refusing writes, and a latched doc keeps taking
+ * changes, so without a ceiling one long degraded session grows the resend batch without bound
+ * against a server with its own body limits. The rule is refuse-new, never evict-old: a queued
+ * row is content the server has not confirmed, and the newest row is the one the app was just
+ * told about and can still shelve.
+ */
+export class UnstoredOutboxOverflowError extends Error {
+  constructor(
+    /** The doc whose outbox is full. */
+    readonly docId: string,
+    /** Rows queued at the time of the refusal. */
+    readonly rows: number,
+    /** Serialised size of the queued rows' ops at the time of the refusal. */
+    readonly bytes: number,
+    /** The row ceiling. */
+    readonly maxRows: number,
+    /** The byte ceiling. */
+    readonly maxBytes: number
+  ) {
+    super(
+      `The outbox for ${docId} is full (${rows}/${maxRows} rows, ${bytes}/${maxBytes} bytes); ` +
+        `a store-refused change was not queued to be sent from memory`
+    );
+    this.name = 'UnstoredOutboxOverflowError';
+  }
+}
+
+/**
+ * Pending changes were held back from a flush for a second time because they sit on a
+ * different committed frame than the run at the head of the queue (see
+ * `OTAlgorithm._withConsistentBaseRev`, DAB-951). One deferral is the designed behaviour — the
+ * queue flushes one frame per pass and the follow-up pass sends the rest — so it is not
+ * reported. The same row deferred again means the follow-up did not clear it: the head run is
+ * not committing, or the queue keeps re-mixing, and from every other signal the row looks sent
+ * (`hasPending` is true either way and nothing ever confirms it). Emitted through
+ * `PatchesSync.onError` once per `(docId, changeId)`.
+ */
+export class PendingDeferredError extends Error {
+  constructor(
+    /** The doc whose queue is mixed. */
+    readonly docId: string,
+    /** Ids of the rows deferred again. */
+    readonly changeIds: string[],
+    /** The committed frame the flush went out on. */
+    readonly flushedBaseRev: number,
+    /** The frame(s) the deferred rows sit on. */
+    readonly deferredBaseRevs: number[]
+  ) {
+    super(
+      `${changeIds.length} pending change(s) for ${docId} on baseRev ${deferredBaseRevs.join('/')} were deferred ` +
+        `again behind a flush at baseRev ${flushedBaseRev}: ${changeIds.join(', ')}`
+    );
+    this.name = 'PendingDeferredError';
+  }
+}
+
+/**
  * A COMMITTED change `PatchesSync` gave up applying and skipped, so the document could
  * converge on the rest of its history instead of latching forever.
  *

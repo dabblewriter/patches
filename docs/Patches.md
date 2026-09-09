@@ -275,6 +275,20 @@ happened (`false` for an algorithm without an outbox, such as LWW).
   The open doc recognises the echo as its own and confirms the memory-only entry exactly once.
 - The outbox is **memory only** — a reload loses it. `onUnstoredQueued` fires with the provisional
   change so the app can shelve it elsewhere as well.
+- Rows are confirmed from the **commit response** of the flush that sent them, before the response
+  is applied to the store — so a store that refuses the apply as well cannot keep a row queued and
+  resent on every flush. Every row goes out at the committed frame its ops are really in (a row
+  from an open doc is re-minted from the doc; a row the doc has closed on, or one accepted from
+  another context, at its own `baseRev`), and is walked forward through every committed batch that
+  extends that frame, so it is never relabeled into a frame it was not transformed into.
+- The outbox is **bounded**: 500 rows or 2 MiB of serialised ops per doc. Past that, new rows are
+  refused (never evicted — a queued row is unconfirmed content) and reported once per episode
+  through `onError` as `UnstoredOutboxOverflowError`; the refused change's own `onError` emit says
+  `unstored: false`, so the app can move to its shelf.
+- A pending row held back from a flush a second time because it sits on a different committed
+  frame than the head of the queue (see `PendingDeferredError`) is reported through
+  `PatchesSync.onError` once per row — the first deferral is the designed one-frame-per-flush
+  behaviour; the second means the follow-up flush did not clear it.
 
 ```typescript
 patches.onUnstoredQueued((docId, change) => {

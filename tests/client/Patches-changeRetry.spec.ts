@@ -478,6 +478,32 @@ describe('Patches change-submit retry (non-destructive rollback)', () => {
       expect(doc.state).toEqual({ text: 'hello' });
     });
 
+    it('a persist with no open doc that exhausts its attempts is reported as not queued (unstored: false), never silently dropped', async () => {
+      setup();
+      vi.spyOn(store, 'savePendingChanges').mockImplementation(async () => {
+        throw timeoutError();
+      });
+      await patches.trackDocs(['doc1']);
+      const errors: { error: Error; context?: any }[] = [];
+      patches.onError((error, context) => errors.push({ error, context }));
+      const queued = vi.fn();
+      patches.onUnstoredQueued(queued);
+
+      void patches.submitDocChange('doc1', [{ op: 'add', path: '/text', value: 'hello' }]);
+      await vi.advanceTimersByTimeAsync(3000);
+
+      expect(patches.isWriteLatched('doc1')).toBe(true);
+      expect(errors[errors.length - 1].context).toEqual({
+        docId: 'doc1',
+        willRetry: false,
+        kind: 'environment',
+        attempt: 2,
+        unstored: false, // nothing to mint from: the app hears the drop on the same emit
+      });
+      expect(queued).not.toHaveBeenCalled();
+      expect(patches.listUnstoredChanges('doc1')).toEqual([]);
+    });
+
     it('queues changes made while latched behind the first, in capture order', async () => {
       setup();
       vi.spyOn(store, 'savePendingChanges').mockImplementation(async () => {

@@ -122,6 +122,16 @@ export interface ClientAlgorithm {
   noteUnstoredCommitted?(docId: string, committed: Change[]): void;
 
   /**
+   * Optional: the commit response for a flush this instance sent carries committed copies of the
+   * batch's own rows. Outbox rows among them are confirmed from the response — dropped here and
+   * reported on `onUnstoredCommitted` — BEFORE the response is applied to the store, so a store
+   * that refuses the apply (the condition the outbox exists for) cannot leave the row queued and
+   * resent on every flush. The open doc keeps its memory-only entry visible until a receive or
+   * import covers the committed rev.
+   */
+  confirmUnstoredCommitted?(docId: string, committed: Change[]): void;
+
+  /**
    * Lists all changes (committed + pending) for a document.
    * Used by PatchesBranchClient for client-side offline merge to read branch changes.
    * Optional — only OT algorithms with IndexedDB stores support this.

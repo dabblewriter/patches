@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OTAlgorithm } from '../../src/client/OTAlgorithm';
+import { PendingDeferredError, UnstoredOutboxOverflowError } from '../../src/net/error';
 import type { OTDoc } from '../../src/client/OTDoc';
 import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
 import { createChange } from '../../src/data/change';
@@ -12,8 +13,9 @@ import type { Change } from '../../src/types';
  * the store never accepted has no store row to conflict with and no rebased copy to duplicate.
  *
  * Invariants pinned here:
- *   - rows ride BEHIND the store queue, in one batch, re-minted from the doc's pointers at send
- *     time (baseRev = committedRev now, revs after the tail);
+ *   - rows ride BEHIND the store queue, in one batch: a live row re-minted from the doc's pointers
+ *     at send time (baseRev = committedRev now), a frozen row at its OWN baseRev — never
+ *     relabeled — and walked forward through every committed batch that extends its frame;
  *   - a row leaves when its echo arrives (applyServerChanges), when the server resolves it away
  *     (dropResolvedPending), or when the store takes it after all (handleDocChange, same id);
  *   - the doc drops its memory-only entry on each of those paths, so nothing applies twice.
@@ -165,7 +167,7 @@ describe('OTAlgorithm outbox (store-refused changes sent from memory)', () => {
     expect(algorithm.hasUnstoredChanges('doc1')).toBe(false);
   });
 
-  it('accepts rows minted by another context, deduped by id, and sends them only beside the rows they were expressed over', async () => {
+  it('accepts rows minted by another context, deduped by id, and sends them beside the rows they were expressed over', async () => {
     // The follower expressed this row on top of the shared store's pending row P (frame 4).
     const stored = createChange(4, 6, [{ op: 'add', path: '/items/-', value: 'p' }], {}, 'stored');
     await store.savePendingChanges('doc1', [stored]);
@@ -174,17 +176,82 @@ describe('OTAlgorithm outbox (store-refused changes sent from memory)', () => {
     expect(algorithm.acceptUnstoredChanges('doc1', [foreign])).toBe(0);
 
     // With P still pending: one batch, P first, the accepted row behind it at its own frame.
-    let batch = (await algorithm.getPendingToSend('doc1'))!;
+    const batch = (await algorithm.getPendingToSend('doc1'))!;
     expect(batch.map(c => c.id)).toEqual(['stored', 'from-follower']);
-    expect(batch[1]).toMatchObject({ baseRev: 4, ops: foreign.ops });
+    expect(batch[1]).toMatchObject({ baseRev: 4, rev: 9, ops: foreign.ops });
     expect(batch[1].ops).not.toBe(foreign.ops);
+  });
 
-    // P committed (the queue drained): sent alone at ITS OWN baseRev the server would transform
-    // it against P again, so it is re-minted at this instance's committed frame instead.
-    await store.applyServerChanges('doc1', [{ ...stored, rev: 6, committedAt: 1 }], [], 6);
+  it('walks an accepted row through a foreign commit that lands between the accept and the drain, behind P (review round 2)', async () => {
+    // Store at 5 with [a, b]; pending P appends 'p'; the follower expressed F over P in frame 5:
+    // insert at /items/1 (between a and b). No doc is open on this instance.
+    await store.saveDoc('doc1', { state: { items: ['a', 'b'] }, rev: 5 });
+    const p = createChange(5, 6, [{ op: 'add', path: '/items/-', value: 'p' }], {}, 'P');
+    await store.savePendingChanges('doc1', [p]);
+    const f = createChange(5, 7, [{ op: 'add', path: '/items/1', value: 'f' }], {}, 'F');
+    expect(algorithm.acceptUnstoredChanges('doc1', [f])).toBe(1);
+
+    // Foreign Z inserts at 0 and commits at 6 while P is still pending: the store rebases P; the
+    // accepted row must cross Z the same way, behind P, or it is later sent in frame 5 under a
+    // newer label and the server commits its /items/1 verbatim (Z, f, a, b, p).
+    await algorithm.applyServerChanges(
+      'doc1',
+      [{ ...createChange(5, 6, [{ op: 'add', path: '/items/0', value: 'Z' }]), committedAt: 1 }],
+      undefined
+    );
+    let batch = (await algorithm.getPendingToSend('doc1'))!;
+    expect(batch.map(c => c.id)).toEqual(['P', 'F']);
+    expect(batch[1]).toMatchObject({ baseRev: 6, ops: [{ op: 'add', path: '/items/2', value: 'f' }] });
+
+    // P commits at 7: its echo drops from the walk untransformed, so F comes out with P in frame
+    // at the new tip and goes alone at ITS OWN baseRev 7 — the server has nothing left to
+    // transform it against, and commits Z, a, f, b, p.
+    await algorithm.applyServerChanges('doc1', [{ ...p, baseRev: 6, rev: 7, committedAt: 1 }], undefined);
+    expect(await store.getPendingChanges('doc1')).toEqual([]);
     batch = (await algorithm.getPendingToSend('doc1'))!;
     expect(batch).toHaveLength(1);
-    expect(batch[0]).toMatchObject({ id: 'from-follower', baseRev: 6, ops: foreign.ops });
+    expect(batch[0]).toMatchObject({ id: 'F', baseRev: 7, ops: [{ op: 'add', path: '/items/2', value: 'f' }] });
+  });
+
+  it('a row frozen by closeDoc is walked through a foreign commit that lands with no doc open, and sent at its own baseRev (review round 2)', async () => {
+    // Doc at 5 with [a, b]; the row inserts 'u' at /items/1. Close the doc: frozen at 5.
+    await store.saveDoc('doc1', { state: { items: ['a', 'b'] }, rev: 5 });
+    doc = algorithm.createDoc('doc1', { state: { items: ['a', 'b'] }, rev: 5, changes: [] }) as unknown as OTDoc<any>;
+    let refusedOps: any[] = [];
+    const off = doc.onChange(ops => (refusedOps = ops));
+    doc.change(patch => patch.add('/items/1', 'u'));
+    off();
+    algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused');
+    algorithm.detachUnstoredChanges('doc1', doc);
+
+    // Rev 6 (Z at 0) lands with no doc open.
+    await algorithm.applyServerChanges(
+      'doc1',
+      [{ ...createChange(5, 6, [{ op: 'add', path: '/items/0', value: 'Z' }]), committedAt: 1 }],
+      undefined
+    );
+
+    // Not baseRev 6 with the frame-5 path (the server would commit Z, u, a, b): the row crossed
+    // Z, so it goes at 6 WITH the path moved to /items/2 — Z, a, u, b everywhere.
+    const [sent] = (await algorithm.getPendingToSend('doc1'))!;
+    expect(sent).toMatchObject({ id: 'refused', baseRev: 6, ops: [{ op: 'add', path: '/items/2', value: 'u' }] });
+    expect(algorithm.listUnstoredChanges('doc1')[0]).toMatchObject({ baseRev: 6 });
+  });
+
+  it('a frozen row whose ops transform away is dropped, not sent empty', async () => {
+    let refusedOps: any[] = [];
+    const off = doc.onChange(ops => (refusedOps = ops));
+    doc.change(patch => patch.replace('/items/0', 'A'));
+    off();
+    algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused');
+    algorithm.detachUnstoredChanges('doc1', doc);
+    await algorithm.applyServerChanges(
+      'doc1',
+      [{ ...createChange(5, 6, [{ op: 'remove', path: '/items' }]), committedAt: 1 }],
+      undefined
+    );
+    expect(algorithm.hasUnstoredChanges('doc1')).toBe(false);
+    expect(await algorithm.getPendingToSend('doc1')).toBeNull();
   });
 
   it('collectUnsyncedForDiscard includes outbox rows (content the user can still see)', async () => {
@@ -206,7 +273,9 @@ describe('OTAlgorithm outbox (store-refused changes sent from memory)', () => {
 
     const batch = (await algorithm.getPendingToSend('doc1'))!; // no open doc any more
     expect(batch[0]).toMatchObject({ id: 'refused', baseRev: 6, ops: [{ op: 'add', path: '/items/-', value: 'u' }] });
-    expect(algorithm.listUnstoredChanges('doc1')[0].baseRev).toBe(6); // frozen rows keep their frame
+    // Frozen rows keep their frame, and their rev is the one they were minted with (6, after the
+    // doc's tail at queue time) — not re-stamped from zero once no row has a doc.
+    expect(algorithm.listUnstoredChanges('doc1')[0]).toMatchObject({ baseRev: 6, rev: 6 });
   });
 
   it('walks live rows through the committed tail before a rebuild-from-store import, so the ops go out in the new frame', async () => {
@@ -286,5 +355,258 @@ describe('OTAlgorithm outbox (store-refused changes sent from memory)', () => {
 
     const batch = (await algorithm.getPendingToSend('doc1', doc))!;
     expect(batch.map(c => c.id)).toEqual(['straggler']); // the outbox row waits for the follow-up pass
+  });
+
+  it('a row deferred a second time is reported once on onError (PendingDeferredError); the first deferral is not', async () => {
+    await store.savePendingChanges('doc1', [
+      createChange(3, 6, [{ op: 'add', path: '/x', value: 1 }], {}, 'straggler'), // a frame behind
+    ]);
+    const refusedOps = type('u');
+    algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errors: Error[] = [];
+    algorithm.onError((err, context) => {
+      errors.push(err);
+      expect(context).toEqual({ docId: 'doc1' });
+    });
+
+    await algorithm.getPendingToSend('doc1', doc); // deferred once: the follow-up pass is expected to clear it
+    expect(errors).toEqual([]);
+    await algorithm.getPendingToSend('doc1', doc); // still deferred: the follow-up did not clear it
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(PendingDeferredError);
+    expect(errors[0]).toMatchObject({
+      docId: 'doc1',
+      changeIds: ['refused'],
+      flushedBaseRev: 3,
+      deferredBaseRevs: [5],
+    });
+    await algorithm.getPendingToSend('doc1', doc);
+    expect(errors).toHaveLength(1); // latched per row
+  });
+
+  it('confirmUnstoredCommitted (the commit response) drops the row and reports it before the store apply; the echo then finds nothing to re-report', async () => {
+    const refusedOps = type('u');
+    algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused');
+    const committed = vi.fn();
+    algorithm.onUnstoredCommitted(committed);
+    const echo = {
+      ...createChange(5, 6, [{ op: 'add', path: '/items/-', value: 'u' }], {}, 'refused'),
+      committedAt: 1,
+    };
+
+    algorithm.confirmUnstoredCommitted('doc1', [
+      echo,
+      createChange(5, 7, [{ op: 'add', path: '/y', value: 1 }], {}, 'store-row'),
+    ]);
+    expect(algorithm.hasUnstoredChanges('doc1')).toBe(false);
+    expect(committed).toHaveBeenCalledTimes(1);
+    expect(committed).toHaveBeenCalledWith('doc1', [echo]); // only the outbox row, with its committed copy
+    // The doc keeps the entry visible (rev 6 is ahead of it) until a receive or import covers it.
+    expect(doc.unstoredChangeIds).toEqual(['refused']);
+    expect(doc.state.items).toEqual(['a', 'u']);
+    expect(await algorithm.getPendingToSend('doc1', doc)).toBeNull(); // nothing goes out again
+
+    await algorithm.applyServerChanges('doc1', [echo], doc);
+    expect(doc.state.items).toEqual(['a', 'u']); // once
+    expect(doc.unstoredChangeIds).toEqual([]);
+    expect(committed).toHaveBeenCalledTimes(1); // not reported twice
+  });
+
+  it('a row confirmed here is not accepted again from a re-forward (recently confirmed ids are remembered, bounded)', async () => {
+    const refusedOps = type('u');
+    algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused');
+    const [row] = algorithm.listUnstoredChanges('doc1');
+    const echo = {
+      ...createChange(5, 6, [{ op: 'add', path: '/items/-', value: 'u' }], {}, 'refused'),
+      committedAt: 1,
+    };
+    await algorithm.applyServerChanges('doc1', [echo], doc);
+
+    expect(algorithm.acceptUnstoredChanges('doc1', [row])).toBe(0); // its echo was consumed; no echo left to clear it
+    expect(algorithm.hasUnstoredChanges('doc1')).toBe(false);
+
+    // The memory is a window, not a ledger: 200 later confirmations push the id out.
+    for (let i = 0; i < 200; i++) {
+      algorithm.acceptUnstoredChanges('doc1', [createChange(6, 7, [{ op: 'add', path: '/n', value: i }], {}, `f${i}`)]);
+      algorithm.noteUnstoredCommitted('doc1', [
+        { ...createChange(6, 7, [{ op: 'add', path: '/n', value: i }], {}, `f${i}`), committedAt: 1 },
+      ]);
+    }
+    expect(algorithm.acceptUnstoredChanges('doc1', [row])).toBe(1);
+  });
+
+  it('refuses rows past the ceiling and reports the overflow once per episode (UnstoredOutboxOverflowError)', () => {
+    const errors: Error[] = [];
+    algorithm.onError(err => errors.push(err));
+    for (let i = 0; i < 500; i++) algorithm.queueUnstoredChange('doc1', type(`v${i}`), doc, {}, `r${i}`);
+    expect(algorithm.listUnstoredChanges('doc1')).toHaveLength(500);
+    expect(errors).toEqual([]);
+
+    const over = type('over');
+    expect(algorithm.queueUnstoredChange('doc1', over, doc, {}, 'over')).toBeNull(); // refused, not evicting an older row
+    expect(algorithm.listUnstoredChanges('doc1')).toHaveLength(500);
+    expect(doc.unstoredChangeIds).not.toContain('over'); // stays an ordinary optimistic entry
+    expect(doc.state.items).toContain('over'); // still visible; the app shelves it
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(UnstoredOutboxOverflowError);
+    expect(errors[0]).toMatchObject({ docId: 'doc1', rows: 500, maxRows: 500, maxBytes: 2 * 1024 * 1024 });
+    expect(algorithm.queueUnstoredChange('doc1', type('over2'), doc, {}, 'over2')).toBeNull();
+    expect(
+      algorithm.acceptUnstoredChanges('doc1', [createChange(5, 9, [{ op: 'add', path: '/x', value: 1 }], {}, 'f')])
+    ).toBe(0);
+    expect(errors).toHaveLength(1); // latched while the outbox stays full
+
+    // The outbox drains: the latch clears and a new episode reports again.
+    algorithm.discardUnstoredChanges('doc1');
+    for (let i = 0; i < 500; i++)
+      algorithm.acceptUnstoredChanges('doc1', [createChange(5, 9, [{ op: 'add', path: '/x', value: i }], {}, `a${i}`)]);
+    expect(
+      algorithm.acceptUnstoredChanges('doc1', [createChange(5, 9, [{ op: 'add', path: '/x', value: 1 }], {}, 'a-over')])
+    ).toBe(0);
+    expect(errors).toHaveLength(2);
+  });
+
+  it('the byte ceiling refuses a row the serialised outbox cannot hold', () => {
+    const errors: Error[] = [];
+    algorithm.onError(err => errors.push(err));
+    const big = 'x'.repeat(1.5 * 1024 * 1024);
+    expect(algorithm.queueUnstoredChange('doc1', type(big), doc, {}, 'big1')).not.toBeNull();
+    expect(algorithm.queueUnstoredChange('doc1', type(big), doc, {}, 'big2')).toBeNull(); // 3 MiB > 2 MiB
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ rows: 1, maxBytes: 2 * 1024 * 1024 });
+    expect((errors[0] as UnstoredOutboxOverflowError).bytes).toBeGreaterThan(1.5 * 1024 * 1024);
+  });
+});
+
+describe('OTAlgorithm outbox — walking live rows across a rebuild or reload (review round 2)', () => {
+  let store: OTInMemoryStore;
+  let algorithm: OTAlgorithm;
+  let doc: OTDoc<any>;
+  let refusedOps: any[];
+
+  beforeEach(async () => {
+    store = new OTInMemoryStore();
+    algorithm = new OTAlgorithm(store);
+    await store.trackDocs(['doc1']);
+    await store.saveDoc('doc1', { state: { items: ['a'] }, rev: 5 });
+    doc = algorithm.createDoc('doc1', { state: { items: ['a'] }, rev: 5, changes: [] }) as unknown as OTDoc<any>;
+    // Doc at rev 5 with items [a]; the outbox row inserts 'u' at /items/1 (after a) in that frame.
+    refusedOps = [];
+    const off = doc.onChange(ops => (refusedOps = ops));
+    doc.change(patch => patch.add('/items/1', 'u'));
+    off();
+    algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused');
+  });
+
+  const Z = { ...createChange(5, 6, [{ op: 'add', path: '/items/0', value: 'Z' }]), committedAt: 1 };
+  const other = { ...createChange(6, 7, [{ op: 'add', path: '/other', value: 1 }]), committedAt: 1 };
+
+  it('reconcilePending anchors the walk on the DOC frame: the span between a torn doc and the tail comes from the store', async () => {
+    // A torn reload: the store took rev 6 (Z at 0) that the doc never applied. The reload's
+    // reconcile hands over the tail FROM 6 — anchored on the tail's frame, the walk would skip
+    // rev 6 and the row would still read /items/1 under baseRev 7 (Z, u, a).
+    await store.applyServerChanges('doc1', [Z], [], 5);
+    await store.savePendingChanges('doc1', [createChange(6, 7, [{ op: 'add', path: '/x', value: 1 }], {}, 'p')]);
+    await algorithm.reconcilePending('doc1', [{ ...other, baseRev: 6, rev: 7 }]);
+    expect(refusedOps).toEqual([{ op: 'add', path: '/items/2', value: 'u' }]); // crossed 6 AND 7
+
+    // The reload's import, then the send: in frame at 7.
+    doc.import((await algorithm.loadDoc('doc1')) as any);
+    expect(doc.committedRev).toBe(7);
+    const batch = (await algorithm.getPendingToSend('doc1', doc))!;
+    expect(batch.find(c => c.id === 'refused')).toMatchObject({
+      baseRev: 7,
+      ops: [{ op: 'add', path: '/items/2', value: 'u' }],
+    });
+    expect(doc.state.items).toEqual(['Z', 'a', 'u']);
+  });
+
+  it('a store tail that stops short of the snapshot rev (compacted or torn) freezes the rows at their true frame instead of re-minting them', async () => {
+    await store.applyServerChanges('doc1', [Z], [], 5);
+    // Rev 7 inserts at 0 as well: a walk that crossed 6 but not 7 would come out one slot short.
+    const Y = { ...createChange(6, 7, [{ op: 'add', path: '/items/0', value: 'Y' }]), committedAt: 1 };
+    // The store's committed run is short: rev 7 is missing from the read (compacted away, or the
+    // envelope write tore) although the snapshot the doc rebuilds from sits at 7.
+    const real = store.listChanges.bind(store);
+    vi.spyOn(store, 'listChanges').mockImplementation(async (docId, opts) =>
+      (await real(docId, opts)).filter(c => c.rev !== 7)
+    );
+    await algorithm.applyServerChanges('doc1', [Y], doc); // misaligned for the doc: rebuild from the store
+    expect(doc.committedRev).toBe(7);
+
+    // NOT re-minted at 7 with a partly-walked /items/2 (nor the raw /items/1): frozen at 5 with
+    // its own ops, an honest baseRev the server transforms from.
+    const [sent] = (await algorithm.getPendingToSend('doc1', doc))!;
+    expect(sent).toMatchObject({ id: 'refused', baseRev: 5, ops: [{ op: 'add', path: '/items/1', value: 'u' }] });
+    expect(algorithm.listUnstoredChanges('doc1')[0]).toMatchObject({ baseRev: 5 });
+  });
+
+  it('a store tail that starts past the doc frame (the first rev missing) freezes the rows as well', async () => {
+    await store.applyServerChanges('doc1', [Z], [], 5);
+    const real = store.listChanges.bind(store);
+    vi.spyOn(store, 'listChanges').mockImplementation(async (docId, opts) =>
+      (await real(docId, opts)).filter(c => c.rev !== 6)
+    );
+    await algorithm.applyServerChanges('doc1', [other], doc);
+    const [sent] = (await algorithm.getPendingToSend('doc1', doc))!;
+    expect(sent).toMatchObject({ id: 'refused', baseRev: 5, ops: [{ op: 'add', path: '/items/1', value: 'u' }] });
+  });
+
+  it('an empty tail read is not "nothing to walk": the rows are frozen', async () => {
+    await store.applyServerChanges('doc1', [Z], [], 5);
+    vi.spyOn(store, 'listChanges').mockResolvedValue([]);
+    await algorithm.applyServerChanges('doc1', [other], doc);
+    expect(doc.committedRev).toBe(7);
+    const [sent] = (await algorithm.getPendingToSend('doc1', doc))!;
+    expect(sent).toMatchObject({ id: 'refused', baseRev: 5, ops: [{ op: 'add', path: '/items/1', value: 'u' }] });
+  });
+
+  it('pending rows in the tail read are not walked as committed history', async () => {
+    await store.applyServerChanges('doc1', [Z], [], 5);
+    // The store's read hands back a pending row (no committedAt) in the run's place.
+    vi.spyOn(store, 'listChanges').mockResolvedValue([
+      createChange(5, 6, [{ op: 'add', path: '/items/0', value: 'Z' }], {}, 'not-committed'),
+      other,
+    ]);
+    await algorithm.applyServerChanges('doc1', [other], doc);
+    const [sent] = (await algorithm.getPendingToSend('doc1', doc))!;
+    expect(sent).toMatchObject({ id: 'refused', baseRev: 5, ops: [{ op: 'add', path: '/items/1', value: 'u' }] });
+  });
+
+  it('a frozen straggler is deferred behind the store queue and reported, not relabeled', async () => {
+    await store.applyServerChanges('doc1', [Z], [], 5);
+    vi.spyOn(store, 'listChanges').mockResolvedValue([]);
+    await algorithm.applyServerChanges('doc1', [other], doc); // frozen at 5, doc now at 7
+    await store.savePendingChanges('doc1', [createChange(7, 8, [{ op: 'add', path: '/x', value: 1 }], {}, 'p')]);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errors: Error[] = [];
+    algorithm.onError(err => errors.push(err));
+
+    expect((await algorithm.getPendingToSend('doc1', doc))!.map(c => c.id)).toEqual(['p']);
+    expect((await algorithm.getPendingToSend('doc1', doc))!.map(c => c.id)).toEqual(['p']);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      name: 'PendingDeferredError',
+      changeIds: ['refused'],
+      flushedBaseRev: 7,
+      deferredBaseRevs: [5],
+    });
+  });
+
+  it('an echo inside the walked span confirms the row (the store took it while the doc was torn)', async () => {
+    const committedSpy = vi.fn();
+    algorithm.onUnstoredCommitted(committedSpy);
+    const echo = {
+      ...createChange(5, 6, [{ op: 'add', path: '/items/1', value: 'u' }], {}, 'refused'),
+      committedAt: 1,
+    };
+    await store.applyServerChanges('doc1', [echo], [], 5); // the doc's apply of this echo tore
+    await algorithm.applyServerChanges('doc1', [other], doc); // rebuild from the store
+
+    expect(algorithm.hasUnstoredChanges('doc1')).toBe(false);
+    expect(doc.unstoredChangeIds).toEqual([]);
+    expect(doc.state).toEqual({ items: ['a', 'u'], other: 1 }); // once
+    expect(committedSpy).toHaveBeenCalledWith('doc1', [echo]);
   });
 });

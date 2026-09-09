@@ -1408,6 +1408,15 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
             const fullSnapshot = await algorithm.loadDoc(docId);
             if (fullSnapshot) this._applySnapshotPreservingPending(docId, fullSnapshot, changeBatch);
           }
+          // Outbox rows (sent from memory because the store refused them) are confirmed from
+          // the response itself, BEFORE the apply below writes it to that same store: if the
+          // store refuses the apply too, the rows would otherwise stay queued and go out again
+          // on every flush, relying on the server's id dedupe for the life of the session.
+          if (algorithm.confirmUnstoredCommitted) {
+            const sentIds = new Set(changeBatch.map(c => c.id));
+            const own = committed.filter(c => sentIds.has(c.id));
+            if (own.length > 0) algorithm.confirmUnstoredCommitted(docId, own);
+          }
           await this._applyServerChangesToDoc(docId, committed);
 
           // Drop any sent change the server rebased away to a no-op (absent from

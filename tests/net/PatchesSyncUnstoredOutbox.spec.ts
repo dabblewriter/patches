@@ -151,7 +151,7 @@ describe('PatchesSync — outbox rows go out from memory and confirm once', () =
     expect(patches!.listUnstoredChanges('doc1')).toEqual([]);
   });
 
-  it('a receive the store refuses leaves the row queued; the resend is deduped server-side and confirms once', async () => {
+  it('a store that refuses the response apply cannot keep the row queued: it is confirmed from the commit response and never resent (review round 2)', async () => {
     const { store, server, doc } = await boot();
     store.refuseApplies = true; // the disk refuses the echo as well as the persist
     vi.useFakeTimers();
@@ -160,20 +160,41 @@ describe('PatchesSync — outbox rows go out from memory and confirm once', () =
     await vi.advanceTimersByTimeAsync(3000);
 
     expect(server.committed).toHaveLength(1); // on the server
-    expect(doc.committedRev).toBe(0); // but not confirmed here: the echo could not be applied
+    expect(doc.committedRev).toBe(0); // the store could not take the response, so the doc is not advanced
     expect(doc.state).toEqual({ text: 'hello' }); // still visible from memory
-    expect(patches!.listUnstoredChanges('doc1')).toHaveLength(1);
+    // But the row is NOT still queued: the response confirmed it before the apply that failed.
+    expect(patches!.listUnstoredChanges('doc1')).toEqual([]);
+    expect(doc.unstoredChangeIds).toHaveLength(1); // the doc keeps the entry until rev 1 covers it
 
-    // The disk recovers; the next flush resends the same id, the server dedups it and echoes the
-    // committed copy, and the doc confirms it exactly once.
-    store.refuseApplies = false;
+    // Every later flush sends nothing for it — no resend loop leaning on the server's id dedupe.
     await (sync as any).syncDoc('doc1');
     await vi.advanceTimersByTimeAsync(0);
-
+    expect(server.commitChanges).toHaveBeenCalledTimes(1);
     expect(server.committed).toHaveLength(1);
+
+    // The disk recovers and the commit is re-delivered (a broadcast, a catch-up): the doc
+    // confirms the entry exactly once.
+    store.refuseApplies = false;
+    await (sync as any)._applyServerChangesToDoc('doc1', server.committed);
     expect(doc.state).toEqual({ text: 'hello' });
     expect(doc.committedRev).toBe(1);
-    expect(patches!.listUnstoredChanges('doc1')).toEqual([]);
     expect(doc.unstoredChangeIds).toEqual([]);
+    expect(await store.getCommittedRev('doc1')).toBe(1);
+  });
+
+  it('the response confirmation reports onUnstoredCommitted once, with the committed copies', async () => {
+    const { server, doc } = await boot();
+    const reported: { docId: string; changes: Change[] }[] = [];
+    patches!.onUnstoredCommitted((docId, changes) => reported.push({ docId, changes }));
+    vi.useFakeTimers();
+
+    doc.change(patch => patch.replace('/text', 'hello'));
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(reported).toHaveLength(1);
+    expect(reported[0].docId).toBe('doc1');
+    expect(reported[0].changes).toEqual(server.committed);
+    expect(doc.unstoredChangeIds).toEqual([]);
+    expect(doc.committedRev).toBe(1);
   });
 });

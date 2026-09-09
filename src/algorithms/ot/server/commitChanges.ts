@@ -46,6 +46,15 @@ const MAX_CONFLICT_RETRIES = 5;
  * the named ids and resolves the request as a resend, so a duplicate never commits and
  * non-idempotent ops (array removes, text deltas) are never double-applied.
  *
+ * ## Bounded Catch-up
+ *
+ * The catch-up echoed to the client is capped at `options.maxCatchupChanges` foreign changes.
+ * Past the cap the batch still commits exactly as it otherwise would, but the response drops the
+ * catch-up and sets `docReloadRequired`: the client confirms its batch and rehydrates from the
+ * snapshot, whose size the versioning bounds. A stale client's commit response otherwise scales
+ * with the doc's history (DAB-1340: a 34k-change doc answered every attempt with a response too
+ * large for the proxy in front of it, and the client retried forever).
+ *
  * @param store - The backend store for persistence.
  * @param docId - The ID of the document.
  * @param changes - The changes to commit.
@@ -284,10 +293,18 @@ export async function commitChanges(
       const catchupChanges = resentCommitted.length
         ? [...committedChanges, ...resentCommitted].sort((a, b) => a.rev - b.rev)
         : committedChanges;
+      // Beyond the cap the client reloads instead of applying the tail (see "Bounded Catch-up"):
+      // the echoes are dropped with it, since the reload path confirms the sent batch itself.
+      const maxCatchup = options?.maxCatchupChanges ?? 0;
+      const reloadInsteadOfCatchup = maxCatchup > 0 && committedChanges.length > maxCatchup;
+      const respond = (newChanges: Change[]): CommitResult =>
+        reloadInsteadOfCatchup
+          ? { catchupChanges: [], newChanges, docReloadRequired: true }
+          : { catchupChanges, newChanges, docReloadRequired };
 
       // If all incoming changes were already committed, return the committed changes found
       if (incomingChanges.length === 0) {
-        return { catchupChanges, newChanges: [], docReloadRequired };
+        return respond([]);
       }
 
       // 4. Offline-session versioning applies when:
@@ -361,7 +378,7 @@ export async function commitChanges(
       }
 
       // Return catchup changes and newly transformed changes separately
-      return { catchupChanges, newChanges: transformedChanges, docReloadRequired };
+      return respond(transformedChanges);
     } catch (error) {
       // The store's write-time id guard fired: one or more incoming changes were
       // already committed (a rebased retry past the read-side dedup window, or a

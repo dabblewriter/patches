@@ -35,6 +35,16 @@ export interface OTServerOptions {
    * server starts taking count-based snapshots on high-rate documents that previously had none.
    */
   maxChangesPerVersion?: number;
+  /**
+   * Cap on the foreign committed changes a commit response echoes back as catch-up. A client
+   * further behind the head than this still has its batch committed, but the response carries no
+   * catch-up and sets `docReloadRequired` instead, so the client rehydrates from the snapshot
+   * (bounded by `maxChangesPerVersion`) rather than receiving the whole tail inline. Without this
+   * a stale client's commit response grows with the doc's history — on a 34k-change doc it
+   * exceeded a proxy's 32 MiB response cap on every attempt, and the client retried forever.
+   * Defaults to 1000; set to `0` to disable.
+   */
+  maxCatchupChanges?: number;
 }
 
 /**
@@ -66,6 +76,7 @@ export class OTServer implements PatchesServer {
 
   private readonly sessionTimeoutMillis: number;
   private readonly maxChangesPerVersion: number;
+  private readonly maxCatchupChanges: number;
   /** Per-doc FIFO mutex (see {@link _withDocLock}). */
   private readonly _docLocks = new Map<string, Promise<unknown>>();
   readonly store: OTStoreBackend;
@@ -80,6 +91,7 @@ export class OTServer implements PatchesServer {
   constructor(store: OTStoreBackend, options: OTServerOptions = {}) {
     this.sessionTimeoutMillis = (options.sessionTimeoutMinutes ?? 30) * 60 * 1000;
     this.maxChangesPerVersion = options.maxChangesPerVersion ?? 1000;
+    this.maxCatchupChanges = options.maxCatchupChanges ?? 1000;
     this.store = store;
   }
 
@@ -137,7 +149,7 @@ export class OTServer implements PatchesServer {
         docId,
         changes,
         this.sessionTimeoutMillis,
-        { ...options, maxChangesPerVersion: this.maxChangesPerVersion }
+        { ...options, maxChangesPerVersion: this.maxChangesPerVersion, maxCatchupChanges: this.maxCatchupChanges }
       );
 
       // Notify about newly committed changes (broadcast to other clients)

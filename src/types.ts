@@ -377,6 +377,17 @@ export interface CommitChangesOptions {
    * `<= 0` disables it.
    */
   maxChangesPerVersion?: number;
+  /**
+   * Cap on the foreign committed changes a commit response echoes back as catch-up. A client
+   * further behind the head than this still has its batch committed, but the response carries no
+   * catch-up and sets `docReloadRequired`, so the client rehydrates from the snapshot instead of
+   * receiving the whole tail inline — a response that would otherwise grow without bound with
+   * the doc's history.
+   *
+   * The server passes its configured value (see `OTServerOptions.maxCatchupChanges`);
+   * `<= 0` disables it.
+   */
+  maxCatchupChanges?: number;
 }
 
 /**

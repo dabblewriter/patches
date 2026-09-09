@@ -42,15 +42,18 @@ const server = new OTServer(store, {
   sessionTimeoutMinutes: 30,
   // ...and at least every 1000 changes, even with no inactivity gap (default)
   maxChangesPerVersion: 1000,
+  // Past this many missed changes, a commit answers docReloadRequired instead of the tail (default)
+  maxCatchupChanges: 1000,
 });
 ```
 
 ### Options
 
-| Option                  | Type     | Default | Description                                                                                            |
-| ----------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------ |
-| `sessionTimeoutMinutes` | `number` | `30`    | Minutes of inactivity before creating a new version snapshot                                           |
-| `maxChangesPerVersion`  | `number` | `1000`  | Snapshot forward in bounded steps of at most N changes when the un-versioned tail reaches N; `0` = off |
+| Option                  | Type     | Default | Description                                                                                                                                                                          |
+| ----------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sessionTimeoutMinutes` | `number` | `30`    | Minutes of inactivity before creating a new version snapshot                                                                                                                         |
+| `maxChangesPerVersion`  | `number` | `1000`  | Snapshot forward in bounded steps of at most N changes when the un-versioned tail reaches N; `0` = off                                                                               |
+| `maxCatchupChanges`     | `number` | `1000`  | Cap on the foreign changes a commit response echoes as catch-up; past it the batch still commits but the client gets `docReloadRequired` and rehydrates from the snapshot; `0` = off |
 
 > **Why `maxChangesPerVersion`?** Session-gap versioning only fires when consecutive changes are far apart in time. A continuous high-rate stream of changes (seconds apart) never triggers it, so without a count-based trigger a single document can accrue tens of thousands of un-versioned changes — every cold load then replays the entire log, which can grow large enough that the document can no longer be loaded at all. The count trigger snapshots forward in **bounded steps of at most N changes**, so each snapshot build stays cheap.
 >
@@ -113,7 +116,7 @@ The heavy lifting is handled by the `commitChanges` [algorithm](algorithms.md) i
 Returns an object with:
 
 - **`changes`**: Combined array — catchup changes from other clients first, then the client's own changes after transformation (with assigned revisions)
-- **`docReloadRequired`** _(optional)_: `true` when the client's local state is stale and it must call `getDoc` before continuing. This happens when an offline-first client (`baseRev: 0`) commits changes to a document that already has server history — the server commits the changes but cannot inline all the missed history.
+- **`docReloadRequired`** _(optional)_: `true` when the client's local state is stale and it must call `getDoc` before continuing. This happens when an offline-first client (`baseRev: 0`) commits changes to a document that already has server history, or when the client is more than `maxCatchupChanges` behind the head — the server commits the changes but does not inline all the missed history.
 
 ```typescript
 const { changes, docReloadRequired } = await server.commitChanges(docId, myChanges);

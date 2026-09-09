@@ -152,3 +152,70 @@ describe('PatchesSync flushDoc — docReloadRequired reload', () => {
     expect(doc.committedRev).toBe(4);
   });
 });
+
+// A change minted on top of the sent batch while the commit is on the wire (or a later batch of
+// the same queue) is expressed in the batch's frame. The reload's reconcile must see the batch
+// in the pending queue so its committed echo is recognised as our own; dropped beforehand, the
+// echo reads as foreign and the newer change is transformed against it a second time
+// (DAB-1340, reachable for any client past the server's maxCatchupChanges).
+describe('PatchesSync flushDoc — docReloadRequired with pending minted on the sent batch', () => {
+  interface ListDoc {
+    title: string;
+    list: string[];
+  }
+  const R = 3;
+  const foreign = (rev: number): Change => ({
+    id: `f${rev}`,
+    rev,
+    baseRev: rev - 1,
+    ops: [{ op: 'replace', path: '/title', value: `t${rev}` }],
+    createdAt: rev,
+    committedAt: rev,
+  });
+
+  let store: OTInMemoryStore;
+  let patches: Patches;
+  let conn: ReturnType<typeof makeFakeConnection>;
+  let sync: PatchesSync;
+  let doc: OTDoc<ListDoc>;
+
+  beforeEach(async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    store = new OTInMemoryStore();
+    patches = new Patches({ algorithms: { ot: new OTAlgorithm(store) } });
+    await store.saveDoc(DOC_ID, { state: { title: 't', list: ['a', 'b'] }, rev: R });
+    conn = makeFakeConnection();
+    sync = new PatchesSync(patches, conn as unknown as PatchesConnection);
+    vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+    await patches.trackDocs([DOC_ID]);
+    doc = (await patches.openDoc<ListDoc>(DOC_ID)) as OTDoc<ListDoc>;
+    sync['updateState']({ connected: true });
+  });
+
+  it('keeps a change minted during the round-trip at its offset after the capped reload', async () => {
+    doc.change(p => p.add('/list/0', 'H'));
+    await doc.flush();
+    const [sent] = await store.getPendingChanges(DOC_ID);
+    expect(sent.baseRev).toBe(R);
+
+    // Server: three foreign changes (revs 4..6), then the sent batch committed at rev 7.
+    const echo: Change = { ...sent, rev: 7, baseRev: 6, committedAt: 7 };
+    const history = [foreign(4), foreign(5), foreign(6), echo];
+    conn.getChangesSince.mockImplementation((async (_id: string, rev: number) =>
+      history.filter(c => c.rev > rev)) as any);
+    conn.getDoc.mockImplementation(async () => ({ state: { title: 't', list: ['a', 'b'] }, rev: R, changes: history }));
+    conn.commitChanges.mockImplementation(async () => {
+      // Minted on top of the sent batch while it is on the wire: 'w' right after 'H'.
+      doc.change(p => p.add('/list/1', 'w'));
+      await doc.flush();
+      return { changes: [echo], docReloadRequired: true as const };
+    });
+
+    await sync['flushDoc'](DOC_ID);
+
+    expect(doc.committedRev).toBe(7);
+    expect(doc.state.list).toEqual(['H', 'w', 'a', 'b']);
+    const pending = await store.getPendingChanges(DOC_ID);
+    expect(pending.map(c => c.ops)).toEqual([[{ op: 'add', path: '/list/1', value: 'w' }]]);
+  });
+});

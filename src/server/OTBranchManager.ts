@@ -892,7 +892,13 @@ export class OTBranchManager implements BranchManager {
       if (changesToCommit.length > 0) {
         result = (
           await wrapMergeCommit(branchId, sourceDocId, async () => {
-            return (await this.patchesServer.commitChanges(sourceDocId, changesToCommit)).changes;
+            const committed = await this.patchesServer.commitChanges(sourceDocId, changesToCommit);
+            if (!committed.docReloadRequired) return committed.changes;
+            // Past the server's catch-up cap the response carries none of the foreign rows the
+            // frame must fold; read the tail since the frame back instead.
+            const tail: Change[] = [];
+            for await (const page of this.pageChanges(sourceDocId, frame.sourceRev)) tail.push(...page);
+            return tail;
           })
         ).sort((a, b) => a.rev - b.rev);
         committedThroughRev = spanEnd;

@@ -36,12 +36,10 @@ export interface OTServerOptions {
    */
   maxChangesPerVersion?: number;
   /**
-   * Cap on the foreign committed changes a commit response echoes back as catch-up. A client
-   * further behind the head than this still has its batch committed, but the response carries no
-   * catch-up and sets `docReloadRequired` instead, so the client rehydrates from the snapshot
-   * (bounded by `maxChangesPerVersion`) rather than receiving the whole tail inline. Without this
-   * a stale client's commit response grows with the doc's history — on a 34k-change doc it
-   * exceeded a proxy's 32 MiB response cap on every attempt, and the client retried forever.
+   * Cap on the foreign committed changes a commit response echoes back as catch-up. Past it the
+   * batch still commits but the response sets `docReloadRequired` instead of carrying the tail,
+   * so the client rehydrates from the snapshot (whose un-versioned tail is bounded by versioning:
+   * `maxChangesPerVersion` and session gaps). See `commitChanges` for the full contract.
    * Defaults to 1000; set to `0` to disable.
    */
   maxCatchupChanges?: number;

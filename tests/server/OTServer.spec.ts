@@ -206,13 +206,7 @@ describe('OTServer', () => {
       vi.mocked(mockStore.listChanges).mockImplementation(async (_doc, opts: any) =>
         opts?.reverse && opts?.limit === 1 ? [tail[2]] : tail
       );
-      const change = {
-        id: 'c1',
-        rev: 2,
-        baseRev: 1,
-        ops: [{ op: 'add', path: '/x', value: 1 }],
-        createdAt: recent,
-      } as any;
+      const change = { ...mockChange, id: 'c1', rev: 2, baseRev: 1, batchId: undefined, createdAt: recent };
 
       const result = await cappedServer.commitChanges('doc1', [change]);
 

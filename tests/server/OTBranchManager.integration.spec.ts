@@ -18,7 +18,7 @@ import {
   OTBranchManager,
   type OTBranchManagerOptions,
 } from '../../src/server/OTBranchManager';
-import { OTServer } from '../../src/server/OTServer';
+import { OTServer, type OTServerOptions } from '../../src/server/OTServer';
 import type { BranchingStoreBackend, OTStoreBackend } from '../../src/server/types';
 import type {
   Branch,
@@ -213,9 +213,9 @@ async function coldLoad(server: OTServer, docId: string): Promise<{ state: any; 
   return { state: applyChanges(state, changes), rev, changes };
 }
 
-function setup(managerOptions?: OTBranchManagerOptions) {
+function setup(managerOptions?: OTBranchManagerOptions, serverOptions?: OTServerOptions) {
   const store = new MemoryOTBranchStore();
-  const server = new OTServer(store);
+  const server = new OTServer(store, serverOptions);
   const manager = new OTBranchManager(store, server, managerOptions);
   return { store, server, manager };
 }
@@ -1488,8 +1488,8 @@ describe('windowed merge with concurrent source edits', () => {
     };
   }
 
-  async function seededSource(text: string, options?: OTBranchManagerOptions) {
-    const ctx = setup(options);
+  async function seededSource(text: string, options?: OTBranchManagerOptions, serverOptions?: OTServerOptions) {
+    const ctx = setup(options, serverOptions);
     await ctx.server.commitChanges('doc1', [rootChange('s1', { body: { ops: [{ insert: text }] } })]);
     const branchId = await ctx.manager.createBranch('doc1', 1);
     return { ...ctx, branchId, edit: editor(ctx), apply: applier(ctx) };
@@ -1648,10 +1648,13 @@ describe('windowed merge with concurrent source edits', () => {
   // A foreign change landing between two windows is folded by the next window's catch-up; one
   // landing between a window's catch-up and its commit comes back in the commit result and is
   // folded forward through the slice as sent.
-  it('converges when a foreign change lands mid-merge', async () => {
-    const { store, server, manager, branchId, edit } = await seededSource('alpha beta gamma', {
-      maxChangesPerMerge: 1,
-    });
+  /** Merge with one foreign row landing between windows and two landing inside a window. */
+  async function mergeWithForeignRows(serverOptions?: OTServerOptions) {
+    const { store, server, manager, branchId, edit } = await seededSource(
+      'alpha beta gamma',
+      { maxChangesPerMerge: 1 },
+      serverOptions
+    );
     await edit(branchId, 'b1', [{ insert: '<b1>' }]);
     await edit(branchId, 'b2', [{ retain: 20 }, { insert: '<b2>' }]);
     await edit(branchId, 'b3', [{ retain: 10 }, { insert: '<b3>' }]);
@@ -1666,14 +1669,15 @@ describe('windowed merge with concurrent source edits', () => {
       }
       return applied;
     };
-    // ...and one inside the next window, after its catch-up read but before its commit, so it
-    // comes back in the commit result and has to be folded forward through the slice as sent.
+    // ...and two inside the next window, after its catch-up read but before its commit, so they
+    // come back in the commit result and have to be folded forward through the slice as sent.
     const realListChanges = store.listChanges.bind(store);
     let sliceReads = 0;
     store.listChanges = async (docId, options) => {
       const rows = await realListChanges(docId, options);
       if (docId === branchId && options?.maxBytes !== undefined && ++sliceReads === 2) {
         await edit('doc1', 'f2', [{ insert: '<f2>' }]);
+        await edit('doc1', 'f3', [{ insert: '<f3>' }]);
       }
       return rows;
     };
@@ -1683,7 +1687,12 @@ describe('windowed merge with concurrent source edits', () => {
     expect(sliceReads).toBeGreaterThan(1);
 
     const text = bodyText((await coldLoad(server, 'doc1')).state);
-    for (const marker of ['<b1>', '<b2>', '<b3>', '<f1>', '<f2>']) {
+    return { store, text };
+  }
+
+  it('converges when a foreign change lands mid-merge', async () => {
+    const { store, text } = await mergeWithForeignRows();
+    for (const marker of ['<b1>', '<b2>', '<b3>', '<f1>', '<f2>', '<f3>']) {
       expect(text.indexOf(marker), marker).toBeGreaterThanOrEqual(0);
       expect(text.indexOf(marker), marker).toBe(text.lastIndexOf(marker));
     }
@@ -1691,6 +1700,15 @@ describe('windowed merge with concurrent source edits', () => {
     expect(text.replace(/<[bf]\d>/g, '')).toBe('alpha beta gamma\n');
     const ids = await changeIds(store, 'doc1');
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  // Past the server's catch-up cap the commit response omits the mid-window foreign rows
+  // (docReloadRequired); the merge must read the tail back rather than persist a frame that
+  // claims to cover rows it never folded, or the next window lifts through a hole.
+  it('converges identically when the commit response is capped', async () => {
+    const { text } = await mergeWithForeignRows();
+    const { text: capped } = await mergeWithForeignRows({ maxCatchupChanges: 1 });
+    expect(capped).toBe(text);
   });
 
   it('resumes a crashed windowed merge and returns the committed prefix too', async () => {

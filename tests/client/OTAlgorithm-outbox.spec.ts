@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OTAlgorithm } from '../../src/client/OTAlgorithm';
-import { PendingDeferredError, UnstoredOutboxOverflowError } from '../../src/net/error';
+import { PendingDeferredError, UnstoredFrameLostError, UnstoredOutboxOverflowError } from '../../src/net/error';
 import type { OTDoc } from '../../src/client/OTDoc';
 import { OTInMemoryStore } from '../../src/client/OTInMemoryStore';
 import { createChange } from '../../src/data/change';
@@ -385,7 +385,7 @@ describe('OTAlgorithm outbox (store-refused changes sent from memory)', () => {
     expect(errors).toHaveLength(1); // latched per row
   });
 
-  it('confirmUnstoredCommitted (the commit response) drops the row and reports it before the store apply; the echo then finds nothing to re-report', async () => {
+  it('confirmUnstoredCommitted (the commit response) confirms the row before the store apply — reported once, no longer listed or pending — and the echo does not re-report it', async () => {
     const refusedOps = type('u');
     algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused');
     const committed = vi.fn();
@@ -400,12 +400,14 @@ describe('OTAlgorithm outbox (store-refused changes sent from memory)', () => {
       createChange(5, 7, [{ op: 'add', path: '/y', value: 1 }], {}, 'store-row'),
     ]);
     expect(algorithm.hasUnstoredChanges('doc1')).toBe(false);
+    expect(await algorithm.hasPending('doc1')).toBe(false);
+    expect(algorithm.listUnstoredChanges('doc1')).toEqual([]); // on the server: not unsaved content
     expect(committed).toHaveBeenCalledTimes(1);
     expect(committed).toHaveBeenCalledWith('doc1', [echo]); // only the outbox row, with its committed copy
     // The doc keeps the entry visible (rev 6 is ahead of it) until a receive or import covers it.
     expect(doc.unstoredChangeIds).toEqual(['refused']);
     expect(doc.state.items).toEqual(['a', 'u']);
-    expect(await algorithm.getPendingToSend('doc1', doc)).toBeNull(); // nothing goes out again
+    expect(await algorithm.getPendingToSend('doc1', doc)).toBeNull(); // a stub alone is not a batch
 
     await algorithm.applyServerChanges('doc1', [echo], doc);
     expect(doc.state.items).toEqual(['a', 'u']); // once
@@ -608,5 +610,212 @@ describe('OTAlgorithm outbox — walking live rows across a rebuild or reload (r
     expect(doc.unstoredChangeIds).toEqual([]);
     expect(doc.state).toEqual({ items: ['a', 'u'], other: 1 }); // once
     expect(committedSpy).toHaveBeenCalledWith('doc1', [echo]);
+  });
+});
+
+describe('OTAlgorithm outbox — confirmed stubs and the unreadable span over pending rows (review round 3)', () => {
+  let store: OTInMemoryStore;
+  let algorithm: OTAlgorithm;
+  let doc: OTDoc<any>;
+
+  beforeEach(async () => {
+    store = new OTInMemoryStore();
+    algorithm = new OTAlgorithm(store);
+    await store.trackDocs(['doc1']);
+    await store.saveDoc('doc1', { state: { items: ['a'] }, rev: 5 });
+    doc = algorithm.createDoc('doc1', { state: { items: ['a'] }, rev: 5, changes: [] }) as unknown as OTDoc<any>;
+  });
+
+  /** Type through the doc and return the emitted ops array. */
+  function type(path: string, value: string): any[] {
+    let emitted: any[] = [];
+    const off = doc.onChange(ops => (emitted = ops));
+    doc.change(patch => patch.add(path, value));
+    off();
+    return emitted;
+  }
+
+  it('a confirmed row stays as a stub and rides ahead of later rows at the doc frame until the doc covers its rev', async () => {
+    const committed = vi.fn();
+    algorithm.onUnstoredCommitted(committed);
+    algorithm.queueUnstoredChange('doc1', type('/items/0', 'u'), doc, {}, 'u');
+    const uEcho = { ...createChange(5, 6, [{ op: 'add', path: '/items/0', value: 'u' }], {}, 'u'), committedAt: 1 };
+    algorithm.confirmUnstoredCommitted('doc1', [uEcho]); // the store then refuses the apply: the doc stays at 5
+    expect(doc.committedRev).toBe(5);
+
+    // v is minted over u (the user sees u, v, a). It must not go out alone at 5: the server
+    // would transform it against u's committed copy.
+    algorithm.queueUnstoredChange('doc1', type('/items/1', 'v'), doc, {}, 'v');
+    expect(algorithm.listUnstoredChanges('doc1').map(c => c.id)).toEqual(['v']); // the stub is not unsaved content
+    const batch = (await algorithm.getPendingToSend('doc1', doc))!;
+    expect(batch.map(c => [c.id, c.baseRev, c.ops[0].path])).toEqual([
+      ['u', 5, '/items/0'],
+      ['v', 5, '/items/1'],
+    ]);
+
+    // The response echoes the deduped stub again: not reported twice, still a stub.
+    algorithm.confirmUnstoredCommitted('doc1', [
+      uEcho,
+      { ...createChange(5, 7, [{ op: 'add', path: '/items/1', value: 'v' }], {}, 'v'), committedAt: 1 },
+    ]);
+    expect(committed).toHaveBeenCalledTimes(2);
+    expect(committed.mock.calls.map(([, changes]) => changes.map((c: Change) => c.id))).toEqual([['u'], ['v']]);
+    expect(await algorithm.getPendingToSend('doc1', doc)).toBeNull(); // stubs alone: nothing to shadow
+    expect(await algorithm.hasPending('doc1')).toBe(false);
+
+    // A later batch (a store row minted over both) carries both stubs ahead of it.
+    await algorithm.handleDocChange('doc1', type('/items/2', 'w'), doc, {}, 'w');
+    const next = (await algorithm.getPendingToSend('doc1', doc))!;
+    expect(next.map(c => c.id)).toEqual(['w', 'u', 'v']);
+  });
+
+  it("a stub retires on the doc's own echo, with no second report, and on an import that covers its rev", async () => {
+    const committed = vi.fn();
+    algorithm.onUnstoredCommitted(committed);
+    algorithm.queueUnstoredChange('doc1', type('/items/0', 'u'), doc, {}, 'u');
+    const uEcho = { ...createChange(5, 6, [{ op: 'add', path: '/items/0', value: 'u' }], {}, 'u'), committedAt: 1 };
+    algorithm.confirmUnstoredCommitted('doc1', [uEcho]);
+    expect(algorithm['_outbox'].get('doc1')).toHaveLength(1);
+
+    await algorithm.applyServerChanges('doc1', [uEcho], doc); // the store recovered: the echo lands
+    expect(doc.committedRev).toBe(6);
+    expect(doc.state.items).toEqual(['u', 'a']); // once
+    expect(doc.unstoredChangeIds).toEqual([]);
+    expect(algorithm['_outbox'].has('doc1')).toBe(false);
+    expect(committed).toHaveBeenCalledTimes(1);
+
+    // The import route: the doc jumps to a snapshot that holds the row.
+    algorithm.queueUnstoredChange('doc1', type('/items/1', 'v'), doc, {}, 'v');
+    const vEcho = { ...createChange(6, 7, [{ op: 'add', path: '/items/1', value: 'v' }], {}, 'v'), committedAt: 1 };
+    algorithm.confirmUnstoredCommitted('doc1', [vEcho]);
+    doc.import({ state: { items: ['u', 'v', 'a'] }, rev: 7, changes: [] });
+    expect(doc.unstoredChangeIds).toEqual([]);
+    expect(await algorithm.getPendingToSend('doc1', doc)).toBeNull();
+    expect(algorithm['_outbox'].has('doc1')).toBe(false); // retired at the read
+    expect(committed).toHaveBeenCalledTimes(2);
+  });
+
+  it('a stub absent from a later response is not "resolved away", and a stub deferred behind the store queue is not reported stuck', async () => {
+    algorithm.queueUnstoredChange('doc1', type('/items/0', 'u'), doc, {}, 'u');
+    algorithm.confirmUnstoredCommitted('doc1', [
+      { ...createChange(5, 6, [{ op: 'add', path: '/items/0', value: 'u' }], {}, 'u'), committedAt: 1 },
+    ]);
+    algorithm.queueUnstoredChange('doc1', type('/items/1', 'v'), doc, {}, 'v');
+    const batch = (await algorithm.getPendingToSend('doc1', doc))!;
+    // A server that did not echo the deduped stub back: only v comes back committed.
+    const vEcho = { ...createChange(5, 7, [{ op: 'add', path: '/items/1', value: 'v' }], {}, 'v'), committedAt: 1 };
+    expect(await algorithm.dropResolvedPending('doc1', batch, [vEcho])).toBe(0);
+    expect(doc.unstoredChangeIds).toEqual(['u', 'v']); // the doc still holds both entries
+    expect(algorithm['_outbox'].get('doc1')).toHaveLength(2);
+
+    // The doc closes: the stubs (v confirmed by the next response) freeze at 5. A store row
+    // minted on a newer frame heads the queue, so the stubs are stragglers — deferred, but never
+    // reported as stuck.
+    algorithm.confirmUnstoredCommitted('doc1', [vEcho]);
+    algorithm.detachUnstoredChanges('doc1', doc);
+    await store.savePendingChanges('doc1', [createChange(8, 9, [{ op: 'add', path: '/x', value: 1 }], {}, 'p')]);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errors: Error[] = [];
+    algorithm.onError(err => errors.push(err));
+    expect((await algorithm.getPendingToSend('doc1'))!.map(c => c.id)).toEqual(['p']);
+    expect((await algorithm.getPendingToSend('doc1'))!.map(c => c.id)).toEqual(['p']);
+    expect(errors).toEqual([]);
+  });
+
+  it('stubs count toward the ceiling: a doc that cannot advance holds the honest bound', () => {
+    const errors: Error[] = [];
+    algorithm.onError(err => errors.push(err));
+    const echoes: Change[] = [];
+    for (let i = 0; i < 500; i++) {
+      algorithm.queueUnstoredChange('doc1', type('/items/-', `v${i}`), doc, {}, `r${i}`);
+      echoes.push({
+        ...createChange(5, 6 + i, [{ op: 'add', path: '/items/-', value: `v${i}` }], {}, `r${i}`),
+        committedAt: 1,
+      });
+    }
+    algorithm.confirmUnstoredCommitted('doc1', echoes);
+    expect(algorithm.hasUnstoredChanges('doc1')).toBe(false);
+    expect(algorithm.listUnstoredChanges('doc1')).toEqual([]);
+
+    expect(algorithm.queueUnstoredChange('doc1', type('/items/-', 'over'), doc, {}, 'over')).toBeNull();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(UnstoredOutboxOverflowError);
+    expect(errors[0]).toMatchObject({ rows: 500, maxRows: 500 });
+  });
+
+  describe('an unreadable span over an in-frame pending row', () => {
+    const Z = { ...createChange(5, 6, [{ op: 'add', path: '/items/0', value: 'Z' }]), committedAt: 1 };
+    const other = { ...createChange(6, 7, [{ op: 'add', path: '/other', value: 1 }]), committedAt: 1 };
+    let refusedOps: any[];
+    let errors: Error[];
+
+    beforeEach(async () => {
+      // P (add /x) is pending in the store and the doc; the row u = add /items/1 is expressed over it.
+      await algorithm.handleDocChange('doc1', type('/x', 'p'), doc, {}, 'P');
+      refusedOps = type('/items/1', 'u');
+      algorithm.queueUnstoredChange('doc1', refusedOps, doc, {}, 'refused');
+      // The store took Z torn (the doc stays at 5) and cannot read the span for the rebuild.
+      await algorithm.applyServerChanges('doc1', [Z], undefined);
+      expect(doc.committedRev).toBe(5);
+      vi.spyOn(store, 'listChanges').mockRejectedValue(new Error('unreadable'));
+      errors = [];
+      algorithm.onError(err => errors.push(err));
+    });
+
+    it('is taken from the server when a fetcher is installed: the row is walked, not frozen', async () => {
+      const fetch = vi.fn(async () => [Z, other]);
+      algorithm.setCommittedSpanFetcher(fetch);
+      await algorithm.applyServerChanges('doc1', [other], doc); // misaligned: rebuild from the store
+      expect(fetch).toHaveBeenCalledWith('doc1', 5, 7);
+      expect(doc.committedRev).toBe(7);
+      const batch = (await algorithm.getPendingToSend('doc1', doc))!;
+      expect(batch.map(c => [c.id, c.baseRev])).toEqual([
+        ['P', 7],
+        ['refused', 7],
+      ]); // one batch, in frame
+      expect(batch[1].ops).toEqual([{ op: 'add', path: '/items/2', value: 'u' }]); // crossed Z
+      expect(doc.state).toEqual({ items: ['Z', 'a', 'u'], x: 'p', other: 1 });
+      expect(errors).toEqual([]);
+    });
+
+    it('refuses and reports the row when no fetcher is installed: it is dropped from the outbox, never frozen', async () => {
+      await algorithm.applyServerChanges('doc1', [other], doc);
+      expect(doc.committedRev).toBe(7);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBeInstanceOf(UnstoredFrameLostError);
+      expect(errors[0]).toMatchObject({
+        docId: 'doc1',
+        fromRev: 5,
+        toRev: 7,
+        changes: [{ id: 'refused', baseRev: 5, ops: [{ op: 'add', path: '/items/1', value: 'u' }] }],
+      });
+      expect(algorithm.hasUnstoredChanges('doc1')).toBe(false);
+      expect(doc.unstoredChangeIds).toEqual([]); // an ordinary optimistic entry from here
+      expect(doc.state.items).toContain('u'); // still visible; the app shelves it
+      // Only P goes out; the row is not sent at a frame it is not in.
+      expect((await algorithm.getPendingToSend('doc1', doc))!.map(c => c.id)).toEqual(['P']);
+    });
+
+    it('refuses the row when the fetcher fails or returns a short span', async () => {
+      algorithm.setCommittedSpanFetcher(vi.fn(async () => [other])); // rev 6 missing
+      await algorithm.applyServerChanges('doc1', [other], doc);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBeInstanceOf(UnstoredFrameLostError);
+      expect(algorithm.hasUnstoredChanges('doc1')).toBe(false);
+
+      // And a fetcher that throws (offline).
+      const again = type('/items/1', 'w');
+      algorithm.queueUnstoredChange('doc1', again, doc, {}, 'again');
+      const more = { ...createChange(7, 8, [{ op: 'add', path: '/items/0', value: 'Y' }]), committedAt: 1 };
+      await algorithm.applyServerChanges('doc1', [more], undefined); // torn again
+      algorithm.setCommittedSpanFetcher(vi.fn(async () => Promise.reject(new Error('offline'))));
+      await algorithm.applyServerChanges(
+        'doc1',
+        [{ ...createChange(8, 9, [{ op: 'add', path: '/more', value: 1 }]), committedAt: 1 }],
+        doc
+      );
+      expect(errors).toHaveLength(2);
+      expect(errors[1]).toMatchObject({ fromRev: 7, toRev: 9, changes: [{ id: 'again' }] });
+    });
   });
 });

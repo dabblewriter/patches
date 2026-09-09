@@ -276,11 +276,24 @@ happened (`false` for an algorithm without an outbox, such as LWW).
 - The outbox is **memory only** — a reload loses it. `onUnstoredQueued` fires with the provisional
   change so the app can shelve it elsewhere as well.
 - Rows are confirmed from the **commit response** of the flush that sent them, before the response
-  is applied to the store — so a store that refuses the apply as well cannot keep a row queued and
-  resent on every flush. Every row goes out at the committed frame its ops are really in (a row
-  from an open doc is re-minted from the doc; a row the doc has closed on, or one accepted from
-  another context, at its own `baseRev`), and is walked forward through every committed batch that
-  extends that frame, so it is never relabeled into a frame it was not transformed into.
+  is applied to the store — reported once, and no longer listed or counted as pending — so a store
+  that refuses the apply as well cannot keep a row unconfirmed. The row itself stays in the outbox
+  as a **stub** until the open doc's frame covers its committed rev: the doc only advances when the
+  apply succeeds, and until then every later edit is minted on top of the row, so the stub rides
+  in every batch (the server dedupes it by id and keeps its committed copy out of the transform
+  set) and the later edits stay in its shadow. The doc's own echo or import retires it. Stubs
+  count toward the ceiling below.
+- Every row goes out at the committed frame its ops are really in (a row from an open doc is
+  re-minted from the doc; a row the doc has closed on, or one accepted from another context, at
+  its own `baseRev`), and is walked forward through every committed batch that extends that
+  frame, so it is never relabeled into a frame it was not transformed into. When the doc jumps
+  over a span (a rebuild from the store, a snapshot reload) the store supplies it; if the store
+  cannot and the row was expressed over pending rows still in that frame, the span is read from
+  the server instead (`PatchesSync` wires `getChangesSince` in), and if that is not possible
+  either the row is dropped from the outbox and reported as `UnstoredFrameLostError` (its ops as
+  they stood) so the app can shelve it — a row that depends on a pending row is never frozen at
+  the old frame, where it would flush alone after that row and be transformed against its
+  committed copy.
 - The outbox is **bounded**: 500 rows or 2 MiB of serialised ops per doc. Past that, new rows are
   refused (never evicted — a queued row is unconfirmed content) and reported once per episode
   through `onError` as `UnstoredOutboxOverflowError`; the refused change's own `onError` emit says

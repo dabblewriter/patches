@@ -1,4 +1,5 @@
 import type { ApplyChangesError } from '../algorithms/ot/shared/applyChanges.js';
+import type { Change } from '../types.js';
 
 export class StatusError extends Error {
   constructor(
@@ -458,6 +459,37 @@ export class UnstoredOutboxOverflowError extends Error {
         `a store-refused change was not queued to be sent from memory`
     );
     this.name = 'UnstoredOutboxOverflowError';
+  }
+}
+
+/**
+ * Outbox rows were dropped from the outbox because they could not be carried across a committed
+ * span the open doc is jumping over (a rebuild from the store or a snapshot reload past
+ * `(fromRev, toRev]`), and they were expressed over pending rows still in that frame (see
+ * `OTAlgorithm._rebaseOutboxRows`). Neither the store nor the server could supply the span, so
+ * the rows can neither be walked into the new frame nor honestly frozen at the old one: frozen,
+ * they would flush alone after the pending rows commit and be transformed against those rows'
+ * committed copies as well. `changes` carries the rows as they stood (ops in frame `fromRev`)
+ * so the app can shelve them; the doc keeps each as an ordinary memory-only optimistic entry,
+ * re-driven under the same id by `retrySavingChanges`. Emitted through `PatchesSync.onError`.
+ */
+export class UnstoredFrameLostError extends Error {
+  constructor(
+    /** The doc the rows belong to. */
+    readonly docId: string,
+    /** The refused rows, ops as they stood in frame `fromRev`. */
+    readonly changes: Change[],
+    /** The committed frame the rows' ops are expressed in. */
+    readonly fromRev: number,
+    /** The committed rev the doc moved to without them. */
+    readonly toRev: number
+  ) {
+    super(
+      `${changes.length} outbox change(s) for ${docId} could not be carried from rev ${fromRev} to ${toRev} ` +
+        `(the committed span could not be read) and depend on pending changes, so they were dropped from the ` +
+        `outbox and must be shelved: ${changes.map(c => c.id).join(', ')}`
+    );
+    this.name = 'UnstoredFrameLostError';
   }
 }
 

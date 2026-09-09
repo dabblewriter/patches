@@ -123,13 +123,29 @@ export interface ClientAlgorithm {
 
   /**
    * Optional: the commit response for a flush this instance sent carries committed copies of the
-   * batch's own rows. Outbox rows among them are confirmed from the response — dropped here and
-   * reported on `onUnstoredCommitted` — BEFORE the response is applied to the store, so a store
-   * that refuses the apply (the condition the outbox exists for) cannot leave the row queued and
-   * resent on every flush. The open doc keeps its memory-only entry visible until a receive or
-   * import covers the committed rev.
+   * batch's own rows. Outbox rows among them are confirmed from the response — reported on
+   * `onUnstoredCommitted` once, listed and counted as pending no more — BEFORE the response is
+   * applied to the store, so a store that refuses the apply (the condition the outbox exists
+   * for) cannot leave the row unconfirmed. The row itself stays in the outbox as a stub that
+   * rides in every batch until the open doc's frame covers its committed rev: the doc only
+   * advances when the apply succeeds, and until then every later edit is minted on top of the
+   * row and must go out in its shadow (the server dedupes the stub by id and keeps its committed
+   * copy out of the transform set). The open doc keeps its memory-only entry visible until a
+   * receive or import covers the committed rev, which is also what retires the stub.
    */
   confirmUnstoredCommitted?(docId: string, committed: Change[]): void;
+
+  /**
+   * Optional: install the reader the algorithm falls back to when the store cannot supply a
+   * committed span an outbox row has to cross and the row depends on in-frame pending rows —
+   * the one case where freezing the row at its old frame is not safe (it would later flush
+   * alone and be transformed against those rows' committed copies). PatchesSync wires this to
+   * the connection's `getChangesSince`; without it, or when it fails, the row is refused and
+   * reported (`UnstoredFrameLostError`) so the app can shelve it.
+   */
+  setCommittedSpanFetcher?(
+    fetch: ((docId: string, fromRev: number, toRev: number) => Promise<Change[]>) | undefined
+  ): void;
 
   /**
    * Lists all changes (committed + pending) for a document.

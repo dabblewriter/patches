@@ -7,7 +7,12 @@ import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
 import { createChange } from '../data/change.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
-import { PendingDeferredError, UnstoredOutboxOverflowError, UnstoredPendingError } from '../net/error.js';
+import {
+  PendingDeferredError,
+  UnstoredFrameLostError,
+  UnstoredOutboxOverflowError,
+  UnstoredPendingError,
+} from '../net/error.js';
 import type { Change, PatchesSnapshot, QuarantinedChange } from '../types.js';
 import type { ClientAlgorithm } from './ClientAlgorithm.js';
 import type { OTClientStore } from './OTClientStore.js';
@@ -95,6 +100,20 @@ function firstGapIndex(changes: Change[]): number {
  * through every committed batch that extends its frame so it stays sendable in one batch with
  * the store queue. `doc` on a frozen row is bookkeeping only (the doc that still holds its
  * memory-only entry, if any).
+ *
+ * A row with `committedRev` set is a STUB: the commit response of a flush this instance sent has
+ * confirmed it (see {@link OTAlgorithm.confirmUnstoredCommitted}), so its content is on the
+ * server and it is reported, listed and counted as pending no more — but it stays in the outbox,
+ * and goes out with every batch, until the frame later rows are minted in covers that rev. The
+ * doc only advances when the store accepts the response's apply, and a store that refuses it (the
+ * condition the outbox exists for) leaves the doc's frame — and the row in the doc's optimistic
+ * queue — where it was: every later edit is minted on top of the row, and sent WITHOUT it the
+ * server transforms the edit against the row's committed copy (an insert at /items/1 expressed
+ * over the row's insert at /items/0 lands at /items/2). Sent with it, the server dedupes the stub
+ * by id and keeps its committed copy out of the transform set, and the later rows stay in its
+ * shadow. A stub is retired when the doc's own echo or import covers its rev (a frozen stub, when
+ * its echo comes through {@link OTAlgorithm.applyServerChanges}); it counts toward the ceiling,
+ * which is the honest bound while the doc cannot advance.
  */
 interface OutboxRow {
   change: Change;
@@ -103,7 +122,15 @@ interface OutboxRow {
   metadata?: Record<string, any>;
   /** Serialised size of the ops at queue time, against {@link MAX_OUTBOX_BYTES}. */
   bytes: number;
+  /** Set once the commit response confirmed the row: the rev it committed at (a stub). */
+  committedRev?: number;
 }
+
+/**
+ * Reads the committed span `(fromRev, toRev]` of a doc from the server (see
+ * {@link OTAlgorithm.setCommittedSpanFetcher}). May throw; the algorithm then falls back.
+ */
+export type CommittedSpanFetcher = (docId: string, fromRev: number, toRev: number) => Promise<Change[]>;
 
 export class OTAlgorithm implements ClientAlgorithm {
   readonly name = 'ot';
@@ -129,7 +156,10 @@ export class OTAlgorithm implements ClientAlgorithm {
    * exhausted its bounded retries, and only via {@link queueUnstoredChange} /
    * {@link acceptUnstoredChanges}. A row leaves when its committed echo arrives
    * ({@link applyServerChanges}), when the server resolves it away ({@link dropResolvedPending}),
-   * or when the store accepts it after all ({@link handleDocChange} under the same id).
+   * or when the store accepts it after all ({@link handleDocChange} under the same id). A row
+   * the commit response confirmed stays as a stub until the doc's frame covers its rev (see
+   * {@link OutboxRow}); a row that can neither be walked nor frozen across a span is refused
+   * and reported ({@link _rebaseOutboxRows}).
    *
    * Memory only, by design: a reload loses the outbox. Nothing here is a second durability
    * tier — the app's shelf and the server's shelf back it.
@@ -187,6 +217,13 @@ export class OTAlgorithm implements ClientAlgorithm {
    * entries are short ids that only enter on a deferral, and lifecycle clearing is the bound.
    */
   private readonly _deferrals = new Map<string, Map<string, number>>();
+
+  /**
+   * Reads a committed span from the server when the store cannot supply it (see
+   * {@link _rebaseOutboxRows}). Supplied by the sync layer ({@link setCommittedSpanFetcher});
+   * absent, an unreadable span under a row that depends on pending rows refuses the row.
+   */
+  private _fetchCommittedSpan?: CommittedSpanFetcher;
 
   constructor(store: OTClientStore, options: PatchesDocOptions = {}) {
     this.store = store;
@@ -314,9 +351,27 @@ export class OTAlgorithm implements ClientAlgorithm {
     // deferred by _withConsistentBaseRev like any straggler, never relabeled into a frame it
     // was not transformed into. No store read here: nothing relabels, so nothing needs the
     // store's frame.
-    const toSend = [...pending, ...this._outboxToSend(docId, pending, otDoc?.committedRev)];
+    //
+    // Confirmed stubs ride too, for the same reason the live rows ride behind the store queue:
+    // until the doc's frame covers a stub, every later row was minted over it, and only a batch
+    // that carries the stub keeps the server from transforming those rows against its committed
+    // copy (the server dedupes the stub by id). A batch of nothing BUT stubs has no such row to
+    // shadow and is not sent.
+    const outbox = this._outboxToSend(docId, pending, otDoc?.committedRev, true);
+    const toSend = [...pending, ...outbox];
     if (toSend.length === 0) return null;
+    if (pending.length === 0 && outbox.every(c => this._isStub(docId, c.id))) return null;
     return this._withConsistentBaseRev(docId, toSend);
+  }
+
+  /**
+   * Install (or clear) the reader {@link _rebaseOutboxRows} falls back to when the store cannot
+   * supply the committed span a live row has to cross and the row depends on in-frame pending
+   * rows — the one case where freezing the row is not honest (see there). PatchesSync wires
+   * this to the connection's `getChangesSince`.
+   */
+  setCommittedSpanFetcher(fetch: CommittedSpanFetcher | undefined): void {
+    this._fetchCommittedSpan = fetch;
   }
 
   // --- Outbox (store-refused changes sent from memory) ---
@@ -392,13 +447,22 @@ export class OTAlgorithm implements ClientAlgorithm {
     return accepted;
   }
 
-  /** The outbox rows for a doc as they stand now (copies); frozen rows keep their own frame. */
+  /**
+   * The outbox rows for a doc as they stand now (copies); frozen rows keep their own frame.
+   * Confirmed stubs are not listed: their content is on the server (see {@link OutboxRow}).
+   */
   listUnstoredChanges(docId: string): Change[] {
     return this._outboxToSend(docId, []);
   }
 
+  /** Whether the doc has outbox rows the server has not confirmed (stubs do not count). */
   hasUnstoredChanges(docId: string): boolean {
-    return (this._outbox.get(docId)?.length ?? 0) > 0;
+    return (this._outbox.get(docId) ?? []).some(row => row.committedRev === undefined);
+  }
+
+  /** Whether the outbox row `id` of `docId` is a confirmed stub (see {@link OutboxRow}). */
+  private _isStub(docId: string, id: string): boolean {
+    return this._outbox.get(docId)?.find(row => row.change.id === id)?.committedRev !== undefined;
   }
 
   /** Drop every outbox row for a doc (the doc's optimistic queue was rolled back). */
@@ -446,12 +510,34 @@ export class OTAlgorithm implements ClientAlgorithm {
    * ends at `targetRev` is walked. Anything else freezes the rows at the doc's frame instead
    * (see {@link _freezeOutboxRow}): an honest baseRev the server transforms from, never a
    * re-mint in a frame the ops are not in.
+   *
+   * The freeze is honest only while no IN-FRAME PENDING row sits under the outbox rows. A row
+   * expressed over a store pending row P (P at /items/0, the row at /items/1 behind it) that is
+   * frozen at the old frame while P is rebased to the new one becomes a straggler: P flushes
+   * first and commits, the row goes alone at its frozen baseRev, and the server transforms it
+   * against P's committed copy as well — P is no longer in its batch, so it is not "own" —
+   * landing it a slot late (the #145 shape). So when the store cannot supply the span and such
+   * rows exist, the span is taken from the server instead ({@link setCommittedSpanFetcher});
+   * and when that is not possible either, the rows are REFUSED rather than frozen: dropped from
+   * the outbox and reported ({@link UnstoredFrameLostError}) so the app shelves them, their
+   * entries left in the doc as ordinary optimistic entries (visible, memory-only, re-driven by
+   * `retrySavingChanges`). A frozen row that depends on a pending row is not safe to send alone.
    */
   private async _rebaseOutboxRows(docId: string, doc: OTDoc<any>, targetRev: number, tail?: Change[]): Promise<void> {
     const rows = (this._outbox.get(docId) ?? []).filter(row => row.doc === doc && row.ops);
     if (rows.length === 0) return;
     const frameRev = doc.committedRev;
     if (targetRev <= frameRev) return; // the doc already covers the target; nothing to cross
+    // The frame-behind stragglers of the doc's queue are skipped exactly as
+    // _rebasePendingPreservingFrameDebt skips them; the in-frame rows are what the outbox rows
+    // were expressed over.
+    const inFrame = doc.getPendingChanges().filter(c => c.baseRev >= frameRev);
+    const isComplete = (span: Change[] | undefined): span is Change[] =>
+      !!span &&
+      span.length > 0 &&
+      span[0].rev === frameRev + 1 &&
+      span[span.length - 1].rev === targetRev &&
+      firstGapIndex(span) === -1;
     let committed: Change[] | undefined;
     try {
       const given = (tail ?? []).filter(c => c.committedAt > 0 && c.rev > frameRev && c.rev <= targetRev);
@@ -468,37 +554,51 @@ export class OTAlgorithm implements ClientAlgorithm {
     } catch {
       committed = undefined;
     }
-    const complete =
-      committed &&
-      committed.length > 0 &&
-      committed[0].rev === frameRev + 1 &&
-      committed[committed.length - 1].rev === targetRev &&
-      firstGapIndex(committed) === -1;
-    if (!complete) {
+    if (!isComplete(committed) && inFrame.length > 0) {
+      // The store's span is unusable and the rows depend on pending rows: the server holds
+      // every committed change past the doc's frame, so ask it before giving up on the walk.
+      committed = undefined;
+      if (this._fetchCommittedSpan) {
+        try {
+          const fetched = await this._fetchCommittedSpan(docId, frameRev, targetRev);
+          const span = fetched.filter(c => c.committedAt > 0 && c.rev > frameRev && c.rev <= targetRev);
+          committed = [...span].sort((a, b) => a.rev - b.rev);
+        } catch {
+          committed = undefined;
+        }
+      }
+      if (!isComplete(committed)) {
+        this._refuseOutboxRows(docId, doc, rows, frameRev, targetRev);
+        return;
+      }
+    }
+    if (!isComplete(committed)) {
       this._freezeOutboxRows(docId, doc);
       return;
     }
     // Echoes inside the span: the store took the committed copy while the doc was torn. Those
     // rows are confirmed by the span itself — dropped from the outbox and the doc's queue (the
-    // snapshot about to be imported holds them) and reported like any other echo.
-    const spanIds = new Set(committed!.map(c => c.id));
+    // snapshot about to be imported holds them) and reported like any other echo (a stub the
+    // response already reported is not reported again).
+    const spanIds = new Set(committed.map(c => c.id));
     const echoed = rows.filter(row => spanIds.has(row.change.id));
     if (echoed.length > 0) {
       const ids = echoed.map(row => row.change.id);
+      const fresh = new Set(echoed.filter(row => row.committedRev === undefined).map(row => row.change.id));
       this._removeOutboxRows(docId, ids);
       doc._dropUnstored(ids);
-      this.onUnstoredCommitted.emit(
-        docId,
-        committed!.filter(c => ids.includes(c.id))
-      );
+      if (fresh.size > 0) {
+        this.onUnstoredCommitted.emit(
+          docId,
+          committed.filter(c => fresh.has(c.id))
+        );
+      }
     }
     const live = rows.filter(row => !spanIds.has(row.change.id));
     if (live.length === 0) return;
-    // Under their real ids; the frame-behind stragglers of the doc's queue are skipped exactly
-    // as _rebasePendingPreservingFrameDebt skips them.
+    // Under their real ids, behind the in-frame pending rows they were expressed over.
     const synthetic: Change[] = live.map(row => ({ ...row.change, ops: row.ops! }));
-    const inFrame = doc.getPendingChanges().filter(c => c.baseRev >= frameRev);
-    const rebased = rebaseChanges(committed!, [...inFrame, ...synthetic]);
+    const rebased = rebaseChanges(committed, [...inFrame, ...synthetic]);
     const opsById = new Map(rebased.map(c => [c.id, c.ops]));
     for (const row of live) {
       const next = [...(opsById.get(row.change.id) ?? [])];
@@ -519,6 +619,28 @@ export class OTAlgorithm implements ClientAlgorithm {
     row.change = { ...row.change, baseRev: doc.committedRev, ops: [...row.ops] };
     delete row.ops;
     if (detach) delete row.doc;
+  }
+
+  /**
+   * The rows cannot be carried across `(fromRev, toRev]` and depend on in-frame pending rows, so
+   * neither a walk nor a freeze is honest (see {@link _rebaseOutboxRows}): drop them from the
+   * outbox and report them, with their ops as they stand, so the app shelves them. The doc keeps
+   * each entry as an ordinary optimistic entry — visible, memory-only, re-driven under the same
+   * stable id by `retrySavingChanges` — with its outbox mark removed, exactly as a row the
+   * ceiling refused. Stubs are left alone: their content is on the server, their ops only carry
+   * the id the server dedupes, and the doc's own bookkeeping retires their entries.
+   */
+  private _refuseOutboxRows(docId: string, doc: OTDoc<any>, rows: OutboxRow[], fromRev: number, toRev: number): void {
+    const unconfirmed = rows.filter(row => row.committedRev === undefined);
+    if (unconfirmed.length === 0) return;
+    const refused = unconfirmed.filter(row => row.ops!.length > 0);
+    const changes: Change[] = refused.map(row => ({ ...row.change, baseRev: fromRev, ops: [...row.ops!] }));
+    this._removeOutboxRows(
+      docId,
+      unconfirmed.map(row => row.change.id)
+    );
+    for (const row of unconfirmed) doc._forgetUnstored(row.change.id);
+    if (changes.length > 0) this.onError.emit(new UnstoredFrameLostError(docId, changes, fromRev, toRev), { docId });
   }
 
   /**
@@ -565,14 +687,37 @@ export class OTAlgorithm implements ClientAlgorithm {
   /**
    * See {@link ClientAlgorithm.confirmUnstoredCommitted}: the commit response of a flush THIS
    * instance sent. Outbox rows among `committed` are confirmed here, before the response reaches
-   * the store, and reported on {@link onUnstoredCommitted} — the echo through
-   * {@link applyServerChanges} then finds nothing left to confirm. A store that refuses the
-   * response's apply (the condition the outbox exists for) therefore cannot keep the row queued
-   * and resent on every flush.
+   * the store, and reported on {@link onUnstoredCommitted} once — the echo through
+   * {@link applyServerChanges} then finds nothing left to report. A store that refuses the
+   * response's apply (the condition the outbox exists for) therefore cannot keep the row
+   * unconfirmed and reported on every flush.
+   *
+   * The row is NOT dropped here: it becomes a stub (see {@link OutboxRow}) that keeps going out
+   * with every batch until the doc's frame covers its committed rev. Dropped, and with the doc's
+   * frame stuck below that rev by the refused apply, every later edit — minted on top of the
+   * row — would go out alone and be transformed against the row's committed copy.
    */
   confirmUnstoredCommitted(docId: string, committed: Change[]): void {
-    const confirmed = this._confirmOutboxRows(docId, committed);
-    if (confirmed.length > 0) this.onUnstoredCommitted.emit(docId, confirmed);
+    if (committed.length === 0) return;
+    const rows = this._outbox.get(docId);
+    if (!rows?.length) return;
+    const confirmed: Change[] = [];
+    const ids: string[] = [];
+    for (const row of rows) {
+      if (row.committedRev !== undefined) continue; // a stub resent: reported already
+      const copy = committed.find(c => c.id === row.change.id);
+      if (!copy) continue;
+      row.committedRev = copy.rev;
+      ids.push(row.change.id);
+      confirmed.push(copy);
+      row.doc?._noteUnstoredCommitted(row.change.id, copy.rev);
+    }
+    if (confirmed.length === 0) return;
+    this._rememberConfirmed(docId, ids);
+    // The doc may already sit at or past the rev (its echo arrived by broadcast before the
+    // response): then there is nothing to shadow and the stub retires now.
+    this._retireCoveredStubs(docId);
+    this.onUnstoredCommitted.emit(docId, confirmed);
   }
 
   /** Drop the outbox rows `committed` names and tell their doc; returns the committed copies. */
@@ -590,6 +735,18 @@ export class OTAlgorithm implements ClientAlgorithm {
       row.doc?._noteUnstoredCommitted(row.change.id, copy.rev);
     }
     return confirmed;
+  }
+
+  /**
+   * Retire the stubs of `docId` whose doc's frame now covers their committed rev (see
+   * {@link OutboxRow}): nothing minted from here on can be in their shadow. A frozen stub has no
+   * doc to ask and retires on its echo through {@link applyServerChanges}.
+   */
+  private _retireCoveredStubs(docId: string): void {
+    const covered = (this._outbox.get(docId) ?? [])
+      .filter(row => row.committedRev !== undefined && row.doc && row.doc.committedRev >= row.committedRev)
+      .map(row => row.change.id);
+    if (covered.length > 0) this._removeOutboxRows(docId, covered);
   }
 
   /** Serialised size of `ops` for the outbox ceiling, by the configured calculator if any. */
@@ -642,13 +799,19 @@ export class OTAlgorithm implements ClientAlgorithm {
    * {@link _withConsistentBaseRev}, and {@link _walkFrozenOutboxRows} is what moves a frozen row
    * into a new frame. `committedRev` (the open doc's, when known) only seeds the rev sequence
    * for an empty store queue.
+   *
+   * Stubs (see {@link OutboxRow}) are included only for the wire (`withStubs`): a listing or a
+   * discard shelf wants the rows the server has not confirmed. Stubs the doc's frame has come
+   * to cover are retired first.
    */
-  private _outboxToSend(docId: string, pending: Change[], committedRev?: number): Change[] {
+  private _outboxToSend(docId: string, pending: Change[], committedRev?: number, withStubs = false): Change[] {
+    this._retireCoveredStubs(docId);
     const rows = this._outbox.get(docId);
     if (!rows?.length) return [];
     let rev = pending[pending.length - 1]?.rev ?? committedRev;
     const out: Change[] = [];
     for (const row of rows) {
+      if (row.committedRev !== undefined && !withStubs) continue;
       if (row.ops && row.doc) {
         if (row.ops.length === 0) continue; // rebased away; nothing left to send
         // createdAt is the original mint's: the server's offline-session versioning keys on it.
@@ -682,14 +845,22 @@ export class OTAlgorithm implements ClientAlgorithm {
       this._outbox.delete(docId);
       this._reportedOverflow.delete(docId);
     }
+    this._rememberConfirmed(
+      docId,
+      removed.map(row => row.change.id)
+    );
+    return removed;
+  }
+
+  /** Remember `ids` as confirmed/retired for {@link acceptUnstoredChanges}, newest last, bounded. */
+  private _rememberConfirmed(docId: string, ids: string[]): void {
     const confirmed = this._confirmedUnstored.get(docId) ?? new Set<string>();
-    for (const row of removed) {
-      confirmed.delete(row.change.id); // re-insert so it is the newest
-      confirmed.add(row.change.id);
+    for (const id of ids) {
+      confirmed.delete(id); // re-insert so it is the newest
+      confirmed.add(id);
     }
     while (confirmed.size > MAX_CONFIRMED_OUTBOX_IDS) confirmed.delete(confirmed.values().next().value!);
     this._confirmedUnstored.set(docId, confirmed);
-    return removed;
   }
 
   /**
@@ -832,15 +1003,17 @@ export class OTAlgorithm implements ClientAlgorithm {
       this._walkFrozenOutboxRows(docId, committedRev, newServerChanges, pendingSet);
 
       // Echoes of outbox rows: the store never held them, so this — or the commit response
-      // (confirmUnstoredCommitted), which normally gets there first — is where they are
-      // confirmed. The doc drops its entries on its own aligned path (applyChanges recognises
-      // the ids); the misaligned rebuild below imports a snapshot that already holds them, so
-      // the entries are dropped first there or the import re-applies them on top.
+      // (confirmUnstoredCommitted), which normally gets there first and leaves a stub — is
+      // where they are confirmed. The doc drops its entries on its own aligned path
+      // (applyChanges recognises the ids); the misaligned rebuild below imports a snapshot that
+      // already holds them, so the entries are dropped first there or the import re-applies
+      // them on top. A stub's echo retires it; it was reported from the response.
       const echoed = this._removeOutboxRows(
         docId,
         serverChanges.map(c => c.id)
       );
       const echoedIds = new Set(echoed.map(row => row.change.id));
+      const reportIds = new Set(echoed.filter(row => row.committedRev === undefined).map(row => row.change.id));
 
       if (otDoc) {
         // `serverChanges` is internally contiguous when the frame passed the gap check above,
@@ -871,12 +1044,14 @@ export class OTAlgorithm implements ClientAlgorithm {
             otDoc.import(snapshot as PatchesSnapshot<T>);
           }
         }
+        // The doc's frame moved: stubs it now covers have nothing left to shadow.
+        this._retireCoveredStubs(docId);
       }
 
-      if (echoedIds.size > 0) {
+      if (reportIds.size > 0) {
         this.onUnstoredCommitted.emit(
           docId,
-          serverChanges.filter(c => echoedIds.has(c.id))
+          serverChanges.filter(c => reportIds.has(c.id))
         );
       }
 
@@ -914,7 +1089,10 @@ export class OTAlgorithm implements ClientAlgorithm {
     // root-level replace never reduces to empty under rebase, so it would be resent on every
     // flush. Drop those by id.
     const survived = new Set(committedChanges.map(c => c.id));
-    const droppedIds = sentChanges.filter(c => !survived.has(c.id)).map(c => c.id);
+    // A stub (see OutboxRow) rides in the batch only to be deduped; its content is on the
+    // server whether or not this response echoed the committed copy again, so its absence is
+    // never "resolved away" — and its doc entry retires on the doc's own frame, not here.
+    const droppedIds = sentChanges.filter(c => !survived.has(c.id) && !this._isStub(docId, c.id)).map(c => c.id);
     if (droppedIds.length === 0) return 0;
     // Outbox rows have no store row to drop, but the same fate: unechoed means resolved away,
     // and their memory-only entries must leave the doc's queue or the caller's re-sync from the
@@ -1234,6 +1412,7 @@ export class OTAlgorithm implements ClientAlgorithm {
     const counts = this._deferrals.get(docId) ?? new Map<string, number>();
     const stuck: Change[] = [];
     for (const change of deferred) {
+      if (this._isStub(docId, change.id)) continue; // on the server already; nothing is stuck
       const n = (counts.get(change.id) ?? 0) + 1;
       counts.set(change.id, n);
       if (n === DEFERRAL_REPORT_THRESHOLD) stuck.push(change);

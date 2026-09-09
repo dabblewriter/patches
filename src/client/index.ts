@@ -31,6 +31,7 @@ export {
   NonCloneableOpError,
   PendingDeferredError,
   UnsplittableChangeError,
+  UnstoredFrameLostError,
   UnstoredOutboxOverflowError,
   UnstoredPendingError,
 } from '../net/error.js';

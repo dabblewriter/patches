@@ -279,6 +279,19 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       patches.onDeleteDoc(this._handleDocDeleted.bind(this)),
       patches.onChange(this._handleDocChange.bind(this)),
     ];
+
+    // The server holds every committed change; an algorithm that cannot read a committed span
+    // from its store (OT walking outbox rows across a rebuild whose store tail is unreadable or
+    // short, with pending rows under them) takes it from here rather than freezing rows it
+    // cannot safely send alone. Gated like a send: offline, the fetch fails and the algorithm
+    // takes its refuse-and-report path instead of waiting on a connection.
+    for (const algorithm of Object.values(patches.algorithms)) {
+      algorithm?.setCommittedSpanFetcher?.(async (docId, fromRev, toRev) => {
+        if (!this._canSend()) throw new NetworkError('Cannot read committed changes: offline or not connected');
+        const changes = await this.connection.getChangesSince(docId, fromRev);
+        return changes.filter(c => c.rev <= toRev);
+      });
+    }
   }
 
   private _unsubs: Unsubscriber[] = [];
@@ -526,6 +539,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.disconnect();
     for (const unsub of this._unsubs) unsub();
     this._unsubs.length = 0;
+    for (const algorithm of Object.values(this.patches.algorithms)) algorithm?.setCommittedSpanFetcher?.(undefined);
   }
 
   /**

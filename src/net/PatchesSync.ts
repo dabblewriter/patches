@@ -2119,13 +2119,36 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._surfacedDeleteErrors.delete(docId);
     this._terminalDeleteFailures.delete(docId);
     this._updateDocSyncState(docId, undefined);
-    // Wipe the doc's data before dropping its tracking row. `confirmDeleteDoc` alone removes
-    // only the `docs` row; the snapshots, committed history, pending queue and quarantine rows
-    // live in other stores and are reachable only through that row, so every remote delete
-    // used to orphan them for the life of the database — unbounded growth for a client that
-    // sees many remote deletes (DAB-1141). `deleteDoc` is the local-delete wipe (it also
-    // tombstones the row, which the confirm below removes). Best-effort: a wipe the store
-    // refuses must not keep the doc tracked — that is the pre-fix state, not a worse one.
+    // A resumed stream can still replay this doc's pre-delete changes; the gate in
+    // `_receiveCommittedChanges` drops them. Armed BEFORE the app is told, so a batch landing
+    // inside the emit window below is gated rather than applied over a doc mid-discard.
+    this._confirmedDeletedDocs.add(docId);
+
+    // Notify the application BEFORE the store wipe, with the unsynced work the delete is
+    // discarding. For a doc `Patches.untrackDocs` early-returned on (not in
+    // `patches.trackedDocs`), nothing above touched the store, so while the app is shelving
+    // these rows they are still on disk: a shelf write the store refuses leaves them recoverable
+    // from a database export (an orphan, but the one support recovers from) instead of the
+    // in-memory copy being the only one left. Safe to do first: no tombstone exists until
+    // `deleteDoc` runs, so a tombstone drain cannot race this window, and the gate above already
+    // covers a replayed batch. Awaited so an app that shelves those changes has landed the write
+    // before we proceed, but bounded: subscribers are app code running inside this doc's sync
+    // gate, and one that never settles would wedge the doc permanently. On expiry, say so loudly
+    // and carry on.
+    await this._emitRemoteDocDeleted(docId, pendingChanges);
+
+    // Wipe the doc's data, then drop its tracking row. What is left to wipe depends on the path:
+    // for a doc `untrackDocs` early-returned on, everything — `confirmDeleteDoc` alone removes
+    // only the `docs` row, while the snapshot, committed history, pending queue and quarantine
+    // rows live in other stores and are reachable only through that row, so every such delete
+    // used to orphan them for the life of the database: unbounded growth for a client that sees
+    // many remote deletes (DAB-1141). For a tracked doc, `untrackDocs` above already dropped the
+    // snapshot, history and pending rows (that call is NOT redundant with this one), and the
+    // only new cleanup here is the quarantine store, which `untrackDocs` leaves alone. `deleteDoc`
+    // is the local-delete wipe (it also tombstones the row, which the confirm below removes).
+    // Best-effort: a wipe the store refuses must not keep the doc tracked — that is the pre-fix
+    // state, not a worse one. The confirm stays outside the try on purpose: the app already has
+    // its payload, and a tombstone stranded by a failed confirm self-heals on the next drain.
     try {
       await algorithm.deleteDoc(docId);
     } catch (err) {
@@ -2135,15 +2158,6 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       );
     }
     await algorithm.confirmDeleteDoc(docId);
-    // A resumed stream can still replay this doc's pre-delete changes; the gate in
-    // `_receiveCommittedChanges` drops them.
-    this._confirmedDeletedDocs.add(docId);
-
-    // Notify application (with any pending changes that were lost). Awaited so an app that
-    // shelves those changes has landed the write before we proceed, but bounded: subscribers
-    // are app code running inside this doc's sync gate, and one that never settles would wedge
-    // the doc permanently. On expiry, say so loudly and carry on.
-    await this._emitRemoteDocDeleted(docId, pendingChanges);
   }
 
   /** Emits `onRemoteDocDeleted`, bounded by {@link REMOTE_DOC_DELETED_EMIT_TIMEOUT_MS}. */

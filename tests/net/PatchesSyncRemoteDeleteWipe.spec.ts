@@ -75,19 +75,24 @@ describe('PatchesSync — remote delete wipes the doc data (DAB-1141)', () => {
     const wipe = vi.spyOn(algorithm, 'deleteDoc');
     const confirm = vi.spyOn(algorithm, 'confirmDeleteDoc');
     const shelved: unknown[] = [];
-    sync.onRemoteDocDeleted((_docId, pending) => shelved.push(...pending));
+    let wipesAtEmit = -1;
+    sync.onRemoteDocDeleted((_docId, pending) => {
+      shelved.push(...pending);
+      wipesAtEmit = wipe.mock.calls.length;
+    });
 
     await sync['_handleRemoteDocDeleted'](DOC_ID);
 
     expect(wipe).toHaveBeenCalledWith(DOC_ID);
     expect(confirm).toHaveBeenCalledWith(DOC_ID);
+    expect(wipesAtEmit).toBe(0); // the app is told before the wipe, not after
     expect(wipe.mock.invocationCallOrder[0]).toBeLessThan(confirm.mock.invocationCallOrder[0]);
     expect(await store.getDoc(DOC_ID)).toBeUndefined();
     expect(await store.listChanges(DOC_ID)).toEqual([]);
     expect(await store.getPendingChanges(DOC_ID)).toEqual([]);
     expect(await store.listQuarantinedChanges(DOC_ID)).toEqual([]);
     expect(await store.listDocs(true)).toEqual([]); // no tombstone left behind either
-    expect(shelved).toHaveLength(2); // the pending row and the quarantined change still reach the app
+    expect(shelved).toHaveLength(2); // the pending row and the quarantined change reach the app
   });
 
   it('still removes the tracking row when the wipe itself fails', async () => {

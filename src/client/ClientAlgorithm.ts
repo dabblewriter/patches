@@ -37,6 +37,12 @@ export interface ClientAlgorithm {
   readonly onError?: Signal<(error: Error, context?: { docId?: string }) => void>;
 
   /**
+   * Optional: outbox rows (see {@link queueUnstoredChange}) confirmed committed by their server
+   * echo, carrying the committed copies. `Patches` forwards this as `onUnstoredCommitted`.
+   */
+  readonly onUnstoredCommitted?: Signal<(docId: string, changes: Change[]) => void>;
+
+  /**
    * Creates a doc instance appropriate for this algorithm.
    * OT creates OTDoc, LWW creates LWWDoc.
    *
@@ -74,6 +80,72 @@ export interface ClientAlgorithm {
     metadata: Record<string, any>,
     id?: string
   ): Promise<Change[]>;
+
+  /**
+   * Optional: hand a change the store REFUSED to an in-memory outbox, to be sent on the next
+   * flush behind the store's queue. `Patches` calls this on the exhausted-retry branch of a
+   * persist (and for changes made while that doc's write path is latched) — never on the normal
+   * path, which still writes the store first. `ops` is the entry's own optimistic-queue array and
+   * `id` the stable id the failed persist used, so a later successful persist under it cannot
+   * double-commit. Returns the provisional change, or null when nothing was queued.
+   *
+   * Only OT implements it; an algorithm without it keeps refused changes memory-only until the
+   * app retries.
+   */
+  queueUnstoredChange?<T extends object>(
+    docId: string,
+    ops: JSONPatchOp[],
+    doc: PatchesDoc<T> | undefined,
+    metadata: Record<string, any>,
+    id: string
+  ): Change | null;
+
+  /**
+   * Optional: accept outbox rows minted by another context (a tab that cannot send), deduped by
+   * id, to go out with this instance's next flush as they stand. Returns the number accepted.
+   */
+  acceptUnstoredChanges?(docId: string, changes: Change[]): number;
+
+  /** Optional: the outbox rows for a doc as they would go on the wire now (copies). */
+  listUnstoredChanges?(docId: string): Change[];
+
+  /** Optional: drop every outbox row for a doc (its optimistic queue was rolled back). */
+  discardUnstoredChanges?(docId: string): void;
+
+  /** Optional: an open doc is closing — freeze its outbox rows in their current frame. */
+  detachUnstoredChanges?<T extends object>(docId: string, doc: PatchesDoc<T>): void;
+
+  /**
+   * Optional: another context reports outbox rows committed. Rows still queued here are dropped
+   * and any open doc that minted them drops its memory-only entries once its state covers them.
+   */
+  noteUnstoredCommitted?(docId: string, committed: Change[]): void;
+
+  /**
+   * Optional: the commit response for a flush this instance sent carries committed copies of the
+   * batch's own rows. Outbox rows among them are confirmed from the response — reported on
+   * `onUnstoredCommitted` once, listed and counted as pending no more — BEFORE the response is
+   * applied to the store, so a store that refuses the apply (the condition the outbox exists
+   * for) cannot leave the row unconfirmed. The row itself stays in the outbox as a stub that
+   * rides in every batch until the open doc's frame covers its committed rev: the doc only
+   * advances when the apply succeeds, and until then every later edit is minted on top of the
+   * row and must go out in its shadow (the server dedupes the stub by id and keeps its committed
+   * copy out of the transform set). The open doc keeps its memory-only entry visible until a
+   * receive or import covers the committed rev, which is also what retires the stub.
+   */
+  confirmUnstoredCommitted?(docId: string, committed: Change[]): void;
+
+  /**
+   * Optional: install the reader the algorithm falls back to when the store cannot supply a
+   * committed span an outbox row has to cross and the row depends on in-frame pending rows —
+   * the one case where freezing the row at its old frame is not safe (it would later flush
+   * alone and be transformed against those rows' committed copies). PatchesSync wires this to
+   * the connection's `getChangesSince`; without it, or when it fails, the row is refused and
+   * reported (`UnstoredFrameLostError`) so the app can shelve it.
+   */
+  setCommittedSpanFetcher?(
+    fetch: ((docId: string, fromRev: number, toRev: number) => Promise<Change[]>) | undefined
+  ): void;
 
   /**
    * Lists all changes (committed + pending) for a document.

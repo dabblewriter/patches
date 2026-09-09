@@ -259,6 +259,70 @@ whether the ops were kept for re-submission. There are three classes:
 While a doc is latched, further changes stay applied optimistically (the user's text remains
 visible) but are not persisted; each emits `onError` with `latched: true`.
 
+### Store-refused changes are still sent: the outbox
+
+With the OT algorithm, a change whose persist exhausted its attempts is not only latched — it is
+handed to an in-memory **outbox** and sent to the server on the next flush, behind whatever the
+store's queue holds, under the same stable change id the failed persist used. The store refused the
+change; the server can still take it. `context.unstored` on the `onError` emit says whether that
+happened (`false` for an algorithm without an outbox, such as LWW).
+
+- The outbox is the **failure branch** of the write path, not a bypass of local durability: the
+  store is still written first on every change, and only rows the store never accepted enter the
+  outbox.
+- A row leaves the outbox when its committed echo arrives, when the server resolves it away, or
+  when the store accepts it after all (a `retrySavingChanges` re-drive minting under the same id).
+  The open doc recognises the echo as its own and confirms the memory-only entry exactly once.
+- The outbox is **memory only** — a reload loses it. `onUnstoredQueued` fires with the provisional
+  change so the app can shelve it elsewhere as well.
+- Rows are confirmed from the **commit response** of the flush that sent them, before the response
+  is applied to the store — reported once, and no longer listed or counted as pending — so a store
+  that refuses the apply as well cannot keep a row unconfirmed. The row itself stays in the outbox
+  as a **stub** until the open doc's frame covers its committed rev: the doc only advances when the
+  apply succeeds, and until then every later edit is minted on top of the row, so the stub rides
+  in every batch (the server dedupes it by id and keeps its committed copy out of the transform
+  set) and the later edits stay in its shadow. The doc's own echo or import retires it. Stubs
+  count toward the ceiling below.
+- Every row goes out at the committed frame its ops are really in (a row from an open doc is
+  re-minted from the doc; a row the doc has closed on, or one accepted from another context, at
+  its own `baseRev`), and is walked forward through every committed batch that extends that
+  frame, so it is never relabeled into a frame it was not transformed into. When the doc jumps
+  over a span (a rebuild from the store, a snapshot reload) the store supplies it; if the store
+  cannot and the row was expressed over pending rows still in that frame, the span is read from
+  the server instead (`PatchesSync` wires `getChangesSince` in), and if that is not possible
+  either the row is dropped from the outbox and reported as `UnstoredFrameLostError` (its ops as
+  they stood) so the app can shelve it — a row that depends on a pending row is never frozen at
+  the old frame, where it would flush alone after that row and be transformed against its
+  committed copy.
+- The outbox is **bounded**: 500 rows or 2 MiB of serialised ops per doc. Past that, new rows are
+  refused (never evicted — a queued row is unconfirmed content) and reported once per episode
+  through `onError` as `UnstoredOutboxOverflowError`; the refused change's own `onError` emit says
+  `unstored: false`, so the app can move to its shelf.
+- A pending row held back from a flush a second time because it sits on a different committed
+  frame than the head of the queue (see `PendingDeferredError`) is reported through
+  `PatchesSync.onError` once per row — the first deferral is the designed one-frame-per-flush
+  behaviour; the second means the follow-up flush did not clear it.
+
+```typescript
+patches.onUnstoredQueued((docId, change) => {
+  // The store refused this change; it is queued to be sent from memory.
+  shelfSomewhereDurable(docId, change);
+});
+
+patches.onUnstoredCommitted((docId, changes) => {
+  // Outbox rows the server has now committed (their committed copies).
+  telemetry('sync_unstored_sent', { docId, count: changes.length });
+});
+
+patches.listUnstoredChanges(docId); // the rows still queued, as they would go on the wire
+```
+
+**One elected sender.** If only one tab syncs, a non-sending tab cannot flush its own outbox.
+Forward its `onUnstoredQueued` payload to the sender, which calls
+`patches.acceptUnstoredChanges(docId, [change])`; when the sender's `onUnstoredCommitted` fires,
+forward the committed copies back so the minting tab can call
+`patches.noteUnstoredCommitted(docId, changes)` and drop its memory-only entries.
+
 ### Recovering from a latched write path
 
 ```typescript

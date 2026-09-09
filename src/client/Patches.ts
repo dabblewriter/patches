@@ -29,6 +29,9 @@ const CHANGE_RETRY_MAX_MS = 30_000;
  * retrying it forever lets the user keep typing memory-only words with no signal that nothing is
  * being saved (the DAB-830 loss pattern). On exhaustion the ops are KEPT (never discarded — they
  * may yet land) and the write path is latched until the app calls {@link Patches.retrySavingChanges}.
+ * Where the algorithm has an outbox (OT), the exhausted change is also handed to it and sent from
+ * memory on the next flush — the store refused it, the server still can take it — so a latched doc
+ * keeps reaching the server while the app decides what to do about the disk.
  */
 const MAX_CHANGE_SUBMIT_ATTEMPTS = 3;
 
@@ -102,6 +105,12 @@ export interface ChangeErrorContext {
   kind?: 'rejection' | 'defective' | 'environment';
   /** True when this fires because the doc's write path is already latched, so persistence was skipped. */
   latched?: boolean;
+  /**
+   * True when the change that could not be persisted was handed to the algorithm's outbox to be
+   * sent from memory (see {@link Patches.onUnstoredQueued}); false/absent when it stays memory-only
+   * until the app retries.
+   */
+  unstored?: boolean;
 }
 
 /**
@@ -204,10 +213,32 @@ export class Patches {
    * payload elsewhere (a shelf, telemetry) and return.
    */
   readonly onPendingDropped = signal<(docId: string, dropped: Change[]) => void>();
+  /**
+   * A change the store refused (its persist exhausted the bounded retries, or it was made while
+   * the doc's write path was latched) was handed to the algorithm's outbox and will be sent from
+   * memory on the next flush, behind the store's queue. Carries the provisional change (its
+   * baseRev is the doc's committedRev now; re-stamped at send time). An app that syncs from one
+   * elected tab forwards this from a non-sending tab to the sender (`acceptUnstoredChanges`).
+   *
+   * This is the failure branch of the write path, not a bypass of local durability: the store is
+   * still written first on every change. The outbox is memory-only — a reload loses it — so an
+   * app that wants the change to survive the tab should also shelve it (the `onError` this fires
+   * alongside carries `unstored: true`).
+   */
+  readonly onUnstoredQueued = signal<(docId: string, change: Change) => void>();
+  /**
+   * Outbox rows confirmed committed by their server echo, carrying the committed copies. In a
+   * multi-tab deployment, forward to the tab that minted them (`noteUnstoredCommitted`) so it can
+   * drop its memory-only entries.
+   */
+  readonly onUnstoredCommitted = signal<(docId: string, changes: Change[]) => void>();
 
   constructor(opts: PatchesOptions) {
     this.options = opts;
     this.algorithms = opts.algorithms;
+    for (const algorithm of Object.values(opts.algorithms)) {
+      algorithm?.onUnstoredCommitted?.((docId, changes) => this.onUnstoredCommitted.emit(docId, changes));
+    }
 
     // Determine default algorithm
     const algorithmNames = Object.keys(opts.algorithms) as AlgorithmName[];
@@ -560,6 +591,10 @@ export class Patches {
       await drain;
       if (this._changeQueues.get(docId) === drain) this._changeQueues.delete(docId);
     }
+    // The doc's outbox rows outlive it: frozen in their current frame, they still go out with the
+    // next flush (the store never held them, so nothing else carries them). Their live arrays
+    // stop being rebased once the doc is gone.
+    managed.algorithm.detachUnstoredChanges?.(docId, managed.doc);
     // Drop any write latch with the doc. Done AFTER the drain so changes still queued during
     // teardown keep hitting the latch's skip-and-return (rather than persisting against a doc being
     // closed); once drained, the latch's retained optimistic ops live only in this in-memory doc
@@ -718,6 +753,8 @@ export class Patches {
     this.onUntrackDocs.clear();
     this.onTrackDocs.clear();
     this.onServerCommit.clear();
+    this.onUnstoredQueued.clear();
+    this.onUnstoredCommitted.clear();
     this.onError.clear();
   }
 
@@ -766,7 +803,11 @@ export class Patches {
       // calls retrySavingChanges().
       const latchError = this._writeLatches.get(docId);
       if (latchError) {
-        this.onError.emit(latchError, { docId, willRetry: false, kind: 'environment', latched: true });
+        // A change typed while latched has the same fate as the one that latched the doc: no
+        // persist, but sent from memory by the outbox where the algorithm has one, under a
+        // stable id a later re-drive reuses (see _changeStableIds).
+        const unstored = this._queueUnstored(docId, ops, doc, algorithm, metadata, this._stableIdFor(ops));
+        this.onError.emit(latchError, { docId, willRetry: false, kind: 'environment', latched: true, unstored });
         return;
       }
       return this._processDocChange(docId, ops, doc, algorithm, metadata);
@@ -784,10 +825,81 @@ export class Patches {
    * defective change). Bumps the per-doc epoch BEFORE rolling back so changes already queued
    * behind this failure — whose optimistic ops the rollback just discarded — are skipped.
    */
-  private _rollbackDoc<T extends object>(docId: string, baseDoc: BaseDoc<T> | undefined): void {
+  private _rollbackDoc<T extends object>(
+    docId: string,
+    baseDoc: BaseDoc<T> | undefined,
+    algorithm?: ClientAlgorithm
+  ): void {
     if (baseDoc && typeof baseDoc.rollbackOptimistic === 'function') {
       this._changeEpochs.set(docId, (this._changeEpochs.get(docId) ?? 0) + 1);
       baseDoc.rollbackOptimistic();
+      // The outbox rows were the rolled-back entries; nothing is left for them to confirm.
+      algorithm?.discardUnstoredChanges?.(docId);
+    }
+  }
+
+  /** The stable change id for an optimistic entry, minted once per entry (see _changeStableIds). */
+  private _stableIdFor(ops: JSONPatchOp[]): string {
+    let stableId = this._changeStableIds.get(ops);
+    if (!stableId) {
+      stableId = createId(STABLE_CHANGE_ID_LENGTH);
+      this._changeStableIds.set(ops, stableId);
+    }
+    return stableId;
+  }
+
+  /**
+   * Hand a change the store refused to the algorithm's outbox (storage hardening A1). Returns
+   * whether it was queued; false when the algorithm has no outbox (LWW) or there is no open doc
+   * to mint from. Emits `onUnstoredQueued` and wakes the sync layer via `onChange` so the row
+   * goes out on the next flush rather than waiting for the next successful persist.
+   */
+  private _queueUnstored<T extends object>(
+    docId: string,
+    ops: JSONPatchOp[],
+    doc: PatchesDoc<T> | undefined,
+    algorithm: ClientAlgorithm,
+    metadata: Record<string, any>,
+    id: string
+  ): boolean {
+    if (!algorithm.queueUnstoredChange || !doc || ops.length === 0) return false;
+    const change = algorithm.queueUnstoredChange(docId, ops, doc, metadata, id);
+    if (!change) return false;
+    this.onUnstoredQueued.emit(docId, change);
+    this.onChange.emit(docId);
+    return true;
+  }
+
+  /**
+   * Accept outbox rows minted by another context (a tab whose store refused them and that cannot
+   * send), to go out with this instance's next flush. Deduped by id. Returns the number accepted.
+   */
+  acceptUnstoredChanges(docId: string, changes: Change[]): number {
+    if (changes.length === 0) return 0;
+    const algorithm = this.getDocAlgorithm(docId) ?? this.algorithms[this.defaultAlgorithm];
+    const accepted = algorithm?.acceptUnstoredChanges?.(docId, changes) ?? 0;
+    if (accepted > 0) this.onChange.emit(docId);
+    return accepted;
+  }
+
+  /** The outbox rows for a doc as they would go on the wire now (copies); empty without an outbox. */
+  listUnstoredChanges(docId: string): Change[] {
+    const algorithm = this.getDocAlgorithm(docId) ?? this.algorithms[this.defaultAlgorithm];
+    return algorithm?.listUnstoredChanges?.(docId) ?? [];
+  }
+
+  /**
+   * Another context reports outbox rows of this doc committed (it received `onUnstoredCommitted`
+   * for rows this context minted). Rows still queued here are dropped and the open doc drops its
+   * memory-only entries once its state covers the committed rev.
+   */
+  noteUnstoredCommitted(docId: string, committed: Change[]): void {
+    if (committed.length === 0) return;
+    const algorithm = this.getDocAlgorithm(docId) ?? this.algorithms[this.defaultAlgorithm];
+    algorithm?.noteUnstoredCommitted?.(docId, committed);
+    const doc = this.docs.get(docId)?.doc as { _noteUnstoredCommitted?: (id: string, rev: number) => void } | undefined;
+    if (typeof doc?._noteUnstoredCommitted === 'function') {
+      for (const change of committed) doc._noteUnstoredCommitted(change.id, change.rev);
     }
   }
 
@@ -813,7 +925,9 @@ export class Patches {
    *   id also backstops the server's commit dedup for the ambiguous case where the write did land.
    *   On exhausting the attempts the ops are KEPT (never discarded — they may yet land) and the
    *   doc's write path is LATCHED (`kind: 'environment'`, `willRetry: false`); persistence resumes
-   *   only when the app calls {@link retrySavingChanges}.
+   *   only when the app calls {@link retrySavingChanges}. The exhausted change (and each change
+   *   made while latched) is handed to the algorithm's outbox where it has one, to be sent from
+   *   memory under the same stable id (`unstored: true` on the emit) — see {@link onUnstoredQueued}.
    *
    * The retry runs inside the per-doc change queue, so later changes wait behind it in capture
    * order — required for OT correctness (their ops assume this change's ops are already in the doc
@@ -833,11 +947,7 @@ export class Patches {
     // the same optimistic entry: keyed by the entry's ops array so the id survives the latch,
     // keeping the server's commit dedup effective if a latched submit had actually landed (see
     // {@link _changeStableIds}). A brand-new entry (including one typed while latched) mints fresh.
-    let stableId = this._changeStableIds.get(ops);
-    if (!stableId) {
-      stableId = createId(STABLE_CHANGE_ID_LENGTH);
-      this._changeStableIds.set(ops, stableId);
-    }
+    const stableId = this._stableIdFor(ops);
     const baseDoc = doc as unknown as BaseDoc<T> | undefined;
     for (let attempt = 0; ; attempt++) {
       try {
@@ -848,7 +958,7 @@ export class Patches {
         // 1) Authoritative rejection — the server/store definitively refused this change.
         if (isRejectionError(err)) {
           console.error(`Rejected doc change for ${docId}:`, err);
-          this._rollbackDoc(docId, baseDoc);
+          this._rollbackDoc(docId, baseDoc, algorithm);
           this.onError.emit(err as Error, { docId, willRetry: false, kind: 'rejection' });
           return;
         }
@@ -856,7 +966,7 @@ export class Patches {
         // 2) Defective change — its own data can never be saved; retrying is provably useless.
         if (isDefectiveChangeError(err)) {
           console.error(`Defective doc change for ${docId} (cannot be saved, not retrying):`, err);
-          this._rollbackDoc(docId, baseDoc);
+          this._rollbackDoc(docId, baseDoc, algorithm);
           this.onError.emit(err as Error, { docId, willRetry: false, kind: 'defective' });
           return;
         }
@@ -874,7 +984,11 @@ export class Patches {
             err
           );
           this._writeLatches.set(docId, err as Error);
-          this.onError.emit(err as Error, { docId, willRetry: false, kind: 'environment', attempt });
+          // The store will not take it; the server still can. Hand the change to the outbox
+          // (where the algorithm has one) so it goes out from memory on the next flush under
+          // the same stable id — a persist that later succeeds cannot double-commit it.
+          const unstored = this._queueUnstored(docId, ops, doc, algorithm, metadata, stableId);
+          this.onError.emit(err as Error, { docId, willRetry: false, kind: 'environment', attempt, unstored });
           return;
         }
 

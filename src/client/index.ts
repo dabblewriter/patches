@@ -29,7 +29,10 @@ export {
   isNonCloneableOpError,
   isUnsplittableChangeError,
   NonCloneableOpError,
+  PendingDeferredError,
   UnsplittableChangeError,
+  UnstoredFrameLostError,
+  UnstoredOutboxOverflowError,
   UnstoredPendingError,
 } from '../net/error.js';
 // The splitter itself, plus telemetry for changes it can't get under the storage

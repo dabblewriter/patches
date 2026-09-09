@@ -188,6 +188,23 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
   }
 
   /**
+   * Internal: drop outbox entries whose ops could not be carried into the frame the doc is about
+   * to sit on (see `OTAlgorithm._refuseOutboxRows`) and recompute state from what is left.
+   *
+   * Unlike {@link _dropUnstored}, these entries are NOT on the server: they are handed to the app
+   * to shelve, and the doc has to stop showing them, because the import that follows re-applies
+   * surviving optimistic ops RAW — putting ops from the old frame into the new one — and
+   * `retrySavingChanges` would then re-drive the entry at the doc's new committedRev, the relabel
+   * this algorithm's invariant forbids. Removed rather than left visible: their content reaches
+   * the writer again through the shelf, in a frame it was actually transformed into.
+   */
+  _dropRefusedUnstored(ids: Iterable<string>): string[] {
+    const dropped = this._dropUnstored(ids);
+    if (dropped.length > 0) this._recomputeState();
+    return dropped;
+  }
+
+  /**
    * Internal: an outbox row of this doc is known to be committed at `rev` — told by another
    * context (the writer tab that sent it) rather than by an echo through `applyChanges`. If this
    * doc is already at or past that rev the committed copy is in its state and the entry is

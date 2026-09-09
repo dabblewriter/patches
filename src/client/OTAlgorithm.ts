@@ -519,19 +519,30 @@ export class OTAlgorithm implements ClientAlgorithm {
    * landing it a slot late (the #145 shape). So when the store cannot supply the span and such
    * rows exist, the span is taken from the server instead ({@link setCommittedSpanFetcher});
    * and when that is not possible either, the rows are REFUSED rather than frozen: dropped from
-   * the outbox and reported ({@link UnstoredFrameLostError}) so the app shelves them, their
-   * entries left in the doc as ordinary optimistic entries (visible, memory-only, re-driven by
-   * `retrySavingChanges`). A frozen row that depends on a pending row is not safe to send alone.
+   * the outbox and from the doc, and reported ({@link UnstoredFrameLostError}, ops at the doc's
+   * frame) so the app shelves them (see {@link _refuseOutboxRows} for why the doc cannot keep
+   * them). A frozen row that depends on a pending row is not safe to send alone.
+   *
+   * The rows and the in-frame pending queue are collected AFTER the span is in hand, never
+   * captured across the store read or the fetch: on a latched doc every keystroke reaches
+   * `queueUnstoredChange` through the change queue, so a row queued during either await is the
+   * normal case, and one missed here would be re-applied raw by the import and re-minted at the
+   * new committedRev with old-frame ops.
    */
   private async _rebaseOutboxRows(docId: string, doc: OTDoc<any>, targetRev: number, tail?: Change[]): Promise<void> {
-    const rows = (this._outbox.get(docId) ?? []).filter(row => row.doc === doc && row.ops);
-    if (rows.length === 0) return;
+    // Read fresh on every use, never captured across an await: reading the span yields, and on a
+    // latched doc every keystroke reaches queueUnstoredChange through the change queue, so a row
+    // queued while the store read or the fetch is in flight is the normal case rather than a race
+    // to construct. A row missed here is re-applied raw by the import and re-minted at the doc's
+    // new committedRev with ops in the old frame — the misplacement this walk exists to prevent.
+    const liveRows = () => (this._outbox.get(docId) ?? []).filter(row => row.doc === doc && row.ops);
+    if (liveRows().length === 0) return;
     const frameRev = doc.committedRev;
     if (targetRev <= frameRev) return; // the doc already covers the target; nothing to cross
     // The frame-behind stragglers of the doc's queue are skipped exactly as
     // _rebasePendingPreservingFrameDebt skips them; the in-frame rows are what the outbox rows
     // were expressed over.
-    const inFrame = doc.getPendingChanges().filter(c => c.baseRev >= frameRev);
+    const inFrameNow = () => doc.getPendingChanges().filter(c => c.baseRev >= frameRev);
     const isComplete = (span: Change[] | undefined): span is Change[] =>
       !!span &&
       span.length > 0 &&
@@ -554,7 +565,7 @@ export class OTAlgorithm implements ClientAlgorithm {
     } catch {
       committed = undefined;
     }
-    if (!isComplete(committed) && inFrame.length > 0) {
+    if (!isComplete(committed) && inFrameNow().length > 0) {
       // The store's span is unusable and the rows depend on pending rows: the server holds
       // every committed change past the doc's frame, so ask it before giving up on the walk.
       committed = undefined;
@@ -568,7 +579,9 @@ export class OTAlgorithm implements ClientAlgorithm {
         }
       }
       if (!isComplete(committed)) {
-        this._refuseOutboxRows(docId, doc, rows, frameRev, targetRev);
+        // The set as it stands now: a row queued during the fetch is refused with the rest
+        // rather than left behind to be re-applied raw and re-driven relabelled.
+        this._refuseOutboxRows(docId, doc, liveRows(), frameRev, targetRev);
         return;
       }
     }
@@ -576,6 +589,11 @@ export class OTAlgorithm implements ClientAlgorithm {
       this._freezeOutboxRows(docId, doc);
       return;
     }
+    // The span is in hand: collect the rows and the pending queue as they stand NOW, so
+    // everything queued during either await is walked with the rest.
+    const rows = liveRows();
+    if (rows.length === 0) return;
+    const inFrame = inFrameNow();
     // Echoes inside the span: the store took the committed copy while the doc was torn. Those
     // rows are confirmed by the span itself — dropped from the outbox and the doc's queue (the
     // snapshot about to be imported holds them) and reported like any other echo (a stub the
@@ -624,22 +642,24 @@ export class OTAlgorithm implements ClientAlgorithm {
   /**
    * The rows cannot be carried across `(fromRev, toRev]` and depend on in-frame pending rows, so
    * neither a walk nor a freeze is honest (see {@link _rebaseOutboxRows}): drop them from the
-   * outbox and report them, with their ops as they stand, so the app shelves them. The doc keeps
-   * each entry as an ordinary optimistic entry — visible, memory-only, re-driven under the same
-   * stable id by `retrySavingChanges` — with its outbox mark removed, exactly as a row the
-   * ceiling refused. Stubs are left alone: their content is on the server, their ops only carry
-   * the id the server dedupes, and the doc's own bookkeeping retires their entries.
+   * outbox AND from the doc, and report them, with their ops as they stand at `fromRev`, so the
+   * app shelves them. The entries do not stay in the doc: the import that follows re-applies
+   * surviving optimistic entries RAW at `toRev` (the view would show frame-`fromRev` ops in the
+   * new frame — u ahead of the pending P it was typed behind), and the latch's normal recovery,
+   * `retrySavingChanges`, would then re-drive the entry through `handleDocChange` at the doc's
+   * new committedRev with those same ops — the relabel this algorithm's invariant forbids. Their
+   * content reaches the writer through the shelf instead (`UnstoredFrameLostError` carries it).
+   * Stubs are left alone: their content is on the server, their ops only carry the id the server
+   * dedupes, and the doc's own bookkeeping retires their entries.
    */
   private _refuseOutboxRows(docId: string, doc: OTDoc<any>, rows: OutboxRow[], fromRev: number, toRev: number): void {
     const unconfirmed = rows.filter(row => row.committedRev === undefined);
     if (unconfirmed.length === 0) return;
     const refused = unconfirmed.filter(row => row.ops!.length > 0);
     const changes: Change[] = refused.map(row => ({ ...row.change, baseRev: fromRev, ops: [...row.ops!] }));
-    this._removeOutboxRows(
-      docId,
-      unconfirmed.map(row => row.change.id)
-    );
-    for (const row of unconfirmed) doc._forgetUnstored(row.change.id);
+    const ids = unconfirmed.map(row => row.change.id);
+    this._removeOutboxRows(docId, ids);
+    doc._dropRefusedUnstored(ids);
     if (changes.length > 0) this.onError.emit(new UnstoredFrameLostError(docId, changes, fromRev, toRev), { docId });
   }
 

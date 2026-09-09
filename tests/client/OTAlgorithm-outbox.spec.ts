@@ -524,6 +524,34 @@ describe('OTAlgorithm outbox — walking live rows across a rebuild or reload (r
     expect(doc.state.items).toEqual(['Z', 'a', 'u']);
   });
 
+  it("a row queued while the store's span read is pending is walked with the rest, never re-applied raw (review round 4)", async () => {
+    // The store took Z torn (the doc stays at 5); the receive of `other` is misaligned and
+    // rebuilds from the store, reading the span [Z, other] with listChanges. While that read
+    // is pending, w is typed behind u and reaches the outbox. Captured before the read, w
+    // would be re-applied raw by the import (Z, a, w, u) and re-minted at 7 with frame-5 ops.
+    await store.applyServerChanges('doc1', [Z], [], 5);
+    const read = store.listChanges.bind(store);
+    let late: any[] = [];
+    vi.spyOn(store, 'listChanges').mockImplementation(async (docId, options) => {
+      late = [];
+      const off = doc.onChange(ops => (late = ops));
+      doc.change(patch => patch.add('/items/2', 'w'));
+      off();
+      algorithm.queueUnstoredChange('doc1', late, doc, {}, 'late');
+      return read(docId, options);
+    });
+    await algorithm.applyServerChanges('doc1', [other], doc);
+    expect(doc.committedRev).toBe(7);
+    expect(refusedOps).toEqual([{ op: 'add', path: '/items/2', value: 'u' }]);
+    expect(late).toEqual([{ op: 'add', path: '/items/3', value: 'w' }]); // crossed Z as well
+    const batch = (await algorithm.getPendingToSend('doc1', doc))!;
+    expect(batch.map(c => [c.id, c.baseRev, c.ops[0].path])).toEqual([
+      ['refused', 7, '/items/2'],
+      ['late', 7, '/items/3'],
+    ]);
+    expect(doc.state).toEqual({ items: ['Z', 'a', 'u', 'w'], other: 1 });
+  });
+
   it('a store tail that stops short of the snapshot rev (compacted or torn) freezes the rows at their true frame instead of re-minting them', async () => {
     await store.applyServerChanges('doc1', [Z], [], 5);
     // Rev 7 inserts at 0 as well: a walk that crossed 6 but not 7 would come out one slot short.
@@ -790,9 +818,67 @@ describe('OTAlgorithm outbox — confirmed stubs and the unreadable span over pe
         changes: [{ id: 'refused', baseRev: 5, ops: [{ op: 'add', path: '/items/1', value: 'u' }] }],
       });
       expect(algorithm.hasUnstoredChanges('doc1')).toBe(false);
-      expect(doc.unstoredChangeIds).toEqual([]); // an ordinary optimistic entry from here
-      expect(doc.state.items).toContain('u'); // still visible; the app shelves it
+      expect(doc.unstoredChangeIds).toEqual([]);
+      // Dropped from the doc as well (review round 4): the import re-applies surviving entries
+      // RAW at 7, so a kept entry would show frame-5 ops in the new frame, and the latch's
+      // recovery (retrySavingChanges) would re-drive it there. The shelf has its content.
+      expect(doc.state).toEqual({ items: ['Z', 'a'], x: 'p', other: 1 });
+      expect(doc._getOptimisticEntries()).toEqual([]);
+      expect(doc.getPendingChanges().map(c => c.id)).toEqual(['P']);
       // Only P goes out; the row is not sent at a frame it is not in.
+      expect((await algorithm.getPendingToSend('doc1', doc))!.map(c => c.id)).toEqual(['P']);
+      // A re-drive under the same id, the way retrySavingChanges would: the entry is gone, so
+      // nothing is minted for it (the ops array was emptied in place).
+      expect(refusedOps).toEqual([]);
+      expect(await algorithm.handleDocChange('doc1', refusedOps, doc, {}, 'refused')).toEqual([]);
+      expect((await algorithm.getPendingToSend('doc1', doc))!.map(c => c.id)).toEqual(['P']);
+    });
+
+    it('a row queued while the span is being fetched is walked with the rest, never re-applied raw (review round 4)', async () => {
+      // On a latched doc every keystroke reaches queueUnstoredChange through the change queue,
+      // so typing during the round trip is the normal case: w is typed behind u while the
+      // fetch is in flight. Captured before the await, w would be re-applied raw by the import
+      // (Z, a, w, u) and re-minted at 7 with its frame-5 ops.
+      let late: any[] = [];
+      const fetch = vi.fn(async () => {
+        late = type('/items/2', 'w');
+        algorithm.queueUnstoredChange('doc1', late, doc, {}, 'late');
+        return [Z, other];
+      });
+      algorithm.setCommittedSpanFetcher(fetch);
+      await algorithm.applyServerChanges('doc1', [other], doc);
+      expect(doc.committedRev).toBe(7);
+      const batch = (await algorithm.getPendingToSend('doc1', doc))!;
+      expect(batch.map(c => [c.id, c.baseRev, c.ops[0].path])).toEqual([
+        ['P', 7, '/x'],
+        ['refused', 7, '/items/2'],
+        ['late', 7, '/items/3'],
+      ]);
+      expect(doc.state).toEqual({ items: ['Z', 'a', 'u', 'w'], x: 'p', other: 1 });
+      expect(errors).toEqual([]);
+    });
+
+    it('a row queued while the fetch is in flight is refused with the rest when the span falls short (review round 4)', async () => {
+      let late: any[] = [];
+      algorithm.setCommittedSpanFetcher(
+        vi.fn(async () => {
+          late = type('/items/2', 'w');
+          algorithm.queueUnstoredChange('doc1', late, doc, {}, 'late');
+          return [other]; // rev 6 missing
+        })
+      );
+      await algorithm.applyServerChanges('doc1', [other], doc);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({
+        fromRev: 5,
+        toRev: 7,
+        changes: [
+          { id: 'refused', baseRev: 5, ops: [{ op: 'add', path: '/items/1', value: 'u' }] },
+          { id: 'late', baseRev: 5, ops: [{ op: 'add', path: '/items/2', value: 'w' }] },
+        ],
+      });
+      expect(algorithm.hasUnstoredChanges('doc1')).toBe(false);
+      expect(doc.state).toEqual({ items: ['Z', 'a'], x: 'p', other: 1 });
       expect((await algorithm.getPendingToSend('doc1', doc))!.map(c => c.id)).toEqual(['P']);
     });
 

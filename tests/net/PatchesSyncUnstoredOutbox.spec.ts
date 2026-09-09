@@ -245,12 +245,17 @@ describe('PatchesSync — outbox rows against the real OTServer (review round 3)
     await patches.trackDocs(['doc1']);
     await store.saveDoc('doc1', { state: { items }, rev: 1 });
     const batches: Change[][] = [];
+    /** Runs while the server-side span fetch is in flight (see the round-4 tests). */
+    const hooks: { duringFetch?: () => Promise<void> } = {};
     const connection = makeConnection({
       commitChanges: vi.fn(async (docId: string, changes: Change[]) => {
         batches.push(wire(changes));
         return wire(await server.commitChanges(docId, wire(changes)));
       }),
-      getChangesSince: vi.fn(async (docId: string, rev: number) => wire(await server.getChangesSince(docId, rev))),
+      getChangesSince: vi.fn(async (docId: string, rev: number) => {
+        await hooks.duringFetch?.();
+        return wire(await server.getChangesSince(docId, rev));
+      }),
     });
     sync = new PatchesSync(patches, connection as any);
     sync['updateState']({ connected: true });
@@ -259,7 +264,7 @@ describe('PatchesSync — outbox rows against the real OTServer (review round 3)
     const errors: Error[] = [];
     sync.onError(err => errors.push(err));
     const doc = (await patches.openDoc<{ items: string[] }>('doc1')) as OTDoc<{ items: string[] }>;
-    return { store, algorithm, server, backend, doc, batches, reported, errors };
+    return { store, algorithm, server, backend, doc, batches, reported, errors, hooks };
   }
 
   it('a confirmed row stays in the batch as a stub until the doc covers its rev: a later edit minted over it is not transformed against it', async () => {
@@ -323,31 +328,35 @@ describe('PatchesSync — outbox rows against the real OTServer (review round 3)
   });
 
   /**
-   * Doc at 1 with [a, b]; P = add /items/0 persisted; the outbox row u = add /items/1 over it
-   * (p, u, a, b); foreign Z and Y append at the end; the store takes Z torn (the doc stays at
-   * 1); listChanges throws on the Y receive. Frozen at 1, u would be a straggler: flush one
-   * sends P alone at 3, flush two sends u alone at 1 and the server transforms it against P's
-   * committed copy as well — p, a, u, b, Z, Y.
+   * Doc at 1 with [a, b]; P (at `p`, default /items/0) persisted; the outbox row u (at `u`,
+   * default /items/1) over it (p, u, a, b); foreign Z (at `z`, default appended) at 2 and Y
+   * appended at 3; the store takes Z torn (the doc stays at 1); on the Y receive the store's
+   * listChanges throws (`storeSpan: 'unreadable'`, the default) or reads the span. Frozen at 1,
+   * u would be a straggler: flush one sends P alone at 3, flush two sends u alone at 1 and the
+   * server transforms it against P's committed copy as well — p, a, u, b, Z, Y.
    */
-  async function tornOverPending() {
+  async function tornOverPending(
+    paths: { p?: string; u?: string; z?: string } = {},
+    storeSpan: 'unreadable' | 'readable' = 'unreadable'
+  ) {
+    const { p = '/items/0', u = '/items/1', z = '/items/-' } = paths;
     const booted = await bootReal(['a', 'b']);
     const { store, algorithm, server, doc } = booted;
     sync!['updateState']({ connected: false });
     store.refusePersists = false;
-    doc.change(patch => patch.add('/items/0', 'p'));
+    doc.change(patch => patch.add(p, 'p'));
     await doc.flush();
     expect(await store.getPendingChanges('doc1')).toHaveLength(1);
     store.refusePersists = true;
     vi.useFakeTimers();
-    doc.change(patch => patch.add('/items/1', 'u'));
+    doc.change(patch => patch.add(u, 'u'));
     await vi.advanceTimersByTimeAsync(3000); // latch → outbox (offline: no send)
     vi.useRealTimers();
-    expect(doc.state.items).toEqual(['p', 'u', 'a', 'b']);
     expect(doc.unstoredChangeIds).toHaveLength(1);
     const uId = doc.unstoredChangeIds[0];
 
     const [Z] = (
-      await server.commitChanges('doc1', [createChange(1, 2, [{ op: 'add', path: '/items/-', value: 'Z' }], {}, 'Z')])
+      await server.commitChanges('doc1', [createChange(1, 2, [{ op: 'add', path: z, value: 'Z' }], {}, 'Z')])
     ).changes;
     const [Y] = (
       await server.commitChanges('doc1', [createChange(2, 3, [{ op: 'add', path: '/items/-', value: 'Y' }], {}, 'Y')])
@@ -355,8 +364,23 @@ describe('PatchesSync — outbox rows against the real OTServer (review round 3)
     await algorithm.applyServerChanges('doc1', [wire(Z)], undefined); // the store took Z; the doc did not
     expect(doc.committedRev).toBe(1);
     expect(await store.getCommittedRev('doc1')).toBe(2);
-    vi.spyOn(store, 'listChanges').mockRejectedValue(new Error('[changes] did not settle within 5021ms'));
+    if (storeSpan === 'unreadable') {
+      vi.spyOn(store, 'listChanges').mockRejectedValue(new Error('[changes] did not settle within 5021ms'));
+    }
     return { ...booted, uId, Y: wire(Y) };
+  }
+
+  /**
+   * Type on the latched doc and wait for the change queue to hand the entry to the outbox (no
+   * persist: the latch skips it; `doc.flush()` would spin, the optimistic queue never drains).
+   */
+  async function typeLatched(doc: OTDoc<{ items: string[] }>, path: string, value: string): Promise<string> {
+    const before = new Set(doc.unstoredChangeIds);
+    doc.change(patch => patch.add(path, value));
+    await patches!['_changeQueues'].get('doc1');
+    const id = doc.unstoredChangeIds.find(candidate => !before.has(candidate));
+    expect(id).toBeDefined();
+    return id!;
   }
 
   it('a row over a pending row whose span the store cannot read is walked with the span from the server, never frozen: it flushes in one batch with the pending row', async () => {
@@ -382,8 +406,21 @@ describe('PatchesSync — outbox rows against the real OTServer (review round 3)
     expect(errors).toEqual([]);
   });
 
-  it('with no way to read the span (offline), the row is refused and reported rather than frozen: it is never sent alone', async () => {
-    const { algorithm, backend, doc, batches, errors, uId, Y } = await tornOverPending();
+  /**
+   * Round 4: P = add /items/1 (a, p, b), u = add /items/2 behind it (a, p, u, b), Z = add
+   * /items/0 at 2, Y appended at 3, the store takes Z torn, listChanges throws, no fetcher.
+   * Left in the doc, u's frame-1 entry is re-applied RAW at 3 by the import (Z, a, u, p, b, Y —
+   * u ahead of the P it was typed behind), and the latch's recovery, retrySavingChanges,
+   * re-drives it at the doc's new committedRev with those ops: the server commits Z, a, u, p,
+   * b, Y where the walk would have put u after p. So the refused entry leaves the doc too.
+   */
+  it('with no way to read the span (offline), the row is refused and reported rather than frozen: it leaves the doc and is never sent, not even by retrySavingChanges', async () => {
+    const { store, algorithm, backend, doc, batches, errors, uId, Y } = await tornOverPending({
+      p: '/items/1',
+      u: '/items/2',
+      z: '/items/0',
+    });
+    expect(doc.state.items).toEqual(['a', 'p', 'u', 'b']);
     // Offline for the receive: the server cannot be asked either.
     await (sync as any)._applyServerChangesToDoc('doc1', [Y]);
     expect(doc.committedRev).toBe(3);
@@ -394,17 +431,99 @@ describe('PatchesSync — outbox rows against the real OTServer (review round 3)
       docId: 'doc1',
       fromRev: 1,
       toRev: 3,
-      changes: [expect.objectContaining({ id: uId, baseRev: 1, ops: [{ op: 'add', path: '/items/1', value: 'u' }] })],
+      changes: [expect.objectContaining({ id: uId, baseRev: 1, ops: [{ op: 'add', path: '/items/2', value: 'u' }] })],
     });
     expect(algorithm.listUnstoredChanges('doc1')).toEqual([]);
-    expect(doc.unstoredChangeIds).toEqual([]); // an ordinary optimistic entry from here
-    expect(doc.state.items).toContain('u'); // still visible; the app shelves it
+    expect(doc.unstoredChangeIds).toEqual([]);
+    // The doc no longer shows u (the shelf has it); P was walked into the new frame.
+    expect(doc.state.items).toEqual(['Z', 'a', 'p', 'b', 'Y']);
+    expect(doc._getOptimisticEntries()).toEqual([]);
 
     sync!['updateState']({ connected: true });
     await (sync as any).syncDoc('doc1');
     expect(batches).toHaveLength(1);
-    expect(batches[0].map(c => c.id)).not.toContain(uId); // P alone; u is not sent at a frame it is not in
-    expect(serverState(backend).items).toEqual(['p', 'a', 'b', 'Z', 'Y']);
+    expect(batches[0].map(c => [c.id, c.baseRev, c.ops[0].path])).toEqual([[batches[0][0].id, 3, '/items/2']]); // P alone
+    expect(doc.committedRev).toBe(4);
+    expect(serverState(backend).items).toEqual(['Z', 'a', 'p', 'b', 'Y']);
+
+    // The latch's normal recovery: the store is back, the app retries. Nothing is minted for u
+    // — it is not re-driven relabelled at 4 with its frame-1 ops.
+    store.refusePersists = false;
+    await patches!.retrySavingChanges('doc1');
+    await (sync as any).syncDoc('doc1');
+    expect(batches).toHaveLength(1);
+    expect(batches.flat().some(c => c.baseRev === 4 || c.ops.some(op => op.value === 'u'))).toBe(false);
+    expect(doc.state.items).toEqual(['Z', 'a', 'p', 'b', 'Y']);
+    expect(serverState(backend).items).toEqual(['Z', 'a', 'p', 'b', 'Y']);
     expect(backend.log('doc1').map(c => c.id)).not.toContain(uId);
+  });
+
+  /**
+   * Round 4: a row queued while the span is in flight. On a latched doc every keystroke reaches
+   * queueUnstoredChange through the change queue, so typing during the round trip is the normal
+   * case. Captured before the await, w = add /items/2 (p, u, w, a, b) is not walked: the import
+   * re-applies it raw at 3 and the batch carries P@3 /items/0, u@3 /items/2 (walked), w@3
+   * /items/2 (raw) — the server commits w AHEAD of u (p, Z, w, u, a, b, Y), nothing on onError.
+   *
+   * The keystroke's `onChange` wake is held for the receive (a flush racing it reads the
+   * store queue at 3 while the doc is still at 1, sends P alone and defers the rows; they then
+   * go out re-minted from the doc at the frame P's echo leaves it on, in place — a split batch,
+   * not a misplacement — but Jacob's assertion is the single batch after the receive).
+   */
+  it('a row queued while the span is fetched from the server is walked with the rest and stays behind the row it was typed after', async () => {
+    const { backend, doc, batches, errors, uId, Y, hooks } = await tornOverPending({ z: '/items/0' });
+    expect(doc.state.items).toEqual(['p', 'u', 'a', 'b']);
+    let wId = '';
+    hooks.duringFetch = async () => {
+      wId = await typeLatched(doc, '/items/2', 'w');
+      expect(doc.state.items).toEqual(['p', 'u', 'w', 'a', 'b']);
+    };
+    sync!['updateState']({ connected: true });
+    const wake = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+    await (sync as any)._applyServerChangesToDoc('doc1', [Y]);
+    wake.mockRestore();
+    expect(wId).not.toBe('');
+    expect(doc.committedRev).toBe(3);
+    expect(doc.state.items).toEqual(['p', 'Z', 'u', 'w', 'a', 'b', 'Y']);
+
+    await (sync as any).syncDoc('doc1');
+    expect(batches).toHaveLength(1);
+    expect(batches[0].map(c => [c.id, c.baseRev, c.ops[0].path])).toEqual([
+      [batches[0][0].id, 3, '/items/0'],
+      [uId, 3, '/items/2'],
+      [wId, 3, '/items/3'], // walked, not raw
+    ]);
+    expect(serverState(backend).items).toEqual(['p', 'Z', 'u', 'w', 'a', 'b', 'Y']);
+    expect(doc.state.items).toEqual(['p', 'Z', 'u', 'w', 'a', 'b', 'Y']);
+    expect(doc.unstoredChangeIds).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("a row queued while the store's span read is pending is walked with the rest as well", async () => {
+    const { store, backend, doc, batches, errors, uId, Y } = await tornOverPending({ z: '/items/0' }, 'readable');
+    // The store can read the span this time; a row is typed while that read is pending.
+    const read = store.listChanges.bind(store);
+    let wId = '';
+    vi.spyOn(store, 'listChanges').mockImplementation(async (docId, options) => {
+      wId = await typeLatched(doc, '/items/2', 'w');
+      return read(docId, options);
+    });
+    sync!['updateState']({ connected: true });
+    const wake = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+    await (sync as any)._applyServerChangesToDoc('doc1', [Y]);
+    wake.mockRestore();
+    expect(wId).not.toBe('');
+    expect(doc.committedRev).toBe(3);
+
+    await (sync as any).syncDoc('doc1');
+    expect(batches).toHaveLength(1);
+    expect(batches[0].map(c => [c.id, c.baseRev, c.ops[0].path])).toEqual([
+      [batches[0][0].id, 3, '/items/0'],
+      [uId, 3, '/items/2'],
+      [wId, 3, '/items/3'],
+    ]);
+    expect(serverState(backend).items).toEqual(['p', 'Z', 'u', 'w', 'a', 'b', 'Y']);
+    expect(doc.state.items).toEqual(['p', 'Z', 'u', 'w', 'a', 'b', 'Y']);
+    expect(errors).toEqual([]);
   });
 });

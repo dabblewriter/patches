@@ -893,6 +893,7 @@ export class OTBranchManager implements BranchManager {
         result = (
           await wrapMergeCommit(branchId, sourceDocId, async () => {
             const committed = await this.patchesServer.commitChanges(sourceDocId, changesToCommit);
+            committedThroughRev = spanEnd;
             if (!committed.docReloadRequired) return committed.changes;
             // Past the server's catch-up cap the response carries none of the foreign rows the
             // frame must fold; read the tail since the frame back instead.
@@ -901,7 +902,6 @@ export class OTBranchManager implements BranchManager {
             return tail;
           })
         ).sort((a, b) => a.rev - b.rev);
-        committedThroughRev = spanEnd;
 
         // Walk rows in rev order, consuming the as-sent queue as our own rows pass: a foreign
         // row's stored ops already include every slice row committed BEFORE it (our rows it

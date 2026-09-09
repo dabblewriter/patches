@@ -96,6 +96,15 @@ export interface ClientAlgorithm {
   hasPending(docId: string): Promise<boolean>;
 
   /**
+   * Whether the durable pending queue holds a change outside `excludeIds`. A plain read like
+   * {@link hasPending}; the reload path uses it to tell "the batch the server just confirmed is
+   * all that is queued" from "newer work has to be reconciled against the committed tail".
+   *
+   * Optional — only OT keeps a durable queue of changes. Without it the caller assumes newer work.
+   */
+  hasPendingBeyond?(docId: string, excludeIds: ReadonlySet<string>): Promise<boolean>;
+
+  /**
    * Gets pending data to send to the server.
    * - OT: Returns the pending queue's leading run of same-baseRev changes — usually the whole
    *   queue; a mixed-baseRev queue flushes one frame per call (callers flush repeatedly until

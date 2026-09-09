@@ -40,7 +40,8 @@ export interface OTServerOptions {
    * batch still commits but the response sets `docReloadRequired` instead of carrying the tail,
    * so the client rehydrates from the snapshot (whose un-versioned tail is bounded by versioning:
    * `maxChangesPerVersion` and session gaps). See `commitChanges` for the full contract.
-   * Defaults to 1000; set to `0` to disable.
+   * Defaults to 1000; set to `0` to disable. Server-side replays (`historicalImport`,
+   * `forceCommit`) are never capped.
    */
   maxCatchupChanges?: number;
 }

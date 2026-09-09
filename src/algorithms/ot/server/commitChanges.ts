@@ -293,9 +293,11 @@ export async function commitChanges(
       const resentCommitted = allCommittedChanges.filter(c => ownOrigin(c) && changeIds.has(c.id));
       // Beyond the cap the client reloads instead of applying the tail (see "Bounded Catch-up"):
       // the echoes are dropped with it, since the reload path confirms the sent batch itself.
-      const maxCatchup = options?.maxCatchupChanges ?? 0;
+      // Server-side replays (migrations) never apply the echo, so they are never capped.
+      const replay = options?.historicalImport || options?.forceCommit;
+      const maxCatchup = replay ? 0 : (options?.maxCatchupChanges ?? 0);
       const capped = maxCatchup > 0 && committedChanges.length > maxCatchup;
-      if (capped) docReloadRequired = true;
+      const reloadRequired = capped || docReloadRequired;
       const catchupChanges = capped
         ? []
         : resentCommitted.length
@@ -304,7 +306,7 @@ export async function commitChanges(
 
       // If all incoming changes were already committed, return the committed changes found
       if (incomingChanges.length === 0) {
-        return { catchupChanges, newChanges: [], docReloadRequired };
+        return { catchupChanges, newChanges: [], docReloadRequired: reloadRequired };
       }
 
       // 4. Offline-session versioning applies when:
@@ -333,7 +335,7 @@ export async function commitChanges(
           await handleOfflineSessionsAndBatches(store, sessionTimeoutMillis, docId, incomingChanges, 'main');
           offlineSessionsHandled = true;
         }
-        return { catchupChanges, newChanges: incomingChanges, docReloadRequired };
+        return { catchupChanges, newChanges: incomingChanges, docReloadRequired: reloadRequired };
       }
 
       // 5. Transform the incoming changes against committed changes (stateless — no state
@@ -378,7 +380,7 @@ export async function commitChanges(
       }
 
       // Return catchup changes and newly transformed changes separately
-      return { catchupChanges, newChanges: transformedChanges, docReloadRequired };
+      return { catchupChanges, newChanges: transformedChanges, docReloadRequired: reloadRequired };
     } catch (error) {
       // The store's write-time id guard fired: one or more incoming changes were
       // already committed (a rebased retry past the read-side dedup window, or a

@@ -153,6 +153,12 @@ export class OTAlgorithm implements ClientAlgorithm {
     return pending.length > 0;
   }
 
+  /** See {@link ClientAlgorithm.hasPendingBeyond} — the store's queue against a resolved set. */
+  async hasPendingBeyond(docId: string, excludeIds: ReadonlySet<string>): Promise<boolean> {
+    const pending = await this.store.getPendingChanges(docId);
+    return pending.some(c => !excludeIds.has(c.id));
+  }
+
   /**
    * The queue to put on the wire. Store rows are ground truth — the same contract the receive
    * path uses (see {@link _collectPending}) — because the store is the sole rev sequencer: a

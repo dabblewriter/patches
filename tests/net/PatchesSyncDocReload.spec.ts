@@ -151,6 +151,20 @@ describe('PatchesSync flushDoc — docReloadRequired reload', () => {
     // …and the doc lands on the server revision.
     expect(doc.committedRev).toBe(4);
   });
+
+  it('does not read the committed tail when only the resolved batch is pending', async () => {
+    conn.getDoc.mockResolvedValue(SERVER_SNAPSHOT);
+
+    await sync['flushDoc'](DOC_ID);
+
+    // The snapshot already carries the batch and nothing else is queued, so there is nothing
+    // to reconcile: the reload must not pull the whole tail since baseRev (a client far enough
+    // behind to be capped would re-read exactly what the cap spared it, or 413 past the
+    // store's read limit).
+    expect(conn.getChangesSince).not.toHaveBeenCalled();
+    expect(await store.getPendingChanges(DOC_ID)).toHaveLength(0);
+    expect(doc.committedRev).toBe(4);
+  });
 });
 
 // A change minted on top of the sent batch while the commit is on the wire (or a later batch of

@@ -49,11 +49,11 @@ const server = new OTServer(store, {
 
 ### Options
 
-| Option                  | Type     | Default | Description                                                                                                                                                                          |
-| ----------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `sessionTimeoutMinutes` | `number` | `30`    | Minutes of inactivity before creating a new version snapshot                                                                                                                         |
-| `maxChangesPerVersion`  | `number` | `1000`  | Snapshot forward in bounded steps of at most N changes when the un-versioned tail reaches N; `0` = off                                                                               |
-| `maxCatchupChanges`     | `number` | `1000`  | Cap on the foreign changes a commit response echoes as catch-up; past it the batch still commits but the client gets `docReloadRequired` and rehydrates from the snapshot; `0` = off |
+| Option                  | Type     | Default | Description                                                                                                                                                                                                                                        |
+| ----------------------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sessionTimeoutMinutes` | `number` | `30`    | Minutes of inactivity before creating a new version snapshot                                                                                                                                                                                       |
+| `maxChangesPerVersion`  | `number` | `1000`  | Snapshot forward in bounded steps of at most N changes when the un-versioned tail reaches N; `0` = off                                                                                                                                             |
+| `maxCatchupChanges`     | `number` | `1000`  | Cap on the foreign changes a commit response echoes as catch-up; past it the batch still commits but the client gets `docReloadRequired` and rehydrates from the snapshot; `0` = off; replays (`historicalImport`, `forceCommit`) are never capped |
 
 > **Why `maxChangesPerVersion`?** Session-gap versioning only fires when consecutive changes are far apart in time. A continuous high-rate stream of changes (seconds apart) never triggers it, so without a count-based trigger a single document can accrue tens of thousands of un-versioned changes — every cold load then replays the entire log, which can grow large enough that the document can no longer be loaded at all. The count trigger snapshots forward in **bounded steps of at most N changes**, so each snapshot build stays cheap.
 >

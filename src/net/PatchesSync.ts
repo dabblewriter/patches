@@ -1170,9 +1170,15 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // queue here. One the tail echoes stays through the reconcile: the rebase drops it by id
       // and advances the foreign tail through it before transforming the rest of the queue.
       // Dropped beforehand, its echo reads as foreign and a change minted on top of it is
-      // transformed against it a second time.
+      // transformed against it a second time. The tail is fetched only when the queue holds
+      // something the resolved set does not cover: a queue the batch covers outright is dropped
+      // without it (the snapshot already carries the batch), so a client far enough behind to be
+      // capped does not re-read the whole tail it was just spared.
+      const resolvedIds = new Set(resolvedChanges.map(c => c.id));
+      const pendingBeyondResolved = () =>
+        algorithm.hasPendingBeyond ? algorithm.hasPendingBeyond(docId, resolvedIds) : algorithm.hasPending(docId);
       let unechoed = resolvedChanges;
-      if (algorithm.reconcilePending && installedRev > baseRev && (await algorithm.hasPending(docId))) {
+      if (algorithm.reconcilePending && installedRev > baseRev && (await pendingBeyondResolved())) {
         // Changes past the installed head are excluded: the envelope doesn't contain them, so
         // the normal catch-up path will deliver them and rebase pending against them itself.
         committedTail = (await this.connection.getChangesSince(docId, baseRev)).filter(c => c.rev <= installedRev);

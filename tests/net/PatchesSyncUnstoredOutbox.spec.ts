@@ -13,7 +13,7 @@ import { Patches } from '../../src/client/Patches.js';
 import { createChange } from '../../src/data/change.js';
 import { UnstoredFrameLostError } from '../../src/net/error.js';
 import { PatchesSync } from '../../src/net/PatchesSync.js';
-import { OTServer } from '../../src/server/OTServer.js';
+import { OTServer, type OTServerOptions } from '../../src/server/OTServer.js';
 import type { Change } from '../../src/types.js';
 import { OTFuzzBackend } from '../fuzz/otFuzzBackend.js';
 import { makeConnection } from './connectionMock.js';
@@ -230,11 +230,11 @@ describe('PatchesSync — outbox rows against the real OTServer (review round 3)
   /** The wire: the server sees copies, never the client's own objects. */
   const wire = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 
-  async function bootReal(items: string[]) {
+  async function bootReal(items: string[], serverOptions?: OTServerOptions) {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const backend = new OTFuzzBackend();
-    const server = new OTServer(backend);
+    const server = new OTServer(backend, serverOptions);
     // Doc at rev 1 on the server and in the store.
     await server.commitChanges('doc1', [
       createChange(0, 1, [{ op: 'replace', path: '', value: { items } }], {}, 'init'),
@@ -245,17 +245,23 @@ describe('PatchesSync — outbox rows against the real OTServer (review round 3)
     await patches.trackDocs(['doc1']);
     await store.saveDoc('doc1', { state: { items }, rev: 1 });
     const batches: Change[][] = [];
-    /** Runs while the server-side span fetch is in flight (see the round-4 tests). */
-    const hooks: { duringFetch?: () => Promise<void> } = {};
+    /**
+     * Run while the server-side span fetch is in flight (the round-4 tests) or after the server
+     * committed a batch, before the client sees the response (the capped-reload test).
+     */
+    const hooks: { duringFetch?: () => Promise<void>; duringCommit?: () => Promise<void> } = {};
     const connection = makeConnection({
       commitChanges: vi.fn(async (docId: string, changes: Change[]) => {
         batches.push(wire(changes));
-        return wire(await server.commitChanges(docId, wire(changes)));
+        const result = wire(await server.commitChanges(docId, wire(changes)));
+        await hooks.duringCommit?.();
+        return result;
       }),
       getChangesSince: vi.fn(async (docId: string, rev: number) => {
         await hooks.duringFetch?.();
         return wire(await server.getChangesSince(docId, rev));
       }),
+      getDoc: vi.fn(async (docId: string) => JSON.parse(await new Response(await server.getDoc(docId)).text())),
     });
     sync = new PatchesSync(patches, connection as any);
     sync['updateState']({ connected: true });
@@ -264,7 +270,7 @@ describe('PatchesSync — outbox rows against the real OTServer (review round 3)
     const errors: Error[] = [];
     sync.onError(err => errors.push(err));
     const doc = (await patches.openDoc<{ items: string[] }>('doc1')) as OTDoc<{ items: string[] }>;
-    return { store, algorithm, server, backend, doc, batches, reported, errors, hooks };
+    return { store, algorithm, server, backend, connection, doc, batches, reported, errors, hooks };
   }
 
   it('a confirmed row stays in the batch as a stub until the doc covers its rev: a later edit minted over it is not transformed against it', async () => {
@@ -524,6 +530,61 @@ describe('PatchesSync — outbox rows against the real OTServer (review round 3)
     ]);
     expect(serverState(backend).items).toEqual(['p', 'Z', 'u', 'w', 'a', 'b', 'Y']);
     expect(doc.state.items).toEqual(['p', 'Z', 'u', 'w', 'a', 'b', 'Y']);
+    expect(errors).toEqual([]);
+  });
+
+  /**
+   * DAB-1340: the reload a capped commit answers with (`docReloadRequired`) reads the committed
+   * tail only when pending work sits beyond the confirmed batch. A row typed on the latched doc
+   * while the batch was on the wire lives only in the outbox; unseen there, the reload skips the
+   * reconcile that walks the row through the tail, the import re-applies it raw in the old frame
+   * and it commits at the wrong index.
+   */
+  it('a capped reload walks an outbox row typed during the round trip through the tail it jumps over', async () => {
+    // Doc at 1 with [a, b]: P persisted, u latched into the outbox (offline, nothing sent).
+    const { store, backend, server, connection, doc, batches, errors, hooks } = await bootReal(['a', 'b'], {
+      maxCatchupChanges: 1,
+    });
+    sync!['updateState']({ connected: false });
+    store.refusePersists = false;
+    doc.change(patch => patch.add('/items/0', 'p'));
+    await doc.flush();
+    store.refusePersists = true;
+    vi.useFakeTimers();
+    doc.change(patch => patch.add('/items/1', 'u'));
+    await vi.advanceTimersByTimeAsync(3000);
+    vi.useRealTimers();
+    expect(doc.state.items).toEqual(['p', 'u', 'a', 'b']);
+    // Two foreign rows since the client's frame: over the cap, so the commit answers a reload.
+    await server.commitChanges('doc1', [createChange(1, 2, [{ op: 'add', path: '/items/1', value: 'Z' }], {}, 'Z')]);
+    await server.commitChanges('doc1', [createChange(2, 3, [{ op: 'add', path: '/items/-', value: 'Y' }], {}, 'Y')]);
+
+    // w is typed after b while [P, u] is on the wire: an outbox row over the batch, in its frame.
+    let wId = '';
+    hooks.duringCommit = async () => {
+      wId = await typeLatched(doc, '/items/4', 'w');
+    };
+    sync!['updateState']({ connected: true });
+    const wake = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+    await (sync as any).flushDoc('doc1');
+    wake.mockRestore();
+    expect(wId).not.toBe('');
+    expect(batches).toHaveLength(1);
+    expect(serverState(backend).items).toEqual(['p', 'u', 'a', 'Z', 'b', 'Y']);
+
+    // The reload read the tail once, for w, and walked it through: w is still after b, in the
+    // reloaded frame. (Unseen, the reload skips the read and w is re-applied at /items/4: before b.)
+    const after = (items: string[], x: string, y: string) => items.indexOf(x) > items.indexOf(y);
+    expect(connection.getChangesSince).toHaveBeenCalledTimes(1);
+    expect(doc.committedRev).toBe(5);
+    expect(after(doc.state.items, 'w', 'b')).toBe(true);
+
+    // The next flush sends w in that frame. (One flush only: a row typed during a flush round
+    // trip is re-minted on later flushes, with or without the cap — the outbox's, not the reload's.)
+    await (sync as any).syncDoc('doc1');
+    expect(batches).toHaveLength(2);
+    expect(batches[1].map(c => c.baseRev)).toEqual([5]);
+    expect(after(serverState(backend).items, 'w', 'b')).toBe(true);
     expect(errors).toEqual([]);
   });
 });

@@ -115,11 +115,17 @@ describe('PatchesSync flushDoc — docReloadRequired reload', () => {
     conn.getDoc.mockResolvedValue(SERVER_SNAPSHOT);
 
     const origLoadDoc = algorithm.loadDoc.bind(algorithm);
+    let minted = false;
     vi.spyOn(algorithm, 'loadDoc').mockImplementation(async docId => {
       const snapshot = await origLoadDoc(docId);
       // A mint lands after the store read but before the import — the store read and
       // the mint pipeline are not mutually serialized, so with IndexedDB the read
-      // transaction can complete just before the mint's write transaction.
+      // transaction can complete just before the mint's write transaction. Once: the
+      // mint itself re-reads the store to catch the doc up to the frame the reload
+      // already installed there (OTAlgorithm._catchUpDocToStore), and that read is not
+      // another keystroke.
+      if (minted) return snapshot;
+      minted = true;
       doc.change(patch => patch.replace('/note', 'typed-during-reload'));
       await doc.flush();
       return snapshot;
@@ -129,8 +135,12 @@ describe('PatchesSync flushDoc — docReloadRequired reload', () => {
 
     // The concurrent change survives in the doc contents…
     expect(doc.state.note).toBe('typed-during-reload');
-    // …in the doc's pending queue…
-    expect(opsAt(doc.getPendingChanges(), '/note')).toHaveLength(1);
+    // …in the doc's pending queue, labeled on the frame the store already held (not the
+    // baseRev-0 frame the doc was still showing, which the server refuses as a stale
+    // continuation)…
+    const [note] = opsAt(doc.getPendingChanges(), '/note');
+    expect(note).toBeDefined();
+    expect(note.baseRev).toBe(SERVER_SNAPSHOT.rev);
     // …and in the store's pending queue.
     expect(opsAt(await store.getPendingChanges(DOC_ID), '/note')).toHaveLength(1);
   });

@@ -429,6 +429,45 @@ export class UnstoredPendingError extends Error {
 }
 
 /**
+ * A change was not minted because the open doc it came from is a committed frame behind its
+ * store and could not be brought up to it. A mint stamps `baseRev` from the open doc's
+ * `committedRev`; when the store holds committed rows the doc never applied (a receive whose
+ * store transaction landed but whose in-memory apply threw, a torn reload), that stamp is a
+ * lie: the ops were expressed on top of the doc's pending rows — the very rows the store
+ * committed — so the server would transform them against their own echoes a second time and
+ * commit double-shifted ops (the DAB-1199 poison cascade). `OTAlgorithm.handleDocChange`
+ * replays the missed span through the doc first (see `_catchUpDocToStore`); this is thrown
+ * when that replay fails — the local committed history does not apply (a poison row the floor
+ * has not neutered yet) — so no honest frame exists for the change. The ops stay applied in
+ * memory and the doc's write path latches WITHOUT an outbox hand-off (an outbox row would carry
+ * the same stale frame); a `retrySavingChanges` re-drive attempts the catch-up again. Emitted
+ * through `Patches.onError`.
+ */
+export class DocFrameBehindStoreError extends Error {
+  constructor(
+    /** The doc the change belongs to. */
+    readonly docId: string,
+    /** The open doc's committed rev — the frame its pending rows and optimistic ops are in. */
+    readonly docRev: number,
+    /** The store's committed rev — the frame a minted change has to be expressed in. */
+    readonly storeRev: number,
+    options?: { cause?: unknown }
+  ) {
+    super(
+      `The open doc ${docId} is at committed rev ${docRev} but its store is at ${storeRev}, and the doc could not ` +
+        `be brought up to the store's frame, so the change was not minted (its baseRev would be stale)`,
+      options
+    );
+    this.name = 'DocFrameBehindStoreError';
+  }
+}
+
+/** Duck-typed on `name` (see {@link isDefectiveChangeError} for why). */
+export function isDocFrameBehindStoreError(err: unknown): boolean {
+  return (err as { name?: unknown } | null | undefined)?.name === 'DocFrameBehindStoreError';
+}
+
+/**
  * The in-memory outbox for a doc is full, so a store-refused change was NOT queued to be sent
  * from memory (see `OTAlgorithm.queueUnstoredChange` / `acceptUnstoredChanges`). The row stays
  * applied in the open doc and is reported on the persist's own `onError` with `unstored: false`;

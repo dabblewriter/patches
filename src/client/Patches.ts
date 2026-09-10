@@ -1,7 +1,7 @@
 import { createId } from 'crypto-id';
 import { type Unsubscriber, signal } from 'easy-signal';
 import type { JSONPatchOp } from '../json-patch/types.js';
-import { isDefectiveChangeError, isRejectionError } from '../net/error.js';
+import { isDefectiveChangeError, isDocFrameBehindStoreError, isRejectionError } from '../net/error.js';
 import type { Change, PatchesSnapshot, QuarantinedChange } from '../types.js';
 import { singleInvocation } from '../utils/concurrency.js';
 import type { BaseDoc } from './BaseDoc.js';
@@ -805,8 +805,13 @@ export class Patches {
       if (latchError) {
         // A change typed while latched has the same fate as the one that latched the doc: no
         // persist, but sent from memory by the outbox where the algorithm has one, under a
-        // stable id a later re-drive reuses (see _changeStableIds).
-        const unstored = this._queueUnstored(docId, ops, doc, algorithm, metadata, this._stableIdFor(ops));
+        // stable id a later re-drive reuses (see _changeStableIds). Not when the latch is the
+        // doc being a frame behind its store: an outbox row is framed by the same stale
+        // committedRev the persist refused to stamp (see DocFrameBehindStoreError), so the entry
+        // stays memory-only until a re-drive catches the doc up.
+        const unstored = isDocFrameBehindStoreError(latchError)
+          ? false
+          : this._queueUnstored(docId, ops, doc, algorithm, metadata, this._stableIdFor(ops));
         this.onError.emit(latchError, { docId, willRetry: false, kind: 'environment', latched: true, unstored });
         return;
       }
@@ -928,6 +933,10 @@ export class Patches {
    *   only when the app calls {@link retrySavingChanges}. The exhausted change (and each change
    *   made while latched) is handed to the algorithm's outbox where it has one, to be sent from
    *   memory under the same stable id (`unstored: true` on the emit) — see {@link onUnstoredQueued}.
+   *   The one exhausted failure that is not handed over is a doc a frame behind its store that
+   *   could not be caught up ({@link isDocFrameBehindStoreError}): an outbox row would be framed
+   *   by the same stale `committedRev` the mint refused to stamp, so the entry stays memory-only
+   *   (`unstored: false`) until a re-drive catches the doc up.
    *
    * The retry runs inside the per-doc change queue, so later changes wait behind it in capture
    * order — required for OT correctness (their ops assume this change's ops are already in the doc
@@ -986,8 +995,13 @@ export class Patches {
           this._writeLatches.set(docId, err as Error);
           // The store will not take it; the server still can. Hand the change to the outbox
           // (where the algorithm has one) so it goes out from memory on the next flush under
-          // the same stable id — a persist that later succeeds cannot double-commit it.
-          const unstored = this._queueUnstored(docId, ops, doc, algorithm, metadata, stableId);
+          // the same stable id — a persist that later succeeds cannot double-commit it. Unless
+          // the store would take it and the DOC is what is behind (DocFrameBehindStoreError):
+          // an outbox row is framed by the doc's committedRev, the stale label the mint refused
+          // to stamp, so the entry stays memory-only until a re-drive catches the doc up.
+          const unstored = isDocFrameBehindStoreError(err)
+            ? false
+            : this._queueUnstored(docId, ops, doc, algorithm, metadata, stableId);
           this.onError.emit(err as Error, { docId, willRetry: false, kind: 'environment', attempt, unstored });
           return;
         }

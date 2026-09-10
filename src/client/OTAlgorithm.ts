@@ -8,6 +8,7 @@ import { createChange } from '../data/change.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import {
+  DocFrameBehindStoreError,
   PendingDeferredError,
   UnstoredFrameLostError,
   UnstoredOutboxOverflowError,
@@ -264,6 +265,11 @@ export class OTAlgorithm implements ClientAlgorithm {
       let pendingRev: number;
       if (doc) {
         const otDoc = doc as OTDoc<T>;
+        // The stamp below is only honest if the doc is on the store's committed frame. Put it
+        // there first; the walk can rebase this entry's ops in place — to nothing, when a
+        // missed commit already covers them.
+        await this._catchUpDocToStore(docId, otDoc);
+        if (ops.length === 0) return [];
         const pendingChanges = otDoc.getPendingChanges();
         committedRev = otDoc.committedRev;
         pendingRev = pendingChanges[pendingChanges.length - 1]?.rev ?? committedRev;
@@ -298,6 +304,65 @@ export class OTAlgorithm implements ClientAlgorithm {
 
       return changes;
     });
+  }
+
+  /**
+   * Bring an open doc up to its store's committed frame before a mint stamps `baseRev` from it.
+   *
+   * The receive path writes the store first and updates the open doc after
+   * ({@link applyServerChanges}), so a doc-side failure — the in-memory apply threw on a row the
+   * store had already taken, a torn reload whose re-import faulted — leaves the doc a frame
+   * behind the store while its pending rows (the rows the store just committed) and its state
+   * still include those changes. Every later mint then carries the doc's stale `committedRev`
+   * as its `baseRev`: a label that says "expressed on frame N" for ops actually expressed on top
+   * of the rows committed as N+1..M. The server trusts the label. It transforms the change
+   * against those rows — its own earlier commits from separate requests, which
+   * `isOwnCommitted` cannot recognise (same request or batch only) — and commits array and
+   * text ops shifted a second time: out of range, or silently misplaced. Each poisoned echo
+   * then fails the doc-side apply again, so the doc never catches up and every further mint
+   * repeats it (DAB-1199: 103 stale-labelled commits from one frozen tab, seven of them poison).
+   *
+   * The catch-up is the receive the doc missed, run the way {@link applyServerChanges} runs it
+   * on the aligned path: the store's committed rows past the doc's rev, followed by the store's
+   * pending queue (already rebased when the store took those rows), through
+   * {@link OTDoc.applyChanges} — which drops the doc's own echoes untransformed, walks foreign
+   * rows through the pending queue and the optimistic ops (this mint's included, in place), and
+   * advances the doc's frame. Nothing is relabeled without the transform it needs, and nothing
+   * is transformed against its own echo. When the span cannot be replayed row by row (compacted
+   * into a snapshot, a store without `listChanges`), the doc is rebuilt from the store's
+   * materialized snapshot instead, as the misaligned receive path does.
+   *
+   * A catch-up that fails means the local committed history does not apply — a poison row the
+   * floor has not neutered yet — so no honest frame exists for the change: it is refused
+   * ({@link DocFrameBehindStoreError}) rather than minted with a stale label, and `Patches`
+   * keeps it in memory for a later re-drive. A doc on the store's frame (the invariant case)
+   * costs one committed-rev read and returns.
+   */
+  private async _catchUpDocToStore<T extends object>(docId: string, otDoc: OTDoc<T>): Promise<void> {
+    const docRev = otDoc.committedRev;
+    const storeRev = await this.store.getCommittedRev(docId);
+    if (docRev >= storeRev) return;
+    try {
+      const span = (await this.store.listChanges?.(docId, { startAfter: docRev })) ?? [];
+      const committed = span.filter(c => c.rev <= storeRev);
+      const replayable =
+        committed.length === storeRev - docRev && committed[0]?.rev === docRev + 1 && firstGapIndex(committed) === -1;
+      if (replayable) {
+        const pending = await this.store.getPendingChanges(docId);
+        otDoc.applyChanges([...committed, ...pending]);
+      } else {
+        const snapshot = await this.loadDoc(docId);
+        if (!snapshot) throw new Error(`the store has no snapshot for ${docId}`);
+        otDoc.import(snapshot as PatchesSnapshot<T>);
+      }
+      // Check the outcome, not the path: a committed row stored without `committedAt` rides the
+      // pending branch of the doc's apply and leaves the frame where it was.
+      if (otDoc.committedRev < storeRev) {
+        throw new Error(`the doc is still at rev ${otDoc.committedRev} after the catch-up`);
+      }
+    } catch (cause) {
+      throw new DocFrameBehindStoreError(docId, docRev, storeRev, { cause });
+    }
   }
 
   async hasPending(docId: string): Promise<boolean> {
@@ -1413,9 +1478,10 @@ export class OTAlgorithm implements ClientAlgorithm {
   /**
    * The server requires every change in one flush batch to share a baseRev — the batch is a
    * sequential program expressed against that committed frame. The queue can carry rows from
-   * more than one frame: a mint lands while its doc is a frame behind the store (a torn reload,
-   * a follower tab that hasn't received the writer's broadcast yet), so its baseRev — and its
-   * ops — sit on an older frame than siblings the receive path already rebased.
+   * more than one frame: a row minted by another context between this doc's frame read and the
+   * store's next receive, a row forwarded from another context's outbox, or a row persisted
+   * before mints were held to the store's frame ({@link _catchUpDocToStore}) — so its baseRev,
+   * and its ops, sit on an older frame than siblings the receive path already rebased.
    *
    * Those frames are not interchangeable. Relabeling a straggler to the newest frame commits
    * its ops WITHOUT the transform across the intervening committed changes — committed history

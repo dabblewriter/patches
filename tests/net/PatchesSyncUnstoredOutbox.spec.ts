@@ -560,8 +560,10 @@ describe('PatchesSync — outbox rows against the real OTServer (review round 3)
     await server.commitChanges('doc1', [createChange(2, 3, [{ op: 'add', path: '/items/-', value: 'Y' }], {}, 'Y')]);
 
     // w is typed after b while [P, u] is on the wire: an outbox row over the batch, in its frame.
+    // One keystroke: the hook clears itself, so no later round trip types another row.
     let wId = '';
     hooks.duringCommit = async () => {
+      hooks.duringCommit = undefined;
       wId = await typeLatched(doc, '/items/4', 'w');
     };
     sync!['updateState']({ connected: true });
@@ -579,12 +581,62 @@ describe('PatchesSync — outbox rows against the real OTServer (review round 3)
     expect(doc.committedRev).toBe(5);
     expect(after(doc.state.items, 'w', 'b')).toBe(true);
 
-    // The next flush sends w in that frame. (One flush only: a row typed during a flush round
-    // trip is re-minted on later flushes, with or without the cap — the outbox's, not the reload's.)
+    // The next flush sends w in that frame under the id it was queued with, and its echo retires
+    // it: the server holds w once, the doc agrees, and a later sync has nothing to send.
     await (sync as any).syncDoc('doc1');
     expect(batches).toHaveLength(2);
-    expect(batches[1].map(c => c.baseRev)).toEqual([5]);
+    expect(batches[1].map(c => [c.id, c.baseRev])).toEqual([[wId, 5]]);
     expect(after(serverState(backend).items, 'w', 'b')).toBe(true);
+    expect(serverState(backend).items.filter(item => item === 'w')).toHaveLength(1);
+    expect(doc.state.items).toEqual(serverState(backend).items);
+    expect(patches!.listUnstoredChanges('doc1')).toEqual([]);
+    expect(doc.unstoredChangeIds).toEqual([]);
+    await (sync as any).syncDoc('doc1');
+    expect(batches).toHaveLength(2);
+    expect(errors).toEqual([]);
+  });
+
+  /**
+   * DAB-1362 reported a re-mint loop here: a row typed on a latched doc while a flush is on the
+   * wire going out again under a fresh id on every later flush. Its repro's commit hook never
+   * cleared, so every round trip typed a new row, and each "re-mint" was that new keystroke.
+   * Typing through several round trips is the normal case on a latched doc: each flush carries
+   * the row typed during the one before it, under the id it was queued with, and nothing goes
+   * out twice.
+   */
+  it('typing through several flush round trips sends each row once, under the id it was queued with', async () => {
+    // Doc at 1 with [a, b]: P persisted, u latched into the outbox (offline, nothing sent).
+    const { store, backend, doc, batches, errors, hooks } = await bootReal(['a', 'b']);
+    sync!['updateState']({ connected: false });
+    store.refusePersists = false;
+    doc.change(patch => patch.add('/items/0', 'p'));
+    await doc.flush();
+    store.refusePersists = true;
+    vi.useFakeTimers();
+    doc.change(patch => patch.add('/items/1', 'u'));
+    await vi.advanceTimersByTimeAsync(3000);
+    vi.useRealTimers();
+
+    // One keystroke inside each of the first three commit round trips, then the typing stops.
+    const typed: string[] = [];
+    hooks.duringCommit = async () => {
+      typed.push(await typeLatched(doc, '/items/-', `w${typed.length + 1}`));
+      if (typed.length === 3) hooks.duringCommit = undefined;
+    };
+    sync!['updateState']({ connected: true });
+    const wake = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+    await (sync as any).flushDoc('doc1');
+    wake.mockRestore();
+    for (let pass = 0; pass < 4; pass++) await (sync as any).syncDoc('doc1');
+
+    // Each flush after [P, u] carried exactly the row typed during the flush before it.
+    expect(typed).toHaveLength(3);
+    expect(batches.slice(1).map(batch => batch.map(c => c.id))).toEqual(typed.map(id => [id]));
+    // Each row landed once; the doc converged on the server with nothing left to send.
+    expect(serverState(backend).items).toEqual(['p', 'u', 'a', 'b', 'w1', 'w2', 'w3']);
+    expect(doc.state.items).toEqual(serverState(backend).items);
+    expect(patches!.listUnstoredChanges('doc1')).toEqual([]);
+    expect(doc.unstoredChangeIds).toEqual([]);
     expect(errors).toEqual([]);
   });
 });

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.31.1](https://github.com/dabblewriter/patches/compare/v0.31.0...v0.31.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* **client:** count live outbox rows when a reload asks for pending work beyond the confirmed batch (DAB-1340) ([6883c26](https://github.com/dabblewriter/patches/commit/6883c26d6d451978c2f26c6d624892c50dea63df))
+* **ot:** cap the catch-up a commit echoes and answer docReloadRequired past it (DAB-1340) ([fa10cd8](https://github.com/dabblewriter/patches/commit/fa10cd8268a9434d1461019040b2dc4295bb4ccf))
+
 ## [0.31.0](https://github.com/dabblewriter/patches/compare/v0.30.2...v0.31.0) (2026-09-09)
 
 

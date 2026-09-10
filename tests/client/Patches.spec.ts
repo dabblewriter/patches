@@ -797,6 +797,7 @@ describe('Patches', () => {
           willRetry: false,
           kind: 'environment',
           attempt: 2,
+          unstored: false, // the mock algorithm has no outbox — the change stays memory-only
         });
       } finally {
         vi.useRealTimers();

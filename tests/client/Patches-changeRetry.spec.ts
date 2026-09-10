@@ -263,6 +263,7 @@ describe('Patches change-submit retry (non-destructive rollback)', () => {
         willRetry: false,
         kind: 'environment',
         attempt: 2,
+        unstored: true, // handed to the OT outbox to be sent from memory (see the outbox describe)
       });
 
       await vi.advanceTimersByTimeAsync(120_000);
@@ -295,7 +296,13 @@ describe('Patches change-submit retry (non-destructive rollback)', () => {
       expect(saveSpy).not.toHaveBeenCalled(); // latched — nothing minted or sent
       expect(doc.state).toEqual({ text: 'hello', more: 'text' }); // still applied optimistically
       expect(errors).toHaveLength(1);
-      expect(errors[0].context).toEqual({ docId: 'doc1', willRetry: false, kind: 'environment', latched: true });
+      expect(errors[0].context).toEqual({
+        docId: 'doc1',
+        willRetry: false,
+        kind: 'environment',
+        latched: true,
+        unstored: true,
+      });
     });
 
     it('retrySavingChanges clears the latch and re-submits retained ops in order once the store recovers', async () => {
@@ -430,6 +437,196 @@ describe('Patches change-submit retry (non-destructive rollback)', () => {
       expect(pending).toHaveLength(1);
       expect(pending[0].id).toBe(idDuringFailures); // re-driven under the original stable id
       expect(seenIds).toEqual([idDuringFailures]); // the recovering save used that same id
+    });
+  });
+
+  describe('OT outbox (store-refused changes sent from memory)', () => {
+    let store: OTInMemoryStore;
+    let algorithm: OTAlgorithm;
+
+    function setup() {
+      store = new OTInMemoryStore();
+      algorithm = new OTAlgorithm(store);
+      patches = new Patches({ algorithms: { ot: algorithm } });
+      vi.useFakeTimers();
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+    }
+
+    it('hands the exhausted change to the outbox and wakes the sync layer', async () => {
+      setup();
+      vi.spyOn(store, 'savePendingChanges').mockImplementation(async () => {
+        throw timeoutError();
+      });
+      const queued: { docId: string; change: any }[] = [];
+      patches.onUnstoredQueued((docId, change) => queued.push({ docId, change }));
+      const changed: string[] = [];
+      patches.onChange(docId => changed.push(docId));
+
+      const doc = await patches.openDoc<{ text?: string }>('doc1');
+      doc.change(patch => patch.add('/text', 'hello'));
+      await vi.advanceTimersByTimeAsync(3000); // 3 failed attempts → latch
+
+      expect(patches.isWriteLatched('doc1')).toBe(true);
+      expect(queued).toHaveLength(1);
+      expect(queued[0].docId).toBe('doc1');
+      expect(queued[0].change).toMatchObject({ baseRev: 0, ops: [{ op: 'add', path: '/text', value: 'hello' }] });
+      expect(changed).toEqual(['doc1']); // the send path is woken without a successful persist
+      expect(patches.listUnstoredChanges('doc1').map(c => c.id)).toEqual([queued[0].change.id]);
+      expect((doc as unknown as OTDoc<any>).unstoredChangeIds).toEqual([queued[0].change.id]);
+      expect(await store.getPendingChanges('doc1')).toEqual([]); // still nothing in the store
+      expect(doc.state).toEqual({ text: 'hello' });
+    });
+
+    it('a persist with no open doc that exhausts its attempts is reported as not queued (unstored: false), never silently dropped', async () => {
+      setup();
+      vi.spyOn(store, 'savePendingChanges').mockImplementation(async () => {
+        throw timeoutError();
+      });
+      await patches.trackDocs(['doc1']);
+      const errors: { error: Error; context?: any }[] = [];
+      patches.onError((error, context) => errors.push({ error, context }));
+      const queued = vi.fn();
+      patches.onUnstoredQueued(queued);
+
+      void patches.submitDocChange('doc1', [{ op: 'add', path: '/text', value: 'hello' }]);
+      await vi.advanceTimersByTimeAsync(3000);
+
+      expect(patches.isWriteLatched('doc1')).toBe(true);
+      expect(errors[errors.length - 1].context).toEqual({
+        docId: 'doc1',
+        willRetry: false,
+        kind: 'environment',
+        attempt: 2,
+        unstored: false, // nothing to mint from: the app hears the drop on the same emit
+      });
+      expect(queued).not.toHaveBeenCalled();
+      expect(patches.listUnstoredChanges('doc1')).toEqual([]);
+    });
+
+    it('queues changes made while latched behind the first, in capture order', async () => {
+      setup();
+      vi.spyOn(store, 'savePendingChanges').mockImplementation(async () => {
+        throw timeoutError();
+      });
+      const doc = await patches.openDoc<{ list?: string[] }>('doc1');
+      doc.change(patch => patch.add('/list', []));
+      await vi.advanceTimersByTimeAsync(3000); // latch
+      doc.change(patch => patch.add('/list/0', 'a'));
+      doc.change(patch => patch.add('/list/1', 'b'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      const rows = patches.listUnstoredChanges('doc1');
+      expect(rows.map(c => c.ops)).toEqual([
+        [{ op: 'add', path: '/list', value: [] }],
+        [{ op: 'add', path: '/list/0', value: 'a' }],
+        [{ op: 'add', path: '/list/1', value: 'b' }],
+      ]);
+      expect(rows.map(c => c.rev)).toEqual([1, 2, 3]);
+      expect(rows.every(c => c.baseRev === 0)).toBe(true);
+    });
+
+    it('retrySavingChanges re-mints under the outbox id and retires the outbox copy — sent once, from the store', async () => {
+      setup();
+      const original = store.savePendingChanges.bind(store);
+      let failSaves = true;
+      vi.spyOn(store, 'savePendingChanges').mockImplementation(async (id, changes) => {
+        if (failSaves) throw timeoutError();
+        return original(id, changes);
+      });
+      const doc = await patches.openDoc<{ text?: string }>('doc1');
+      doc.change(patch => patch.add('/text', 'hello'));
+      await vi.advanceTimersByTimeAsync(3000); // latch → outbox
+      const [row] = patches.listUnstoredChanges('doc1');
+
+      failSaves = false;
+      vi.useRealTimers();
+      await patches.retrySavingChanges('doc1');
+
+      const pending = await store.getPendingChanges('doc1');
+      expect(pending.map(c => c.id)).toEqual([row.id]);
+      expect(patches.listUnstoredChanges('doc1')).toEqual([]);
+      expect((doc as unknown as OTDoc<any>).unstoredChangeIds).toEqual([]);
+      const batch = await algorithm.getPendingToSend('doc1', doc);
+      expect(batch!.map(c => c.id)).toEqual([row.id]); // not twice
+    });
+
+    it('an authoritative rejection rolls the queue back and empties the outbox with it', async () => {
+      setup();
+      let calls = 0;
+      vi.spyOn(store, 'savePendingChanges').mockImplementation(async () => {
+        throw calls++ < 3 ? timeoutError() : rejectionError();
+      });
+      const doc = await patches.openDoc<{ text?: string }>('doc1');
+      doc.change(patch => patch.add('/text', 'hello'));
+      await vi.advanceTimersByTimeAsync(3000); // latch → outbox
+      expect(patches.listUnstoredChanges('doc1')).toHaveLength(1);
+
+      vi.useRealTimers();
+      await patches.retrySavingChanges('doc1'); // re-drive meets a 403
+
+      expect(doc.state).toEqual({});
+      expect(patches.listUnstoredChanges('doc1')).toEqual([]);
+    });
+
+    it('closeDoc keeps the outbox rows, frozen in their frame, so the next flush still sends them', async () => {
+      setup();
+      vi.spyOn(store, 'savePendingChanges').mockImplementation(async () => {
+        throw timeoutError();
+      });
+      const doc = await patches.openDoc<{ text?: string }>('doc1');
+      doc.change(patch => patch.add('/text', 'hello'));
+      await vi.advanceTimersByTimeAsync(3000);
+      const [row] = patches.listUnstoredChanges('doc1');
+
+      vi.useRealTimers();
+      await patches.closeDoc('doc1');
+
+      expect(patches.isWriteLatched('doc1')).toBe(false);
+      const batch = await algorithm.getPendingToSend('doc1');
+      expect(batch!.map(c => c.id)).toEqual([row.id]);
+      expect(batch![0].ops).toEqual([{ op: 'add', path: '/text', value: 'hello' }]);
+    });
+
+    it('accepts rows from another context and wakes the sync layer once', async () => {
+      setup();
+      vi.useRealTimers();
+      const changed: string[] = [];
+      patches.onChange(docId => changed.push(docId));
+      await patches.trackDocs(['doc1']);
+      const foreign = createChange(0, 1, [{ op: 'add', path: '/text', value: 'from a follower' }], {}, 'follower-1');
+
+      expect(patches.acceptUnstoredChanges('doc1', [foreign])).toBe(1);
+      expect(patches.acceptUnstoredChanges('doc1', [foreign])).toBe(0);
+      expect(changed).toEqual(['doc1']);
+      expect(patches.listUnstoredChanges('doc1').map(c => c.id)).toEqual(['follower-1']);
+    });
+
+    it("forwards the algorithm's committed report and lets a minting context drop its entry", async () => {
+      setup();
+      vi.spyOn(store, 'savePendingChanges').mockImplementation(async () => {
+        throw timeoutError();
+      });
+      const committed: { docId: string; changes: any[] }[] = [];
+      patches.onUnstoredCommitted((docId, changes) => committed.push({ docId, changes }));
+      const doc = await patches.openDoc<{ text?: string }>('doc1');
+      doc.change(patch => patch.add('/text', 'hello'));
+      await vi.advanceTimersByTimeAsync(3000);
+      const [row] = patches.listUnstoredChanges('doc1');
+      vi.useRealTimers();
+
+      const echo = { ...row, committedAt: 1 };
+      await algorithm.applyServerChanges('doc1', [echo], doc);
+      expect(committed).toEqual([{ docId: 'doc1', changes: [echo] }]);
+      expect(doc.state).toEqual({ text: 'hello' });
+
+      // A second context told the same thing (its own copy still queued) drops it too.
+      const other = new Patches({ algorithms: { ot: new OTAlgorithm(new OTInMemoryStore()) } });
+      await other.trackDocs(['doc1']);
+      other.acceptUnstoredChanges('doc1', [row]);
+      other.noteUnstoredCommitted('doc1', [echo]);
+      expect(other.listUnstoredChanges('doc1')).toEqual([]);
+      await other.close();
     });
   });
 

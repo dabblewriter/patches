@@ -457,3 +457,186 @@ describe('OTDoc — import() must not double-apply a stranded optimistic op the 
     expect(doc.state.items).toEqual(['a', 'b']);
   });
 });
+
+/**
+ * Outbox entries (storage hardening A1): an optimistic entry the store refused is sent from
+ * memory under a stable id and has NO pending row, so its committed echo is the one thing that
+ * can confirm it. The doc must recognise that echo as its own — drop the entry, never transform
+ * it against its committed copy — or the change applies twice.
+ */
+describe('OTDoc — outbox entries confirmed by their committed echo', () => {
+  let doc: InstanceType<typeof OTDoc<ListDoc>>;
+  let stateUpdates: number;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    doc = new OTDoc<ListDoc>('doc-1', { state: { items: ['a', 'b', 'c'] }, rev: 1, changes: [] });
+    stateUpdates = 0;
+    doc.subscribe(() => stateUpdates++, false);
+  });
+
+  /** Type an append, hand its entry to the outbox, and return the live ops array. */
+  function typeUnstored(id: string, value: string): any[] {
+    doc.change(patch => patch.add('/items/-', value));
+    const calls = (doc.onChange.emit as any).mock.calls;
+    const ops = calls[calls.length - 1][0];
+    doc._markUnstored(id, ops);
+    return ops;
+  }
+
+  it('a pure echo drops the entry without emitting or re-applying (state is data-identical)', () => {
+    const ops = typeUnstored('u1', 'X');
+    expect(doc.unstoredChangeIds).toEqual(['u1']);
+    const emitsBefore = stateUpdates;
+
+    doc.applyChanges([makeChange('u1', 1, 2, [{ op: 'add', path: '/items/-', value: 'X' }], true)]);
+
+    expect(doc.state.items).toEqual(['a', 'b', 'c', 'X']); // once, not twice
+    expect(doc.committedRev).toBe(2);
+    expect((doc as any)._optimisticOps).toEqual([]);
+    expect(doc.unstoredChangeIds).toEqual([]);
+    expect(ops).toEqual([]); // emptied in place so a queued mint skips it
+    expect(stateUpdates).toBe(emitsBefore); // pure echo: no spurious update mid-typing
+  });
+
+  it('a mixed batch drops the echoed entry and rebases later entries against the foreign change only', () => {
+    typeUnstored('u1', 'X');
+    doc.change(patch => patch.add('/items/1', 'Y')); // typed after, still memory-only (not queued yet)
+    const laterOps = (doc.onChange.emit as any).mock.calls[1][0];
+    expect(doc.state.items).toEqual(['a', 'Y', 'b', 'c', 'X']);
+
+    // Foreign insert at 0 committed at rev 2, then our outbox row at rev 3 (transformed by the
+    // server against the foreign change — an append is unaffected).
+    doc.applyChanges([
+      makeChange('c-foreign', 1, 2, [{ op: 'add', path: '/items/0', value: 'Z' }], true),
+      makeChange('u1', 1, 3, [{ op: 'add', path: '/items/-', value: 'X' }], true),
+    ]);
+
+    expect(doc.committedRev).toBe(3);
+    // X exactly once (from the committed copy), Y shifted by Z only — NOT re-expressed over X.
+    expect(doc.state.items).toEqual(['Z', 'a', 'Y', 'b', 'c', 'X']);
+    expect(laterOps).toEqual([{ op: 'add', path: '/items/2', value: 'Y' }]);
+    expect((doc as any)._optimisticOps).toEqual([laterOps]);
+    expect(doc.unstoredChangeIds).toEqual([]);
+  });
+
+  it('a later entry is NOT transformed against the echoed row (its frame already includes it)', () => {
+    typeUnstored('u1', 'X'); // appended: ['a','b','c','X']
+    doc.change(patch => patch.add('/items/0', 'W')); // on top of X: ['W','a','b','c','X']
+    const laterOps = (doc.onChange.emit as any).mock.calls[1][0];
+
+    // The server committed a foreign insert at 1, then our row (appended, unaffected).
+    doc.applyChanges([
+      makeChange('c-foreign', 1, 2, [{ op: 'add', path: '/items/1', value: 'Z' }], true),
+      makeChange('u1', 1, 3, [{ op: 'add', path: '/items/-', value: 'X' }], true),
+    ]);
+
+    // W stays at 0. Had the echo been walked as foreign, W would ALSO have been transformed
+    // against an insert it was already expressed on top of.
+    expect(doc.state.items).toEqual(['W', 'a', 'Z', 'b', 'c', 'X']);
+    expect(laterOps).toEqual([{ op: 'add', path: '/items/0', value: 'W' }]);
+  });
+
+  it('a later entry keeps its index when the echoed row is an insert before it', () => {
+    typeUnstored('u1', 'X'); // ['a','b','c','X']
+    doc.change(patch => patch.add('/items/4', 'Y')); // after X: ['a','b','c','X','Y']
+    const laterOps = (doc.onChange.emit as any).mock.calls[1][0];
+
+    doc.applyChanges([makeChange('u1', 1, 2, [{ op: 'add', path: '/items/-', value: 'X' }], true)]);
+    expect(doc.state.items).toEqual(['a', 'b', 'c', 'X', 'Y']);
+
+    // Now a foreign insert lands AFTER the echo; only it may move Y.
+    doc.applyChanges([makeChange('c-foreign', 2, 3, [{ op: 'add', path: '/items/0', value: 'Z' }], true)]);
+    expect(doc.state.items).toEqual(['Z', 'a', 'b', 'c', 'X', 'Y']);
+    expect(laterOps).toEqual([{ op: 'add', path: '/items/5', value: 'Y' }]);
+  });
+
+  it('a mixed batch where the echoed row is an insert must not shift entries typed on top of it', () => {
+    doc.change(patch => patch.add('/items/0', 'X')); // ['X','a','b','c']
+    const calls = (doc.onChange.emit as any).mock.calls;
+    doc._markUnstored('u1', calls[calls.length - 1][0]);
+    doc.change(patch => patch.add('/items/2', 'Y')); // ['X','a','Y','b','c']
+    const laterOps = calls[calls.length - 1][0];
+
+    doc.applyChanges([
+      makeChange('c-foreign', 1, 2, [{ op: 'add', path: '/items/-', value: 'Z' }], true),
+      makeChange('u1', 1, 3, [{ op: 'add', path: '/items/0', value: 'X' }], true),
+    ]);
+
+    // Y was expressed on top of X; walking X's echo as foreign would push Y to index 3.
+    expect(doc.state.items).toEqual(['X', 'a', 'Y', 'b', 'c', 'Z']);
+    expect(laterOps).toEqual([{ op: 'add', path: '/items/2', value: 'Y' }]);
+  });
+
+  it('without the outbox mark the same echo would be treated as foreign and double-apply (control)', () => {
+    doc.change(patch => patch.add('/items/-', 'X'));
+    doc.applyChanges([makeChange('u1', 1, 2, [{ op: 'add', path: '/items/-', value: 'X' }], true)]);
+    expect(doc.state.items).toEqual(['a', 'b', 'c', 'X', 'X']); // the hazard the mark exists to prevent
+  });
+
+  it('a foreign change arriving before the echo rebases the entry in place, so the outbox sends the rebased ops', () => {
+    const ops = typeUnstored('u1', 'X');
+    doc.change(patch => patch.add('/items/0', 'W'));
+    doc.applyChanges([makeChange('c-foreign', 1, 2, [{ op: 'add', path: '/items/1', value: 'Z' }], true)]);
+
+    expect(doc.unstoredChangeIds).toEqual(['u1']); // still ours, still queued
+    expect(ops).toEqual([{ op: 'add', path: '/items/-', value: 'X' }]);
+    expect(doc.state.items).toEqual(['W', 'a', 'Z', 'b', 'c', 'X']);
+  });
+
+  it('_forgetUnstored hands the entry back to the normal local-confirm path (store accepted it after all)', () => {
+    const ops = typeUnstored('u1', 'X');
+    doc._forgetUnstored('u1');
+    expect(doc.unstoredChangeIds).toEqual([]);
+
+    doc.applyChanges([makeChange('u1', 1, 2, ops, false)]); // local confirm: shifts the entry
+    expect(doc.hasPending).toBe(true);
+    doc.applyChanges([makeChange('u1', 1, 2, [{ op: 'add', path: '/items/-', value: 'X' }], true)]);
+    expect(doc.state.items).toEqual(['a', 'b', 'c', 'X']);
+    expect((doc as any)._optimisticOps).toEqual([]);
+  });
+
+  it('_dropUnstored removes the entry from the queue without recomputing state', () => {
+    const ops = typeUnstored('u1', 'X');
+    const emitsBefore = stateUpdates;
+    expect(doc._dropUnstored(['u1', 'not-queued'])).toEqual(['u1']);
+    expect((doc as any)._optimisticOps).toEqual([]);
+    expect(ops).toEqual([]);
+    expect(doc.state.items).toEqual(['a', 'b', 'c', 'X']); // untouched until the caller re-syncs
+    expect(stateUpdates).toBe(emitsBefore);
+  });
+
+  it('_noteUnstoredCommitted at or below committedRev drops the duplicate now', () => {
+    typeUnstored('u1', 'X');
+    // The doc caught up by import (a follower reloading from the store): the snapshot already
+    // holds X, so the surviving entry is re-applied on top — a visible duplicate...
+    doc.import({ state: { items: ['a', 'b', 'c', 'X'] }, rev: 2, changes: [] });
+    expect(doc.state.items).toEqual(['a', 'b', 'c', 'X', 'X']);
+    // ...until the writer's report names the rev the row committed at.
+    doc._noteUnstoredCommitted('u1', 2);
+    expect(doc.state.items).toEqual(['a', 'b', 'c', 'X']);
+    expect(doc.unstoredChangeIds).toEqual([]);
+  });
+
+  it('_noteUnstoredCommitted ahead of committedRev makes the import that covers it drop the entry', () => {
+    typeUnstored('u1', 'X');
+    doc._noteUnstoredCommitted('u1', 2);
+    expect(doc.unstoredChangeIds).toEqual(['u1']); // not yet in this doc's state
+
+    doc.import({ state: { items: ['a', 'b', 'c', 'X'] }, rev: 2, changes: [] });
+    expect(doc.state.items).toEqual(['a', 'b', 'c', 'X']); // not duplicated
+    expect(doc.unstoredChangeIds).toEqual([]);
+  });
+
+  it('rollbackOptimistic clears the outbox bookkeeping with the queue', () => {
+    typeUnstored('u1', 'X');
+    doc.rollbackOptimistic();
+    expect(doc.unstoredChangeIds).toEqual([]);
+    expect(doc.state.items).toEqual(['a', 'b', 'c']);
+  });
+
+  it('_markUnstored ignores an array that is not in the optimistic queue', () => {
+    doc._markUnstored('ghost', [{ op: 'add', path: '/items/-', value: 'G' }]);
+    expect(doc.unstoredChangeIds).toEqual([]);
+  });
+});

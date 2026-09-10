@@ -279,6 +279,19 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       patches.onDeleteDoc(this._handleDocDeleted.bind(this)),
       patches.onChange(this._handleDocChange.bind(this)),
     ];
+
+    // The server holds every committed change; an algorithm that cannot read a committed span
+    // from its store (OT walking outbox rows across a rebuild whose store tail is unreadable or
+    // short, with pending rows under them) takes it from here rather than freezing rows it
+    // cannot safely send alone. Gated like a send: offline, the fetch fails and the algorithm
+    // takes its refuse-and-report path instead of waiting on a connection.
+    for (const algorithm of Object.values(patches.algorithms)) {
+      algorithm?.setCommittedSpanFetcher?.(async (docId, fromRev, toRev) => {
+        if (!this._canSend()) throw new NetworkError('Cannot read committed changes: offline or not connected');
+        const changes = await this.connection.getChangesSince(docId, fromRev);
+        return changes.filter(c => c.rev <= toRev);
+      });
+    }
   }
 
   private _unsubs: Unsubscriber[] = [];
@@ -526,6 +539,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.disconnect();
     for (const unsub of this._unsubs) unsub();
     this._unsubs.length = 0;
+    for (const algorithm of Object.values(this.patches.algorithms)) algorithm?.setCommittedSpanFetcher?.(undefined);
   }
 
   /**
@@ -1420,6 +1434,15 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
             const fullSnapshot = await algorithm.loadDoc(docId);
             if (fullSnapshot) this._applySnapshotPreservingPending(docId, fullSnapshot, changeBatch);
           }
+          // Outbox rows (sent from memory because the store refused them) are confirmed from
+          // the response itself, BEFORE the apply below writes it to that same store: if the
+          // store refuses the apply too, the rows would otherwise stay queued and go out again
+          // on every flush, relying on the server's id dedupe for the life of the session.
+          if (algorithm.confirmUnstoredCommitted) {
+            const sentIds = new Set(changeBatch.map(c => c.id));
+            const own = committed.filter(c => sentIds.has(c.id));
+            if (own.length > 0) algorithm.confirmUnstoredCommitted(docId, own);
+          }
           await this._applyServerChangesToDoc(docId, committed);
 
           // Drop any sent change the server rebased away to a no-op (absent from
@@ -2131,16 +2154,45 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this._surfacedDeleteErrors.delete(docId);
     this._terminalDeleteFailures.delete(docId);
     this._updateDocSyncState(docId, undefined);
-    await algorithm.confirmDeleteDoc(docId);
     // A resumed stream can still replay this doc's pre-delete changes; the gate in
-    // `_receiveCommittedChanges` drops them.
+    // `_receiveCommittedChanges` drops them. Armed BEFORE the app is told, so a batch landing
+    // inside the emit window below is gated rather than applied over a doc mid-discard.
     this._confirmedDeletedDocs.add(docId);
 
-    // Notify application (with any pending changes that were lost). Awaited so an app that
-    // shelves those changes has landed the write before we proceed, but bounded: subscribers
-    // are app code running inside this doc's sync gate, and one that never settles would wedge
-    // the doc permanently. On expiry, say so loudly and carry on.
+    // Notify the application BEFORE the store wipe, with the unsynced work the delete is
+    // discarding. For a doc `Patches.untrackDocs` early-returned on (not in
+    // `patches.trackedDocs`), nothing above touched the store, so while the app is shelving
+    // these rows they are still on disk: a shelf write the store refuses leaves them recoverable
+    // from a database export (an orphan, but the one support recovers from) instead of the
+    // in-memory copy being the only one left. Safe to do first: no tombstone exists until
+    // `deleteDoc` runs, so a tombstone drain cannot race this window, and the gate above already
+    // covers a replayed batch. Awaited so an app that shelves those changes has landed the write
+    // before we proceed, but bounded: subscribers are app code running inside this doc's sync
+    // gate, and one that never settles would wedge the doc permanently. On expiry, say so loudly
+    // and carry on.
     await this._emitRemoteDocDeleted(docId, pendingChanges);
+
+    // Wipe the doc's data, then drop its tracking row. What is left to wipe depends on the path:
+    // for a doc `untrackDocs` early-returned on, everything — `confirmDeleteDoc` alone removes
+    // only the `docs` row, while the snapshot, committed history, pending queue and quarantine
+    // rows live in other stores and are reachable only through that row, so every such delete
+    // used to orphan them for the life of the database: unbounded growth for a client that sees
+    // many remote deletes (DAB-1141). For a tracked doc, `untrackDocs` above already dropped the
+    // snapshot, history and pending rows (that call is NOT redundant with this one), and the
+    // only new cleanup here is the quarantine store, which `untrackDocs` leaves alone. `deleteDoc`
+    // is the local-delete wipe (it also tombstones the row, which the confirm below removes).
+    // Best-effort: a wipe the store refuses must not keep the doc tracked — that is the pre-fix
+    // state, not a worse one. The confirm stays outside the try on purpose: the app already has
+    // its payload, and a tombstone stranded by a failed confirm self-heals on the next drain.
+    try {
+      await algorithm.deleteDoc(docId);
+    } catch (err) {
+      console.warn(
+        `Could not wipe local data for remotely deleted doc ${docId}; its tracking row is still removed:`,
+        err
+      );
+    }
+    await algorithm.confirmDeleteDoc(docId);
   }
 
   /** Emits `onRemoteDocDeleted`, bounded by {@link REMOTE_DOC_DELETED_EMIT_TIMEOUT_MS}. */

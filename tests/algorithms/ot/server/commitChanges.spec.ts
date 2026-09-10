@@ -434,6 +434,64 @@ describe('commitChanges', () => {
     expect(mockStore.createVersion).toHaveBeenCalledWith('doc1', expect.any(Object), [lastChange]);
   });
 
+  describe('bounded catch-up (maxCatchupChanges)', () => {
+    // A doc whose head is 3 foreign changes past the client's baseRev 1.
+    const tail = [createChange('f2', 2, 1), createChange('f3', 3, 2), createChange('f4', 4, 3)];
+    const mockTail = () => {
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(4);
+      vi.mocked(mockStore.listChanges)
+        .mockResolvedValueOnce([tail[2]]) // session check
+        .mockResolvedValueOnce(tail); // committed changes after baseRev
+    };
+
+    it('commits a far-behind batch but answers docReloadRequired with no catch-up', async () => {
+      mockTail();
+      const result = await commitChanges(mockStore, 'doc1', [createChange('c', 2, 1)], sessionTimeoutMillis, {
+        maxCatchupChanges: 2,
+      });
+
+      expect(mockStore.saveChanges).toHaveBeenCalledTimes(1);
+      expect(result.catchupChanges).toEqual([]);
+      expect(result.newChanges.map(c => c.id)).toEqual(['c']);
+      expect(result.docReloadRequired).toBe(true);
+    });
+
+    it('answers a far-behind resend of already-committed changes the same way', async () => {
+      // The client's own change sits in the tail (its earlier commit's response never arrived).
+      const own = createChange('c', 5, 1);
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(5);
+      vi.mocked(mockStore.listChanges)
+        .mockResolvedValueOnce([own]) // session check
+        .mockResolvedValueOnce([...tail, own]); // committed changes after baseRev
+      const result = await commitChanges(mockStore, 'doc1', [createChange('c', 2, 1)], sessionTimeoutMillis, {
+        maxCatchupChanges: 2,
+      });
+
+      expect(mockStore.saveChanges).not.toHaveBeenCalled();
+      expect(result).toEqual({ catchupChanges: [], newChanges: [], docReloadRequired: true });
+    });
+
+    it('echoes the whole tail at or under the cap', async () => {
+      mockTail();
+      const result = await commitChanges(mockStore, 'doc1', [createChange('c', 2, 1)], sessionTimeoutMillis, {
+        maxCatchupChanges: 3,
+      });
+
+      expect(result.catchupChanges).toEqual(tail);
+      expect(result.docReloadRequired).toBeUndefined();
+    });
+
+    it('is unbounded when the cap is 0', async () => {
+      mockTail();
+      const result = await commitChanges(mockStore, 'doc1', [createChange('c', 2, 1)], sessionTimeoutMillis, {
+        maxCatchupChanges: 0,
+      });
+
+      expect(result.catchupChanges).toEqual(tail);
+      expect(result.docReloadRequired).toBeUndefined();
+    });
+  });
+
   describe('count-based versioning (maxChangesPerVersion)', () => {
     it('creates a version when a commit crosses a maxChangesPerVersion boundary', async () => {
       // Tip 19 → 20 crosses the boundary at 20 (interval 10); last version at rev 0, so 19

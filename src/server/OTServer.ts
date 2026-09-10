@@ -35,6 +35,15 @@ export interface OTServerOptions {
    * server starts taking count-based snapshots on high-rate documents that previously had none.
    */
   maxChangesPerVersion?: number;
+  /**
+   * Cap on the foreign committed changes a commit response echoes back as catch-up. Past it the
+   * batch still commits but the response sets `docReloadRequired` instead of carrying the tail,
+   * so the client rehydrates from the snapshot (whose un-versioned tail is bounded by versioning:
+   * `maxChangesPerVersion` and session gaps). See `commitChanges` for the full contract.
+   * Defaults to 1000; set to `0` to disable. Server-side replays (`historicalImport`,
+   * `forceCommit`) are never capped.
+   */
+  maxCatchupChanges?: number;
 }
 
 /**
@@ -66,6 +75,7 @@ export class OTServer implements PatchesServer {
 
   private readonly sessionTimeoutMillis: number;
   private readonly maxChangesPerVersion: number;
+  private readonly maxCatchupChanges: number;
   /** Per-doc FIFO mutex (see {@link _withDocLock}). */
   private readonly _docLocks = new Map<string, Promise<unknown>>();
   readonly store: OTStoreBackend;
@@ -80,6 +90,7 @@ export class OTServer implements PatchesServer {
   constructor(store: OTStoreBackend, options: OTServerOptions = {}) {
     this.sessionTimeoutMillis = (options.sessionTimeoutMinutes ?? 30) * 60 * 1000;
     this.maxChangesPerVersion = options.maxChangesPerVersion ?? 1000;
+    this.maxCatchupChanges = options.maxCatchupChanges ?? 1000;
     this.store = store;
   }
 
@@ -137,7 +148,7 @@ export class OTServer implements PatchesServer {
         docId,
         changes,
         this.sessionTimeoutMillis,
-        { ...options, maxChangesPerVersion: this.maxChangesPerVersion }
+        { ...options, maxChangesPerVersion: this.maxChangesPerVersion, maxCatchupChanges: this.maxCatchupChanges }
       );
 
       // Notify about newly committed changes (broadcast to other clients)

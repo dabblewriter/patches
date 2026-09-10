@@ -377,6 +377,12 @@ export interface CommitChangesOptions {
    * `<= 0` disables it.
    */
   maxChangesPerVersion?: number;
+  /**
+   * Cap on the foreign committed changes a commit response echoes back as catch-up; past it the
+   * response sets `docReloadRequired` instead. The server passes its configured value (see
+   * `OTServerOptions.maxCatchupChanges`); `<= 0` disables it.
+   */
+  maxCatchupChanges?: number;
 }
 
 /**

@@ -1180,14 +1180,29 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // the stores make the same cast to install `changes`; older/LWW transports may omit it.)
       const installedChanges = (snapshot as PatchesSnapshot).changes;
       const installedRev = installedChanges?.length ? installedChanges[installedChanges.length - 1].rev : snapshot.rev;
-      if (algorithm.reconcilePending && installedRev > baseRev && (await algorithm.hasPending(docId))) {
+      // A resolved change (the batch a docReloadRequired answer confirmed) leaves the pending
+      // queue here. One the tail echoes stays through the reconcile: the rebase drops it by id
+      // and advances the foreign tail through it before transforming the rest of the queue.
+      // Dropped beforehand, its echo reads as foreign and a change minted on top of it is
+      // transformed against it a second time. The tail is fetched only when the queue holds
+      // something the resolved set does not cover: a queue the batch covers outright is dropped
+      // without it (the snapshot already carries the batch), so a client far enough behind to be
+      // capped does not re-read the whole tail it was just spared.
+      const resolvedIds = new Set(resolvedChanges.map(c => c.id));
+      const pendingBeyondResolved = () =>
+        algorithm.hasPendingBeyond ? algorithm.hasPendingBeyond(docId, resolvedIds) : algorithm.hasPending(docId);
+      let unechoed = resolvedChanges;
+      if (algorithm.reconcilePending && installedRev > baseRev && (await pendingBeyondResolved())) {
         // Changes past the installed head are excluded: the envelope doesn't contain them, so
         // the normal catch-up path will deliver them and rebase pending against them itself.
         committedTail = (await this.connection.getChangesSince(docId, baseRev)).filter(c => c.rev <= installedRev);
-        if (committedTail.length > 0) {
-          await algorithm.reconcilePending(docId, committedTail);
-          reconciled = true;
-        }
+        const echoed = new Set(committedTail.map(c => c.id));
+        unechoed = resolvedChanges.filter(c => !echoed.has(c.id));
+      }
+      if (unechoed.length > 0) await algorithm.dropResolvedPending?.(docId, unechoed, []);
+      if (committedTail.length > 0 && algorithm.reconcilePending) {
+        await algorithm.reconcilePending(docId, committedTail);
+        reconciled = true;
       }
       // Save via algorithm's store
       await algorithm.store.saveDoc(docId, snapshot);
@@ -1386,17 +1401,14 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // Our local state is stale (baseRev:0 on existing doc). Confirm the sent
           // changes (they were committed), then reload the full state from the server.
           await algorithm.confirmSent(docId, changeBatch);
+          changeBatch.forEach(c => resolvedIds.add(c.id));
           // The batch WAS committed — the server transformed it onto its tip, so the
           // snapshot reloaded below already contains its effects. OT's confirmSent is a
           // no-op (the normal path clears pending via the commit echo, which never
-          // comes on this path), so drop the batch from the pending queue explicitly.
-          // Leaving it there would re-apply its ops on import (duplicating content)
-          // and re-send it on the next flush (re-committing it — the server's id
+          // comes on this path), so the reload drops the batch from the pending queue as
+          // resolved. Leaving it there would re-apply its ops on import (duplicating
+          // content) and re-send it on the next flush (re-committing it — the server's id
           // de-dup window `startAfter: baseRev` no longer covers the original commit).
-          await algorithm.dropResolvedPending?.(docId, changeBatch, []);
-          changeBatch.forEach(c => resolvedIds.add(c.id));
-          // Pass the batch as resolved so the pending-preserving import can't re-add it
-          // from the open doc's stale in-memory queue.
           await this._reloadDocFromServer(docId, algorithm, false, changeBatch);
           // `batches` predates the reload, which replaced the committed state they were minted
           // against and rebased the rest of the queue onto the new head. Every remaining batch

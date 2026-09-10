@@ -46,6 +46,16 @@ const MAX_CONFLICT_RETRIES = 5;
  * the named ids and resolves the request as a resend, so a duplicate never commits and
  * non-idempotent ops (array removes, text deltas) are never double-applied.
  *
+ * ## Bounded Catch-up
+ *
+ * The catch-up echoed to the client is capped at `options.maxCatchupChanges` foreign changes.
+ * Past the cap the batch still commits exactly as it otherwise would, but the response drops the
+ * catch-up and sets `docReloadRequired`: the client confirms its batch and rehydrates from the
+ * snapshot. The read and transform against the full tail still happen; only the response is
+ * bounded. Without the cap a stale client's commit response scales with the doc's history
+ * (DAB-1340: a 34k-change doc answered every attempt with a response too large for the proxy in
+ * front of it, and the client retried forever).
+ *
  * @param store - The backend store for persistence.
  * @param docId - The ID of the document.
  * @param changes - The changes to commit.
@@ -281,13 +291,22 @@ export async function commitChanges(
       // Committed copies of changes this request re-sent (a retry after a lost ack) must be echoed back so the
       // client can confirm them, even though they are excluded from the transform set above.
       const resentCommitted = allCommittedChanges.filter(c => ownOrigin(c) && changeIds.has(c.id));
-      const catchupChanges = resentCommitted.length
-        ? [...committedChanges, ...resentCommitted].sort((a, b) => a.rev - b.rev)
-        : committedChanges;
+      // Beyond the cap the client reloads instead of applying the tail (see "Bounded Catch-up"):
+      // the echoes are dropped with it, since the reload path confirms the sent batch itself.
+      // Server-side replays (migrations) never apply the echo, so they are never capped.
+      const replay = options?.historicalImport || options?.forceCommit;
+      const maxCatchup = replay ? 0 : (options?.maxCatchupChanges ?? 0);
+      const capped = maxCatchup > 0 && committedChanges.length > maxCatchup;
+      const reloadRequired = capped || docReloadRequired;
+      const catchupChanges = capped
+        ? []
+        : resentCommitted.length
+          ? [...committedChanges, ...resentCommitted].sort((a, b) => a.rev - b.rev)
+          : committedChanges;
 
       // If all incoming changes were already committed, return the committed changes found
       if (incomingChanges.length === 0) {
-        return { catchupChanges, newChanges: [], docReloadRequired };
+        return { catchupChanges, newChanges: [], docReloadRequired: reloadRequired };
       }
 
       // 4. Offline-session versioning applies when:
@@ -316,7 +335,7 @@ export async function commitChanges(
           await handleOfflineSessionsAndBatches(store, sessionTimeoutMillis, docId, incomingChanges, 'main');
           offlineSessionsHandled = true;
         }
-        return { catchupChanges, newChanges: incomingChanges, docReloadRequired };
+        return { catchupChanges, newChanges: incomingChanges, docReloadRequired: reloadRequired };
       }
 
       // 5. Transform the incoming changes against committed changes (stateless — no state
@@ -361,7 +380,7 @@ export async function commitChanges(
       }
 
       // Return catchup changes and newly transformed changes separately
-      return { catchupChanges, newChanges: transformedChanges, docReloadRequired };
+      return { catchupChanges, newChanges: transformedChanges, docReloadRequired: reloadRequired };
     } catch (error) {
       // The store's write-time id guard fired: one or more incoming changes were
       // already committed (a rebased retry past the read-side dedup window, or a

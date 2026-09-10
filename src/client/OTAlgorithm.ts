@@ -307,6 +307,18 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   /**
+   * See {@link ClientAlgorithm.hasPendingBeyond} — the outbox and the store's queue against a
+   * resolved set. A live outbox row counts like {@link hasPending}: the reload that asks has to
+   * walk it through the tail it is about to jump over (see {@link reconcilePending}).
+   */
+  async hasPendingBeyond(docId: string, excludeIds: ReadonlySet<string>): Promise<boolean> {
+    const outbox = this._outbox.get(docId) ?? [];
+    if (outbox.some(row => row.committedRev === undefined && !excludeIds.has(row.change.id))) return true;
+    const pending = await this.store.getPendingChanges(docId);
+    return pending.some(c => !excludeIds.has(c.id));
+  }
+
+  /**
    * The queue to put on the wire. Store rows are ground truth — the same contract the receive
    * path uses (see {@link _collectPending}) — because the store is the sole rev sequencer: a
    * context sharing it mints at the STORE's tail, which can be a rev this doc's in-memory

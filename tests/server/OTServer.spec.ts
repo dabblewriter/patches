@@ -198,6 +198,23 @@ describe('OTServer', () => {
       expect(vi.mocked(createVersionAtRev)).toHaveBeenCalled();
     });
 
+    it('honors a configured maxCatchupChanges (reload instead of an unbounded catch-up)', async () => {
+      const cappedServer = new OTServer(mockStore, { maxCatchupChanges: 2 });
+      const recent = Date.now();
+      const tail = [2, 3, 4].map(rev => ({ ...mockChange, id: `f${rev}`, rev, baseRev: rev - 1, createdAt: recent }));
+      vi.mocked(mockStore.getCurrentRev).mockResolvedValue(4);
+      vi.mocked(mockStore.listChanges).mockImplementation(async (_doc, opts: any) =>
+        opts?.reverse && opts?.limit === 1 ? [tail[2]] : tail
+      );
+      const change = { ...mockChange, id: 'c1', rev: 2, baseRev: 1, batchId: undefined, createdAt: recent };
+
+      const result = await cappedServer.commitChanges('doc1', [change]);
+
+      expect(mockStore.saveChanges).toHaveBeenCalledTimes(1);
+      expect(result.docReloadRequired).toBe(true);
+      expect(result.changes.map(c => c.id)).toEqual(['c1']);
+    });
+
     it('does not count-version below the default threshold', async () => {
       // Default server (maxChangesPerVersion 1000): a rev 19→20 commit is nowhere near a
       // boundary, so no count-based version is created.

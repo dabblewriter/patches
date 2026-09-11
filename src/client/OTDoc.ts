@@ -450,6 +450,18 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       const isOwn = (c: Change) => priorPendingIds.has(c.id) || this._unstored.has(c.id);
       const isPureEcho = serverChanges.length > 0 && serverChanges.every(isOwn);
 
+      // Apply the committed rows FIRST, into a local: it is the one step here that can throw
+      // (a row the history cannot apply — poison), and everything after it mutates the doc in
+      // place. Ordered the other way, a throw left the optimistic queue and the outbox entries
+      // rebased across the span's foreign rows while committedRev, _committedState and state
+      // stayed put — and a caller that retries the same span (OTAlgorithm._catchUpDocToStore,
+      // three times and then on every retrySavingChanges re-drive) shifted the retained ops
+      // once more per attempt, so the change kept on screen for an honest re-drive drifted one
+      // span further from the doc's view each time. A throwing span now leaves the doc, the
+      // optimistic queue and the outbox entries exactly as they were.
+
+      const committedState = applyChangesToState(this._committedState, serverChanges);
+
       // Must run against the OLD pending queue (the frame the optimistic ops live in),
       // so before _pendingChanges is replaced below. Pure echoes need no rebase — the
       // optimistic frames already include our own changes.
@@ -461,7 +473,7 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // here on the pure-echo path) or their ops apply a second time on top.
       this._confirmUnstoredEchoes(serverChanges);
 
-      this._committedState = applyChangesToState(this._committedState, serverChanges);
+      this._committedState = committedState;
       this._committedRev = serverChanges[serverChanges.length - 1].rev;
       this._pendingChanges = rebasedPending;
       this._checkLoaded();

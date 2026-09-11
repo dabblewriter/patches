@@ -26,6 +26,8 @@ export { ApplyChangesError } from '../algorithms/ot/shared/applyChanges.js';
 // an RPC/worker boundary that rehydrates errors.)
 export { LossyEjectionError, isLossyEjectionError } from '../algorithms/ot/shared/ejectPendingChange.js';
 export {
+  DocFrameBehindStoreError,
+  isDocFrameBehindStoreError,
   isNonCloneableOpError,
   isUnsplittableChangeError,
   NonCloneableOpError,

@@ -219,6 +219,101 @@ describe('a mint is stamped on the store frame, not a doc frame the store has mo
     expect(doc.state).toEqual({ items: ['a', 'q'] });
     expect(doc._hasOptimisticEntry(ops)).toBe(true);
   });
+
+  it('a refused catch-up leaves the retained ops untouched across attempts; once the floor clears, the re-drive shifts them exactly once', async () => {
+    const { store, algorithm, doc } = await openAt({ items: ['a', 'b', 'c'] }, 1);
+    // A foreign row ahead of the poison — the two-device shape the refusal exists for. The doc's
+    // apply used to rebase the optimistic queue across the foreign row BEFORE the poison threw,
+    // so every refused attempt shifted the retained ops one span further from the doc's view.
+    const foreign: Change = {
+      ...createChange(1, 2, [{ op: 'add', path: '/items/0', value: 'z' }], {}, 'f2'),
+      committedAt: Date.now(),
+    };
+    const poison: Change = {
+      ...createChange(2, 3, [{ op: 'remove', path: '/items/50' }], {}, 'poison'),
+      committedAt: Date.now(),
+    };
+    await store.applyServerChanges(DOC_ID, [foreign, poison], [], undefined);
+    expect(await store.getCommittedRev(DOC_ID)).toBe(3);
+
+    const ops: JSONPatchOp[] = [{ op: 'add', path: '/items/3', value: 'M' }];
+    doc._applyOptimistic(ops);
+    // Two attempts on the same span, the way Patches retries before it latches.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const err = await algorithm.handleDocChange(DOC_ID, ops, doc, {}).catch(e => e);
+      expect(err).toBeInstanceOf(DocFrameBehindStoreError);
+      // Before the reorder: add /items/4 after one attempt, /items/5 after two, while the view
+      // still showed M at index 3.
+      expect(ops).toEqual([{ op: 'add', path: '/items/3', value: 'M' }]);
+      expect(doc.committedRev).toBe(1);
+      expect(doc.state).toEqual({ items: ['a', 'b', 'c', 'M'] });
+    }
+    expect(await store.getPendingChanges(DOC_ID)).toEqual([]);
+
+    // The floor neuters the poison (an ops-less copy). The re-drive catches the doc up and mints
+    // the op shifted exactly once, by the foreign row.
+    (store as any).docs.get(DOC_ID).committed.find((c: Change) => c.id === 'poison').ops = [];
+    const [minted] = await algorithm.handleDocChange(DOC_ID, ops, doc, {});
+    expect(doc.committedRev).toBe(3);
+    expect(minted.baseRev).toBe(3);
+    expect(minted.ops).toEqual([{ op: 'add', path: '/items/4', value: 'M' }]);
+    expect(doc.state).toEqual({ items: ['z', 'a', 'b', 'c', 'M'] });
+  });
+});
+
+describe('the catch-up rebuild handles a live outbox row the way the misaligned receive does', () => {
+  it('walks the row through the span before the import, so the re-drive mints it in the new frame', async () => {
+    const { store, algorithm, doc } = await openAt({ items: ['a'] }, 5);
+    const typed = (path: string, value: string): JSONPatchOp[] => {
+      let emitted: JSONPatchOp[] = [];
+      const off = doc.onChange(ops => (emitted = ops));
+      doc.change(patch => patch.add(path, value));
+      off();
+      return emitted;
+    };
+    // P (add /x) is pending in the store and the doc; the store-refused row u = add /items/1 is
+    // expressed over it and waits in the outbox.
+    await algorithm.handleDocChange(DOC_ID, typed('/x', 'p'), doc, {}, 'P');
+    const refusedOps = typed('/items/1', 'u');
+    expect(algorithm.queueUnstoredChange(DOC_ID, refusedOps, doc, {}, 'refused')).toMatchObject({
+      id: 'refused',
+      baseRev: 5,
+    });
+    // The store took Z and `other` torn (the doc stays at 5). It cannot read the span row by
+    // row, so the catch-up has to rebuild from the snapshot; the server can supply the span.
+    const Z: Change = { ...createChange(5, 6, [{ op: 'add', path: '/items/0', value: 'Z' }], {}, 'Z'), committedAt: 1 };
+    const other: Change = {
+      ...createChange(6, 7, [{ op: 'add', path: '/other', value: 1 }], {}, 'other'),
+      committedAt: 1,
+    };
+    await algorithm.applyServerChanges(DOC_ID, [Z, other], undefined);
+    expect(await store.getCommittedRev(DOC_ID)).toBe(7);
+    expect(doc.committedRev).toBe(5);
+    const real = store.listChanges.bind(store);
+    vi.spyOn(store, 'listChanges').mockImplementation(async (docId, opts) =>
+      (await real(docId, opts)).filter(c => c.rev !== 6)
+    );
+    const fetch = vi.fn(async () => [Z, other]);
+    algorithm.setCommittedSpanFetcher(fetch);
+
+    // retrySavingChanges re-drives the refused entry under its stable id; the mint catches the
+    // doc up first.
+    const [minted] = await algorithm.handleDocChange(DOC_ID, refusedOps, doc, {}, 'refused');
+
+    expect(fetch).toHaveBeenCalledWith(DOC_ID, 5, 7);
+    expect(doc.committedRev).toBe(7);
+    // Walked across Z before the import re-applied it (u's slot moved from 1 to 2) and minted on
+    // the new frame with those ops — not re-applied raw at /items/1 and re-minted there, which
+    // would land u ahead of a on every other client.
+    expect(minted).toMatchObject({ id: 'refused', baseRev: 7, ops: [{ op: 'add', path: '/items/2', value: 'u' }] });
+    expect(doc.state).toEqual({ items: ['Z', 'a', 'u'], x: 'p', other: 1 });
+    // The store took it, so the outbox copy is retired.
+    expect(algorithm.hasUnstoredChanges(DOC_ID)).toBe(false);
+    expect((await store.getPendingChanges(DOC_ID)).map(c => [c.id, c.baseRev])).toEqual([
+      ['P', 7],
+      ['refused', 7],
+    ]);
+  });
 });
 
 describe('Patches: a doc that cannot be caught up latches its write path without an outbox row', () => {

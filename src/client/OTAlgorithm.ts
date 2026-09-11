@@ -342,18 +342,27 @@ export class OTAlgorithm implements ClientAlgorithm {
     const docRev = otDoc.committedRev;
     const storeRev = await this.store.getCommittedRev(docId);
     if (docRev >= storeRev) return;
+    const span = (await this.store.listChanges?.(docId, { startAfter: docRev })) ?? [];
+    const committed = span.filter(c => c.rev <= storeRev);
+    // Outbox rows the span echoed: the bookkeeping {@link applyServerChanges} runs for a batch,
+    // for the rows this instance still carries (idempotent when that receive already ran here;
+    // the real work when another context wrote the store). The doc's own entries go on the
+    // replay path through applyChanges, on the rebuild path through _rebuildDocFromStore.
+    const echoed = this._removeOutboxRows(
+      docId,
+      committed.map(c => c.id)
+    );
+    const echoedIds = new Set(echoed.map(row => row.change.id));
+    const reportIds = new Set(echoed.filter(row => row.committedRev === undefined).map(row => row.change.id));
     try {
-      const span = (await this.store.listChanges?.(docId, { startAfter: docRev })) ?? [];
-      const committed = span.filter(c => c.rev <= storeRev);
       const replayable =
         committed.length === storeRev - docRev && committed[0]?.rev === docRev + 1 && firstGapIndex(committed) === -1;
       if (replayable) {
         const pending = await this.store.getPendingChanges(docId);
         otDoc.applyChanges([...committed, ...pending]);
       } else {
-        const snapshot = await this.loadDoc(docId);
+        const snapshot = await this._rebuildDocFromStore(docId, otDoc, echoedIds);
         if (!snapshot) throw new Error(`the store has no snapshot for ${docId}`);
-        otDoc.import(snapshot as PatchesSnapshot<T>);
       }
       // Check the outcome, not the path: a committed row stored without `committedAt` rides the
       // pending branch of the doc's apply and leaves the frame where it was.
@@ -362,6 +371,14 @@ export class OTAlgorithm implements ClientAlgorithm {
       }
     } catch (cause) {
       throw new DocFrameBehindStoreError(docId, docRev, storeRev, { cause });
+    }
+    // The doc's frame moved: stubs it now covers have nothing left to shadow.
+    this._retireCoveredStubs(docId);
+    if (reportIds.size > 0) {
+      this.onUnstoredCommitted.emit(
+        docId,
+        committed.filter(c => reportIds.has(c.id))
+      );
     }
   }
 
@@ -835,6 +852,32 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   /**
+   * Rebuild an open doc from the store's materialized snapshot. The misaligned receive and the
+   * catch-up a mint runs ({@link _catchUpDocToStore}) share this one step, so a live outbox row
+   * is handled the same way on both: entries the span echoed are dropped first (the snapshot
+   * already holds their committed copies; the import would re-apply them on top), the remaining
+   * live rows are walked through the committed span the doc is about to jump over, then the
+   * snapshot is imported. The walk matters because import() re-applies the surviving optimistic
+   * ops RAW on the new snapshot — it does not transform them into its frame — so without it a
+   * live row would go out with ops in the old frame under the new committedRev, the
+   * misplacement {@link _rebaseOutboxRows} exists to prevent (and, when the span cannot be
+   * read, to freeze). Returns the snapshot, or undefined when the store has none.
+   */
+  private async _rebuildDocFromStore<T extends object>(
+    docId: string,
+    otDoc: OTDoc<T>,
+    echoedIds: Iterable<string>
+  ): Promise<PatchesSnapshot | undefined> {
+    otDoc._dropUnstored(echoedIds);
+    const snapshot = await this.loadDoc(docId);
+    if (snapshot) {
+      await this._rebaseOutboxRows(docId, otDoc, snapshot.rev);
+      otDoc.import(snapshot as PatchesSnapshot<T>);
+    }
+    return snapshot;
+  }
+
+  /**
    * Retire the stubs of `docId` whose doc's frame now covers their committed rev (see
    * {@link OutboxRow}): nothing minted from here on can be in their shadow. A frozen stub has no
    * doc to ask and retires on its echo through {@link applyServerChanges}.
@@ -1128,18 +1171,7 @@ export class OTAlgorithm implements ClientAlgorithm {
           // Misaligned (root-replace catchup, a stale re-delivery, or an interior-gapped batch):
           // rebuild from the store — the complete, authoritative committed state — the only
           // remaining getDoc in the receive path, paid on the rare path only.
-          otDoc._dropUnstored(echoedIds);
-          const snapshot = await this.loadDoc(docId);
-          if (snapshot) {
-            // import() re-applies the surviving optimistic ops RAW on the new snapshot — it
-            // does not transform them into its frame — so a live outbox row would go out with
-            // ops in the old frame under the new committedRev. Walk the rows through the
-            // committed span the doc is about to jump over, up to exactly the snapshot's rev
-            // (the store holds it), the way _rebaseOptimisticOps walks a contiguous receive,
-            // so the re-mint is in frame; rows the span cannot be read for are frozen.
-            await this._rebaseOutboxRows(docId, otDoc, snapshot.rev);
-            otDoc.import(snapshot as PatchesSnapshot<T>);
-          }
+          await this._rebuildDocFromStore(docId, otDoc, echoedIds);
         }
         // The doc's frame moved: stubs it now covers have nothing left to shadow.
         this._retireCoveredStubs(docId);

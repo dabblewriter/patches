@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.31.2](https://github.com/dabblewriter/patches/compare/v0.31.1...v0.31.2) (2026-09-11)
+
+
+### Bug Fixes
+
+* **ot:** apply a span before rebasing the queue, and walk outbox rows before the catch-up rebuild ([9c6fa31](https://github.com/dabblewriter/patches/commit/9c6fa3149122067bb56fe068145b84d68408362d))
+* **ot:** hold a mint to the store's committed frame, not the open doc's ([82b89bd](https://github.com/dabblewriter/patches/commit/82b89bd933a916ac9840e4a70acad0d6127a052f))
+* **ot:** hold a mint to the store's committed frame, not the open doc's ([b3c30f2](https://github.com/dabblewriter/patches/commit/b3c30f2c6e3fa78e24a5574ee359eed15128cb6c))
+
 ## [0.31.1](https://github.com/dabblewriter/patches/compare/v0.31.0...v0.31.1) (2026-09-10)
 
 

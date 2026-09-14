@@ -2305,6 +2305,68 @@ describe('windowed merge with concurrent source edits', () => {
     expect(listed.every(b => !('mergeFrame' in b))).toBe(true);
     expect((await store.loadBranch(branchId))!.mergeFrame).toBeDefined();
   });
+
+  // DAB-1175 §5. Two other tests each cover one half of the corner Mindy Strunk's 307k-change
+  // branch hit at once: 'rebuilds an oversized (unpersisted) frame from the raw logs' (a frame
+  // over MAX_PERSISTED_FRAME_BYTES, but rebuilt only after a simulated crash, with the foreign
+  // edit present before the merge began) and 'converges when a foreign change lands mid-merge'
+  // (foreign edits landing between and inside windows, but a tiny frame). This is both at once:
+  // a foreign edit larger than the persist cap lands mid-merge, so the frame carrying it forward
+  // is dropped and every later window rebuilds it from the raw logs — inside one live merge, no
+  // crash. A window lifting b3 through a frame rebuilt at the wrong offset is exactly the "text
+  // deleted or inserted in the wrong place" this block names: the server-side twin of her
+  // client-side corruption. It must land where a one-shot merge does.
+  it('rebuilds an oversized frame from raw logs when a foreign edit lands mid-merge', async () => {
+    const HUGE = 'z'.repeat(300_000); // exceeds MAX_PERSISTED_FRAME_BYTES (256 KB)
+
+    // A one-change-per-window merge with an oversized foreign edit landing after the first
+    // window commits. The next window must carry that edit in its frame; the frame exceeds the
+    // persist cap and is dropped, so every later window rebuilds the frame from the raw logs.
+    const { store, server, manager, branchId, edit } = await seededSource('alpha beta gamma', {
+      maxChangesPerMerge: 1,
+    });
+    await edit(branchId, 'b1', [{ insert: '<b1>' }]);
+    await edit(branchId, 'b2', [{ retain: 20 }, { insert: '<b2>' }]);
+    await edit(branchId, 'b3', [{ retain: 10 }, { insert: '<b3>' }]);
+
+    const updateBranchIf = store.updateBranchIf.bind(store);
+    let watermarks = 0;
+    let frameDroppedMidMerge = false;
+    store.updateBranchIf = async (id, updates, expected) => {
+      const applied = await updateBranchIf(id, updates, expected);
+      if ('lastMergedRev' in updates) {
+        watermarks++;
+        if (watermarks === 1) {
+          // Oversized foreign edit lands between windows: the next window's frame can't hold it.
+          await edit('doc1', 'f1', [{ retain: 6 }, { insert: HUGE }]);
+        } else if ((await store.loadBranch(id))!.mergeFrame === null) {
+          frameDroppedMidMerge = true;
+        }
+      }
+      return applied;
+    };
+
+    await manager.mergeBranch(branchId);
+
+    // Prove the rebuild-from-raw path was actually exercised: a later window found no persisted
+    // frame to carry, because the one holding the oversized foreign edit could not be stored.
+    expect(frameDroppedMidMerge, 'the oversized frame must have been dropped mid-merge').toBe(true);
+
+    // Convergence, asserted timing-invariantly (a one-shot control is not a valid oracle here:
+    // the foreign edit's retain lands past a different amount of already-merged text depending
+    // on when b1 reached the source). Each marker appears exactly once — no duplication — and
+    // stripping the markers and the oversized run leaves the original source verbatim: the frame
+    // rebuilt from raw ate no characters and shifted nothing. That is the server-side negative
+    // of the DAB-1175 corruption.
+    const text = bodyText((await coldLoad(server, 'doc1')).state);
+    for (const marker of ['<b1>', '<b2>', '<b3>']) {
+      expect(text.indexOf(marker), marker).toBeGreaterThanOrEqual(0);
+      expect(text.indexOf(marker), marker).toBe(text.lastIndexOf(marker));
+    }
+    expect(text.replace(/z+/g, '').replace(/<b\d>/g, '')).toBe('alpha beta gamma\n');
+    const ids = await changeIds(store, 'doc1');
+    expect(new Set(ids).size).toBe(ids.length);
+  });
 });
 
 /**

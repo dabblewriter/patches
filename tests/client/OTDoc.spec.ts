@@ -568,10 +568,17 @@ describe('OTDoc — outbox entries confirmed by their committed echo', () => {
     expect(laterOps).toEqual([{ op: 'add', path: '/items/2', value: 'Y' }]);
   });
 
-  it('without the outbox mark the same echo would be treated as foreign and double-apply (control)', () => {
+  it('without the outbox mark the same echo is still recognised as ours by its ops, not double-applied', () => {
+    // This was the control for the hazard the mark exists to prevent: an own echo the doc could
+    // not recognise was treated as foreign and applied twice (['a','b','c','X','X']). It is the
+    // DAB-1366 `+1` — a mint whose store write settles after its echo has no row and no mark —
+    // so the echo is now matched structurally against the parked optimistic op and adopted as
+    // an outbox entry. The mark remains the primary path; this is the backstop.
     doc.change(patch => patch.add('/items/-', 'X'));
     doc.applyChanges([makeChange('u1', 1, 2, [{ op: 'add', path: '/items/-', value: 'X' }], true)]);
-    expect(doc.state.items).toEqual(['a', 'b', 'c', 'X', 'X']); // the hazard the mark exists to prevent
+    expect(doc.state.items).toEqual(['a', 'b', 'c', 'X']);
+    expect((doc as any)._optimisticOps).toEqual([]);
+    expect(doc.unstoredChangeIds).toEqual([]); // adopted and confirmed in the same call
   });
 
   it('a foreign change arriving before the echo rebases the entry in place, so the outbox sends the rebased ops', () => {

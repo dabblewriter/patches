@@ -71,6 +71,11 @@ describe('OTDoc — a pending row the committed tier already holds must not appl
     doc.applyChanges([committedX, pendingX]);
     expect(doc.committedRev).toBe(11);
     expect(doc.state.items).toEqual(['a', 'b', 'c']); // pure echo: view untouched
+    // Pins the strip at the committed branch on its own: without it the row stays queued until the
+    // next rebuild's belt-and-braces strip catches it, and in that window it is visible through
+    // hasPending / getPendingChanges() / toJSON(), which _collectPending's withheld filter and
+    // _applySnapshotPreservingPending both read.
+    expect(doc.getPendingChanges().map(c => c.id)).not.toContain('x');
 
     // A foreign change lands while the store is STILL lagging, so the algorithm hands X back
     // yet again as rebased pending. The rebuild this triggers must not re-apply X on top of

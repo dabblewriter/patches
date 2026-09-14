@@ -128,6 +128,25 @@ describe('commitChanges', () => {
     );
   });
 
+  it('names the refused root op so a duplicate create (add) and a pre-fix restore (replace) are told apart', async () => {
+    // Both shapes trip the same guard and, before this, produced byte-identical messages —
+    // Sentry could only separate them by the rev they named. The literal phrase
+    // "root-level replace" must survive: the client's refusal recovery matches on it.
+    vi.mocked(mockStore.getCurrentRev).mockResolvedValue(3);
+
+    const dupCreate = createChange('dup', 4, 3);
+    dupCreate.ops = [{ op: 'add', path: '', value: {} }];
+    await expect(commitChanges(mockStore, 'doc1', [dupCreate], sessionTimeoutMillis)).rejects.toThrow(
+      /already exists \(rev 3\)\. Cannot apply root-level replace \(path: '', op: add\)/
+    );
+
+    const restore = createChange('restore', 4, 3);
+    restore.ops = [{ op: 'replace', path: '', value: {} }];
+    await expect(commitChanges(mockStore, 'doc1', [restore], sessionTimeoutMillis)).rejects.toThrow(
+      /already exists \(rev 3\)\. Cannot apply root-level replace \(path: '', op: replace\)/
+    );
+  });
+
   it('rejects as StatusError with data naming the culprit change (or the doc) so clients can eject/quarantine', async () => {
     // Root-op guard: change-intrinsic — data names the offending change.
     vi.mocked(mockStore.getCurrentRev).mockResolvedValue(1);

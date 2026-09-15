@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.31.3](https://github.com/dabblewriter/patches/compare/v0.31.2...v0.31.3) (2026-09-15)
+
+
+### Bug Fixes
+
+* **ot:** de-dup pending vs committed on every view rebuild, and adopt an own echo that beats its mint (DAB-1366) ([#175](https://github.com/dabblewriter/patches/issues/175)) ([aed03dd](https://github.com/dabblewriter/patches/commit/aed03dd4842c0603247764e0d153a9aee6fbd30c))
+* **ot:** name the refused op in the root-replace guard message ([#176](https://github.com/dabblewriter/patches/issues/176)) ([cf79b8e](https://github.com/dabblewriter/patches/commit/cf79b8ec43589eebd737f14510cc237f55e9c7a8))
+
 ## [0.31.2](https://github.com/dabblewriter/patches/compare/v0.31.1...v0.31.2) (2026-09-11)
 
 

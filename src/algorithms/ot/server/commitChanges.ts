@@ -109,10 +109,16 @@ export async function commitChanges(
     // at baseRev = tip and would overwrite the doc just the same.
     const rootOpChange = changes.find(c => c.ops.some(op => op.path === ''));
     if (rootOpChange && !options?.allowRootReplace && !(await isOwnUpload())) {
+      // Name the actual op. Both `replace ""` (a pre-fix version restore, DAB-832) and `add ""`
+      // (a duplicate create, DAB-1143) trip this guard, and without the op in the message the
+      // two are indistinguishable in Sentry except by the rev they name. The phrase
+      // "root-level replace" is load-bearing: the client's refusal recovery matches on it
+      // (dw3 `isRootReplaceRefusalMessage`), so it stays verbatim and the op rides alongside.
+      const rootOp = rootOpChange.ops.find(op => op.path === '')!;
       throw new StatusError(
         400,
         `Document ${docId} already exists (rev ${initialRev}). ` +
-          `Cannot apply root-level replace (path: '') - this would overwrite the existing document. ` +
+          `Cannot apply root-level replace (path: '', op: ${rootOp.op}) - this would overwrite the existing document. ` +
           `Load the existing document first, or use nested paths instead of replacing at root.`,
         { changeId: rootOpChange.id, scope: 'change' }
       );

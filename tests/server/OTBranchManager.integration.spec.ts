@@ -2305,6 +2305,64 @@ describe('windowed merge with concurrent source edits', () => {
     expect(listed.every(b => !('mergeFrame' in b))).toBe(true);
     expect((await store.loadBranch(branchId))!.mergeFrame).toBeDefined();
   });
+
+  // DAB-1175 §5. Two other tests each cover one half of the corner Mindy Strunk's 307k-change
+  // branch hit: 'rebuilds an oversized (unpersisted) frame from the raw logs' (a frame over
+  // MAX_PERSISTED_FRAME_BYTES, rebuilt after a simulated crash, foreign edit present before the
+  // merge) and 'converges when a foreign change lands mid-merge' (foreign edits mid-merge, but a
+  // small frame the carry holds). This is the combination, and it takes deliberate arranging:
+  // within one live merge the in-memory carry keeps an oversized frame alive, so persistMergeProgress
+  // clearing the *record* does NOT by itself force a rebuild. To reach the rebuild-from-raw path
+  // inside one merge, the second window's watermark write is reported as a lost CAS (as a concurrent
+  // merge would), so the merge drops its carry; the next window finds mergeFrame null and rebuilds
+  // the frame from the raw logs, folding the oversized foreign edit back in. The op geometry is
+  // drift-sensitive on purpose: b3 (retain 8) sits between f1's original position (retain 6) and
+  // the position the foreign insert shifts it to, so a stale frame and a correctly advanced one
+  // land b3 in different places. The exact-text assertion is what catches that — it goes red under
+  // a frame-drift mutation (advanceProgramsThroughQueue returning its input), where the earlier
+  // strip-and-compare oracle stayed green.
+  it('rebuilds an oversized frame from raw logs when a lost-CAS window drops the carry mid-merge', async () => {
+    const HUGE = 'z'.repeat(300_000); // exceeds MAX_PERSISTED_FRAME_BYTES (256 KB)
+
+    const { store, server, manager, branchId, edit } = await seededSource('alpha beta gamma', {
+      maxChangesPerMerge: 1,
+    });
+    await edit(branchId, 'b1', [{ insert: '<b1>' }]);
+    await edit(branchId, 'b2', [{ retain: 4 }, { insert: '<b2>' }]);
+    await edit(branchId, 'b3', [{ retain: 8 }, { insert: '<b3>' }]);
+
+    const updateBranchIf = store.updateBranchIf.bind(store);
+    let watermarks = 0;
+    let frameDroppedMidMerge = false;
+    store.updateBranchIf = async (id, updates, expected) => {
+      const applied = await updateBranchIf(id, updates, expected);
+      if ('lastMergedRev' in updates) {
+        watermarks++;
+        if (watermarks === 1) {
+          // Oversized foreign edit lands between windows: the next window's frame can't be stored.
+          await edit('doc1', 'f1', [{ retain: 6 }, { insert: HUGE }]);
+        } else if (watermarks === 2) {
+          // The write applied; report a lost CAS so the merge drops its (oversized, unpersistable)
+          // carry. The next window re-reads, finds the frame gone, and rebuilds it from raw.
+          if ((await store.loadBranch(id))!.mergeFrame === null) frameDroppedMidMerge = true;
+          return false;
+        }
+      }
+      return applied;
+    };
+
+    await manager.mergeBranch(branchId);
+
+    // The dropped carry forced a later window down the rebuild-from-raw path.
+    expect(frameDroppedMidMerge, 'the oversized frame must have been dropped mid-merge').toBe(true);
+
+    // Exact text: the frame rebuilt from raw lifts b2/b3 to the same offsets a correctly carried
+    // frame would. A drift (a stale frame) moves b3 relative to the foreign insert and fails this.
+    const text = bodyText((await coldLoad(server, 'doc1')).state);
+    expect(text).toBe('<b1><b2><b3>al' + HUGE + 'pha beta gamma\n');
+    const ids = await changeIds(store, 'doc1');
+    expect(new Set(ids).size).toBe(ids.length);
+  });
 });
 
 /**

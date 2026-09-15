@@ -51,6 +51,20 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
    * or past that rev already holds the change, so the entry must not re-apply on top of it.
    */
   private _unstoredCommittedRevs = new Map<string, number>();
+  /**
+   * Ids of changes this doc has folded into `_committedState`, with the rev each landed at.
+   * Consulted wherever a pending list is taken from outside the doc — the rebased pending an
+   * echo hands back, a snapshot's `changes` on import, a local mint confirmation — so a row the
+   * committed tier already contains is never applied a second time on top of its own committed
+   * copy (DAB-1366). The store retires a committed row from its pending tier inside a `[docs]`
+   * transaction that can take seconds on a slow IndexedDB; until it settles, the algorithm keeps
+   * handing that row back as pending, and `applyPendingForView` would strict-apply it again — a
+   * re-applied `add` never throws, it just inserts once more. Bounded: entries fall off in rev
+   * order once the map grows past `MAX_COMMITTED_IDS`; the lag this guards is seconds, not
+   * thousands of revs.
+   */
+  private _committedIds = new Map<string, number>();
+  private static readonly MAX_COMMITTED_IDS = 1024;
 
   /**
    * Creates an instance of OTDoc.
@@ -221,6 +235,68 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
     this._unstoredCommittedRevs.set(id, rev);
   }
 
+  /** Remember that `changes` are now part of `_committedState`, pruning the oldest beyond the cap. */
+  private _rememberCommitted(changes: Change[]): void {
+    for (const change of changes) this._committedIds.set(change.id, change.rev);
+    // Map iteration is insertion order and committed revs only ever rise, so the front is the
+    // oldest. Deleting from the front keeps the most recent MAX_COMMITTED_IDS.
+    if (this._committedIds.size > OTDoc.MAX_COMMITTED_IDS) {
+      const excess = this._committedIds.size - OTDoc.MAX_COMMITTED_IDS;
+      let n = 0;
+      for (const id of this._committedIds.keys()) {
+        if (n++ >= excess) break;
+        this._committedIds.delete(id);
+      }
+    }
+  }
+
+  /**
+   * A pending list taken from outside the doc, with every row the committed tier already holds
+   * removed. Such a row is not queued work: its committed copy is in `_committedState`, and
+   * applying it again from the pending tier is exactly the double-count of DAB-1366. Dropping it
+   * here loses nothing — the server has it — and keeps the view one row shorter than it would
+   * otherwise read, which is the difference between the next minted index landing in range and
+   * landing one past the end.
+   */
+  private _withoutCommitted(pending: Change[]): Change[] {
+    if (this._committedIds.size === 0 || pending.length === 0) return pending;
+    const kept = pending.filter(c => !this._committedIds.has(c.id));
+    return kept.length === pending.length ? pending : kept;
+  }
+
+  /**
+   * Adopt, as outbox entries, any parked optimistic op whose committed echo has arrived ahead of
+   * its local mint confirmation. Under a slow store the mint's `[docs]` write can settle AFTER the
+   * change has been sent and echoed, so the doc has no pending row and no outbox mark to recognise
+   * the echo by — and would treat its own change as foreign: `_rebaseOptimisticOps` transforms the
+   * optimistic op against its own committed copy (`add /children/18` past `add /children/18` →
+   * 19) and the doc applies it twice. That is the DAB-1366 `+1`, and the very hazard the outbox
+   * mark exists to prevent (see OTDoc.spec "without the outbox mark … double-apply (control)").
+   *
+   * Match structurally, the way `import()` already does for SNAPIMP-1, consuming each optimistic
+   * op at most once so two genuinely distinct identical edits are confirmed one echo at a time.
+   * Registering the match under the echo's id hands it to the tested outbox path: `isOwn` sees
+   * it, `_rebaseOptimisticOps` walks it out untransformed, and `_confirmUnstoredEchoes` empties it
+   * in place so the mint still queued for it skips it.
+   */
+  private _adoptEchoedOptimisticOps(serverChanges: Change[], pendingIds: Set<string>): void {
+    if (this._optimisticOps.length === 0) return;
+    const marked = new Set(this._unstored.values());
+    const candidates = this._optimisticOps.filter(ops => ops.length > 0 && !marked.has(ops));
+    if (candidates.length === 0) return;
+    const keys = candidates.map(ops => JSON.stringify(ops));
+    for (const change of serverChanges) {
+      // Already ours by id — a minted row or an outbox entry. Its echo confirms THAT change, not a
+      // parked op that merely looks the same (the user typed the same thing twice); adopting the
+      // parked op here would empty it and lose the second edit.
+      if (pendingIds.has(change.id) || this._unstored.has(change.id)) continue;
+      const i = keys.indexOf(JSON.stringify(change.ops));
+      if (i === -1) continue;
+      keys[i] = null as unknown as string;
+      this._unstored.set(change.id, candidates[i]);
+    }
+  }
+
   /** Drop bookkeeping for entries that have left the optimistic queue by any path. */
   private _pruneUnstored(): void {
     if (this._unstored.size === 0) return;
@@ -266,6 +342,11 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
    */
   import(snapshot: PatchesSnapshot<T>): void {
     if (snapshot.rev < this._committedRev) return;
+    // The snapshot is at or past every rev in `_committedIds`, so its state already holds all of
+    // them; a stale row for one in `snapshot.changes` (read from a store still retiring it) must
+    // not re-apply on top (DAB-1366).
+    const pending = this._withoutCommitted(snapshot.changes);
+    if (pending !== snapshot.changes) snapshot = { ...snapshot, changes: pending };
     this._committedState = snapshot.state;
     this._committedRev = snapshot.rev;
     this._pendingChanges = snapshot.changes;
@@ -327,6 +408,9 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
    * Recomputes state from committed + pending + remaining optimistic ops.
    */
   protected _recomputeState(): void {
+    // Belt and braces: every assignment of `_pendingChanges` from outside is already cleaned,
+    // but the view must never be built from a row the committed tier holds (DAB-1366).
+    this._pendingChanges = this._withoutCommitted(this._pendingChanges);
     let newState: T = applyPendingForView(this._committedState, this._committedRev, this._pendingChanges);
     this._optimisticOps = this._optimisticOps.filter(ops => {
       try {
@@ -446,10 +530,6 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // but defends against `[].every() === true` if a future refactor weakens the invariant.
       // Outbox entries (`_unstored`) count as ours too: a change sent from memory has no
       // pending row, so its committed echo is recognised by the id it was queued under.
-      const priorPendingIds = new Set(this._pendingChanges.map(c => c.id));
-      const isOwn = (c: Change) => priorPendingIds.has(c.id) || this._unstored.has(c.id);
-      const isPureEcho = serverChanges.length > 0 && serverChanges.every(isOwn);
-
       // Apply the committed rows FIRST, into a local: it is the one step here that can throw
       // (a row the history cannot apply — poison), and everything after it mutates the doc in
       // place. Ordered the other way, a throw left the optimistic queue and the outbox entries
@@ -458,9 +538,16 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // three times and then on every retrySavingChanges re-drive) shifted the retained ops
       // once more per attempt, so the change kept on screen for an honest re-drive drifted one
       // span further from the doc's view each time. A throwing span now leaves the doc, the
-      // optimistic queue and the outbox entries exactly as they were.
-
+      // optimistic queue and the outbox entries exactly as they were — including the outbox
+      // marks the echo adoption below would otherwise leave behind (DAB-1366).
       const committedState = applyChangesToState(this._committedState, serverChanges);
+
+      const priorPendingIds = new Set(this._pendingChanges.map(c => c.id));
+      // An own echo that beats its mint confirmation has neither a pending row nor a mark;
+      // recognise it by its ops and adopt it as an outbox entry first (DAB-1366).
+      this._adoptEchoedOptimisticOps(serverChanges, priorPendingIds);
+      const isOwn = (c: Change) => priorPendingIds.has(c.id) || this._unstored.has(c.id);
+      const isPureEcho = serverChanges.length > 0 && serverChanges.every(isOwn);
 
       // Must run against the OLD pending queue (the frame the optimistic ops live in),
       // so before _pendingChanges is replaced below. Pure echoes need no rebase — the
@@ -475,13 +562,40 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
 
       this._committedState = committedState;
       this._committedRev = serverChanges[serverChanges.length - 1].rev;
-      this._pendingChanges = rebasedPending;
+      this._rememberCommitted(serverChanges);
+      // The rebased pending the algorithm hands back is read from the store, which may not yet
+      // have retired the rows this very batch committed (its `[docs]` transaction can lag by
+      // seconds). Those rows are now inside `_committedState`; keeping them queued would
+      // re-apply them on the next rebuild (DAB-1366).
+      this._pendingChanges = this._withoutCommitted(rebasedPending);
       this._checkLoaded();
       if (!isPureEcho) {
         this._recomputeState();
       }
     } else {
-      this._pendingChanges.push(...changes);
+      // A local mint confirmation for a change whose echo already landed (the store's write
+      // settled after the server round-trip) is not new pending work: its committed copy is
+      // already in `_committedState`, and the echo path has already retired its optimistic op.
+      const fresh = this._withoutCommitted(changes);
+      if (fresh.length === 0) {
+        // Nothing to queue — but the optimistic entry may still be parked. The echo retired it
+        // only if it matched structurally; a server-TRANSFORMED echo (a foreign commit landed
+        // first) does not match, is treated as foreign, and leaves the entry in the queue —
+        // where `_recomputeState` re-applies it on top of its committed copy. Retire it by its
+        // own array reference (the mint holds the array `change()` emitted), never by a blind
+        // shift, which would take a different, still-in-flight edit. Recompute so the doubled
+        // copy leaves the view now rather than on the next foreign change.
+        const minted = new Set(changes.map(c => c.ops));
+        const before = this._optimisticOps.length;
+        this._optimisticOps = this._optimisticOps.filter(ops => !minted.has(ops));
+        if (this._optimisticOps.length !== before) {
+          this._pruneUnstored();
+          this._recomputeState();
+        }
+        this._checkLoaded();
+        return;
+      }
+      this._pendingChanges.push(...fresh);
       this._checkLoaded();
 
       if (this._optimisticOps.length > 0) {

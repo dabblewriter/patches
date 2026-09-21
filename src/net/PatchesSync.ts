@@ -2377,7 +2377,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    * retrying it forever ahead of every edit queued behind it.
    */
   protected _isBranchWriteRefused(err: unknown): boolean {
-    return isStatusError(err) && (err.code === ErrorCodes.DOC_FORBIDDEN || err.code === 402);
+    return (
+      isStatusError(err) && (err.code === ErrorCodes.DOC_FORBIDDEN || err.code === ErrorCodes.DOC_PAYMENT_REQUIRED)
+    );
   }
 
   /**

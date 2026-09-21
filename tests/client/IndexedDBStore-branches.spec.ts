@@ -210,7 +210,11 @@ describe('IndexedDBStore branch pending flags (real store over fake-indexeddb)',
       const id = await store.createBranch(docId, 5, { name: 'Feature' });
       await store.deleteBranch(id);
 
-      await expect(store.updateBranch(id, { name: 'Renamed after delete' })).rejects.toThrow('not found');
+      // Its own message — a consumer's error report must not read as a row that is missing.
+      await expect(store.updateBranch(id, { name: 'Renamed after delete' })).rejects.toThrow(`Branch ${id} is deleted`);
+      await expect(store.updateBranch('never-existed', { name: 'x' })).rejects.toThrow(
+        'Branch never-existed not found'
+      );
 
       const stored = await store.loadBranch(id);
       expect(stored).toMatchObject({ pendingOp: 'delete', deleted: true, name: 'Feature' });

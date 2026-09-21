@@ -826,9 +826,11 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
   async updateBranch(branchId: string, metadata: EditableBranchMetadata): Promise<void> {
     const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
     const existing = await branchStore.get<StoredBranch>(branchId);
-    // A tombstone reads as "not found" too: flipping its `pendingOp` to 'update' would cancel the
-    // delete before it reached the server, and the next full list would bring the branch back.
-    if (!existing || existing.deleted) throw new Error(`Branch ${branchId} not found`);
+    if (!existing) throw new Error(`Branch ${branchId} not found`);
+    // A tombstone is not editable: flipping its `pendingOp` to 'update' would cancel the delete
+    // before it reached the server, and the next full list would bring the branch back. Its own
+    // message, so a report of it is not mistaken for a row that is genuinely missing.
+    if (existing.deleted) throw new Error(`Branch ${branchId} is deleted`);
     Object.assign(existing, metadata);
     existing.modifiedAt = Date.now();
     // If never synced, keep pendingOp as 'create'

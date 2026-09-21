@@ -375,7 +375,10 @@ export class LWWAlgorithm implements ClientAlgorithm {
    * runs for its own doc (`import()` re-derives pending from the store, which no longer holds
    * the ejected ops). LWW pending is path-keyed, so the doc cannot be asked which change ids
    * it holds: the doc is rebuilt whenever it reports pending and the store holds a quarantine
-   * for it, and every quarantined id is reported as dropped.
+   * for it, and EVERY quarantined id for the doc is reported — including entries retained from
+   * earlier ejections, since quarantine is kept for recovery UX until discarded. A caller that
+   * needs the precise set reconciles against `listQuarantinedChanges` itself. A doc with no
+   * store snapshot is `[]`, as in {@link ejectPendingChange}'s `null` for the same race.
    */
   async dropQuarantinedPending(docId: string, doc: PatchesDoc<any>): Promise<string[]> {
     return this._withDocLock(docId, async () => {
@@ -383,7 +386,7 @@ export class LWWAlgorithm implements ClientAlgorithm {
       const quarantined = await this.store.listQuarantinedChanges(docId);
       if (quarantined.length === 0) return [];
       const snapshot = await this.loadDoc(docId);
-      if (!snapshot) throw new Error(`the store has no snapshot for ${docId}`);
+      if (!snapshot) return [];
       (doc as LWWDoc<any>).import(snapshot);
       return quarantined.map(q => q.changeId);
     });

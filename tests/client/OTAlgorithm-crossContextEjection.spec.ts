@@ -4,6 +4,7 @@ import { OTAlgorithm } from '../../src/client/OTAlgorithm';
 import type { OTDoc } from '../../src/client/OTDoc';
 import { OTIndexedDBStore } from '../../src/client/OTIndexedDBStore';
 import { createChange } from '../../src/data/change';
+import { UnstoredPendingError } from '../../src/net/error';
 import type { Change } from '../../src/types';
 
 /**
@@ -96,6 +97,28 @@ describe('OTAlgorithm cross-context ejection (DAB-1296)', () => {
       // memory without anyone calling dropQuarantinedPending.
       expect(docF.getPendingChanges()).toEqual([]);
       expect(docF.state).toEqual({ a: 1 });
+    });
+
+    it('keeps a quarantined row out of the torn-write report when the send path already read the set', async () => {
+      // The ejection renumbers the survivor DOWN to the poison's rev, so the poison this doc
+      // still holds sits at the store tail — a `withheld` row, not a `merged` one. A genuine
+      // torn-write row above the tail forces the quarantine read; with the set in hand, the
+      // poison must not reach UnstoredPendingError as "a change we could not store".
+      const poison = await mintInFollower([{ op: 'add', path: '/x', value: 'refused' }]);
+      const successor = await mintInFollower([{ op: 'replace', path: '/a', value: 1 }]);
+      await algW.ejectPendingChange(DOC, poison.id, 'server-refused-change', undefined);
+      expect((await storePending()).map(c => [c.id, c.rev])).toEqual([[successor.id, 2]]);
+      const torn = createChange(1, 9, [{ op: 'add', path: '/torn', value: true }]);
+      docF.applyChanges([torn]);
+      const reported: UnstoredPendingError[] = [];
+      algF.onError(err => {
+        if (err instanceof UnstoredPendingError) reported.push(err);
+      });
+
+      const toSend = await algF.getPendingToSend(DOC, docF);
+
+      expect(toSend!.map(c => c.id)).toEqual([successor.id, torn.id]);
+      expect(reported).toEqual([]);
     });
 
     it('never reads the quarantine for an ordinary own echo (the two-tab typing hot path)', async () => {
@@ -218,6 +241,19 @@ describe('OTAlgorithm cross-context ejection (DAB-1296)', () => {
       expect(await algF.dropQuarantinedPending(DOC, docF)).toEqual([]);
       expect(docF.getPendingChanges().map(c => c.id)).toEqual([torn.id]);
       expect(docF.state).toEqual({ a: 0, torn: true });
+    });
+
+    it('is [] when the store has no snapshot for the doc (a delete racing the announcement)', async () => {
+      const poison = await mintInFollower([{ op: 'add', path: '/x', value: 'refused' }]);
+      await algW.ejectPendingChange(DOC, poison.id, 'server-refused-change', undefined);
+      const loadDoc = algF.loadDoc.bind(algF);
+      algF.loadDoc = async () => undefined;
+
+      // The same race ejectPendingChange absorbs with `null`; a throw here would surface as an
+      // unhandled rejection in the app's announcement handler.
+      await expect(algF.dropQuarantinedPending(DOC, docF)).resolves.toEqual([]);
+      expect(docF.getPendingChanges().map(c => c.id)).toEqual([poison.id]);
+      algF.loadDoc = loadDoc;
     });
 
     it('carries a torn-write row held ALONGSIDE the poison through the rebuild', async () => {

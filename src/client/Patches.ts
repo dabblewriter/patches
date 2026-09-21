@@ -694,8 +694,13 @@ export class Patches {
    * is announced (a tab broadcast, a leader/follower message). A no-op unless this context's
    * open doc holds quarantined work. See docs/quarantine.md, "Ejection is per context".
    *
-   * @returns The ids of the quarantined changes dropped from the open doc — `[]` when the doc is
-   *   not open here, holds none, or the algorithm has no cross-context ejection to reconcile.
+   * @returns The quarantined change ids the rebuild dropped from the open doc — `[]` when the doc
+   *   is not open here, holds none, has no store snapshot (a delete racing the announcement), or
+   *   the algorithm has no cross-context ejection to reconcile. Exactness depends on the
+   *   algorithm: OT reports precisely the rows it removed; LWW pending is path-keyed and cannot
+   *   be matched by id, so LWW reports every quarantined id for the doc, including entries
+   *   retained from earlier ejections. Reconcile against {@link listQuarantinedChanges} when the
+   *   exact set matters.
    */
   async dropQuarantinedPending(docId: string): Promise<string[]> {
     const doc = this.getOpenDoc(docId);

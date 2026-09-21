@@ -368,9 +368,10 @@ export interface ClientAlgorithm {
    * Brings an open doc in line with an ejection performed in ANOTHER context (a second tab
    * over the same store): when the doc still holds pending work the store has quarantined for
    * `docId`, the doc is rebuilt from the store's snapshot and the ids dropped are returned.
-   * Nothing is written to the store; a doc with nothing quarantined is left untouched (`[]`).
-   * OT keeps a torn-write row (doc-only, not quarantined) through the rebuild. Optional. See
-   * docs/quarantine.md, "Ejection is per context".
+   * Nothing is written to the store; a doc with nothing quarantined, or no store snapshot, is
+   * left untouched (`[]`). OT keeps a torn-write row (doc-only, not quarantined) through the
+   * rebuild and reports exactly the ids removed; LWW cannot match by id and reports every
+   * quarantined id for the doc. Optional. See docs/quarantine.md, "Ejection is per context".
    */
   dropQuarantinedPending?(docId: string, doc: PatchesDoc<any>): Promise<string[]>;
 

@@ -1451,7 +1451,9 @@ export class OTAlgorithm implements ClientAlgorithm {
    * the store's frame and `import()` keeps optimistic ops, so a keystroke mid-flight survives.
    * Returns the ids the rebuild actually removed — `import()` declines a snapshot behind the
    * doc's frame, and a row the store still holds is re-imported, so neither may be reported as
-   * dropped.
+   * dropped. A doc with no store snapshot (a delete or purge racing the announcement — the same
+   * race {@link ejectPendingChange} absorbs with `null`) is `[]` too: nothing was dropped, and
+   * the caller is an announcement handler, not a place for a bare throw.
    */
   async dropQuarantinedPending(docId: string, doc: PatchesDoc<any>): Promise<string[]> {
     return this._withDocLock(docId, async () => {
@@ -1461,7 +1463,7 @@ export class OTAlgorithm implements ClientAlgorithm {
       const held = otDoc.getPendingChanges().filter(c => quarantined.has(c.id));
       if (held.length === 0) return [];
       const snapshot = await this.loadDoc(docId);
-      if (!snapshot) throw new Error(`the store has no snapshot for ${docId}`);
+      if (!snapshot) return [];
       const { merged } = await this._docOnlyPending(
         docId,
         otDoc,
@@ -1673,6 +1675,16 @@ export class OTAlgorithm implements ClientAlgorithm {
    * paths that drop rows. If a change to the rev-sequencing invariant ever opens that window,
    * split the two cases rather than let the error keep asserting the cause it can no longer prove.
    *
+   * There IS a second producer with `latestRev` a real store row: a change another context
+   * ejected. The ejection renumbers the survivors DOWN, so the ejected row this doc still holds can
+   * sit at or below the new store tail — a doc-only row that was never a torn write. It is
+   * filtered out of `withheld` whenever the quarantine set is already in hand (a store-bound
+   * candidate forced the read); when nothing forced one, it stays, and the report can name a
+   * change that is safe in quarantine. Bounded: `_reportedUnstored` latches once per id, and the
+   * announced drop ({@link dropQuarantinedPending}) normally rebuilds the doc before a flush
+   * gets here. Reading the quarantine on the stale path just to close that would cost a read
+   * where there was none, for a once-per-id false alarm — not taken.
+   *
    * `tailRev` is the max STORE row rev, never the doc-merged max: R2's conflict check compares it
    * against the store's own pending rows, so a doc-only rev folded in here would push tailRev past
    * the store tail and hide a foreign mint landing at store-tail+1, which the replace then wipes.
@@ -1723,8 +1735,10 @@ export class OTAlgorithm implements ClientAlgorithm {
    * resurrect; but it MUST stay in `merged`: `rebaseChanges` recognises an own echo only by its
    * presence in the local queue, and without it would transform a sibling row against the
    * echo's own ops. So `echoIds` only decides whether to read. A stale `withheld` row never
-   * triggers the read either (it is never written anywhere, only reported). `quarantined` lets
-   * a caller that already holds the set skip the read.
+   * triggers the read either (it is never written anywhere, only reported) — but once the set
+   * IS in hand, a quarantined row is dropped from `withheld` too, so the torn-write report does
+   * not name a change that is safe in quarantine (see {@link _collectPending} on the residual).
+   * `quarantined` lets a caller that already holds the set skip the read.
    */
   private async _docOnlyPending(
     docId: string,
@@ -1739,11 +1753,14 @@ export class OTAlgorithm implements ClientAlgorithm {
     if (docOnly.length === 0) return { merged: [], withheld: [] };
     const latestRev = storeRows[storeRows.length - 1]?.rev ?? fallbackRev;
     let merged = docOnly.filter(c => c.rev > latestRev);
-    if (merged.some(c => !echoIds?.has(c.id))) {
-      const ejected = quarantined ?? (await this._quarantinedIds(docId));
+    let withheld = docOnly.filter(c => c.rev <= latestRev);
+    let ejected = quarantined;
+    if (merged.some(c => !echoIds?.has(c.id))) ejected ??= await this._quarantinedIds(docId);
+    if (ejected?.size) {
       merged = merged.filter(c => !ejected.has(c.id));
+      withheld = withheld.filter(c => !ejected.has(c.id));
     }
-    return { merged, withheld: docOnly.filter(c => c.rev <= latestRev) };
+    return { merged, withheld };
   }
 
   /**

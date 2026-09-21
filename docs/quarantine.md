@@ -92,10 +92,19 @@ leaves that tab's memory on its next batch, with no message needed. On top of th
 the app calls it in every other context when it announces an ejection (the same fan-out
 that shows the user the toast), so the refused edit disappears with the toast rather than
 on the next commit, and a doc that gets no further batch is covered too. It returns the ids
-actually dropped, `[]` when there was nothing to do, keeps an OT torn-write row (doc-only,
-not quarantined) through the rebuild, and never writes to the store. For LWW it is the doc's
-view only — LWW pending is path-keyed and its send path never reads an open doc, so
-resurrection is impossible there and every quarantined id for the doc is reported.
+actually dropped, `[]` when there was nothing to do (including a doc whose store snapshot is
+gone — a delete racing the announcement), keeps an OT torn-write row (doc-only, not
+quarantined) through the rebuild, and never writes to the store. For LWW it is the doc's view
+only — LWW pending is path-keyed and its send path never reads an open doc, so resurrection is
+impossible there — and, because the doc cannot be matched by id, it reports **every**
+quarantined id for the doc, including entries retained from earlier ejections; reconcile
+against `listQuarantinedChanges` when the exact set matters.
+
+One residual on the OT send path: an ejected row this context still holds can sit _at or
+below_ the store tail (the ejection renumbers survivors down), where the torn-write report
+(`UnstoredPendingError`) can name it once — a change that is in fact safe in quarantine. It is
+filtered out whenever the quarantine set is already in hand; reading it on that path just to
+close the gap was judged not worth a read where there was none.
 
 A tab on an older library has neither guard; during a mixed-version deploy such a tab can
 still fold an ejected change back in until it reloads.

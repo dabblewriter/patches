@@ -3316,6 +3316,7 @@ describe('PatchesSync', () => {
         deleteBranch: vi.fn().mockResolvedValue(undefined),
         loadBranch: vi.fn().mockResolvedValue(undefined),
         saveBranches: vi.fn().mockResolvedValue(undefined),
+        confirmPendingBranch: vi.fn().mockResolvedValue(undefined),
         removeBranches: vi.fn().mockResolvedValue(undefined),
         listPendingBranches: vi.fn().mockResolvedValue([]),
         getLastModifiedAt: vi.fn().mockResolvedValue(undefined),
@@ -3364,10 +3365,10 @@ describe('PatchesSync', () => {
         name: 'Feature',
       });
 
-      // Should save without pendingOp
-      const savedBranches = mockBranchStore.saveBranches.mock.calls[0][1];
-      expect(savedBranches[0].id).toBe('my-branch');
-      expect(savedBranches[0]).not.toHaveProperty('pendingOp');
+      // Confirms the row as read — the store clears the flag (DAB-1013: a saveBranches
+      // of the same row minus pendingOp was a no-op, so the flag was permanent).
+      expect(mockBranchStore.confirmPendingBranch).toHaveBeenCalledWith(pendingBranch);
+      expect(mockBranchStore.saveBranches).not.toHaveBeenCalled();
     });
 
     it('should stop processing on API error', async () => {
@@ -3404,7 +3405,7 @@ describe('PatchesSync', () => {
 
       // Should have tried first but not second
       expect(mockBranchApi.createBranch).toHaveBeenCalledTimes(1);
-      expect(mockBranchStore.saveBranches).not.toHaveBeenCalled();
+      expect(mockBranchStore.confirmPendingBranch).not.toHaveBeenCalled();
     });
 
     it('should stop if disconnected mid-sync', async () => {
@@ -3616,6 +3617,91 @@ describe('PatchesSync', () => {
       expect(mockBranchStore.removeBranches).not.toHaveBeenCalled();
     });
 
+    describe('a tombstone written over an unconfirmed create', () => {
+      const tombstone = (extra: Record<string, unknown>) => ({
+        id: 'del-branch',
+        docId: 'doc1',
+        branchedAtRev: 5,
+        createdAt: 1000,
+        modifiedAt: 2000,
+        contentStartRev: 2,
+        pendingOp: 'delete' as const,
+        deleted: true as const,
+        ...extra,
+      });
+
+      it('takes a 404 as the delete satisfied and clears the tombstone', async () => {
+        // The create may never have reached the server; a not-found is the honest answer, not a
+        // failure to break the pass on (which would have wedged every later delete behind it).
+        const unconfirmed = tombstone({ createUnconfirmed: true });
+        const later = { ...tombstone({}), id: 'other-branch' };
+        mockBranchStore.listPendingBranches.mockResolvedValue([unconfirmed, later]);
+        mockBranchApi.deleteBranch.mockRejectedValueOnce(new StatusError(404, 'Branch not found'));
+
+        const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+          branchStore: mockBranchStore,
+          branchApi: mockBranchApi,
+        });
+        syncWithBranches['updateState']({ connected: true });
+
+        await syncWithBranches['syncPendingBranchMetas']();
+
+        expect(mockBranchStore.removeBranches).toHaveBeenCalledWith(['del-branch']);
+        // The pass carried on to the next tombstone.
+        expect(mockBranchApi.deleteBranch).toHaveBeenCalledWith('other-branch');
+        expect(mockBranchStore.removeBranches).toHaveBeenCalledWith(['other-branch']);
+      });
+
+      it('still keeps the tombstone on any other failure', async () => {
+        mockBranchStore.listPendingBranches.mockResolvedValue([tombstone({ createUnconfirmed: true })]);
+        mockBranchApi.deleteBranch.mockRejectedValueOnce(new StatusError(500, 'Server error'));
+
+        const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+          branchStore: mockBranchStore,
+          branchApi: mockBranchApi,
+        });
+        syncWithBranches['updateState']({ connected: true });
+
+        await syncWithBranches['syncPendingBranchMetas']();
+
+        expect(mockBranchStore.removeBranches).not.toHaveBeenCalled();
+      });
+
+      it('a 404 on an unmarked tombstone keeps it — for a branch the server has, 404 is noise', async () => {
+        mockBranchStore.listPendingBranches.mockResolvedValue([tombstone({})]);
+        mockBranchApi.deleteBranch.mockRejectedValueOnce(new StatusError(404, 'Not found'));
+
+        const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+          branchStore: mockBranchStore,
+          branchApi: mockBranchApi,
+        });
+        syncWithBranches['updateState']({ connected: true });
+
+        await syncWithBranches['syncPendingBranchMetas']();
+
+        expect(mockBranchStore.removeBranches).not.toHaveBeenCalled();
+      });
+
+      it('a 410 clears any tombstone — the source doc is gone and the server cascaded the branch', async () => {
+        // Project deleted elsewhere while a branch tombstone waited here: leaving it would re-block
+        // every later delete on every pass.
+        const later = { ...tombstone({}), id: 'other-branch' };
+        mockBranchStore.listPendingBranches.mockResolvedValue([tombstone({}), later]);
+        mockBranchApi.deleteBranch.mockRejectedValueOnce(new StatusError(410, 'Gone'));
+
+        const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+          branchStore: mockBranchStore,
+          branchApi: mockBranchApi,
+        });
+        syncWithBranches['updateState']({ connected: true });
+
+        await syncWithBranches['syncPendingBranchMetas']();
+
+        expect(mockBranchStore.removeBranches).toHaveBeenCalledWith(['del-branch']);
+        expect(mockBranchStore.removeBranches).toHaveBeenCalledWith(['other-branch']);
+      });
+    });
+
     it('should sync pending update operations', async () => {
       const updatedBranch = {
         id: 'update-branch',
@@ -3645,8 +3731,196 @@ describe('PatchesSync', () => {
           lastMergedRev: 10,
         })
       );
-      const savedBranches = mockBranchStore.saveBranches.mock.calls[0][1];
-      expect(savedBranches[0]).not.toHaveProperty('pendingOp');
+      expect(mockBranchStore.confirmPendingBranch).toHaveBeenCalledWith(updatedBranch);
+      expect(mockBranchStore.saveBranches).not.toHaveBeenCalled();
+    });
+
+    it('does not confirm an update the server rejected', async () => {
+      const updatedBranch = {
+        id: 'update-branch',
+        docId: 'doc1',
+        branchedAtRev: 5,
+        createdAt: 1000,
+        modifiedAt: 2000,
+        contentStartRev: 2,
+        name: 'Renamed',
+        pendingOp: 'update' as const,
+      };
+      mockBranchStore.listPendingBranches.mockResolvedValue([updatedBranch]);
+      mockBranchApi.updateBranch.mockRejectedValueOnce(new Error('Network error'));
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      expect(mockBranchApi.updateBranch).toHaveBeenCalledTimes(1);
+      expect(mockBranchStore.confirmPendingBranch).not.toHaveBeenCalled();
+      expect(mockBranchStore.removeBranches).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [404, 'Branch not found'],
+      [410, 'Gone'],
+    ])('drops a pending update for a branch gone server-side (%i) and carries on', async (code, message) => {
+      // Deleted on another device: the server 404s a tombstoned branch before authorizing. The
+      // row could never be confirmed, a full list never touches a pending row, so the ghost stayed
+      // in the sidebar for good — and the loop's break left every update behind it unflushed.
+      const gone = {
+        id: 'gone-branch',
+        docId: 'doc1',
+        branchedAtRev: 5,
+        createdAt: 1000,
+        modifiedAt: 2000,
+        contentStartRev: 2,
+        name: 'Renamed on this device',
+        pendingOp: 'update' as const,
+      };
+      const next = { ...gone, id: 'live-branch', name: 'Also renamed' };
+      mockBranchStore.listPendingBranches.mockResolvedValue([gone, next]);
+      mockBranchApi.updateBranch.mockRejectedValueOnce(new StatusError(code, message));
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      expect(mockBranchStore.removeBranches).toHaveBeenCalledWith(['gone-branch']);
+      expect(mockBranchStore.confirmPendingBranch).not.toHaveBeenCalledWith(gone);
+      // The pass carried on to the next pending update.
+      expect(mockBranchApi.updateBranch).toHaveBeenCalledWith(
+        'live-branch',
+        expect.objectContaining({ name: 'Also renamed' })
+      );
+      expect(mockBranchStore.confirmPendingBranch).toHaveBeenCalledWith(next);
+    });
+
+    it.each([403, 402])('discards a refused (%i) update but keeps the row, and carries on', async code => {
+      // Write access revoked with a rename still queued: the branch exists, so the row stays; the
+      // edit can never land, so its flag comes off and the next full list overwrites the name.
+      const refused = {
+        id: 'refused-branch',
+        docId: 'doc1',
+        branchedAtRev: 5,
+        createdAt: 1000,
+        modifiedAt: 2000,
+        contentStartRev: 2,
+        name: 'Not allowed',
+        pendingOp: 'update' as const,
+      };
+      const next = { ...refused, id: 'live-branch', name: 'Fine' };
+      mockBranchStore.listPendingBranches.mockResolvedValue([refused, next]);
+      mockBranchApi.updateBranch.mockRejectedValueOnce(new StatusError(code, 'Refused'));
+      const errors: unknown[] = [];
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches.onError(err => errors.push(err));
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      expect(mockBranchStore.removeBranches).not.toHaveBeenCalled();
+      expect(mockBranchStore.confirmPendingBranch).toHaveBeenCalledWith(refused);
+      expect(mockBranchStore.confirmPendingBranch).toHaveBeenCalledWith(next);
+      // Surfaced, since the user's edit was thrown away.
+      expect(errors).toHaveLength(1);
+    });
+
+    it('a 401 on an update still breaks the pass — re-auth heals it', async () => {
+      const first = {
+        id: 'b1',
+        docId: 'doc1',
+        branchedAtRev: 5,
+        createdAt: 1000,
+        modifiedAt: 2000,
+        contentStartRev: 2,
+        name: 'One',
+        pendingOp: 'update' as const,
+      };
+      const second = { ...first, id: 'b2', name: 'Two' };
+      mockBranchStore.listPendingBranches.mockResolvedValue([first, second]);
+      mockBranchApi.updateBranch.mockRejectedValueOnce(new StatusError(401, 'Unauthorized'));
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      expect(mockBranchApi.updateBranch).toHaveBeenCalledTimes(1);
+      expect(mockBranchStore.confirmPendingBranch).not.toHaveBeenCalled();
+      expect(mockBranchStore.removeBranches).not.toHaveBeenCalled();
+    });
+
+    it('drops a pending create whose source doc is gone (410) and carries on to the next', async () => {
+      // The motivating wedge from dw3's `_clearStalePendingCreates` comment: one branch of a
+      // deleted project broke the loop and stranded every create queued behind it, on every pass.
+      const dead = {
+        id: 'dead-branch',
+        docId: 'deleted-doc',
+        branchedAtRev: 3,
+        createdAt: 100,
+        modifiedAt: 100,
+        contentStartRev: 2,
+        pendingOp: 'create' as const,
+      };
+      const live = { ...dead, id: 'live-branch', docId: 'doc1' };
+      mockBranchStore.listPendingBranches.mockResolvedValue([dead, live]);
+      mockBranchApi.createBranch.mockRejectedValueOnce(new StatusError(410, 'Gone'));
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      expect(mockBranchStore.removeBranches).toHaveBeenCalledWith(['dead-branch']);
+      expect(mockBranchApi.createBranch).toHaveBeenCalledWith(
+        'doc1',
+        3,
+        expect.objectContaining({ id: 'live-branch' })
+      );
+      expect(mockBranchStore.confirmPendingBranch).toHaveBeenCalledWith(live);
+    });
+
+    it('a 404 on a create still breaks the pass — the source may not have synced yet', async () => {
+      const first = {
+        id: 'b1',
+        docId: 'doc1',
+        branchedAtRev: 3,
+        createdAt: 100,
+        modifiedAt: 100,
+        contentStartRev: 2,
+        pendingOp: 'create' as const,
+      };
+      const second = { ...first, id: 'b2' };
+      mockBranchStore.listPendingBranches.mockResolvedValue([first, second]);
+      mockBranchApi.createBranch.mockRejectedValueOnce(new StatusError(404, 'Not found'));
+
+      const syncWithBranches = new PatchesSync(mockPatches, 'ws://localhost:8080', {
+        branchStore: mockBranchStore,
+        branchApi: mockBranchApi,
+      });
+      syncWithBranches['updateState']({ connected: true });
+
+      await syncWithBranches['syncPendingBranchMetas']();
+
+      expect(mockBranchApi.createBranch).toHaveBeenCalledTimes(1);
+      expect(mockBranchStore.removeBranches).not.toHaveBeenCalled();
+      expect(mockBranchStore.confirmPendingBranch).not.toHaveBeenCalled();
     });
   });
 

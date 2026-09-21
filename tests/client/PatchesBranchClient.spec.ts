@@ -43,6 +43,7 @@ describe('PatchesBranchClient', () => {
       deleteBranch: vi.fn().mockResolvedValue(undefined),
       loadBranch: vi.fn().mockResolvedValue(undefined),
       saveBranches: vi.fn().mockResolvedValue(undefined),
+      confirmPendingBranch: vi.fn().mockResolvedValue(undefined),
       removeBranches: vi.fn().mockResolvedValue(undefined),
       listPendingBranches: vi.fn().mockResolvedValue([]),
       getLastModifiedAt: vi.fn().mockResolvedValue(undefined),

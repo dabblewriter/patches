@@ -367,6 +367,28 @@ export class LWWAlgorithm implements ClientAlgorithm {
     return quarantined;
   }
 
+  /**
+   * See {@link ClientAlgorithm.dropQuarantinedPending}. An LWW ejection can never be
+   * resurrected — the send path builds from the store's sending slot and pendingOps, never from
+   * an open doc — so this is about the doc's VIEW only: a second context's open copy still shows
+   * the ejected field values as pending. The rebuild is the one {@link ejectPendingChange}
+   * runs for its own doc (`import()` re-derives pending from the store, which no longer holds
+   * the ejected ops). LWW pending is path-keyed, so the doc cannot be asked which change ids
+   * it holds: the doc is rebuilt whenever it reports pending and the store holds a quarantine
+   * for it, and every quarantined id is reported as dropped.
+   */
+  async dropQuarantinedPending(docId: string, doc: PatchesDoc<any>): Promise<string[]> {
+    return this._withDocLock(docId, async () => {
+      if (!doc.hasPending) return [];
+      const quarantined = await this.store.listQuarantinedChanges(docId);
+      if (quarantined.length === 0) return [];
+      const snapshot = await this.loadDoc(docId);
+      if (!snapshot) throw new Error(`the store has no snapshot for ${docId}`);
+      (doc as LWWDoc<any>).import(snapshot);
+      return quarantined.map(q => q.changeId);
+    });
+  }
+
   async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
     return this.store.listQuarantinedChanges(docId);
   }

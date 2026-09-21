@@ -861,15 +861,18 @@ export class OTAlgorithm implements ClientAlgorithm {
    * ops RAW on the new snapshot — it does not transform them into its frame — so without it a
    * live row would go out with ops in the old frame under the new committedRev, the
    * misplacement {@link _rebaseOutboxRows} exists to prevent (and, when the span cannot be
-   * read, to freeze). Returns the snapshot, or undefined when the store has none.
+   * read, to freeze). Returns the snapshot, or undefined when the store has none. A caller that
+   * already holds the store's snapshot (and may have merged doc-only rows into its queue) passes
+   * it as `snapshot` to skip the load.
    */
   private async _rebuildDocFromStore<T extends object>(
     docId: string,
     otDoc: OTDoc<T>,
-    echoedIds: Iterable<string>
+    echoedIds: Iterable<string>,
+    snapshot?: PatchesSnapshot
   ): Promise<PatchesSnapshot | undefined> {
     otDoc._dropUnstored(echoedIds);
-    const snapshot = await this.loadDoc(docId);
+    snapshot ??= await this.loadDoc(docId);
     if (snapshot) {
       await this._rebaseOutboxRows(docId, otDoc, snapshot.rev);
       otDoc.import(snapshot as PatchesSnapshot<T>);
@@ -1114,8 +1117,12 @@ export class OTAlgorithm implements ClientAlgorithm {
       let rebased: Change[] = [];
       let pendingSet: Change[] = [];
       let applied = false;
+      // The batch's own ids never cost a quarantine read: this doc's own echo has already left
+      // the store (the committing context retired it) but not yet this doc, and rebaseChanges
+      // retires it as an echo below — it still has to be IN the pending set for that.
+      const batchIds = new Set(serverChanges.map(c => c.id));
       for (let attempt = 0; attempt < APPLY_CONFLICT_RETRIES; attempt++) {
-        const { pending, tailRev } = await this._collectPending(docId, otDoc, committedRev);
+        const { pending, tailRev } = await this._collectPending(docId, otDoc, committedRev, batchIds);
         pendingSet = pending;
         // A pending copy of a change already reflected in committedRev (stale echo) must be
         // dropped before the rebase, matching applyCommittedChanges; rebaseChanges drops the new
@@ -1355,14 +1362,11 @@ export class OTAlgorithm implements ClientAlgorithm {
       // Merge doc-only in-memory pending (a torn store write) so the import below can't drop a
       // change that exists only in the open doc; it rides the rebase as a successor. Identity is
       // the change id — the rev guard keeps a stale lower-frame copy the store rebased away from
-      // resurrecting.
+      // resurrecting, and the quarantine guard keeps an already-ejected one out (see
+      // {@link _docOnlyPending}).
       if (doc) {
-        const otDoc = doc as OTDoc<any>;
-        const inMemoryPending = otDoc.getPendingChanges();
-        const latestRev = snapshot.changes[snapshot.changes.length - 1]?.rev ?? snapshot.rev;
-        const storedIds = new Set(snapshot.changes.map(change => change.id));
-        const newChanges = inMemoryPending.filter(change => change.rev > latestRev && !storedIds.has(change.id));
-        snapshot.changes.push(...newChanges);
+        const { merged } = await this._docOnlyPending(docId, doc as OTDoc<any>, snapshot.changes, snapshot.rev);
+        snapshot.changes.push(...merged);
       }
 
       // The auto-eject path re-corroborates here (its earlier verifyPendingChange probe ran
@@ -1427,6 +1431,49 @@ export class OTAlgorithm implements ClientAlgorithm {
       return quarantined;
     }
     throw new Error(`ejectPendingChange for ${docId} did not converge after ${APPLY_CONFLICT_RETRIES} attempts`);
+  }
+
+  /**
+   * See {@link ClientAlgorithm.dropQuarantinedPending}. The other half of an ejection that
+   * happened in ANOTHER context: {@link ejectPendingChange} rebuilds the doc it was handed, but a
+   * second tab's open copy of the same doc still holds the ejected change in memory, and nothing
+   * on its import path can remove one pending row — an ejection never advances the committed
+   * rev, so every rev-gated import declines, and the pending guards decline precisely because
+   * the ejected row is what is pending. (The doc's next receive would drop it anyway — see
+   * {@link _docOnlyPending} — this makes it immediate, and covers a doc that gets no next batch.)
+   *
+   * Under the doc lock, so the check and the rebuild see one queue: a mint or a receive
+   * interleaving here would either read the poison-inclusive frame or persist over the rebuild.
+   * The guard is quarantine membership, not "the store lacks it": a doc-only row the store never
+   * took (a torn write) is the row {@link _collectPending} exists to preserve, so it rides the
+   * rebuild as a successor exactly as it does through {@link ejectPendingChange}. The rebuild
+   * itself is the receive path's ({@link _rebuildDocFromStore}): outbox rows are walked into
+   * the store's frame and `import()` keeps optimistic ops, so a keystroke mid-flight survives.
+   * Returns the ids the rebuild actually removed — `import()` declines a snapshot behind the
+   * doc's frame, and a row the store still holds is re-imported, so neither may be reported as
+   * dropped.
+   */
+  async dropQuarantinedPending(docId: string, doc: PatchesDoc<any>): Promise<string[]> {
+    return this._withDocLock(docId, async () => {
+      const otDoc = doc as OTDoc<any>;
+      if (otDoc.getPendingChanges().length === 0) return [];
+      const quarantined = await this._quarantinedIds(docId);
+      const held = otDoc.getPendingChanges().filter(c => quarantined.has(c.id));
+      if (held.length === 0) return [];
+      const snapshot = await this.loadDoc(docId);
+      if (!snapshot) throw new Error(`the store has no snapshot for ${docId}`);
+      const { merged } = await this._docOnlyPending(
+        docId,
+        otDoc,
+        snapshot.changes,
+        snapshot.rev,
+        undefined,
+        quarantined
+      );
+      await this._rebuildDocFromStore(docId, otDoc, [], { ...snapshot, changes: [...snapshot.changes, ...merged] });
+      const remaining = new Set(otDoc.getPendingChanges().map(c => c.id));
+      return held.filter(c => !remaining.has(c.id)).map(c => c.id);
+    });
   }
 
   async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
@@ -1629,27 +1676,89 @@ export class OTAlgorithm implements ClientAlgorithm {
    * `tailRev` is the max STORE row rev, never the doc-merged max: R2's conflict check compares it
    * against the store's own pending rows, so a doc-only rev folded in here would push tailRev past
    * the store tail and hide a foreign mint landing at store-tail+1, which the replace then wipes.
+   *
+   * A doc-only row the store has QUARANTINED is never merged — see {@link _docOnlyPending}.
+   * `echoIds` are the rows of the batch being received: a doc's own echo is momentarily
+   * doc-only (the committing context retired its store row before this doc heard) and must not
+   * by itself cost a quarantine read.
    */
   private async _collectPending<T extends object>(
     docId: string,
     doc: OTDoc<T> | undefined,
-    committedRev: number
+    committedRev: number,
+    echoIds?: ReadonlySet<string>
   ): Promise<{ pending: Change[]; tailRev: number; withheld: Change[] }> {
     const storePending = await this.store.getPendingChanges(docId);
     let pending = storePending;
     let withheld: Change[] = [];
     if (doc) {
-      const inMemory = doc.getPendingChanges();
-      const latestRev = storePending[storePending.length - 1]?.rev ?? committedRev;
-      const storedIds = new Set(storePending.map(c => c.id));
-      const docOnly = inMemory.filter(c => !storedIds.has(c.id));
-      const merged = docOnly.filter(c => c.rev > latestRev);
-      if (merged.length > 0) pending = [...storePending, ...merged];
-      withheld = docOnly.filter(c => c.rev <= latestRev);
+      const docOnly = await this._docOnlyPending(docId, doc, storePending, committedRev, echoIds);
+      if (docOnly.merged.length > 0) pending = [...storePending, ...docOnly.merged];
+      withheld = docOnly.withheld;
     }
     let tailRev = committedRev;
     for (const c of storePending) if (c.rev > tailRev) tailRev = c.rev;
     return { pending, tailRev, withheld };
+  }
+
+  /**
+   * An open doc's in-memory pending rows the store does not hold, split by the rev guard
+   * {@link _collectPending} documents: `merged` (above the store tail — a torn store write to
+   * carry) and `withheld` (at or below it — a stale copy to report, never resurrect).
+   *
+   * A `merged` candidate whose id sits in the store's QUARANTINE for this doc is dropped. It is
+   * the one doc-only row that is not a torn write: another context ejected it
+   * (`ejectPendingChange` rebuilds only the doc it was handed — a second tab's open copy keeps
+   * the change in memory, and nothing on its import path can drop a single pending row).
+   * Folding it back in resurrects a change the server terminally refused, the sending tab
+   * re-sends and re-ejects it, and the app-side ejection budget caps the doc on a change it
+   * already removed twice (dw3 DAB-1296). The receive path then finishes the job for free:
+   * {@link OTDoc.applyChanges} replaces the doc's pending with the rebased queue, so the row
+   * leaves memory on the doc's next batch even if no one calls {@link dropQuarantinedPending}.
+   *
+   * The quarantine read is paid only when a doc-only row could actually reach the store — a
+   * `merged` candidate that is not one of `echoIds`, the batch being received. A doc's own
+   * echo is doc-only for a moment on every commit in a second context (the committing context
+   * retired its store row first), and the rebase retires it as an echo, so it can never
+   * resurrect; but it MUST stay in `merged`: `rebaseChanges` recognises an own echo only by its
+   * presence in the local queue, and without it would transform a sibling row against the
+   * echo's own ops. So `echoIds` only decides whether to read. A stale `withheld` row never
+   * triggers the read either (it is never written anywhere, only reported). `quarantined` lets
+   * a caller that already holds the set skip the read.
+   */
+  private async _docOnlyPending(
+    docId: string,
+    doc: OTDoc<any>,
+    storeRows: Change[],
+    fallbackRev: number,
+    echoIds?: ReadonlySet<string>,
+    quarantined?: ReadonlySet<string>
+  ): Promise<{ merged: Change[]; withheld: Change[] }> {
+    const storedIds = new Set(storeRows.map(c => c.id));
+    const docOnly = doc.getPendingChanges().filter(c => !storedIds.has(c.id));
+    if (docOnly.length === 0) return { merged: [], withheld: [] };
+    const latestRev = storeRows[storeRows.length - 1]?.rev ?? fallbackRev;
+    let merged = docOnly.filter(c => c.rev > latestRev);
+    if (merged.some(c => !echoIds?.has(c.id))) {
+      const ejected = quarantined ?? (await this._quarantinedIds(docId));
+      merged = merged.filter(c => !ejected.has(c.id));
+    }
+    return { merged, withheld: docOnly.filter(c => c.rev <= latestRev) };
+  }
+
+  /**
+   * Ids of the store's quarantined changes for `docId` — empty for a store without quarantine,
+   * and empty (with a warning) when the read fails: the guard it feeds degrades to the pre-guard
+   * behaviour, which is strictly better than failing the mint or receive it runs inside.
+   */
+  private async _quarantinedIds(docId: string): Promise<Set<string>> {
+    try {
+      const quarantined = await this.store.listQuarantinedChanges?.(docId);
+      return new Set((quarantined ?? []).map(q => q.changeId));
+    } catch (err) {
+      console.warn(`[OTAlgorithm] could not read the quarantine for ${docId}; treating it as empty`, err);
+      return new Set();
+    }
   }
 
   /**

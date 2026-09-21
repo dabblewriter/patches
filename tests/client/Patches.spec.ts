@@ -609,6 +609,30 @@ describe('Patches', () => {
     });
   });
 
+  describe('dropQuarantinedPending', () => {
+    it('hands the open doc to the algorithm and returns the ids it dropped', async () => {
+      const doc = await patches.openDoc('doc1');
+      (mockAlgorithm as any).dropQuarantinedPending = vi.fn().mockResolvedValue(['poison']);
+
+      expect(await patches.dropQuarantinedPending('doc1')).toEqual(['poison']);
+      expect((mockAlgorithm as any).dropQuarantinedPending).toHaveBeenCalledWith('doc1', doc);
+    });
+
+    it('is a no-op for a doc not open in this context', async () => {
+      (mockAlgorithm as any).dropQuarantinedPending = vi.fn().mockResolvedValue(['poison']);
+
+      expect(await patches.dropQuarantinedPending('doc1')).toEqual([]);
+      expect((mockAlgorithm as any).dropQuarantinedPending).not.toHaveBeenCalled();
+    });
+
+    it('returns [] for an algorithm without cross-context ejection support', async () => {
+      await patches.openDoc('doc1');
+      delete (mockAlgorithm as any).dropQuarantinedPending;
+
+      expect(await patches.dropQuarantinedPending('doc1')).toEqual([]);
+    });
+  });
+
   describe('getDocAlgorithm', () => {
     it('should return algorithm for open document', async () => {
       await patches.openDoc('doc1');

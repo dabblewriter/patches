@@ -201,6 +201,15 @@ export interface Branch {
   /** True when this branch has been deleted. Stored as a tombstone for incremental sync. */
   deleted?: true;
 
+  /**
+   * Client-only, on a local tombstone: the row was still `pendingOp: 'create'` when it was
+   * deleted, so the server may never have heard of the branch. Lets the delete pass take a 404
+   * as done for this tombstone — for a branch the server is known to have, a 404 is
+   * indistinguishable from routing noise and must keep the tombstone. Cleared by
+   * `confirmPendingBranch` when the create turns out to have landed.
+   */
+  createUnconfirmed?: true;
+
   /** Optional arbitrary metadata associated with the branch record. */
   [metadata: string]: any;
 }
@@ -239,6 +248,7 @@ export type EditableBranchMetadata = Disallowed<
   | 'seedDelta'
   | 'pendingOp'
   | 'deleted'
+  | 'createUnconfirmed'
 >;
 
 /**
@@ -253,7 +263,10 @@ export type EditableBranchMetadata = Disallowed<
  *   {@link Branch.seedDelta}.
  */
 export type CreateBranchMetadata = Omit<
-  Disallowed<Branch, 'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'pendingOp' | 'deleted'>,
+  Disallowed<
+    Branch,
+    'docId' | 'branchedAtRev' | 'createdAt' | 'modifiedAt' | 'pendingOp' | 'deleted' | 'createUnconfirmed'
+  >,
   'contentStartRev' | 'seedDelta'
 > & {
   contentStartRev?: number;

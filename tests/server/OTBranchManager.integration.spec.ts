@@ -1031,6 +1031,7 @@ describe('DAB-760 editor-copy merge doubling', () => {
       deleteBranch: async () => {},
       loadBranch: async () => undefined,
       saveBranches: async () => {},
+      confirmPendingBranch: async () => {},
       removeBranches: async () => {},
       listPendingBranches: async () => [],
       getLastModifiedAt: async () => undefined,

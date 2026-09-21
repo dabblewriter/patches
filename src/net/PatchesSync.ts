@@ -545,10 +545,16 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   /**
    * Syncs pending branch metas to the server.
    *
-   * Pending branches come in two flavors:
-   * - **Created offline** (`pending: true`, no `deleted`): created on the server via `createBranch`.
-   * - **Deleted offline** (`pending: true`, `deleted: true`): deleted on the server via `deleteBranch`,
-   *   then physically removed from the local store.
+   * Pending branches come in three flavors, keyed by `pendingOp`:
+   * - **Created offline** (`'create'`): created on the server via `createBranch`.
+   * - **Edited offline** (`'update'`): editable metadata pushed via `updateBranch`.
+   * - **Deleted offline** (`'delete'`, `deleted: true`): deleted on the server via `deleteBranch`,
+   *   then physically removed from the local store. A tombstone marked `createUnconfirmed` may
+   *   name a branch the server never received; a 404 on its delete counts as done.
+   *
+   * A create or update the server accepted is confirmed through `confirmPendingBranch`, which
+   * clears the flag unless the row was edited again while the request was in flight. A plain
+   * `saveBranches` never overwrites a pending row, so it cannot clear one (DAB-1013).
    *
    * The server skips initial change creation when `contentStartRev` is set in the metadata,
    * so their document content flows through the standard doc sync pipeline.
@@ -579,15 +585,24 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           modifiedAt: _2,
           pendingOp: _3,
           deleted: _4,
+          createUnconfirmed: _5,
           ...metadata
         } = branch;
         /* eslint-enable @typescript-eslint/no-unused-vars */
-        await branchApi.createBranch(sourceDocId, branchedAtRev, metadata);
-
-        // Clear the pending flag
-        const synced = { ...branch, pendingOp: undefined };
-        delete synced.pendingOp;
-        await branchStore.saveBranches(sourceDocId, [synced]);
+        try {
+          await branchApi.createBranch(sourceDocId, branchedAtRev, metadata);
+        } catch (err) {
+          // The source doc is gone (410): this branch can never be created, and breaking on it
+          // would strand every create queued behind it on every pass — the consumer can only
+          // rescue rows the server already lists. Drop the row and carry on; the branch's own doc
+          // meets the same 410 through the doc sync path. 404 is NOT final here: the source may
+          // simply not have reached the server yet, so it keeps the break-and-retry.
+          if (!this._isDocDeletedError(err)) throw err;
+          console.warn('Dropping pending branch create: its source doc no longer exists on the server:', branch.id);
+          await branchStore.removeBranches([branch.id]);
+          continue;
+        }
+        await branchStore.confirmPendingBranch(branch);
       } catch (err) {
         console.error('Failed to sync pending branch create:', branch.id, err);
         this.onError.emit(err instanceof Error ? err : new Error(String(err)));
@@ -611,13 +626,38 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           seedDelta: _sd,
           pendingOp: _po,
           deleted: _del,
+          createUnconfirmed: _cu,
           ...metadata
         } = branch;
         /* eslint-enable @typescript-eslint/no-unused-vars */
-        await branchApi.updateBranch(branch.id, metadata);
-        const synced = { ...branch, pendingOp: undefined };
-        delete synced.pendingOp;
-        await branchStore.saveBranches(branch.docId, [synced]);
+        try {
+          await branchApi.updateBranch(branch.id, metadata);
+        } catch (err) {
+          // A row left pending after a verdict that no retry can change is worse than a lost
+          // rename: it can never be confirmed, a full list never prunes or overwrites a pending
+          // row, so it stays wrong for good — and every update queued behind it never flushes,
+          // because this loop breaks on the first failure. Two verdicts are final:
+          // - Gone server-side (deleted on another device — the server resolves the branch before
+          //   authorizing and 404s a tombstoned one; 410 when its doc is gone). Drop the row.
+          //   Under routing noise this costs a rename the next full list reverts; the
+          //   alternative wedges every later rename on the device.
+          // - Refused (403, 402: the caller may not edit this branch). The branch exists; keep the
+          //   row, clear the flag, and let the next full list overwrite the refused edit.
+          // 401 is neither — re-auth fixes it — and keeps the break-and-retry.
+          if (this._isDocNotFoundError(err) || this._isDocDeletedError(err)) {
+            console.warn('Dropping pending branch update: branch no longer exists on the server:', branch.id);
+            await branchStore.removeBranches([branch.id]);
+            continue;
+          }
+          if (this._isBranchWriteRefused(err)) {
+            console.warn('Dropping pending branch update: the server refused it:', branch.id, err);
+            this.onError.emit(err instanceof Error ? err : new Error(String(err)));
+            await branchStore.confirmPendingBranch(branch);
+            continue;
+          }
+          throw err;
+        }
+        await branchStore.confirmPendingBranch(branch);
       } catch (err) {
         console.error('Failed to sync pending branch update:', branch.id, err);
         this.onError.emit(err instanceof Error ? err : new Error(String(err)));
@@ -629,9 +669,21 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       if (!this._canSend()) break;
 
       try {
-        await branchApi.deleteBranch(branch.id);
+        try {
+          await branchApi.deleteBranch(branch.id);
+        } catch (err) {
+          // Already gone server-side is the delete satisfied, not a failure to break the pass on
+          // — same reasoning as the doc tombstone drain in `syncAllKnownDocs`. 410 is authoritative
+          // for any tombstone: the source doc was deleted and the server cascaded the branch. 404
+          // counts only for a tombstone written over an unconfirmed create, which may name a
+          // branch the server never received; for a branch the server is known to have, a 404 is
+          // indistinguishable from routing noise, and clearing on it would strand the branch.
+          const alreadyGone =
+            this._isDocDeletedError(err) || (branch.createUnconfirmed === true && this._isDocNotFoundError(err));
+          if (!alreadyGone) throw err;
+        }
 
-        // Server confirmed the delete — remove the tombstone from the local store
+        // Server confirmed the delete (or never had the branch) — remove the tombstone locally
         await branchStore.removeBranches([branch.id]);
       } catch (err) {
         console.error('Failed to sync pending branch deletion:', branch.id, err);
@@ -2316,6 +2368,18 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
    */
   protected _isDocNotFoundError(err: unknown): boolean {
     return isStatusError(err) && err.code === ErrorCodes.DOC_NOT_FOUND;
+  }
+
+  /**
+   * A server verdict that this caller may not write the branch (403, or 402 where a plan gates
+   * it) — final for the edit in hand, unlike 401, which re-auth heals. Duck-typed like the
+   * helpers above. Used by the pending-branch update pass to discard a refused edit instead of
+   * retrying it forever ahead of every edit queued behind it.
+   */
+  protected _isBranchWriteRefused(err: unknown): boolean {
+    return (
+      isStatusError(err) && (err.code === ErrorCodes.DOC_FORBIDDEN || err.code === ErrorCodes.DOC_PAYMENT_REQUIRED)
+    );
   }
 
   /**

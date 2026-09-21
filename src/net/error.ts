@@ -26,6 +26,8 @@ export const ErrorCodes = {
   DOC_NOT_FOUND: 404,
   /** Caller is not authenticated (no/invalid credentials). */
   DOC_UNAUTHORIZED: 401,
+  /** Payment required — a plan gates this operation. */
+  DOC_PAYMENT_REQUIRED: 402,
   /** Caller is authenticated but not authorized for this doc. */
   DOC_FORBIDDEN: 403,
 } as const;

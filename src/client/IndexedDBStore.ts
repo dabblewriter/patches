@@ -805,20 +805,21 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     const existing = await branchStore.get<StoredBranch>(branchId);
     if (!existing) throw new Error(`Branch ${branchId} not found`);
 
-    if (existing.pendingOp === 'create') {
-      // Never synced — just remove it, no server call needed
-      await branchStore.delete(branchId);
-    } else {
-      // Save as a tombstone for PatchesSync to delete on the server
-      const tombstone: StoredBranch = {
-        ...existing,
-        modifiedAt: Date.now(),
-        pendingOp: 'delete',
-        deleted: true,
-        _pending: 1,
-      };
-      await branchStore.put<StoredBranch>(tombstone);
-    }
+    // Always a tombstone for PatchesSync to delete on the server — even for a row still flagged
+    // 'create'. Removing such a row outright looks free (the server never heard of it) but the
+    // flag cannot tell "never sent" from "in flight": a create the sync layer has already put on
+    // the wire lands after the row is gone, nothing is left to delete it with, and the next full
+    // list brings the branch back. `createUnconfirmed` records which case the delete pass may be
+    // in, so a 404 on that delete counts as done instead of blocking the pass.
+    const tombstone: StoredBranch = {
+      ...existing,
+      modifiedAt: Date.now(),
+      pendingOp: 'delete',
+      deleted: true,
+      _pending: 1,
+    };
+    if (existing.pendingOp === 'create') tombstone.createUnconfirmed = true;
+    await branchStore.put<StoredBranch>(tombstone);
     await tx.complete();
   }
 
@@ -826,6 +827,10 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
     const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
     const existing = await branchStore.get<StoredBranch>(branchId);
     if (!existing) throw new Error(`Branch ${branchId} not found`);
+    // A tombstone is not editable: flipping its `pendingOp` to 'update' would cancel the delete
+    // before it reached the server, and the next full list would bring the branch back. Its own
+    // message, so a report of it is not mistaken for a row that is genuinely missing.
+    if (existing.deleted) throw new Error(`Branch ${branchId} is deleted`);
     Object.assign(existing, metadata);
     existing.modifiedAt = Date.now();
     // If never synced, keep pendingOp as 'create'
@@ -855,6 +860,7 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
 
         // Don't overwrite branches with pending local operations — the pending op
         // hasn't been synced yet and server data is stale relative to the local mutation.
+        // This is also why a save can never clear a flag: that is confirmPendingBranch's job.
         if (existing?.pendingOp && !branch.pendingOp) return;
 
         const stored: StoredBranch = { ...branch, _docId: docId };
@@ -870,6 +876,35 @@ export class IndexedDBStore implements PatchesStore, BranchClientStore {
         return branchStore.put<StoredBranch>(stored);
       })
     );
+    await tx.complete();
+  }
+
+  async confirmPendingBranch(branch: Branch): Promise<void> {
+    const [tx, branchStore] = await this.transaction(['branches'], 'readwrite');
+    const existing = await branchStore.get<StoredBranch>(branch.id);
+    if (existing?.pendingOp === 'delete') {
+      // A delete queued since the read supersedes the confirmed op; the delete pass owns the row.
+      // But the row is no longer an unsent create: a 404 on that delete is noise now, not proof.
+      if (existing.createUnconfirmed) {
+        delete existing.createUnconfirmed;
+        await branchStore.put<StoredBranch>(existing);
+      }
+    } else if (existing?.pendingOp) {
+      if (existing.modifiedAt > branch.modifiedAt) {
+        // Mutated again after the sync read it — the server has the older state, so the row must
+        // still go out. A row still flagged 'create' can only have been sent as one (updateBranch
+        // keeps that flag), and the create is on the server now: what remains to send is the edit.
+        if (existing.pendingOp === 'create') {
+          existing.pendingOp = 'update';
+          await branchStore.put<StoredBranch>(existing);
+        }
+      } else {
+        delete existing.pendingOp;
+        delete existing._pending;
+        await branchStore.put<StoredBranch>(existing);
+      }
+    }
+    // Otherwise gone or already clean: nothing to clear.
     await tx.complete();
   }
 

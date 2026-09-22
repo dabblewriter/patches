@@ -91,6 +91,32 @@ describe('OTDoc — applyChanges echo-skip', () => {
     expect(doc.state).toEqual({ title: 'world', count: 0 });
   });
 
+  it('recomputes on a pure echo when the rebase dropped a queued row (a quarantined change, DAB-1296)', () => {
+    // Two local changes queued; the first was ejected in another context, and the algorithm's
+    // rebase declines to carry it — so the echo of the second arrives with NO rebased pending.
+    doc.change((patch, path) => {
+      patch.replace(path.title, 'refused');
+    });
+    const refusedOps = (doc.onChange.emit as any).mock.calls[0][0];
+    doc.applyChanges([makeChange('c-refused', 5, 6, refusedOps, false)]);
+    doc.change((patch, path) => {
+      patch.replace(path.count, 1);
+    });
+    const keptOps = (doc.onChange.emit as any).mock.calls[1][0];
+    doc.applyChanges([makeChange('c-kept', 5, 7, keptOps, false)]);
+    expect(doc.state).toEqual({ title: 'refused', count: 1 });
+    const updatesBefore = stateUpdates;
+
+    // Pure echo of c-kept (committed at rev 6 without c-refused), and nothing rebased behind it.
+    doc.applyChanges([makeChange('c-kept', 5, 6, keptOps, true)]);
+
+    expect(doc.hasPending).toBe(false);
+    expect(doc.committedRev).toBe(6);
+    // The pure-echo skip would have left 'refused' on screen with nothing queued to explain it.
+    expect(doc.state).toEqual({ title: 'hello', count: 1 });
+    expect(stateUpdates).toBe(updatesBefore + 1);
+  });
+
   it('emits a state update when server changes contain a foreign concurrent op (not a pure echo)', () => {
     doc.change((patch, path) => {
       patch.replace(path.title, 'mine');

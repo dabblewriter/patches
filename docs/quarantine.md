@@ -71,7 +71,43 @@ await patches.ejectPendingChange(docId, changeId, reason?, opts?);   // app-cons
 // would be dropped or rewritten — see "Safety gates".
 await patches.listQuarantinedChanges(docId?);
 await patches.discardQuarantinedChange(docId, changeId);
+await patches.dropQuarantinedPending(docId);   // the OTHER contexts, once an ejection is announced
 ```
+
+**Ejection is per context; every other context must be told.** `ejectPendingChange` rewrites
+the shared store and rebuilds the open doc _in the context that called it_. A second tab
+(or worker) with the same doc open still holds the ejected change in memory, and no
+rev-gated import can remove it — an ejection never advances the committed rev, so an
+equal-rev import declines, and the pending guards decline precisely because the ejected row
+is what is pending. Left there, the OT torn-write merge would fold the row back into the
+store on that tab's next receive (it is in memory and not in the store, which is exactly
+what a torn store write looks like), and the change would be re-sent, re-refused and
+re-ejected until the app's ejection budget capped the doc.
+
+Two guards close this. The OT merge skips any store-bound doc-only row whose id is
+quarantined, so the store never re-accepts an ejected change whichever tab is behind — and
+since the receive path then replaces the doc's pending with the rebased queue, the row also
+leaves that tab's memory on its next batch, with no message needed. On top of that,
+`dropQuarantinedPending(docId)` rebuilds the open doc from the store the moment it is told:
+the app calls it in every other context when it announces an ejection (the same fan-out
+that shows the user the toast), so the refused edit disappears with the toast rather than
+on the next commit, and a doc that gets no further batch is covered too. It returns the ids
+actually dropped, `[]` when there was nothing to do (including a doc whose store snapshot is
+gone — a delete racing the announcement), keeps an OT torn-write row (doc-only, not
+quarantined) through the rebuild, and never writes to the store. For LWW it is the doc's view
+only — LWW pending is path-keyed and its send path never reads an open doc, so resurrection is
+impossible there — and, because the doc cannot be matched by id, it reports **every**
+quarantined id for the doc, including entries retained from earlier ejections; reconcile
+against `listQuarantinedChanges` when the exact set matters.
+
+One residual on the OT send path: an ejected row this context still holds can sit _at or
+below_ the store tail (the ejection renumbers survivors down), where the torn-write report
+(`UnstoredPendingError`) can name it once — a change that is in fact safe in quarantine. It is
+filtered out whenever the quarantine set is already in hand; reading it on that path just to
+close the gap was judged not worth a read where there was none.
+
+A tab on an older library has neither guard; during a mixed-version deploy such a tab can
+still fold an ejected change back in until it reloads.
 
 `QuarantinedChange` is `{ docId, changeId, change, reason, quarantinedAt }`; `change.ops`
 carries the rejected content (e.g. `@txt` deltas hold the inserted text) for recovery UX.

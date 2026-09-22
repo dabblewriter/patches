@@ -687,6 +687,28 @@ export class Patches {
     return quarantined;
   }
 
+  /**
+   * The receiving side of a cross-context ejection: {@link ejectPendingChange} rebuilds the open
+   * doc in the context that ejected, and this rebuilds the copy open in THIS context, which
+   * still holds the ejected change in memory. Call it in every other context when an ejection
+   * is announced (a tab broadcast, a leader/follower message). A no-op unless this context's
+   * open doc holds quarantined work. See docs/quarantine.md, "Ejection is per context".
+   *
+   * @returns The quarantined change ids the rebuild dropped from the open doc — `[]` when the doc
+   *   is not open here, holds none, has no store snapshot (a delete racing the announcement), or
+   *   the algorithm has no cross-context ejection to reconcile. Exactness depends on the
+   *   algorithm: OT reports precisely the rows it removed; LWW pending is path-keyed and cannot
+   *   be matched by id, so LWW reports every quarantined id for the doc, including entries
+   *   retained from earlier ejections. Reconcile against {@link listQuarantinedChanges} when the
+   *   exact set matters.
+   */
+  async dropQuarantinedPending(docId: string): Promise<string[]> {
+    const doc = this.getOpenDoc(docId);
+    if (!doc) return [];
+    const algorithm = await this._resolveAlgorithmForDoc(docId);
+    return (await algorithm.dropQuarantinedPending?.(docId, doc)) ?? [];
+  }
+
   /** Lists quarantined changes for one doc, or across all algorithms when docId is omitted. */
   async listQuarantinedChanges(docId?: string): Promise<QuarantinedChange[]> {
     if (docId !== undefined) {

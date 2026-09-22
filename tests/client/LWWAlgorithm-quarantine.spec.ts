@@ -105,6 +105,40 @@ describe('LWWAlgorithm quarantine', () => {
       expect(doc.state).toEqual({ title: 'x' });
     });
 
+    it("dropQuarantinedPending rebuilds a SECOND context's open doc after the ejection", async () => {
+      const { store, algorithm } = await setup();
+      // The other tab: its own algorithm instance over the same store, doc open, and the
+      // change minted through it — so the ops sit in this doc's memory as pending.
+      const follower = new LWWAlgorithm(store);
+      const doc = follower.createDoc(DOC, await follower.loadDoc(DOC)) as LWWDoc<any>;
+      const sending = await capture(follower, [{ op: 'replace', path: '/title', value: 'POISON' }], doc);
+      expect(doc.state).toEqual({ title: 'POISON' });
+      expect(doc.hasPending).toBe(true);
+
+      // The writer ejects with no doc of its own; the follower's copy is untouched.
+      await algorithm.ejectPendingChange(DOC, sending.id, 'server rejected', undefined);
+      expect(doc.state).toEqual({ title: 'POISON' });
+
+      expect(await follower.dropQuarantinedPending(DOC, doc)).toEqual([sending.id]);
+
+      expect(doc.state).toEqual({ title: 'x' });
+      expect(doc.hasPending).toBe(false);
+      // Nothing to do without pending.
+      expect(await follower.dropQuarantinedPending(DOC, doc)).toEqual([]);
+    });
+
+    it('dropQuarantinedPending is [] when the store has no snapshot (a delete racing the announcement)', async () => {
+      const { store, algorithm } = await setup();
+      const follower = new LWWAlgorithm(store);
+      const doc = follower.createDoc(DOC, await follower.loadDoc(DOC)) as LWWDoc<any>;
+      const sending = await capture(follower, [{ op: 'replace', path: '/title', value: 'POISON' }], doc);
+      await algorithm.ejectPendingChange(DOC, sending.id, 'server rejected', undefined);
+      follower.loadDoc = async () => undefined;
+
+      await expect(follower.dropQuarantinedPending(DOC, doc)).resolves.toEqual([]);
+      expect(doc.state).toEqual({ title: 'POISON' }); // untouched — nothing was dropped
+    });
+
     it('returns null and mutates nothing when the id does not match the sending change', async () => {
       const { store, algorithm } = await setup();
       const sending = await capture(algorithm, [{ op: 'replace', path: '/title', value: 'y' }]);

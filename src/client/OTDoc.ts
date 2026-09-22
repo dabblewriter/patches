@@ -569,7 +569,21 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // re-apply them on the next rebuild (DAB-1366).
       this._pendingChanges = this._withoutCommitted(rebasedPending);
       this._checkLoaded();
-      if (!isPureEcho) {
+      // The pure-echo skip assumes the recomputed state would be data-identical to the current
+      // one. That stops holding when the algorithm's rebase handed back FEWER rows than the doc
+      // was queuing, none of them echoed: a row it declined to carry (a quarantined change the
+      // store had ejected in another context) is still applied in the current state, and only
+      // a recompute takes its effect back out of the view.
+      const kept = new Set(this._pendingChanges.map(c => c.id));
+      const echoed = new Set(serverChanges.map(c => c.id));
+      let droppedPending = false;
+      for (const id of priorPendingIds) {
+        if (!kept.has(id) && !echoed.has(id) && !this._committedIds.has(id)) {
+          droppedPending = true;
+          break;
+        }
+      }
+      if (!isPureEcho || droppedPending) {
         this._recomputeState();
       }
     } else {

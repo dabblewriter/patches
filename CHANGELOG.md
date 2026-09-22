@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.32.0](https://github.com/dabblewriter/patches/compare/v0.31.3...v0.32.0) (2026-09-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **client:** `BranchClientStore` gains a required `confirmPendingBranch(branch)` member; custom store implementations must add it. `updateBranch` now rejects for a locally deleted branch (`Branch <id> is deleted`) where it previously resolved and silently cancelled the delete.
+
+### Features
+
+* **client:** address review — drop quarantined rows from the torn-write report, [] on a missing snapshot, narrow the LWW contract ([c42f214](https://github.com/dabblewriter/patches/commit/c42f214ba37e7c5a5d57fc97f5ce59700e9e0001))
+* **client:** stop a second context resurrecting an ejected change ([86ed326](https://github.com/dabblewriter/patches/commit/86ed326176b9b61d93020a4966ea7247566c406e))
+* **client:** stop a second context resurrecting an ejected change ([a97ae9e](https://github.com/dabblewriter/patches/commit/a97ae9ec69cce4992cda77fe7afc8e29928273ad))
+
+
+### Bug Fixes
+
+* **client:** address review — declare the interface break, split the deleted-branch error, name 402 ([c28488a](https://github.com/dabblewriter/patches/commit/c28488a32fc26eb1566e639dee5509e30f47a876))
+* **client:** clear a branch's pending flag on confirm, and stop dead rows wedging the pass ([d734835](https://github.com/dabblewriter/patches/commit/d73483525b8c59cf45a2035df86b7b122620e1f0))
+
 ## [0.31.3](https://github.com/dabblewriter/patches/compare/v0.31.2...v0.31.3) (2026-09-15)
 
 

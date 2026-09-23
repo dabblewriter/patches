@@ -286,6 +286,45 @@ describe('convergence fuzz — OT panel', () => {
     }, 30_000);
   }
 
+  // A STRANDED OPTIMISTIC OP on the unstored path. Found by modelling what production does when
+  // the mint's bounded retry is exhausted — keep the ops, latch the write path, hand the change
+  // to the outbox (`mintAttemptLimit`, see OTFuzzConfig). The harness previously retried the
+  // mint forever, so a change could never be live in the open doc and absent from the store, and
+  // this whole class was unreachable. The same 2,000-seed fault screen is GREEN without the knob
+  // and fails here with it.
+  //
+  // Both seeds fail the same way, and the shape is the finding:
+  //
+  //   P2 (no pending changes)      PASSES
+  //   committedRev == server head  PASSES
+  //   committed state == head      PASSES, byte for byte
+  //   LIVE doc state == head       FAILS
+  //
+  //   doc residue: optimisticOps [[{ op: 'replace', path: '/title', … }]]
+  //                pendingChanges []   unstoredIds []   outbox (empty)
+  //
+  // The client is fully converged underneath; what diverges is an optimistic overlay that
+  // belongs to NO ledger — not pending, not unstored, not in the outbox. `_markUnstored` put the
+  // op on the doc and some outbox exit retired the row without taking it off again. The user-
+  // visible shape is a writer whose screen shows text that is committed nowhere and queued
+  // nowhere, with no error and no wedge — it survives until reload, because the overlay is
+  // memory-only.
+  //
+  // Not root-caused: which exit strands it (`dropResolvedPending`, the echo path in
+  // `applyServerChanges`, or `handleDocChange` accepting the row after all) is still open.
+  // Pinned per the suite convention so the seeds are not lost.
+  // Repro: FUZZ_FAULTS=1 FUZZ_UNSTORED=1 FUZZ_SEED=<seed> FUZZ_ITERATIONS=1 npm test -- tests/fuzz/convergence.spec.ts
+  for (const seed of [1000426, 1000725]) {
+    it.skip(`stranded optimistic op survives its outbox row under substrate faults (seed ${seed})`, async () => {
+      await runOTFuzz(seed, {
+        richOps: false,
+        clientStoreFailP: 0.04,
+        serverBackendFailP: 0.04,
+        mintAttemptLimit: 3,
+      });
+    }, 30_000);
+  }
+
   // DAB-1236 regressions (fixed): the "consumed-source move" class. The server's advance walk
   // threads ONE committed-ops value through the queue; when a queue entry superseded a
   // committed op the walk dropped it wholesale, and every LATER queue entry was transformed
@@ -466,14 +505,24 @@ describe.runIf(FUZZ_SEED !== undefined && FUZZ_ITERATIONS === 0)('convergence fu
 // FUZZ_RICH=1 runs the OT soak with the rich edit mix on (off in derived configs, see
 // otConfigFromSeed); the two modifiers combine. The rich mix is an OT knob, so it is ignored
 // — and not written into the seed label — for an LWW soak.
+// FUZZ_UNSTORED=1 bounds the mint retry at production's MAX_CHANGE_SUBMIT_ATTEMPTS (3) so an
+// exhausted mint is handed to the algorithm's OUTBOX instead of being retried until it lands.
+// Only meaningful with FUZZ_FAULTS=1 — nothing exhausts a retry without an injected store
+// fault. This is the ONLY way to reach the unstored machinery (`_unstored`, stub retirement,
+// `_confirmUnstoredEchoes`) from the fuzzer, and it is where the DAB-1581 reporter's client was
+// when its poison was minted. OT-only; see OTFuzzConfig.mintAttemptLimit.
+const FUZZ_UNSTORED = process.env.FUZZ_UNSTORED === '1' && FUZZ_ALGO !== 'lww';
 const FUZZ_FAULTS = process.env.FUZZ_FAULTS === '1';
 const FUZZ_RICH = process.env.FUZZ_RICH === '1' && FUZZ_ALGO !== 'lww';
 const FAULT_OVERRIDES = { clientStoreFailP: 0.04, serverBackendFailP: 0.04 };
 const OT_SOAK_OVERRIDES: Partial<OTFuzzConfig> = {
   ...(FUZZ_FAULTS ? FAULT_OVERRIDES : {}),
   ...(FUZZ_RICH ? { richOps: true } : {}),
+  ...(FUZZ_UNSTORED ? { mintAttemptLimit: 3 } : {}),
 };
-const SOAK_LABEL = [FUZZ_FAULTS && 'faults', FUZZ_RICH && 'rich'].filter(Boolean).join(', ');
+const SOAK_LABEL = [FUZZ_FAULTS && 'faults', FUZZ_RICH && 'rich', FUZZ_UNSTORED && 'unstored']
+  .filter(Boolean)
+  .join(', ');
 
 describe.runIf(FUZZ_ITERATIONS > 0)('convergence fuzz — soak', () => {
   const base = FUZZ_SEED ?? 1_000_000;

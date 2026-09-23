@@ -1,3 +1,4 @@
+import { createId } from 'crypto-id';
 import { vi } from 'vitest';
 import { MissingChangesError } from '../../src/algorithms/ot/client/applyCommittedChanges.js';
 import { getSnapshotAtRevision } from '../../src/algorithms/ot/server/getSnapshotAtRevision.js';
@@ -75,6 +76,26 @@ export interface OTFuzzConfig {
    * class). Surfaces to clients as a failed commit/read; the retry path is a later flush.
    */
   serverBackendFailP: number;
+  /**
+   * Cap on mint attempts before the change is handed to the algorithm's OUTBOX as UNSTORED,
+   * mirroring `Patches._processDocChange`'s `MAX_CHANGE_SUBMIT_ATTEMPTS` (3: the initial
+   * attempt plus 2 retries). Undefined/0 keeps the harness's original unbounded retry, so
+   * every existing seed stays byte-identical — this knob is override-only and is never drawn
+   * in `otConfigFromSeed`.
+   *
+   * Why it exists (DAB-1557): unbounded retry means a change ALWAYS reaches the store before
+   * the script moves on, so the fuzzer could never produce a change that is live in the open
+   * doc but absent from the store. Production can and does — on exhaustion it keeps the ops,
+   * latches the write path, and hands the change to `queueUnstoredChange` to go out from
+   * memory on the next flush. That outbox machinery (`_unstored`, `_markUnstored`,
+   * `confirmUnstoredCommitted`, `_confirmUnstoredEchoes`, stub retirement) was therefore
+   * reachable in production and unreachable here — and `UnstoredPendingError` is exactly the
+   * state the DAB-1581 reporter's client was in when its poison was minted.
+   *
+   * With the cap on, the harness also passes a STABLE id across attempts, as production does,
+   * so a persist that later succeeds cannot double-commit the change.
+   */
+  mintAttemptLimit?: number;
 }
 
 interface Packet {
@@ -289,13 +310,37 @@ export class OTFuzzHarness {
     // Mirror Patches._processDocChange (#85): a store fault at the mint path keeps the
     // optimistic ops and re-submits — nothing rejected the work, discarding it is data loss.
     // The fault fails before any write, so the retry re-mints from a clean slate.
+    //
+    // With `mintAttemptLimit` set the retry is BOUNDED, as production's is: on exhaustion the
+    // ops are kept (never rolled back) and the change goes to the outbox as unstored, which is
+    // the only way to reach the `_unstored` machinery from here. See the config docstring.
+    const limit = this.cfg.mintAttemptLimit ?? 0;
+    // Only minted under the cap: `handleDocChange` draws its own id when none is passed, so
+    // requesting one unconditionally would shift every existing seed's id sequence.
+    const stableId = limit > 0 ? createId(12) : undefined;
     let changes;
-    for (;;) {
+    for (let attempt = 1; ; attempt++) {
       try {
-        changes = await client.algorithm.handleDocChange(DOC_ID, ops, client.doc, {});
+        changes = stableId
+          ? await client.algorithm.handleDocChange(DOC_ID, ops, client.doc, {}, stableId)
+          : await client.algorithm.handleDocChange(DOC_ID, ops, client.doc, {});
         break;
       } catch (err) {
         if (!isInjectedFault(err)) throw err;
+        if (limit > 0 && attempt >= limit) {
+          // Exhausted. Production does NOT discard: the store refused it, the server still
+          // can, so the change is handed to the outbox under the same stable id and goes out
+          // on the next flush. `getPendingToSend` drains the outbox, so the harness's existing
+          // flush picks it up with no further wiring.
+          const queued = client.algorithm.queueUnstoredChange?.(DOC_ID, ops, client.doc, {}, stableId!);
+          if (queued) {
+            client.minted.add(queued.id);
+            this.tr(`edit ${client.name}: mint STORE FAULT ×${attempt} — UNSTORED, queued to outbox (${desc})`);
+          } else {
+            this.tr(`edit ${client.name}: mint STORE FAULT ×${attempt} — outbox refused, ops memory-only (${desc})`);
+          }
+          return;
+        }
         this.tr(`edit ${client.name}: mint STORE FAULT — kept ops, retrying (#85)`);
       }
     }
@@ -810,9 +855,26 @@ export class OTFuzzHarness {
       }
       const liveJson = stableStringify(client.doc.state);
       if (liveJson !== headJson) {
+        // Committed state, rev and the pending queue all matched above, so anything left here
+        // is an optimistic overlay that belongs to no queue. Dump the doc's internals: that
+        // residue is the finding, not the field that happens to differ.
+        const doc = client.doc as any;
+        const residue = {
+          optimisticOps: doc._optimisticOps,
+          unstoredIds: [...(doc.unstoredChangeIds ?? [])],
+          pendingChanges: doc.getPendingChanges?.().map((c: Change) => ({ id: c.id, rev: c.rev, ops: c.ops })),
+          outboxRows: (client.algorithm as any)._outbox?.get(DOC_ID)?.map((r: any) => ({
+            id: r.change?.id,
+            rev: r.change?.rev,
+            committedRev: r.change?.committedRev,
+            frozen: !r.ops,
+            ops: r.change?.ops,
+          })),
+        };
         throw new Error(
           `P1 violated: ${client.name} live doc state diverged from server head\n` +
-            `server: ${headJson}\n${client.name}: ${liveJson}`
+            `server: ${headJson}\n${client.name}: ${liveJson}\n` +
+            `doc residue (committed state, rev and pending queue ALL matched): ${stableStringify(residue)}`
         );
       }
     }

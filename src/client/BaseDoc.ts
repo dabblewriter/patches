@@ -179,10 +179,16 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
   private _flushAwaiter?: () => Promise<void> | undefined;
   /** Latches true the first time _setFlushAwaiter is called. Standalone docs stay false. */
   private _flushAwaiterWired = false;
+  /**
+   * Whether Patches has latched this doc's write path. A latched doc keeps its optimistic ops
+   * on purpose (only Patches.retrySavingChanges re-drives them), so flush() must not wait for them.
+   */
+  private _isWriteLatched?: () => boolean;
 
-  /** Internal: called by Patches.openDoc to wire up flush()'s queue accessor. */
-  _setFlushAwaiter(getter: () => Promise<void> | undefined): void {
+  /** Internal: called by Patches.openDoc to wire up flush()'s queue accessor and write-latch probe. */
+  _setFlushAwaiter(getter: () => Promise<void> | undefined, isWriteLatched?: () => boolean): void {
     this._flushAwaiter = getter;
+    this._isWriteLatched = isWriteLatched;
     this._flushAwaiterWired = true;
   }
 
@@ -196,6 +202,11 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
    * that WAS wired but whose queue entry has been cleared (post-closeDoc with an
    * in-flight chain), we yield to the macrotask queue until the captured chain
    * shifts the ops.
+   *
+   * A write-latched doc resolves once its queue reaches a fixed point, with its optimistic
+   * ops still applied: the latch retains them until Patches.retrySavingChanges, so nothing
+   * in the queue will drain them. Waiting on them re-awaited the same settled tail forever,
+   * a microtask loop that starved every timer, a caller's timeout race included (DAB-1142).
    *
    * **setTimeout(0) yield**: per the HTML spec, nested setTimeout(0) is clamped to
    * 4ms after the 5th level — so a flush spinning over many in-flight ops post-close
@@ -217,8 +228,14 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
       }
       await tail;
       // After awaiting, check whether a new change() appended a fresh queue tail.
-      // If the tail object is the same and optimistic ops are drained, we're done.
-      if (this._flushAwaiter?.() === tail && this._optimisticOps.length === 0) return;
+      // A fresh tail means more work was queued: go round and await it.
+      if (this._flushAwaiter?.() !== tail) continue;
+      // The queue is at a fixed point. Done once optimistic ops are drained, or when the
+      // write latch is what holds them (nothing queued will drain those).
+      if (this._optimisticOps.length === 0 || this._isWriteLatched?.()) return;
+      // Settled tail, ops still pending for another reason: re-awaiting the same resolved
+      // promise would only spin microtasks, so yield to the macrotask queue first.
+      await new Promise<void>(r => setTimeout(r, 0));
     }
   }
 

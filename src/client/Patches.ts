@@ -466,9 +466,13 @@ export class Patches {
       // Create the appropriate doc type via algorithm (now takes docId and snapshot)
       const doc = algorithm.createDoc<any>(docId, snapshot);
 
-      // Wire up flush() so it can await the in-flight change queue for this doc.
+      // Wire up flush() so it can await the in-flight change queue for this doc, and stop
+      // waiting on the optimistic ops a write latch retains.
       const baseDoc = doc as unknown as BaseDoc<any>;
-      baseDoc._setFlushAwaiter(() => this._changeQueues.get(docId));
+      baseDoc._setFlushAwaiter(
+        () => this._changeQueues.get(docId),
+        () => this._writeLatches.has(docId)
+      );
 
       // Hydration dropped pending changes (strict-apply failures — see the constructor
       // recovery in OTDoc). Surface them BEFORE any consumer can persist the truncated

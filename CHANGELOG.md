@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.32.1](https://github.com/dabblewriter/patches/compare/v0.32.0...v0.32.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **sync:** keep a failed store read from stranding newly tracked docs (DAB-1558) ([777f189](https://github.com/dabblewriter/patches/commit/777f1898b812fc444597172c29eceb491b0e6e6f))
+* **sync:** keep a failed store read from stranding newly tracked docs (DAB-1558) ([2f6e9ed](https://github.com/dabblewriter/patches/commit/2f6e9eda9b27b949134df625e9680c1b7bc1a29f))
+
 ## [0.32.0](https://github.com/dabblewriter/patches/compare/v0.31.3...v0.32.0) (2026-09-22)
 
 

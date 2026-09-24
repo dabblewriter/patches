@@ -286,6 +286,34 @@ describe('convergence fuzz — OT panel', () => {
     }, 30_000);
   }
 
+  // The mint-exhaustion path (`mintAttemptLimit`, see OTFuzzConfig) now models the FULL
+  // production shape: on exhaustion the ops are kept and handed to the outbox, AND the doc's
+  // write path is LATCHED (`Patches._writeLatches`) — every later edit on that client goes
+  // straight to the outbox too, with no persist attempt, until a seeded action equivalent to
+  // `Patches.retrySavingChanges()` clears the latch and re-drives the retained optimistic
+  // entries in capture order. Previously the harness queued the exhausted change but never
+  // latched, so a client's LATER edits still raced straight to the store/server while the
+  // unstored entry sat ahead of them in `_optimisticOps` — an interleaving impossible in real
+  // production. That un-latched interleaving is what produced the "stranded optimistic op"
+  // failures originally pinned here at seeds 1000426 and 1000725: with the latch now modeled,
+  // BOTH seeds pass — it was a harness artifact of the un-latched mint path, not a production
+  // defect. (Verified: `FUZZ_FAULTS=1 FUZZ_UNSTORED=1 FUZZ_SEED=1000426 FUZZ_ITERATIONS=1` and
+  // `…SEED=1000725…` both green.)
+  //
+  // Re-running the same 2,000-seed fault screen with the latch modeled turned up two more
+  // failing seeds (1001691, 1001909) that looked like a new outbox/latch-path corruption at
+  // first read — but the control was unfair: setting `mintAttemptLimit` also switches on the
+  // retry action's weight (`step`'s `weighted()` call goes from a total of 100 to 104), so
+  // "same seed, limit unset" draws a different action at every step, not the same script minus
+  // the outbox path. The fair control keeps the weights identical and never exhausts
+  // (`mintAttemptLimit: 1_000_000_000`); both seeds fail IDENTICALLY under it, with no
+  // `UNSTORED`/`LATCHED`/retry line in the trace, so neither failure touches the code this PR
+  // adds — they're the weight-shifted script landing on the same fault-path corruption class
+  // already pinned below as DAB-1269 (1001691's "invalid array index: /tags/2" is the same
+  // signature as DAB-1269's 1001636). Not re-pinned here to avoid a false-premise duplicate;
+  // rooting out which DAB-1269 seed/config they coincide with is that pin's follow-up, not
+  // this harness change's.
+  //
   // DAB-1236 regressions (fixed): the "consumed-source move" class. The server's advance walk
   // threads ONE committed-ops value through the queue; when a queue entry superseded a
   // committed op the walk dropped it wholesale, and every LATER queue entry was transformed
@@ -466,14 +494,24 @@ describe.runIf(FUZZ_SEED !== undefined && FUZZ_ITERATIONS === 0)('convergence fu
 // FUZZ_RICH=1 runs the OT soak with the rich edit mix on (off in derived configs, see
 // otConfigFromSeed); the two modifiers combine. The rich mix is an OT knob, so it is ignored
 // — and not written into the seed label — for an LWW soak.
+// FUZZ_UNSTORED=1 bounds the mint retry at production's MAX_CHANGE_SUBMIT_ATTEMPTS (3) so an
+// exhausted mint is handed to the algorithm's OUTBOX instead of being retried until it lands.
+// Only meaningful with FUZZ_FAULTS=1 — nothing exhausts a retry without an injected store
+// fault. This is the ONLY way to reach the unstored machinery (`_unstored`, stub retirement,
+// `_confirmUnstoredEchoes`) from the fuzzer, and it is where the DAB-1581 reporter's client was
+// when its poison was minted. OT-only; see OTFuzzConfig.mintAttemptLimit.
+const FUZZ_UNSTORED = process.env.FUZZ_UNSTORED === '1' && FUZZ_ALGO !== 'lww';
 const FUZZ_FAULTS = process.env.FUZZ_FAULTS === '1';
 const FUZZ_RICH = process.env.FUZZ_RICH === '1' && FUZZ_ALGO !== 'lww';
 const FAULT_OVERRIDES = { clientStoreFailP: 0.04, serverBackendFailP: 0.04 };
 const OT_SOAK_OVERRIDES: Partial<OTFuzzConfig> = {
   ...(FUZZ_FAULTS ? FAULT_OVERRIDES : {}),
   ...(FUZZ_RICH ? { richOps: true } : {}),
+  ...(FUZZ_UNSTORED ? { mintAttemptLimit: 3 } : {}),
 };
-const SOAK_LABEL = [FUZZ_FAULTS && 'faults', FUZZ_RICH && 'rich'].filter(Boolean).join(', ');
+const SOAK_LABEL = [FUZZ_FAULTS && 'faults', FUZZ_RICH && 'rich', FUZZ_UNSTORED && 'unstored']
+  .filter(Boolean)
+  .join(', ');
 
 describe.runIf(FUZZ_ITERATIONS > 0)('convergence fuzz — soak', () => {
   const base = FUZZ_SEED ?? 1_000_000;

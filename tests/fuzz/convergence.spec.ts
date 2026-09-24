@@ -300,37 +300,20 @@ describe('convergence fuzz — OT panel', () => {
   // defect. (Verified: `FUZZ_FAULTS=1 FUZZ_UNSTORED=1 FUZZ_SEED=1000426 FUZZ_ITERATIONS=1` and
   // `…SEED=1000725…` both green.)
   //
-  // Re-running the same 2,000-seed fault screen with the latch modeled surfaced two DIFFERENT
-  // seeds failing in a more serious shape — not a stray client-side overlay, but a COMMITTED
-  // SERVER CHANGE that fails strict replay (P4-level corruption, not just P1). Both seeds are
-  // green under the identical fault config with `mintAttemptLimit` unset (plain
-  // `FUZZ_FAULTS=1 FUZZ_SEED=<seed> FUZZ_ITERATIONS=1`), so the defect is specific to a change
-  // that passed through the outbox/latch path, not a pre-existing fault-only divergence (e.g.
-  // the separately-pinned DAB-1269 class) landing on these seed numbers by coincidence:
+  // Re-running the same 2,000-seed fault screen with the latch modeled turned up two more
+  // failing seeds (1001691, 1001909) that looked like a new outbox/latch-path corruption at
+  // first read — but the control was unfair: setting `mintAttemptLimit` also switches on the
+  // retry action's weight (`step`'s `weighted()` call goes from a total of 100 to 104), so
+  // "same seed, limit unset" draws a different action at every step, not the same script minus
+  // the outbox path. The fair control keeps the weights identical and never exhausts
+  // (`mintAttemptLimit: 1_000_000_000`); both seeds fail IDENTICALLY under it, with no
+  // `UNSTORED`/`LATCHED`/retry line in the trace, so neither failure touches the code this PR
+  // adds — they're the weight-shifted script landing on the same fault-path corruption class
+  // already pinned below as DAB-1269 (1001691's "invalid array index: /tags/2" is the same
+  // signature as DAB-1269's 1001636). Not re-pinned here to avoid a false-premise duplicate;
+  // rooting out which DAB-1269 seed/config they coincide with is that pin's follow-up, not
+  // this harness change's.
   //
-  //   seed 1001691: "Failed to apply change 000000000003 (rev 6, index 1 of batch):
-  //                  [op:replace] invalid array index: /tags/2"
-  //   seed 1001909: "Failed to apply change 000000000008 (rev 12, index 0 of batch):
-  //                  [op:move] path not found: /sections/m43"
-  //
-  // Not root-caused: both scripts route a change through `queueUnstoredChange` (either the
-  // original exhausted mint or a later edit captured while latched) alongside concurrent
-  // moves/array edits from other clients; which side of the outbox resend — the change's
-  // baseRev stamping, or the server's transform of an outbox-originated change against
-  // concurrent ops on the same array/path — lets a since-invalidated index or move source
-  // reach the committed log uncaught is still open. Pinned per the suite convention.
-  // Repro: FUZZ_FAULTS=1 FUZZ_UNSTORED=1 FUZZ_SEED=<seed> FUZZ_ITERATIONS=1 npm test -- tests/fuzz/convergence.spec.ts
-  for (const seed of [1001691, 1001909]) {
-    it.skip(`unstored/latched change corrupts the committed log under substrate faults (seed ${seed})`, async () => {
-      await runOTFuzz(seed, {
-        richOps: false,
-        clientStoreFailP: 0.04,
-        serverBackendFailP: 0.04,
-        mintAttemptLimit: 3,
-      });
-    }, 30_000);
-  }
-
   // DAB-1236 regressions (fixed): the "consumed-source move" class. The server's advance walk
   // threads ONE committed-ops value through the queue; when a queue entry superseded a
   // committed op the walk dropped it wholesale, and every LATER queue entry was transformed

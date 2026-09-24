@@ -7,6 +7,7 @@ import { OTAlgorithm } from '../../src/client/OTAlgorithm.js';
 import { OTInMemoryStore } from '../../src/client/OTInMemoryStore.js';
 import type { OTDoc } from '../../src/client/OTDoc.js';
 import type { JSONPatch } from '../../src/json-patch/JSONPatch.js';
+import type { JSONPatchOp } from '../../src/json-patch/types.js';
 import { OTServer } from '../../src/server/OTServer.js';
 import type { Change, PatchesSnapshot, PatchesState } from '../../src/types.js';
 import { createFaultInjector, isInjectedFault, withInjectedFaults, type FaultInjector } from './faultInjection.js';
@@ -115,6 +116,20 @@ interface FuzzClient {
   minted: Set<string>;
   /** Minted ids observed to be legitimately resolved to no-ops (rebased away). */
   eliminated: Set<string>;
+  /**
+   * Mirrors `Patches._writeLatches`: set when a mint exhausts `mintAttemptLimit`. While true,
+   * `mint()` never attempts `handleDocChange` for a NEW edit either — it goes straight to the
+   * outbox, same as `Patches._handleDocChange`'s already-latched branch. Cleared only by the
+   * seeded retry action (`retrySaving`, mirroring `Patches.retrySavingChanges`).
+   */
+  latched: boolean;
+  /**
+   * Mirrors `Patches._changeStableIds`: the stable id assigned to an optimistic entry (by ops
+   * array identity), reused across every mint attempt AND a later retry re-drive of the same
+   * entry, so a persist that lands late can't double-commit. Only populated when
+   * `mintAttemptLimit` is set (see `mint`'s `limit` guard).
+   */
+  stableIds: WeakMap<JSONPatchOp[], string>;
 }
 
 const DOC_ID = 'fuzz-doc';
@@ -209,6 +224,8 @@ export class OTFuzzHarness {
         inbox: [],
         minted: new Set(),
         eliminated: new Set(),
+        latched: false,
+        stableIds: new WeakMap(),
       });
     }
   }
@@ -226,7 +243,11 @@ export class OTFuzzHarness {
   }
 
   private async step(): Promise<void> {
-    const action = this.rng.weighted([46, 16, 22, 4, 4, 4, 4]);
+    // The retry action (index 7) only draws when `mintAttemptLimit` is set — 0 weight there
+    // never wins (see prng.ts `weighted`), so every existing seed's action sequence, RNG draw
+    // count, and byte-identical script are unaffected (same pattern as `richOps`'s conditional
+    // weights in `edit()`).
+    const action = this.rng.weighted([46, 16, 22, 4, 4, 4, 4, this.cfg.mintAttemptLimit ? 4 : 0]);
     switch (action) {
       case 0:
         return this.edit(this.rng.pick(this.clients));
@@ -262,6 +283,13 @@ export class OTFuzzHarness {
         this.advance(minutes * 60_000);
         this.tr(`time-jump +${minutes}m`);
         return;
+      }
+      case 7: {
+        // Mirrors an app-triggered Patches.retrySavingChanges() call: only meaningful once a
+        // mint has exhausted its attempts and latched the doc's write path.
+        const client = this.pickWhere(c => c.latched);
+        if (client) return this.retrySaving(client);
+        return this.edit(this.rng.pick(this.clients));
       }
     }
   }
@@ -300,24 +328,62 @@ export class OTFuzzHarness {
   // ─── Actions ──────────────────────────────────────────────────────────────
 
   private async mint(client: FuzzClient, mutate: (patch: JSONPatch) => void, desc: string): Promise<void> {
-    let ops: any[] = [];
+    let ops: JSONPatchOp[] = [];
     const unsubscribe = client.doc.onChange(emitted => {
       ops = emitted;
     });
     client.doc.change(patch => mutate(patch));
     unsubscribe();
     if (ops.length === 0) return;
-    // Mirror Patches._processDocChange (#85): a store fault at the mint path keeps the
-    // optimistic ops and re-submits — nothing rejected the work, discarding it is data loss.
-    // The fault fails before any write, so the retry re-mints from a clean slate.
-    //
     // With `mintAttemptLimit` set the retry is BOUNDED, as production's is: on exhaustion the
     // ops are kept (never rolled back) and the change goes to the outbox as unstored, which is
     // the only way to reach the `_unstored` machinery from here. See the config docstring.
     const limit = this.cfg.mintAttemptLimit ?? 0;
     // Only minted under the cap: `handleDocChange` draws its own id when none is passed, so
-    // requesting one unconditionally would shift every existing seed's id sequence.
-    const stableId = limit > 0 ? createId(12) : undefined;
+    // requesting one unconditionally would shift every existing seed's id sequence. Stable
+    // across every mint attempt AND a later retry re-drive of this same entry (mirrors
+    // Patches._stableIdFor, keyed by the ops array's identity).
+    const stableId = limit > 0 ? this.stableIdFor(client, ops) : undefined;
+
+    if (limit > 0 && client.latched) {
+      // Mirror Patches._handleDocChange: the doc's write path is already latched by a prior
+      // exhausted submit, so this NEW edit doesn't get an attempt either — straight to the
+      // outbox (or memory-only) under its own stable id. Only a seeded retry action
+      // (mirroring Patches.retrySavingChanges) clears the latch.
+      this.queueUnstored(client, ops, stableId!, `edit ${client.name}: LATCHED — no persist attempt (${desc})`);
+      return;
+    }
+
+    await this.tryPersist(client, ops, stableId, desc, limit);
+  }
+
+  /** Mirrors `Patches._stableIdFor`: one id per optimistic entry, minted once and cached by
+   *  the ops array's identity so a mint retry and a later retry-redrive of the same entry
+   *  reuse it (server id-dedup then can't double-commit). */
+  private stableIdFor(client: FuzzClient, ops: JSONPatchOp[]): string {
+    let id = client.stableIds.get(ops);
+    if (!id) {
+      id = createId(12);
+      client.stableIds.set(ops, id);
+    }
+    return id;
+  }
+
+  /**
+   * Attempt to persist `ops` via `handleDocChange`, retrying injected faults up to `limit`
+   * attempts (mirrors Patches._processDocChange's #85 retry-then-latch loop). On success,
+   * records the minted change id(s). On exhaustion (only possible when `limit > 0`), LATCHES
+   * the client's write path and hands the change to the outbox under `stableId` — mirroring
+   * `Patches._processDocChange`'s environment-failure branch, which sets `_writeLatches`
+   * alongside `queueUnstoredChange`.
+   */
+  private async tryPersist(
+    client: FuzzClient,
+    ops: JSONPatchOp[],
+    stableId: string | undefined,
+    desc: string,
+    limit: number
+  ): Promise<void> {
     let changes;
     for (let attempt = 1; ; attempt++) {
       try {
@@ -329,16 +395,16 @@ export class OTFuzzHarness {
         if (!isInjectedFault(err)) throw err;
         if (limit > 0 && attempt >= limit) {
           // Exhausted. Production does NOT discard: the store refused it, the server still
-          // can, so the change is handed to the outbox under the same stable id and goes out
-          // on the next flush. `getPendingToSend` drains the outbox, so the harness's existing
-          // flush picks it up with no further wiring.
-          const queued = client.algorithm.queueUnstoredChange?.(DOC_ID, ops, client.doc, {}, stableId!);
-          if (queued) {
-            client.minted.add(queued.id);
-            this.tr(`edit ${client.name}: mint STORE FAULT ×${attempt} — UNSTORED, queued to outbox (${desc})`);
-          } else {
-            this.tr(`edit ${client.name}: mint STORE FAULT ×${attempt} — outbox refused, ops memory-only (${desc})`);
-          }
+          // can, so the change is handed to the outbox under the same stable id AND the doc's
+          // write path is LATCHED — no further change on this doc is minted/sent until a
+          // seeded retry re-drives it (mirrors Patches.retrySavingChanges).
+          client.latched = true;
+          this.queueUnstored(
+            client,
+            ops,
+            stableId!,
+            `edit ${client.name}: mint STORE FAULT ×${attempt} — LATCHED (${desc})`
+          );
           return;
         }
         this.tr(`edit ${client.name}: mint STORE FAULT — kept ops, retrying (#85)`);
@@ -346,6 +412,47 @@ export class OTFuzzHarness {
     }
     for (const change of changes) client.minted.add(change.id);
     this.tr(`edit ${client.name}: ${desc}`);
+  }
+
+  /** Hand `ops` to the algorithm's outbox under `stableId` (`OTAlgorithm.queueUnstoredChange`)
+   *  and track the resulting id as minted, so property 3 accounts for it once it goes out on a
+   *  later flush (`getPendingToSend` drains the outbox — no further wiring needed here). */
+  private queueUnstored(client: FuzzClient, ops: JSONPatchOp[], stableId: string, note: string): void {
+    const queued = client.algorithm.queueUnstoredChange?.(DOC_ID, ops, client.doc, {}, stableId);
+    if (queued) {
+      client.minted.add(queued.id);
+      this.tr(`${note} — UNSTORED, queued to outbox`);
+    } else {
+      this.tr(`${note} — outbox refused, ops memory-only`);
+    }
+  }
+
+  /**
+   * Mirrors `Patches.retrySavingChanges`: clears the write latch and re-drives every retained
+   * optimistic entry (`doc._getOptimisticEntries()`, oldest first — capture order) back
+   * through the submit path. A still-faulty environment can re-exhaust and re-latch mid-drive;
+   * once that happens, entries still to come in THIS SAME redrive take the same already-latched
+   * branch a fresh edit would (queued straight to the outbox under their own stable id, no
+   * persist attempt) — mirroring how `_handleDocChange`'s serialized per-doc queue processes a
+   * `Promise.all` of re-drives one at a time, in enqueue order.
+   */
+  private async retrySaving(client: FuzzClient): Promise<void> {
+    if (!client.latched) return;
+    client.latched = false;
+    const entries = client.doc._getOptimisticEntries();
+    this.tr(
+      `retry ${client.name}: clearing latch, re-driving ${entries.length} optimistic ${entries.length === 1 ? 'entry' : 'entries'}`
+    );
+    const limit = this.cfg.mintAttemptLimit ?? 0;
+    for (const ops of entries) {
+      if (ops.length === 0) continue;
+      const stableId = this.stableIdFor(client, ops);
+      if (client.latched) {
+        this.queueUnstored(client, ops, stableId, `retry ${client.name}: re-LATCHED mid-drive — no persist attempt`);
+        continue;
+      }
+      await this.tryPersist(client, ops, stableId, 're-drive on retry', limit);
+    }
   }
 
   private async edit(client: FuzzClient): Promise<void> {
@@ -860,16 +967,20 @@ export class OTFuzzHarness {
         // residue is the finding, not the field that happens to differ.
         const doc = client.doc as any;
         const residue = {
-          optimisticOps: doc._optimisticOps,
+          // `?? []` on both: a missing outbox entry / renamed-or-missing field would otherwise
+          // come back `undefined`, which `stableStringify` (JSON.stringify) silently drops the
+          // key for — indistinguishable from an empty case in the dump.
+          optimisticOps: doc._optimisticOps ?? [],
           unstoredIds: [...(doc.unstoredChangeIds ?? [])],
           pendingChanges: doc.getPendingChanges?.().map((c: Change) => ({ id: c.id, rev: c.rev, ops: c.ops })),
-          outboxRows: (client.algorithm as any)._outbox?.get(DOC_ID)?.map((r: any) => ({
-            id: r.change?.id,
-            rev: r.change?.rev,
-            committedRev: r.change?.committedRev,
-            frozen: !r.ops,
-            ops: r.change?.ops,
-          })),
+          outboxRows:
+            (client.algorithm as any)._outbox?.get(DOC_ID)?.map((r: any) => ({
+              id: r.change?.id,
+              rev: r.change?.rev,
+              committedRev: r.change?.committedRev,
+              frozen: !r.ops,
+              ops: r.change?.ops,
+            })) ?? [],
         };
         throw new Error(
           `P1 violated: ${client.name} live doc state diverged from server head\n` +

@@ -286,36 +286,42 @@ describe('convergence fuzz — OT panel', () => {
     }, 30_000);
   }
 
-  // A STRANDED OPTIMISTIC OP on the unstored path. Found by modelling what production does when
-  // the mint's bounded retry is exhausted — keep the ops, latch the write path, hand the change
-  // to the outbox (`mintAttemptLimit`, see OTFuzzConfig). The harness previously retried the
-  // mint forever, so a change could never be live in the open doc and absent from the store, and
-  // this whole class was unreachable. The same 2,000-seed fault screen is GREEN without the knob
-  // and fails here with it.
+  // The mint-exhaustion path (`mintAttemptLimit`, see OTFuzzConfig) now models the FULL
+  // production shape: on exhaustion the ops are kept and handed to the outbox, AND the doc's
+  // write path is LATCHED (`Patches._writeLatches`) — every later edit on that client goes
+  // straight to the outbox too, with no persist attempt, until a seeded action equivalent to
+  // `Patches.retrySavingChanges()` clears the latch and re-drives the retained optimistic
+  // entries in capture order. Previously the harness queued the exhausted change but never
+  // latched, so a client's LATER edits still raced straight to the store/server while the
+  // unstored entry sat ahead of them in `_optimisticOps` — an interleaving impossible in real
+  // production. That un-latched interleaving is what produced the "stranded optimistic op"
+  // failures originally pinned here at seeds 1000426 and 1000725: with the latch now modeled,
+  // BOTH seeds pass — it was a harness artifact of the un-latched mint path, not a production
+  // defect. (Verified: `FUZZ_FAULTS=1 FUZZ_UNSTORED=1 FUZZ_SEED=1000426 FUZZ_ITERATIONS=1` and
+  // `…SEED=1000725…` both green.)
   //
-  // Both seeds fail the same way, and the shape is the finding:
+  // Re-running the same 2,000-seed fault screen with the latch modeled surfaced two DIFFERENT
+  // seeds failing in a more serious shape — not a stray client-side overlay, but a COMMITTED
+  // SERVER CHANGE that fails strict replay (P4-level corruption, not just P1). Both seeds are
+  // green under the identical fault config with `mintAttemptLimit` unset (plain
+  // `FUZZ_FAULTS=1 FUZZ_SEED=<seed> FUZZ_ITERATIONS=1`), so the defect is specific to a change
+  // that passed through the outbox/latch path, not a pre-existing fault-only divergence (e.g.
+  // the separately-pinned DAB-1269 class) landing on these seed numbers by coincidence:
   //
-  //   P2 (no pending changes)      PASSES
-  //   committedRev == server head  PASSES
-  //   committed state == head      PASSES, byte for byte
-  //   LIVE doc state == head       FAILS
+  //   seed 1001691: "Failed to apply change 000000000003 (rev 6, index 1 of batch):
+  //                  [op:replace] invalid array index: /tags/2"
+  //   seed 1001909: "Failed to apply change 000000000008 (rev 12, index 0 of batch):
+  //                  [op:move] path not found: /sections/m43"
   //
-  //   doc residue: optimisticOps [[{ op: 'replace', path: '/title', … }]]
-  //                pendingChanges []   unstoredIds []   outbox (empty)
-  //
-  // The client is fully converged underneath; what diverges is an optimistic overlay that
-  // belongs to NO ledger — not pending, not unstored, not in the outbox. `_markUnstored` put the
-  // op on the doc and some outbox exit retired the row without taking it off again. The user-
-  // visible shape is a writer whose screen shows text that is committed nowhere and queued
-  // nowhere, with no error and no wedge — it survives until reload, because the overlay is
-  // memory-only.
-  //
-  // Not root-caused: which exit strands it (`dropResolvedPending`, the echo path in
-  // `applyServerChanges`, or `handleDocChange` accepting the row after all) is still open.
-  // Pinned per the suite convention so the seeds are not lost.
+  // Not root-caused: both scripts route a change through `queueUnstoredChange` (either the
+  // original exhausted mint or a later edit captured while latched) alongside concurrent
+  // moves/array edits from other clients; which side of the outbox resend — the change's
+  // baseRev stamping, or the server's transform of an outbox-originated change against
+  // concurrent ops on the same array/path — lets a since-invalidated index or move source
+  // reach the committed log uncaught is still open. Pinned per the suite convention.
   // Repro: FUZZ_FAULTS=1 FUZZ_UNSTORED=1 FUZZ_SEED=<seed> FUZZ_ITERATIONS=1 npm test -- tests/fuzz/convergence.spec.ts
-  for (const seed of [1000426, 1000725]) {
-    it.skip(`stranded optimistic op survives its outbox row under substrate faults (seed ${seed})`, async () => {
+  for (const seed of [1001691, 1001909]) {
+    it.skip(`unstored/latched change corrupts the committed log under substrate faults (seed ${seed})`, async () => {
       await runOTFuzz(seed, {
         richOps: false,
         clientStoreFailP: 0.04,

@@ -2330,6 +2330,33 @@ describe('PatchesSync', () => {
       expect(syncDocSpy).toHaveBeenCalledWith('doc4');
     });
 
+    it('does not reject, and still subscribes and syncs, when a store read for a newly tracked doc times out', async () => {
+      // `onTrackDocs` is an easy-signal: `emit` re-raises a rejected subscriber as an unhandled
+      // rejection, and nothing awaits it. A hung IndexedDB `[docs]` read here used to escape as
+      // an unhandled StorageTimeoutError with no caller in the stack, after the doc had already
+      // been marked tracked, so it was never subscribed or synced for the rest of the session.
+      const trackHandler = vi.mocked(mockPatches.onTrackDocs).mock.calls[0][0];
+      const syncDocSpy = vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      const errors: { error: Error; context?: { docId?: string } }[] = [];
+      sync.onError((error, context) => errors.push({ error, context }));
+      const timeout = Object.assign(new Error('IndexedDB transaction [docs] did not settle within 4248ms'), {
+        name: 'StorageTimeoutError',
+      });
+      mockAlgorithm.getCommittedRev.mockImplementation(async (docId: string) => {
+        if (docId === 'doc3') throw timeout;
+        return 4;
+      });
+
+      await expect(trackHandler(['doc3', 'doc4'], 'ot')).resolves.toBeUndefined();
+
+      expect(errors).toEqual([{ error: timeout, context: { docId: 'doc3' } }]);
+      expect(mockWebSocket.subscribe).toHaveBeenCalledWith(['doc3', 'doc4']);
+      expect(syncDocSpy).toHaveBeenCalledWith('doc3');
+      expect(syncDocSpy).toHaveBeenCalledWith('doc4');
+      // The doc whose read succeeded still gets its state from the store.
+      expect(sync.docStates.state.doc4?.committedRev).toBe(4);
+    });
+
     it('should handle untracked documents', async () => {
       const untrackHandler = vi.mocked(mockPatches.onUntrackDocs).mock.calls[0][0];
 

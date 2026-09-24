@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { blockable, blocking, blockableResponse, singleInvocation } from '../../src/utils/concurrency';
+import { blockable, blocking, blockableResponse, serialGate, singleInvocation } from '../../src/utils/concurrency';
 
 // Mock simplified-concurrency module
 vi.mock('simplified-concurrency', () => ({
@@ -247,6 +247,79 @@ describe('concurrency utilities', () => {
       expect(result1).toBe(1);
       expect(result2).toBe(2);
       expect(mockFn).toHaveBeenCalledTimes(2);
+    });
+  });
+  describe('serialGate', () => {
+    function deferred() {
+      let resolve!: () => void;
+      const promise = new Promise<void>(r => (resolve = r));
+      return { promise, resolve };
+    }
+
+    it('treats a synchronous re-entrant call from inside the target as queued, not a second pass', async () => {
+      let running = 0;
+      let maxRunning = 0;
+      let calls = 0;
+      const release = deferred();
+      const gated = serialGate(async function (this: unknown, _key: string) {
+        calls++;
+        running++;
+        maxRunning = Math.max(maxRunning, running);
+        // A subscriber notified synchronously before the first await calls back in.
+        if (calls === 1) void gated.call(this, 'doc1');
+        if (calls === 1) await release.promise;
+        running--;
+      });
+      const owner = {};
+
+      const first = gated.call(owner, 'doc1');
+      expect(maxRunning).toBe(1);
+      release.resolve();
+      await first;
+      await vi.waitFor(() => expect(calls).toBe(2));
+
+      expect(maxRunning).toBe(1);
+    });
+
+    it("resolves a queued caller's promise only after the follow-up pass it triggered completes", async () => {
+      const passes: ReturnType<typeof deferred>[] = [deferred(), deferred()];
+      let calls = 0;
+      const gated = serialGate(async (_key: string) => {
+        await passes[calls++].promise;
+      });
+
+      const owner = {};
+      const first = gated.call(owner, 'doc1');
+      let queuedDone = false;
+      const queued = gated.call(owner, 'doc1').then(() => {
+        queuedDone = true;
+      });
+
+      passes[0].resolve();
+      await first;
+      await vi.waitFor(() => expect(calls).toBe(2));
+      await Promise.resolve();
+      expect(queuedDone).toBe(false);
+
+      passes[1].resolve();
+      await queued;
+      expect(queuedDone).toBe(true);
+    });
+
+    it("rejects a queued caller with its follow-up pass's error", async () => {
+      let calls = 0;
+      const gated = serialGate(async (_key: string) => {
+        calls++;
+        await Promise.resolve();
+        if (calls === 2) throw new Error('follow-up failed');
+      });
+
+      const owner = {};
+      const first = gated.call(owner, 'doc1');
+      const queued = gated.call(owner, 'doc1');
+
+      await first;
+      await expect(queued).rejects.toThrow('follow-up failed');
     });
   });
 });

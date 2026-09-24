@@ -44,7 +44,7 @@ describe('OTAlgorithm.replacePendingChanges', () => {
     const oldPending = [createChange(4, 5, [{ op: '@txt', path: '/text', value: [] }])];
     await store.savePendingChanges('doc1', oldPending);
 
-    await expect(algorithm.replacePendingChanges('doc1', oldPending, [])).resolves.toBeUndefined();
+    await expect(algorithm.replacePendingChanges('doc1', oldPending, [])).resolves.toBe(true);
 
     expect(await store.getPendingChanges('doc1')).toEqual([]);
     expect(await algorithm.hasPending('doc1')).toBe(false);
@@ -63,5 +63,44 @@ describe('OTAlgorithm.replacePendingChanges', () => {
     expect(pending[0].id).toBe(minted.id);
     expect(pending[0].ops).toEqual(minted.ops);
     expect(pending[0].rev).toBe(5); // next rev after the committed rev, no gap left by the dropped queue
+  });
+
+  // DAB-786: the split was computed from a queue read before the replace, and a receive can land
+  // in between. Storing it anyway would re-queue committed work under new ids, or put pre-rebase
+  // ops back over rebased ones.
+  it('refuses a split of a change that was committed since the read, and writes nothing', async () => {
+    const oldPending = [createChange(4, 5, [{ op: 'add', path: '/a', value: 1 }])];
+    await store.savePendingChanges('doc1', oldPending);
+    // The receive: the server committed the change, so it left the pending queue.
+    await store.applyServerChanges('doc1', [{ ...oldPending[0], committedAt: 1 }], []);
+
+    const split = [createChange(4, 5, [{ op: 'add', path: '/a1', value: 1 }])];
+    await expect(algorithm.replacePendingChanges('doc1', oldPending, split, 4)).resolves.toBe(false);
+
+    expect(await store.getPendingChanges('doc1')).toEqual([]);
+  });
+
+  it('refuses a split of a change that was rebased since the read, and keeps the rebased copy', async () => {
+    const oldPending = [createChange(4, 5, [{ op: 'add', path: '/a', value: 1 }])];
+    await store.savePendingChanges('doc1', oldPending);
+    // The receive: a foreign change committed at rev 5 and the pending change rebased onto it.
+    const foreign = { ...createChange(4, 5, [{ op: 'add', path: '/f', value: 1 }]), committedAt: 1 };
+    const rebased = { ...oldPending[0], baseRev: 5, rev: 6 };
+    await store.applyServerChanges('doc1', [foreign], [rebased]);
+
+    const split = [createChange(4, 5, [{ op: 'add', path: '/a1', value: 1 }])];
+    await expect(algorithm.replacePendingChanges('doc1', oldPending, split, 4)).resolves.toBe(false);
+
+    expect(await store.getPendingChanges('doc1')).toEqual([rebased]);
+  });
+
+  it('replaces as before when the committed rev has not moved since the read', async () => {
+    const oldPending = [createChange(4, 5, [{ op: 'add', path: '/a', value: 1 }])];
+    await store.savePendingChanges('doc1', oldPending);
+
+    const split = [createChange(4, 5, [{ op: 'add', path: '/a1', value: 1 }])];
+    await expect(algorithm.replacePendingChanges('doc1', oldPending, split, 4)).resolves.toBe(true);
+
+    expect((await store.getPendingChanges('doc1')).map(c => c.id)).toEqual([split[0].id]);
   });
 });

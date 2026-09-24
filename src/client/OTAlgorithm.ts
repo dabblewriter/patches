@@ -1201,22 +1201,36 @@ export class OTAlgorithm implements ClientAlgorithm {
     // Pending changes remain until server commits them back.
   }
 
-  async replacePendingChanges(docId: string, oldChanges: Change[], newChanges: Change[]): Promise<void> {
+  async replacePendingChanges(
+    docId: string,
+    oldChanges: Change[],
+    newChanges: Change[],
+    readCommittedRev?: number
+  ): Promise<boolean> {
     const oldIds = new Set(oldChanges.map(c => c.id));
-    for (let attempt = 0; attempt < APPLY_CONFLICT_RETRIES; attempt++) {
-      // Preserve any changes minted after oldChanges was read, renumbered after the new queue.
-      // `newChanges` may be empty: splitting can collapse a pending set to nothing (e.g. an
-      // oversized @txt op whose delta carries no sendable ops) — clear the old pending and
-      // renumber any survivors straight off the committed rev then.
-      const committedRev = await this.store.getCommittedRev(docId);
-      const current = await this.store.getPendingChanges(docId);
-      const tailRev = current.length > 0 ? current[current.length - 1].rev : committedRev;
-      let rev = newChanges.length > 0 ? newChanges[newChanges.length - 1].rev : committedRev;
-      const mintedSince = current.filter(c => !oldIds.has(c.id)).map(c => ({ ...c, rev: ++rev }));
-      const result = await this.store.applyServerChanges(docId, [], [...newChanges, ...mintedSince], tailRev);
-      if (result !== 'conflict') return;
-    }
-    throw new Error(`replacePendingChanges for ${docId} did not converge after ${APPLY_CONFLICT_RETRIES} attempts`);
+    // Under the doc lock, so a receive on this instance can't land between the staleness check
+    // below and the write (applyServerChanges takes the same lock).
+    return this._withDocLock(docId, async () => {
+      for (let attempt = 0; attempt < APPLY_CONFLICT_RETRIES; attempt++) {
+        // Preserve any changes minted after oldChanges was read, renumbered after the new queue.
+        // `newChanges` may be empty: splitting can collapse a pending set to nothing (e.g. an
+        // oversized @txt op whose delta carries no sendable ops) — clear the old pending and
+        // renumber any survivors straight off the committed rev then.
+        const committedRev = await this.store.getCommittedRev(docId);
+        // The split is only a copy of `oldChanges` as they were read. A receive since then has
+        // committed or rebased some of them; storing the pieces would re-queue committed work
+        // under ids the server has never seen (it commits twice), or put pre-rebase ops back
+        // over rebased ones (DAB-786). Refuse, and let the caller re-derive the split.
+        if (readCommittedRev !== undefined && committedRev !== readCommittedRev) return false;
+        const current = await this.store.getPendingChanges(docId);
+        const tailRev = current.length > 0 ? current[current.length - 1].rev : committedRev;
+        let rev = newChanges.length > 0 ? newChanges[newChanges.length - 1].rev : committedRev;
+        const mintedSince = current.filter(c => !oldIds.has(c.id)).map(c => ({ ...c, rev: ++rev }));
+        const result = await this.store.applyServerChanges(docId, [], [...newChanges, ...mintedSince], tailRev);
+        if (result !== 'conflict') return true;
+      }
+      throw new Error(`replacePendingChanges for ${docId} did not converge after ${APPLY_CONFLICT_RETRIES} attempts`);
+    });
   }
 
   async dropResolvedPending(docId: string, sentChanges: Change[], committedChanges: Change[]): Promise<number> {

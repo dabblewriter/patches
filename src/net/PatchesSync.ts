@@ -2044,17 +2044,28 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       }
     }
 
-    // Collect data for all new docs first (async), then batch the store updates
+    // Collect data for all new docs first (async), then batch the store updates.
+    // A store read that fails (a stalled IndexedDB transaction times out) must not abort the
+    // handler: these ids are already in `trackedDocs`, so a re-track filters them out and the
+    // subscribe + initial sync below would never run for them this session. And this handler
+    // runs as an `onTrackDocs` subscriber, whose rejection easy-signal re-raises as an unhandled
+    // rejection with no caller in the stack. Report the failure against the doc and leave its
+    // state to `syncDoc`, which initialises it and retries a failed store read with backoff.
     const docData: { docId: string; committedRev: number; hasPending: boolean }[] = [];
     for (const docId of newIds) {
-      const algorithm = this._getAlgorithm(docId);
-      const committedRev = await algorithm.getCommittedRev(docId);
-      const hasPending = await algorithm.hasPending(docId);
-      docData.push({
-        docId,
-        committedRev,
-        hasPending,
-      });
+      try {
+        const algorithm = this._getAlgorithm(docId);
+        const committedRev = await algorithm.getCommittedRev(docId);
+        const hasPending = await algorithm.hasPending(docId);
+        docData.push({
+          docId,
+          committedRev,
+          hasPending,
+        });
+      } catch (err) {
+        console.warn(`Failed to read local state for newly tracked doc ${docId}`, err);
+        this.onError.emit(err as Error, { docId });
+      }
     }
 
     // Batch all synced doc updates so subscribers are only notified once

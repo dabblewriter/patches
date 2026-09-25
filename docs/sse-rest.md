@@ -127,6 +127,14 @@ nothing — it does not disable retries. Servers may also answer with a status e
 `PatchesREST` responds by rebuilding its stream. Adopting `denied` requires the unknown-client
 check — see [Multi-instance deployments](#multi-instance-deployments) for the contract.
 
+When the in-call retries run out with ids still unaccounted for (`SubscribeIncompleteError`), or
+the subscribe throws for any other reason while the stream is up, `PatchesSync` keeps the ids
+and re-asks for them on a jittered ladder (30 s, 60 s, 120 s, then every 300 s) for as long as
+the stream stays connected — a subscribe that failed for routing reasons is otherwise not
+re-driven until the next `connected`, which on a long-lived stream can be an hour away. Any
+connection transition retires the ladder: the reconnect pass re-subscribes everything the
+instance never got granted.
+
 ### Documents
 
 | Method | Path                             | Description                            |

@@ -171,6 +171,19 @@ function trimApplyError(error: ApplyChangesError): ApplyChangesError {
 const DEGRADED_SYNC_INTERVAL_MS = 30_000;
 
 /**
+ * Backoff ladder (last entry repeats) for re-subscribing docs a subscribe call threw on
+ * while the stream stays up. A subscribe can fail without the stream being at fault —
+ * the server answered nothing registered for every attempt (`SubscribeIncompleteError`:
+ * a misrouted request, a forward to the stream's owner that went unanswered) — and
+ * nothing else re-drives it: a resume pass only runs on the next `connected`, which on
+ * a long-lived stream is the next rotation or drop, up to an hour away. Until 2026-09-11
+ * the server answered those cases with the 409 that tears the stream down, and the
+ * rebuild was the retry; now that it doesn't (DAB-1539), this ladder is. Jittered via
+ * `jitterReprobeDelay` so a fleet that failed together doesn't re-ask in lockstep.
+ */
+const SUBSCRIBE_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000];
+
+/**
  * Handles server connection, document subscriptions, and syncing logic between
  * the Patches instance and the server.
  *
@@ -320,6 +333,15 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
   private _recoveryCarryover = new Set<string>();
   /** Pending timer for the next degraded-mode catch-up pass (see `_syncAllDegraded`); null when idle. */
   private _degradedSyncTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
+  /**
+   * Docs whose subscribe threw while the stream was up, awaiting the re-subscribe on
+   * `_subscribeRetryTimer` (see `_scheduleSubscribeRetry`). Emptied by any connection
+   * transition: a reconnect's pass re-subscribes everything missing from
+   * `_subscribedIds` on its own, and a dropped stream has nothing to subscribe on.
+   */
+  private _pendingResubscribeIds = new Set<string>();
+  private _subscribeRetryTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
+  private _subscribeRetryAttempt = 0;
   /**
    * Whether the app has asked this instance to sync (`connect()` sets it, `disconnect()`
    * clears it). `_canSend()` consults it, so on a send-independent transport an explicit
@@ -527,6 +549,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     this.connection.disconnect();
     this._clearAllSyncRetries();
     this._clearDegradedSync();
+    this._clearSubscribeRetry();
     this._resetSyncingStatuses();
     this._subscribedIds.clear();
   }
@@ -825,8 +848,8 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         ? syncIds.filter(id => syncedEntries[id]?.hasPending || !this._subscribedIds.has(id))
         : syncIds;
       if (subscribeCandidates.length > 0) {
+        const subscribeIds = this._filterSubscribeIds(subscribeCandidates);
         try {
-          const subscribeIds = this._filterSubscribeIds(subscribeCandidates);
           if (subscribeIds.length) {
             // Record only the GRANTED ids: subscribe() resolves with the possibly-partial
             // subset actually registered (denied/unaccounted ids resolve silently, no
@@ -839,6 +862,10 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         } catch (err) {
           console.warn('Error subscribing to active docs during sync:', err);
           this.onError.emit(err as Error);
+          // A throw leaves every id unrecorded (partial grants inside the call are
+          // lost to us) — re-ask for all of them later if the stream stays up; the
+          // server registers idempotently.
+          this._scheduleSubscribeRetry(subscribeIds);
         }
       }
 
@@ -998,6 +1025,63 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       globalThis.clearTimeout(this._degradedSyncTimer);
       this._degradedSyncTimer = null;
     }
+  }
+
+  /**
+   * Queue docs whose subscribe just threw for a re-subscribe while the stream stays up
+   * (see `SUBSCRIBE_RETRY_DELAYS_MS`). One timer serves the whole queue: docs failing
+   * across several calls are re-asked together, and the ladder position is shared —
+   * the failure is the server's routing, not any one doc's. A no-op while the stream
+   * is down, because the queue is emptied on every connection transition and the
+   * reconnect's pass re-subscribes whatever is missing from `_subscribedIds` itself.
+   */
+  protected _scheduleSubscribeRetry(docIds: string[]): void {
+    if (!this.state.connected) return;
+    for (const id of docIds) this._pendingResubscribeIds.add(id);
+    if (this._subscribeRetryTimer !== null || this._pendingResubscribeIds.size === 0) return;
+    const rung = Math.min(this._subscribeRetryAttempt, SUBSCRIBE_RETRY_DELAYS_MS.length - 1);
+    this._subscribeRetryTimer = globalThis.setTimeout(() => {
+      this._subscribeRetryTimer = null;
+      void this._retrySubscribe();
+    }, jitterReprobeDelay(SUBSCRIBE_RETRY_DELAYS_MS[rung]));
+  }
+
+  /**
+   * One re-subscribe round for the queued docs. Docs untracked or subscribed meanwhile
+   * drop out; a throw climbs the ladder and re-queues, a clean resolve resets it. Not
+   * re-emitted on `onError`: the original failure already surfaced, and the consumer
+   * dedupes per session anyway — a retry that keeps failing is console-only until it
+   * either succeeds or the stream turns over.
+   */
+  protected async _retrySubscribe(): Promise<void> {
+    const queued = [...this._pendingResubscribeIds].filter(
+      id => this.trackedDocs.has(id) && !this._subscribedIds.has(id)
+    );
+    this._pendingResubscribeIds.clear();
+    const subscribeIds = this._filterSubscribeIds(queued);
+    if (!subscribeIds.length || !this.state.connected || !this._canSend()) {
+      this._subscribeRetryAttempt = 0;
+      return;
+    }
+    try {
+      const granted = (await this.connection.subscribe(subscribeIds)) ?? [];
+      granted.forEach(id => this._subscribedIds.add(id));
+      this._subscribeRetryAttempt = 0;
+    } catch (err) {
+      console.warn(`Re-subscribe failed for ${subscribeIds.length} doc(s); trying again later:`, err);
+      this._subscribeRetryAttempt++;
+      this._scheduleSubscribeRetry(subscribeIds);
+    }
+  }
+
+  /** Drop the re-subscribe queue and its timer (every connection transition, and disconnect()). */
+  protected _clearSubscribeRetry(): void {
+    if (this._subscribeRetryTimer !== null) {
+      globalThis.clearTimeout(this._subscribeRetryTimer);
+      this._subscribeRetryTimer = null;
+    }
+    this._pendingResubscribeIds.clear();
+    this._subscribeRetryAttempt = 0;
   }
 
   /**
@@ -1918,6 +2002,11 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     const isConnected = connectionState === 'connected';
     const isConnecting = connectionState === 'connecting';
 
+    // Any transition retires the re-subscribe queue: a fresh `connected` runs a pass that
+    // re-subscribes whatever `_subscribedIds` is missing, and a stream on its way down
+    // has nothing to subscribe on.
+    this._clearSubscribeRetry();
+
     // Preserve syncing state if moving from connecting -> connected (and while
     // connecting). On a stream-bound transport a definitive drop resets to
     // 'unsynced' — sends are blocked until reconnect. On a send-independent
@@ -2085,9 +2174,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // Subscriptions belong to an open stream (the server rejects them without one),
       // so only attempt them while connected; a degraded-mode sync still runs below.
       if (this.state.connected) {
+        // Only subscribe to IDs not already covered by existing subscriptions
+        const subscribeIds = this._filterSubscribeIds(newIds).filter(id => !alreadySubscribed.has(id));
         try {
-          // Only subscribe to IDs not already covered by existing subscriptions
-          const subscribeIds = this._filterSubscribeIds(newIds).filter(id => !alreadySubscribed.has(id));
           if (subscribeIds.length) {
             // Granted subset only — see the same pattern in syncAllKnownDocs (DAB-865).
             const granted = (await this.connection.subscribe(subscribeIds)) ?? [];
@@ -2098,6 +2187,9 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           // pending changes would never send them (nothing retries a skipped syncDoc).
           console.warn(`Failed to subscribe newly tracked docs: ${newIds.join(', ')}`, err);
           this.onError.emit(err as Error);
+          // ...and the subscription itself is re-asked for later (see the same hook in
+          // syncAllKnownDocs) — nothing else would, short of the next reconnect.
+          this._scheduleSubscribeRetry(subscribeIds);
         }
       }
       // Trigger sync for newly tracked docs immediately. Per-doc failures are handled
@@ -2124,6 +2216,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // tracking must leave it too, or an untrack-then-retrack inside one session gets
       // a flush it was never parked for.
       this._recoveryCarryover.delete(id);
+      this._pendingResubscribeIds.delete(id);
     });
     batch(() => {
       existingIds.forEach(id => this._updateDocSyncState(id, undefined));

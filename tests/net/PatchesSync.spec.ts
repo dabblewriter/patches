@@ -144,6 +144,7 @@ describe('PatchesSync', () => {
   afterEach(() => {
     // Cancel any retry timer a test left scheduled so it can't fire into a later test.
     (sync as any)?._clearAllSyncRetries?.();
+    (sync as any)?._clearSubscribeRetry?.();
     vi.clearAllMocks();
   });
 
@@ -2373,6 +2374,149 @@ describe('PatchesSync', () => {
       await untrackHandler(['nonexistent']);
 
       expect(mockWebSocket.unsubscribe).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('re-subscribe retry for docs a subscribe threw on (DAB-1539 / DAB-1540)', () => {
+    // SUBSCRIBE_RETRY_DELAYS_MS in PatchesSync; jitter only ever shortens a delay, so
+    // advancing by the nominal value always reaches the timer.
+    const RUNGS = [30_000, 60_000, 120_000, 300_000];
+    const incomplete = () => new Error('Subscribe left 2 of 2 requested documents unaccounted for after 4 attempts');
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'doc2', committedRev: 5 },
+      ] as TrackedDoc[]);
+      mockAlgorithm.hasPending.mockResolvedValue(false);
+      vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+      sync['updateState']({ connected: true });
+    });
+
+    afterEach(() => {
+      (sync as any)._clearSubscribeRetry();
+      vi.useRealTimers();
+    });
+
+    it('re-asks for the docs after the first rung when the resync-pass subscribe throws', async () => {
+      // The server answered "nothing registered" four times (a misrouted request, an
+      // unanswered forward to the stream's owner). The stream is fine; nothing but this
+      // timer would re-subscribe before the next reconnect, up to an hour away.
+      mockWebSocket.subscribe.mockRejectedValueOnce(incomplete()).mockResolvedValue(['doc1', 'doc2']);
+      const errors: Error[] = [];
+      sync.onError(err => errors.push(err));
+
+      await sync['syncAllKnownDocs']();
+      expect(mockWebSocket.subscribe).toHaveBeenCalledTimes(1);
+      expect((sync as any)._subscribedIds.size).toBe(0);
+      expect(errors).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(RUNGS[0]);
+
+      expect(mockWebSocket.subscribe).toHaveBeenCalledTimes(2);
+      expect(mockWebSocket.subscribe).toHaveBeenLastCalledWith(['doc1', 'doc2']);
+      expect((sync as any)._subscribedIds.has('doc1')).toBe(true);
+      expect((sync as any)._subscribedIds.has('doc2')).toBe(true);
+      // A clean round ends the ladder — nothing more fires.
+      await vi.advanceTimersByTimeAsync(RUNGS[3]);
+      expect(mockWebSocket.subscribe).toHaveBeenCalledTimes(2);
+    });
+
+    it('re-asks for newly tracked docs whose subscribe threw, and merges into one round', async () => {
+      const trackHandler = vi.mocked(mockPatches.onTrackDocs).mock.calls[0][0];
+      mockWebSocket.subscribe.mockRejectedValue(incomplete());
+
+      await trackHandler(['doc3'], 'ot');
+      await trackHandler(['doc4'], 'ot');
+      expect(mockWebSocket.subscribe).toHaveBeenCalledTimes(2);
+
+      mockWebSocket.subscribe.mockResolvedValue(['doc3', 'doc4']);
+      await vi.advanceTimersByTimeAsync(RUNGS[0]);
+
+      // One timer, one POST for both — not one per failed call.
+      expect(mockWebSocket.subscribe).toHaveBeenCalledTimes(3);
+      expect(mockWebSocket.subscribe).toHaveBeenLastCalledWith(['doc3', 'doc4']);
+    });
+
+    it('climbs the ladder while the retry keeps failing, without re-emitting onError', async () => {
+      mockWebSocket.subscribe.mockRejectedValue(incomplete());
+      const errors: Error[] = [];
+      sync.onError(err => errors.push(err));
+
+      await sync['syncAllKnownDocs']();
+      expect(mockWebSocket.subscribe).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(RUNGS[0]);
+      expect(mockWebSocket.subscribe).toHaveBeenCalledTimes(2);
+      // Second rung is 60 s: nothing at +30 s, the retry at +60 s.
+      await vi.advanceTimersByTimeAsync(RUNGS[0]);
+      expect(mockWebSocket.subscribe).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(RUNGS[1] - RUNGS[0]);
+      expect(mockWebSocket.subscribe).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(RUNGS[2]);
+      expect(mockWebSocket.subscribe).toHaveBeenCalledTimes(4);
+      // Only the original failure reached the consumer; the ladder is console-only.
+      expect(errors).toHaveLength(1);
+    });
+
+    it('drops docs untracked before the round and skips docs subscribed meanwhile', async () => {
+      const untrackHandler = vi.mocked(mockPatches.onUntrackDocs).mock.calls[0][0];
+      mockWebSocket.subscribe.mockRejectedValueOnce(incomplete()).mockResolvedValue(['doc1']);
+
+      await sync['syncAllKnownDocs']();
+      await untrackHandler(['doc2']);
+      await vi.advanceTimersByTimeAsync(RUNGS[0]);
+
+      expect(mockWebSocket.subscribe).toHaveBeenLastCalledWith(['doc1']);
+    });
+
+    it('does not fire once the round has nothing left to ask for', async () => {
+      const untrackHandler = vi.mocked(mockPatches.onUntrackDocs).mock.calls[0][0];
+      mockWebSocket.subscribe.mockRejectedValueOnce(incomplete()).mockResolvedValue([]);
+
+      await sync['syncAllKnownDocs']();
+      await untrackHandler(['doc1', 'doc2']);
+      vi.mocked(mockWebSocket.subscribe).mockClear();
+      await vi.advanceTimersByTimeAsync(RUNGS[0]);
+
+      expect(mockWebSocket.subscribe).not.toHaveBeenCalled();
+    });
+
+    it('is retired by any connection transition — the reconnect pass owns the gap', async () => {
+      mockWebSocket.subscribe.mockRejectedValueOnce(incomplete()).mockResolvedValue(['doc1', 'doc2']);
+      await sync['syncAllKnownDocs']();
+      expect((sync as any)._subscribeRetryTimer).not.toBeNull();
+
+      const connectionHandler = vi.mocked(mockWebSocket.onStateChange).mock.calls[0][0];
+      connectionHandler('disconnected');
+      expect((sync as any)._subscribeRetryTimer).toBeNull();
+      expect((sync as any)._pendingResubscribeIds.size).toBe(0);
+
+      vi.mocked(mockWebSocket.subscribe).mockClear();
+      await vi.advanceTimersByTimeAsync(RUNGS[3]);
+      expect(mockWebSocket.subscribe).not.toHaveBeenCalled();
+    });
+
+    it('is retired by disconnect()', async () => {
+      mockWebSocket.subscribe.mockRejectedValueOnce(incomplete()).mockResolvedValue(['doc1', 'doc2']);
+      await sync['syncAllKnownDocs']();
+      expect((sync as any)._subscribeRetryTimer).not.toBeNull();
+
+      sync.disconnect();
+
+      expect((sync as any)._subscribeRetryTimer).toBeNull();
+      vi.mocked(mockWebSocket.subscribe).mockClear();
+      await vi.advanceTimersByTimeAsync(RUNGS[3]);
+      expect(mockWebSocket.subscribe).not.toHaveBeenCalled();
+    });
+
+    it('does not arm while the stream is down — a failed subscribe there is the reconnect pass to fix', async () => {
+      sync['updateState']({ connected: false });
+      (sync as any)._scheduleSubscribeRetry(['doc1']);
+
+      expect((sync as any)._subscribeRetryTimer).toBeNull();
+      expect((sync as any)._pendingResubscribeIds.size).toBe(0);
     });
   });
 

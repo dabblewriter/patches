@@ -26,6 +26,24 @@ export interface LWWClientStore extends PatchesStore {
   getPendingOps(docId: string, pathPrefixes?: string[]): Promise<JSONPatchOp[]>;
 
   /**
+   * Every doc id the store holds pending work for — pending ops or an in-flight sending
+   * change — in ONE read of each pending store.
+   *
+   * The set-shaped counterpart to calling {@link PatchesStore.listDocs} and then
+   * `hasPending` per doc, which costs two transactions for EVERY tracked doc and answers
+   * "no" for almost all of them. This costs one transaction and scales with pending work
+   * rather than with the size of the account (DAB-1616).
+   *
+   * Semantics match `hasPending` exactly, tombstones included: the pending stores are keyed
+   * by doc alone and know nothing about deletion, so a deleted doc with pending rows is
+   * reported here just as `hasPending` reports it.
+   *
+   * Optional — a store that cannot enumerate keys simply omits it, and `LWWAlgorithm` falls
+   * back to the per-doc reads.
+   */
+  listDocIdsWithPending?(): Promise<Set<string>>;
+
+  /**
    * Save pending ops, optionally deleting paths.
    *
    * Used for consolidation when a parent path overwrites children. For example,

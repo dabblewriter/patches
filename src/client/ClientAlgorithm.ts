@@ -290,13 +290,25 @@ export interface ClientAlgorithm {
    * the stored original by id and its content is duplicated. Changes minted after `oldChanges`
    * was read are preserved (renumbered after the new queue).
    *
+   * Refuses a stale split: given `readCommittedRev` (the committed rev when `oldChanges` was
+   * read), nothing is written and it resolves `false` when the committed rev has moved since. A
+   * receive in between committed or rebased some of `oldChanges`, so the split no longer
+   * describes the queue; the caller re-derives it from the current queue.
+   *
    * Optional — only OT splits changes.
    *
    * @param docId Document identifier
    * @param oldChanges The pending changes the split was computed from
    * @param newChanges The split replacement queue
+   * @param readCommittedRev The committed rev observed before `oldChanges` was read
+   * @returns `true` once the queue is replaced, `false` if the split was stale
    */
-  replacePendingChanges?(docId: string, oldChanges: Change[], newChanges: Change[]): Promise<void>;
+  replacePendingChanges?(
+    docId: string,
+    oldChanges: Change[],
+    newChanges: Change[],
+    readCommittedRev?: number
+  ): Promise<boolean>;
 
   /**
    * Reconciles stored pending changes against a committed server tail WITHOUT applying that

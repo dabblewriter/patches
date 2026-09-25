@@ -111,6 +111,9 @@ const MAX_POISON_MEMO_ENTRIES = 50;
 // Unappliable committed changes `_loadRepairedSnapshot` will skip in one server snapshot
 // before giving up. A snapshot needing more is damaged past what skipping can honestly heal.
 const MAX_SNAPSHOT_REPAIRS = 5;
+
+/** Times one flush re-derives its re-split after a receive made it stale (DAB-786). */
+const MAX_FLUSH_REDERIVES = 3;
 // Slow background re-probe for a doc left at 'error' with pending changes while the
 // connection stays up (see `_scheduleSyncReprobe`).
 const SYNC_REPROBE_EXHAUSTED_MS = 5 * 60_000;
@@ -1451,60 +1454,86 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     const resolvedIds = new Set<string>();
 
     try {
-      if (!pending) {
-        pending = (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId))) ?? [];
-      }
-      if (!pending.length) {
-        return; // Nothing to flush
-      }
-
-      // The follow-up pass at the end of this method re-arms on every flush now, so it needs a
-      // progress signal — without one, any state where a run commits but the queue does not
-      // shrink is a continuous commit + IndexedDB cycle with nothing user-visible (an echo that
-      // never carries the ids, a straggler the server rebases away without echoing it back, a
-      // store write that silently no-ops). Serial-gating stops re-entrancy, not the loop. The
-      // queue only ever drains from the front, so the head row leaving is the cheapest sound
-      // proof that a pass accomplished something. Compared by id, NOT id@rev: a re-sequenced
-      // head is the same row that did not drain.
-      //
-      // Read from the store, not from `pending[0]`: the drained compare below runs against the
-      // store's post-flush head, and the send batch's [0] can be a doc-only row the store never
-      // held (an empty store queue merges to `[...merged]`), an id the store-side peek can never
-      // return — which would read any non-empty post-flush queue as progress. Both ends of the
-      // compare must read the same collection; an algorithm with no peek compares batch to batch.
-      // `undefined` (empty pre-flush store queue) is load-bearing: any non-empty post-flush queue
-      // then reads as drained — the mid-flight-arrival case, whose follow-up flushes that row.
-      const headBefore = algorithm.peekPendingHead ? (await algorithm.peekPendingHead(docId))?.id : pending[0].id;
-
-      const batches = breakChangesIntoBatches(pending, {
-        maxPayloadBytes: this.maxPayloadBytes,
-        maxStorageBytes: this._resplitBudgets.get(docId) ?? this.maxStorageBytes,
-        maxUnsplittableBytes: this.maxUnsplittableBytes,
-        sizeCalculator: this.sizeCalculator,
-        docId,
-      });
-
-      // Splitting an oversized change re-identifies and renumbers part of the queue. The store
-      // must hold exactly what we send: the commit echo clears pending by id, so a stored
-      // original whose pieces were sent under other ids would survive, re-apply on top of its
-      // own committed content, and duplicate it.
-      const flattened = batches.flat();
-      if (flattened.length !== pending.length) {
-        await algorithm.replacePendingChanges?.(docId, pending, flattened);
-        if (this.patches.getOpenDoc(docId)) {
-          const fullSnapshot = await algorithm.loadDoc(docId);
-          if (fullSnapshot) this.patches.applySnapshot(docId, fullSnapshot);
+      let headBefore: string | undefined;
+      let batches: Change[][] = [];
+      // The committed rev observed just before this pass read `pending`; undefined while
+      // `pending` is the caller's, read at a rev this method never saw.
+      let readCommittedRev: number | undefined;
+      let staleSplits = 0;
+      for (;;) {
+        if (!pending) {
+          readCommittedRev = await algorithm.getCommittedRev(docId);
+          pending = (await algorithm.getPendingToSend(docId, this.patches.getOpenDoc(docId))) ?? [];
         }
-        // Splitting collapsed every change to nothing (e.g. an oversized @txt op whose delta
-        // carries no sendable ops): the local edits amount to a no-op. The queue was cleared
-        // above (changes minted since the read survive in the store), so there is nothing to
-        // put on the wire — batches would be [[]] here. Report the store's real hasPending
-        // and finish; a change minted mid-replace re-triggers sync via its own onChange.
-        if (flattened.length === 0) {
-          const stillHasPending = await algorithm.hasPending(docId);
-          this._updateDocSyncState(docId, { hasPending: stillHasPending, syncStatus: 'synced' });
-          return;
+        if (!pending.length) {
+          return; // Nothing to flush
         }
+
+        // The follow-up pass at the end of this method re-arms on every flush now, so it needs a
+        // progress signal — without one, any state where a run commits but the queue does not
+        // shrink is a continuous commit + IndexedDB cycle with nothing user-visible (an echo that
+        // never carries the ids, a straggler the server rebases away without echoing it back, a
+        // store write that silently no-ops). Serial-gating stops re-entrancy, not the loop. The
+        // queue only ever drains from the front, so the head row leaving is the cheapest sound
+        // proof that a pass accomplished something. Compared by id, NOT id@rev: a re-sequenced
+        // head is the same row that did not drain.
+        //
+        // Read from the store, not from `pending[0]`: the drained compare below runs against the
+        // store's post-flush head, and the send batch's [0] can be a doc-only row the store never
+        // held (an empty store queue merges to `[...merged]`), an id the store-side peek can never
+        // return — which would read any non-empty post-flush queue as progress. Both ends of the
+        // compare must read the same collection; an algorithm with no peek compares batch to batch.
+        // `undefined` (empty pre-flush store queue) is load-bearing: any non-empty post-flush queue
+        // then reads as drained — the mid-flight-arrival case, whose follow-up flushes that row.
+        headBefore = algorithm.peekPendingHead ? (await algorithm.peekPendingHead(docId))?.id : pending[0].id;
+
+        batches = breakChangesIntoBatches(pending, {
+          maxPayloadBytes: this.maxPayloadBytes,
+          maxStorageBytes: this._resplitBudgets.get(docId) ?? this.maxStorageBytes,
+          maxUnsplittableBytes: this.maxUnsplittableBytes,
+          sizeCalculator: this.sizeCalculator,
+          docId,
+        });
+
+        // Splitting an oversized change re-identifies and renumbers part of the queue. The store
+        // must hold exactly what we send: the commit echo clears pending by id, so a stored
+        // original whose pieces were sent under other ids would survive, re-apply on top of its
+        // own committed content, and duplicate it.
+        const flattened = batches.flat();
+        if (flattened.length !== pending.length) {
+          // The split was computed from a queue read before any lock was held, so a receive
+          // landing since can have committed or rebased the very changes it split. Storing the
+          // pieces then re-queues work the server already holds under ids it has never seen,
+          // which its id-dedup cannot recognise, and it commits twice (DAB-786). The replace
+          // refuses a split whose committed rev moved; re-derive from the queue as it now
+          // stands instead. A queue the caller read carries no rev to check, so read it again.
+          if (readCommittedRev === undefined) {
+            pending = undefined;
+            continue;
+          }
+          if ((await algorithm.replacePendingChanges?.(docId, pending, flattened, readCommittedRev)) === false) {
+            if (++staleSplits >= MAX_FLUSH_REDERIVES) {
+              throw new Error(`flushDoc for ${docId}: the pending queue kept changing under the re-split`);
+            }
+            pending = undefined;
+            continue;
+          }
+          if (this.patches.getOpenDoc(docId)) {
+            const fullSnapshot = await algorithm.loadDoc(docId);
+            if (fullSnapshot) this.patches.applySnapshot(docId, fullSnapshot);
+          }
+          // Splitting collapsed every change to nothing (e.g. an oversized @txt op whose delta
+          // carries no sendable ops): the local edits amount to a no-op. The queue was cleared
+          // above (changes minted since the read survive in the store), so there is nothing to
+          // put on the wire — batches would be [[]] here. Report the store's real hasPending
+          // and finish; a change minted mid-replace re-triggers sync via its own onChange.
+          if (flattened.length === 0) {
+            const stillHasPending = await algorithm.hasPending(docId);
+            this._updateDocSyncState(docId, { hasPending: stillHasPending, syncStatus: 'synced' });
+            return;
+          }
+        }
+        break;
       }
 
       let reloadedMidFlush = false;

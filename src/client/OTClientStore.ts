@@ -24,6 +24,23 @@ export interface OTClientStore extends PatchesStore {
   getPendingChanges(docId: string, options?: { startAfterRev?: number; limit?: number }): Promise<Change[]>;
 
   /**
+   * Every doc id the store holds pending changes for, in ONE read of the pending store.
+   *
+   * The set-shaped counterpart to calling {@link PatchesStore.listDocs} and then
+   * `hasPending` per doc, which costs a transaction for EVERY tracked doc and answers "no"
+   * for almost all of them. This costs one transaction and scales with pending work rather
+   * than with the size of the account (DAB-1616).
+   *
+   * Store rows only — the algorithm's in-memory outbox is unioned in by
+   * `OTAlgorithm.listDocIdsWithPending`, mirroring how `hasPending` checks
+   * `hasUnstoredChanges` before it reads the store.
+   *
+   * Optional — a store that cannot enumerate keys simply omits it, and `OTAlgorithm` falls
+   * back to the per-doc reads (the outbox union happens either way).
+   */
+  listDocIdsWithPending?(): Promise<Set<string>>;
+
+  /**
    * Appends new pending changes to the document's local change queue.
    *
    * Adds changes to the end of the pending changes list without replacing existing ones.

@@ -1105,6 +1105,16 @@ export class IDBStoreWrapper {
     return this.run(() => this.store.getAll(this.createRange(lower, upper), count));
   }
 
+  /**
+   * The KEYS in a range, without reading a single value. The point is the values NOT read:
+   * asking "which docs have pending rows?" over a per-doc store costs one transaction and
+   * no record deserialization, where the per-doc equivalent costs one transaction per doc
+   * (DAB-1616 — ~955 of them on a 586-doc account, every boot and every idle sweep).
+   */
+  async getAllKeys<T extends IDBValidKey>(lower?: any, upper?: any, count?: number): Promise<T[]> {
+    return this.run(() => this.store.getAllKeys(this.createRange(lower, upper), count));
+  }
+
   async getAllByIndex<T>(indexName: string, query?: IDBValidKey | IDBKeyRange): Promise<T[]> {
     return this.run(() => this.store.index(indexName).getAll(query));
   }

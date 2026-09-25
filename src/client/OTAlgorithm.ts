@@ -389,6 +389,41 @@ export class OTAlgorithm implements ClientAlgorithm {
   }
 
   /**
+   * See {@link ClientAlgorithm.listDocIdsWithPending}. The store rows, unioned with the docs
+   * whose in-memory outbox still holds an unstored row — the same two tiers
+   * {@link hasPending} consults, in the same order of authority.
+   */
+  async listDocIdsWithPending(): Promise<Set<string>> {
+    // `typeof`, not `?.` — optional means "may be absent", and a store carrying a
+    // non-function under the name must fall back, not throw into the caller.
+    const bulk =
+      typeof this.store.listDocIdsWithPending === 'function'
+        ? this.store.listDocIdsWithPending.bind(this.store)
+        : undefined;
+    // Copied, never mutated in place: the interface does not promise a freshly allocated Set,
+    // and an external store memoizing one would have it corrupted by the outbox union below.
+    const docIds = new Set(bulk ? await bulk() : await this._pendingDocIdsPerDoc());
+    for (const docId of this._outbox.keys()) {
+      if (this.hasUnstoredChanges(docId)) docIds.add(docId);
+    }
+    return docIds;
+  }
+
+  /**
+   * The per-doc walk {@link listDocIdsWithPending} exists to avoid, for a store that cannot
+   * enumerate its pending keys. Store rows only — the caller unions the outbox.
+   */
+  private async _pendingDocIdsPerDoc(): Promise<Set<string>> {
+    // `listDocs(true)`: see the note in LWWAlgorithm — the bulk path is tombstone-blind, and
+    // the two paths must agree.
+    const docIds = new Set<string>();
+    for (const { docId } of await this.store.listDocs(true)) {
+      if ((await this.store.getPendingChanges(docId)).length > 0) docIds.add(docId);
+    }
+    return docIds;
+  }
+
+  /**
    * See {@link ClientAlgorithm.hasPendingBeyond} — the outbox and the store's queue against a
    * resolved set. A live outbox row counts like {@link hasPending}: the reload that asks has to
    * walk it through the tail it is about to jump over (see {@link reconcilePending}).

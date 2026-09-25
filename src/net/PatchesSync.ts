@@ -755,12 +755,37 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
 
       // Get tracked docs from ALL algorithms and populate docAlgorithms Map
       const allTracked: TrackedDoc[] = [];
+      // Which docs hold pending work, asked ONCE per algorithm rather than once per doc.
+      // This enumeration runs on every connect, and `hasPending` costs an IndexedDB
+      // transaction per doc (two for LWW: sendingChanges + pendingOps) — ~955 of them on a
+      // 586-doc account, against stores that are usually empty. Several tabs booting together
+      // multiply it into a `[docs] did not settle` stall (DAB-1616).
+      //
+      // Unioned across algorithms because each `listDocs(true)` below is already unioned into
+      // `allTracked`. A doc claimed by two stores (a partial migration — see
+      // `Patches._resolveAlgorithmForDoc`) is therefore `either-has-pending` here where the
+      // per-doc read asked only the resolved algorithm: a false positive costs a needless
+      // flush, where a false negative would cost an unsent doc, so the union is the safe
+      // direction to be wrong in.
+      const docIdsWithPending = new Set<string>();
 
       for (const algorithm of Object.values(this.patches.algorithms)) {
         if (!algorithm) continue; // Skip undefined algorithms
 
         const docs = await algorithm.listDocs(true); // Include deleted docs
         allTracked.push(...docs);
+
+        // Optional capability — an algorithm without it falls back to the per-doc reads.
+        if (algorithm.listDocIdsWithPending) {
+          for (const docId of await algorithm.listDocIdsWithPending()) docIdsWithPending.add(docId);
+        } else {
+          // Actives only: the set is consulted for `activeDocs` alone, so fanning over
+          // tombstones would make the slow path slower than the one this replaced.
+          for (const doc of docs) {
+            if (doc.deleted) continue;
+            if (await algorithm.hasPending(doc.docId)) docIdsWithPending.add(doc.docId);
+          }
+        }
 
         // Populate docAlgorithms Map for algorithm determination during sync
         for (const doc of docs) {
@@ -778,8 +803,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // Populate synced map for active docs
       const syncedEntries: Record<string, DocSyncState> = {};
       for (const doc of activeDocs) {
-        const algorithm = this._getAlgorithm(doc.docId);
-        const hasPending = await algorithm.hasPending(doc.docId);
+        const hasPending = docIdsWithPending.has(doc.docId);
         const entry: DocSyncState = {
           committedRev: doc.committedRev,
           hasPending,
@@ -2190,12 +2214,43 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
     // runs as an `onTrackDocs` subscriber, whose rejection easy-signal re-raises as an unhandled
     // rejection with no caller in the stack. Report the failure against the doc and leave its
     // state to `syncDoc`, which initialises it and retries a failed store read with backoff.
+    // Pending state for the whole batch in one read per ALGORITHM instead of one (LWW: two)
+    // IndexedDB transaction per doc (DAB-1616). `getCommittedRev` below is still per-doc, so
+    // this halves the reads rather than collapsing them — worth it because a cold boot tracks
+    // every project at once.
+    //
+    // Strictly per-algorithm, and each set answers ONLY for its own algorithm's docs.
+    // `listDocIdsWithPending` is optional, so unioning the sets and treating the union as
+    // authoritative would answer for docs whose algorithm never contributed to it — reporting
+    // an unsent doc as clean, which offline (`_canSend()` false, no compensating `syncDoc`
+    // below) would leave it `hasPending:false, isLoaded:false` indefinitely.
+    //
+    // Null — no bulk query, or it failed — means that algorithm's docs fall back to the
+    // per-doc `hasPending`, exactly as before. Read once per algorithm, lazily.
+    const bulkPendingByAlgorithm = new Map<ClientAlgorithm, Set<string> | null>();
+    const pendingSetFor = async (algorithm: ClientAlgorithm): Promise<Set<string> | null> => {
+      const cached = bulkPendingByAlgorithm.get(algorithm);
+      if (cached !== undefined) return cached;
+      let docIds: Set<string> | null = null;
+      try {
+        docIds = (await algorithm.listDocIdsWithPending?.()) ?? null;
+      } catch (err) {
+        // Degrade to the per-doc read rather than failing the doc: this is an optimisation,
+        // and the caller's own try/catch still reports a genuine per-doc store failure
+        // against the docId that actually failed.
+        console.warn('Failed to bulk-read pending doc ids for newly tracked docs', err);
+      }
+      bulkPendingByAlgorithm.set(algorithm, docIds);
+      return docIds;
+    };
+
     const docData: { docId: string; committedRev: number; hasPending: boolean }[] = [];
     for (const docId of newIds) {
       try {
         const algorithm = this._getAlgorithm(docId);
         const committedRev = await algorithm.getCommittedRev(docId);
-        const hasPending = await algorithm.hasPending(docId);
+        const bulkPending = await pendingSetFor(algorithm);
+        const hasPending = bulkPending ? bulkPending.has(docId) : await algorithm.hasPending(docId);
         docData.push({
           docId,
           committedRev,

@@ -305,6 +305,50 @@ describe('Patches change-submit retry (non-destructive rollback)', () => {
       });
     });
 
+    it('flush() settles on a write-latched doc instead of spinning the microtask queue (DAB-1142)', async () => {
+      setup();
+      vi.useFakeTimers();
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const original = store.savePendingChanges.bind(store);
+      let failSaves = true;
+      vi.spyOn(store, 'savePendingChanges').mockImplementation(async (id, changes) => {
+        if (failSaves) throw timeoutError();
+        return original(id, changes);
+      });
+
+      const doc = await patches.openDoc<{ text?: string }>('doc1');
+      doc.change(patch => patch.add('/text', 'hello'));
+      await vi.advanceTimersByTimeAsync(3000); // 3 failed attempts → latch
+      expect(patches.isWriteLatched('doc1')).toBe(true);
+      vi.useRealTimers();
+
+      // The latched entry stays optimistic and the queue tail is settled, so a flush that waits
+      // for the optimistic queue to empty re-awaits the same settled promise forever — pure
+      // microtasks, so no timer (not even a caller's timeout race) ever gets to run. Bound the
+      // laps so the old behavior fails here instead of hanging the worker.
+      const awaiter = (doc as any)._flushAwaiter as () => Promise<void> | undefined;
+      let laps = 0;
+      (doc as any)._flushAwaiter = () => {
+        if (++laps > 1000) throw new Error('flush() spun without settling');
+        return awaiter();
+      };
+
+      await doc.flush();
+      expect(laps).toBeLessThan(10);
+      // Settling is not discarding: the latched edit is still on screen and still latched.
+      expect(doc.state).toEqual({ text: 'hello' });
+      expect(patches.isWriteLatched('doc1')).toBe(true);
+
+      // Once the app resumes saving, flush() waits for the re-driven entry to persist.
+      failSaves = false;
+      await patches.retrySavingChanges('doc1');
+      await doc.flush();
+      expect(patches.isWriteLatched('doc1')).toBe(false);
+      expect(await store.getPendingChanges('doc1')).toHaveLength(1);
+    });
+
     it('retrySavingChanges clears the latch and re-submits retained ops in order once the store recovers', async () => {
       setup();
       vi.useFakeTimers();

@@ -146,6 +146,8 @@ It waits for two things:
 1. Any in-flight change-processing for this doc (the per-doc serialized queue inside `Patches`) has settled.
 2. `_optimisticOps` is empty — every `change()` call has either been confirmed by the algorithm or rolled back on error.
 
+The exception is a doc whose write path is latched (`patches.isWriteLatched(docId)`): the latch keeps its ops applied in memory until `patches.retrySavingChanges()` re-drives them, so `flush()` resolves once the queue settles and leaves those ops in place. Check the latch before an `import()` that would overwrite them.
+
 Idempotent: calling it on a quiet doc resolves immediately. No built-in timeout — wrap with `Promise.race` if you want one:
 
 ```typescript

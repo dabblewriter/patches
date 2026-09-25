@@ -6,7 +6,14 @@ import { signal } from 'easy-signal';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import { getClientId } from '../net/serverContext.js';
-import type { Change, ChangeInput, ChangeMutator, DeleteDocOptions, EditableVersionMetadata } from '../types.js';
+import type {
+  ArrayIndexNormalization,
+  Change,
+  ChangeInput,
+  ChangeMutator,
+  DeleteDocOptions,
+  EditableVersionMetadata,
+} from '../types.js';
 import type { GetDocOptions, PatchesServer } from './PatchesServer.js';
 import type { OTStoreBackend } from './types.js';
 import { createTombstoneIfSupported, removeTombstoneIfExists } from './tombstone.js';
@@ -44,6 +51,15 @@ export interface OTServerOptions {
    * `forceCommit`) are never capped.
    */
   maxCatchupChanges?: number;
+  /**
+   * Correct out-of-range array indexes in incoming changes before they commit: an insert position
+   * past the end is clamped to append, and a remove/replace/move source naming an element that does
+   * not exist is dropped. Without it such a change commits unchecked and every client that replays
+   * it rejects it forever (DAB-1557). Costs one state read per commit that carries an op on a numeric
+   * path segment; others pay nothing. Defaults to `true`. Every correction is reported through
+   * `onArrayIndicesNormalized`.
+   */
+  normalizeArrayIndices?: boolean;
 }
 
 /**
@@ -76,6 +92,7 @@ export class OTServer implements PatchesServer {
   private readonly sessionTimeoutMillis: number;
   private readonly maxChangesPerVersion: number;
   private readonly maxCatchupChanges: number;
+  private readonly normalizeArrayIndices: boolean;
   /** Per-doc FIFO mutex (see {@link _withDocLock}). */
   private readonly _docLocks = new Map<string, Promise<unknown>>();
   readonly store: OTStoreBackend;
@@ -84,6 +101,14 @@ export class OTServer implements PatchesServer {
   public readonly onChangesCommitted =
     signal<(docId: string, changes: Change[], options?: CommitChangesOptions, originClientId?: string) => void>();
 
+  /**
+   * Notifies listeners of every out-of-range array index corrected before a commit. Each one is a
+   * client that minted an index against a view that disagreed with the committed document — the
+   * only measurement of that divergence, so wire it to telemetry.
+   */
+  public readonly onArrayIndicesNormalized =
+    signal<(docId: string, normalizations: ArrayIndexNormalization[], originClientId?: string) => void>();
+
   /** Notifies listeners when a document is deleted. */
   public readonly onDocDeleted = signal<(docId: string, options?: DeleteDocOptions, originClientId?: string) => void>();
 
@@ -91,6 +116,7 @@ export class OTServer implements PatchesServer {
     this.sessionTimeoutMillis = (options.sessionTimeoutMinutes ?? 30) * 60 * 1000;
     this.maxChangesPerVersion = options.maxChangesPerVersion ?? 1000;
     this.maxCatchupChanges = options.maxCatchupChanges ?? 1000;
+    this.normalizeArrayIndices = options.normalizeArrayIndices ?? true;
     this.store = store;
   }
 
@@ -148,7 +174,18 @@ export class OTServer implements PatchesServer {
         docId,
         changes,
         this.sessionTimeoutMillis,
-        { ...options, maxChangesPerVersion: this.maxChangesPerVersion, maxCatchupChanges: this.maxCatchupChanges }
+        {
+          ...options,
+          maxChangesPerVersion: this.maxChangesPerVersion,
+          maxCatchupChanges: this.maxCatchupChanges,
+          // Server-owned: a client-supplied value for either is overwritten here.
+          normalizeArrayIndices: this.normalizeArrayIndices,
+          onArrayIndicesNormalized: (id, normalizations) => {
+            this.onArrayIndicesNormalized.emit(id, normalizations, clientId).catch((error: unknown) => {
+              console.error(`Failed to report array-index normalizations for doc ${id}:`, error);
+            });
+          },
+        }
       );
 
       // Notify about newly committed changes (broadcast to other clients)

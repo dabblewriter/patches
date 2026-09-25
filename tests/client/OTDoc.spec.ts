@@ -117,6 +117,24 @@ describe('OTDoc — applyChanges echo-skip', () => {
     expect(stateUpdates).toBe(updatesBefore + 1);
   });
 
+  it('recomputes when an own echo comes back with different ops (the server normalized it, DAB-1557)', () => {
+    doc.change((patch, path) => {
+      patch.replace(path.title, 'world');
+    });
+    const localOps = (doc.onChange.emit as any).mock.calls[0][0];
+    doc.applyChanges([makeChange('c1', 5, 6, localOps, false)]);
+    const updatesBefore = stateUpdates;
+
+    // Same id, but the server dropped the op on commit: the committed doc never took it.
+    doc.applyChanges([makeChange('c1', 5, 6, [], true)]);
+
+    expect(doc.hasPending).toBe(false);
+    expect(doc.committedRev).toBe(6);
+    // The pure-echo skip would have left the client's own version on screen.
+    expect(doc.state).toEqual({ title: 'hello', count: 0 });
+    expect(stateUpdates).toBe(updatesBefore + 1);
+  });
+
   it('emits a state update when server changes contain a foreign concurrent op (not a pure echo)', () => {
     doc.change((patch, path) => {
       patch.replace(path.title, 'mine');

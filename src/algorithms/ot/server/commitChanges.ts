@@ -3,9 +3,11 @@ import { DuplicateChangeIdsError } from '../../../server/DuplicateChangeIdsError
 import type { CommitResult } from '../../../server/PatchesServer.js';
 import { RevConflictError } from '../../../server/RevConflictError.js';
 import type { OTStoreBackend } from '../../../server/types.js';
-import type { Change, ChangeInput, CommitChangesOptions } from '../../../types.js';
+import type { ArrayIndexNormalization, Change, ChangeInput, CommitChangesOptions } from '../../../types.js';
 import { createVersionAtRev } from './createVersion.js';
+import { getStateAtRevision } from './getStateAtRevision.js';
 import { handleOfflineSessionsAndBatches } from './handleOfflineSessionsAndBatches.js';
+import { hasIndexedOps, normalizeArrayIndices } from './normalizeArrayIndices.js';
 import { transformIncomingChanges } from './transformIncomingChanges.js';
 
 // Re-export for backwards compatibility
@@ -19,9 +21,17 @@ const MAX_CONFLICT_RETRIES = 5;
  *
  * ## Stateless Design
  *
- * This function never loads or builds document state. It uses `getCurrentRev` to get the
+ * This function does not load document state to transform. It uses `getCurrentRev` to get the
  * current revision and transforms changes against committed changes only (no state parameter
  * passed to transformPatch). Bad ops become noops during transformation.
+ *
+ * ## Array-Index Normalization (DAB-1557)
+ *
+ * The one exception: a batch carrying an op on a numeric trailing path segment loads the state at
+ * the tip and corrects any array index outside the array it addresses before saving (see
+ * `normalizeArrayIndices`). Without it an out-of-range index commits unchecked, and strict replay
+ * rejects that row on every client forever. Batches without such an op never pay the read, and a
+ * failed read commits the batch unnormalized rather than failing the commit.
  *
  * ## Version Creation
  *
@@ -336,12 +346,15 @@ export async function commitChanges(
           let nextRev = currentRev + 1;
           incomingChanges.forEach(c => (c.rev = nextRev++));
         }
-        await store.saveChanges(docId, incomingChanges);
+        const normalized = await normalizeBeforeSave(store, docId, currentRev, incomingChanges, options);
+        const toSave = normalized.changes;
+        await store.saveChanges(docId, toSave);
+        reportNormalizations(docId, normalized.normalizations, options);
         if (!offlineSessionsHandled) {
-          await handleOfflineSessionsAndBatches(store, sessionTimeoutMillis, docId, incomingChanges, 'main');
+          await handleOfflineSessionsAndBatches(store, sessionTimeoutMillis, docId, toSave, 'main');
           offlineSessionsHandled = true;
         }
-        return { catchupChanges, newChanges: incomingChanges, docReloadRequired: reloadRequired };
+        return { catchupChanges, newChanges: toSave, docReloadRequired: reloadRequired };
       }
 
       // 5. Transform the incoming changes against committed changes (stateless — no state
@@ -361,7 +374,7 @@ export async function commitChanges(
         seenQueueIds.add(c.id);
         return true;
       }) as Change[];
-      const transformedChanges = transformIncomingChanges(
+      let transformedChanges = transformIncomingChanges(
         queueChanges,
         allCommittedChanges,
         currentRev,
@@ -370,9 +383,13 @@ export async function commitChanges(
       );
 
       if (transformedChanges.length > 0) {
+        // Normalized against the tip the transform just re-expressed the batch in.
+        const normalized = await normalizeBeforeSave(store, docId, currentRev, transformedChanges, options);
+        transformedChanges = normalized.changes;
         // Save before versioning (same ordering as the fast-forward branch) so a
         // RevConflictError on save never leaves a version behind to retry against.
         await store.saveChanges(docId, transformedChanges);
+        reportNormalizations(docId, normalized.normalizations, options);
         // Version the offline/batch session from the changes that ACTUALLY persisted
         // (their post-transform revs), never the pre-transform claimed revs. When an
         // offline change rebases to a no-op it isn't saved — versioning the claimed
@@ -407,6 +424,56 @@ export async function commitChanges(
 
   // Unreachable — the last iteration always re-throws
   throw new Error(`commitChanges: exhausted ${MAX_CONFLICT_RETRIES} retries for doc ${docId}`);
+}
+
+/**
+ * Corrects out-of-range array indexes in a batch about to be saved on top of `currentRev` (see
+ * `normalizeArrayIndices`). Runs inside the retry loop, so a concurrent commit that moves the tip
+ * re-runs it against the new one. Never fails the commit: a batch with no indexed op skips the
+ * state read entirely, and a state that cannot be read (a version whose state is not built yet,
+ * a store error) commits the batch as sent.
+ *
+ * Returns the corrections rather than reporting them: only the attempt whose save succeeds may
+ * report, or a conflict retry counts one correction twice and a failed save reports a commit that
+ * never happened (see {@link reportNormalizations}).
+ */
+async function normalizeBeforeSave(
+  store: OTStoreBackend,
+  docId: string,
+  currentRev: number,
+  changes: Change[],
+  options: CommitChangesOptions | undefined
+): Promise<{ changes: Change[]; normalizations: ArrayIndexNormalization[] }> {
+  const unchanged = { changes, normalizations: [] };
+  if (options?.historicalImport || options?.normalizeArrayIndices === false || !hasIndexedOps(changes)) {
+    return unchanged;
+  }
+  let state: unknown;
+  try {
+    // Reconstruction, not strict: a history that already holds an unappliable row must not stop
+    // new commits from being checked. It skips the same rows every client's poison floor skips,
+    // and quietly — those rows are old news, and this runs on every indexed commit.
+    const reconstruction = { onSkippedChange: () => undefined };
+    ({ state } = await getStateAtRevision(store, docId, currentRev, { reconstruction }));
+  } catch (error) {
+    console.warn(`commitChanges: could not load ${docId} at rev ${currentRev} to check array indexes:`, error);
+    return unchanged;
+  }
+  return normalizeArrayIndices(state, changes);
+}
+
+/** Report the corrections of a batch that has been SAVED. A throwing callback never fails the commit. */
+function reportNormalizations(
+  docId: string,
+  normalizations: ArrayIndexNormalization[],
+  options: CommitChangesOptions | undefined
+): void {
+  if (!normalizations.length) return;
+  try {
+    options?.onArrayIndicesNormalized?.(docId, normalizations);
+  } catch (error) {
+    console.error(`commitChanges: onArrayIndicesNormalized threw for ${docId}:`, error);
+  }
 }
 
 /**

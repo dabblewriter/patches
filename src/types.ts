@@ -350,6 +350,29 @@ export type EditableVersionMetadata = Disallowed<
 >;
 
 /**
+ * One out-of-range array index corrected before commit. Emitted for every correction: a silent
+ * normalization would hide the client-side divergence that minted the bad index, and these
+ * records are the only measurement of how often that happens (DAB-1557).
+ *
+ * `change`, `op` and `index` are as the change stood just before normalization — which is not
+ * always what the client sent: a change committed against a newer tip has already been
+ * transformed, so its paths are the server's re-expression of the client's. `index` and `length`
+ * are always measured against the same tip, so the overshoot they describe is real.
+ */
+export interface ArrayIndexNormalization {
+  /** The change as committed before normalization (rev as committed, metadata intact). */
+  change: Change;
+  /** The op as committed before normalization. */
+  op: JSONPatchOp;
+  /** `clamped` — an insert position past the end, moved to append. `dropped` — an op naming an element that does not exist, removed. */
+  action: 'clamped' | 'dropped';
+  /** The array index the op asked for, as committed before normalization. */
+  index: number;
+  /** The length of the array the index was checked against. */
+  length: number;
+}
+
+/**
  * Options for committing changes.
  */
 export interface CommitChangesOptions {
@@ -396,6 +419,16 @@ export interface CommitChangesOptions {
    * `OTServerOptions.maxCatchupChanges`); `<= 0` disables it.
    */
   maxCatchupChanges?: number;
+  /**
+   * Correct out-of-range array indexes before saving (see `normalizeArrayIndices`). On unless
+   * `false`. The server passes its configured value (see `OTServerOptions.normalizeArrayIndices`).
+   */
+  normalizeArrayIndices?: boolean;
+  /**
+   * Called with every array index corrected in a commit. Server-set only: transports MUST NOT
+   * forward it from client-supplied input.
+   */
+  onArrayIndicesNormalized?: (docId: string, normalizations: ArrayIndexNormalization[]) => void;
 }
 
 /**

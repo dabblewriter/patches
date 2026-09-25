@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.32.2](https://github.com/dabblewriter/patches/compare/v0.32.1...v0.32.2) (2026-09-25)
+
+
+### Bug Fixes
+
+* **client:** settle flush() on a write-latched doc instead of spinning (DAB-1142) ([fe272f9](https://github.com/dabblewriter/patches/commit/fe272f9033613563533ff96d333a3e4c3b016ec2))
+* **client:** settle flush() on a write-latched doc instead of spinning (DAB-1142) ([b9706b3](https://github.com/dabblewriter/patches/commit/b9706b38641f6924720fcdceb8fe70ec892bc93a))
+* **sync:** close serialGate's re-entrancy window and await the queued pass (DAB-952) ([ab364ee](https://github.com/dabblewriter/patches/commit/ab364eeec5291b1e1e4942933feff7586298a557))
+* **sync:** close serialGate's re-entrancy window and await the queued pass (DAB-952) ([248baba](https://github.com/dabblewriter/patches/commit/248babad3037adb6b15e60c8ac27a4b9b83684c2))
+* **sync:** drain delete tombstones in the degraded-mode pass (DAB-1214) ([44e2b8a](https://github.com/dabblewriter/patches/commit/44e2b8ab9eb8ea030113b3106a402ad5dddc74d8))
+* **sync:** drain delete tombstones in the degraded-mode pass (DAB-1214) ([80609c8](https://github.com/dabblewriter/patches/commit/80609c8acffd840ed093e7e0c61f42a6000304b2))
+* **sync:** re-ask for subscriptions a failed subscribe left unregistered ([6b24f04](https://github.com/dabblewriter/patches/commit/6b24f0456578ee89d2c5d38ff687429ee361d453))
+* **sync:** re-ask for subscriptions a failed subscribe left unregistered ([67994dc](https://github.com/dabblewriter/patches/commit/67994dcf0ec9873f9fb5b4664186f1eb8ba3a45e))
+* **sync:** re-derive a flush's re-split when a receive made it stale (DAB-786) ([6b05fe4](https://github.com/dabblewriter/patches/commit/6b05fe4434008e4e490f1684c4ceb4129da72573))
+* **sync:** re-derive a flush's re-split when a receive made it stale (DAB-786) ([9f6a4dc](https://github.com/dabblewriter/patches/commit/9f6a4dc3aec0031e80c4e6ce4be4728402c83bb6))
+
 ## [0.32.1](https://github.com/dabblewriter/patches/compare/v0.32.0...v0.32.1) (2026-09-24)
 
 

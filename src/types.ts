@@ -352,6 +352,24 @@ export type EditableVersionMetadata = Disallowed<
 /**
  * Options for committing changes.
  */
+/**
+ * One out-of-range array index corrected before commit. Emitted for every correction: a silent
+ * normalization would hide the client-side divergence that minted the bad index, and these
+ * records are the only measurement of how often that happens (DAB-1557).
+ */
+export interface ArrayIndexNormalization {
+  /** The change as the client sent it (pre-normalization ops, rev as committed, metadata intact). */
+  change: Change;
+  /** The op as the client sent it. */
+  op: JSONPatchOp;
+  /** `clamped` — an insert position past the end, moved to append. `dropped` — an op naming an element that does not exist, removed. */
+  action: 'clamped' | 'dropped';
+  /** The array index the op asked for. */
+  index: number;
+  /** The length of the array the index was checked against. */
+  length: number;
+}
+
 export interface CommitChangesOptions {
   /**
    * If true, save changes even if they result in no state modification.
@@ -396,6 +414,16 @@ export interface CommitChangesOptions {
    * `OTServerOptions.maxCatchupChanges`); `<= 0` disables it.
    */
   maxCatchupChanges?: number;
+  /**
+   * Correct out-of-range array indexes before saving (see `normalizeArrayIndices`). On unless
+   * `false`. The server passes its configured value (see `OTServerOptions.normalizeArrayIndices`).
+   */
+  normalizeArrayIndices?: boolean;
+  /**
+   * Called with every array index corrected in a commit. Server-set only: transports MUST NOT
+   * forward it from client-supplied input.
+   */
+  onArrayIndicesNormalized?: (docId: string, normalizations: ArrayIndexNormalization[]) => void;
 }
 
 /**

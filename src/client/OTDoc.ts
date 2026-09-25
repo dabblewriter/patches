@@ -4,6 +4,7 @@ import { applyChanges as applyChangesToState } from '../algorithms/ot/shared/app
 import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
+import { deepEqual } from '../json-patch/utils/deepEqual.js';
 import type { Change, PatchesSnapshot } from '../types.js';
 import { BaseDoc } from './BaseDoc.js';
 
@@ -547,7 +548,11 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // recognise it by its ops and adopt it as an outbox entry first (DAB-1366).
       this._adoptEchoedOptimisticOps(serverChanges, priorPendingIds);
       const isOwn = (c: Change) => priorPendingIds.has(c.id) || this._unstored.has(c.id);
-      const isPureEcho = serverChanges.length > 0 && serverChanges.every(isOwn);
+      // An echo is only "pure" if it came back as sent. The server may rewrite an own change on
+      // commit — an out-of-range array index clamped or dropped (DAB-1557) — and then the
+      // committed state differs from the view built from our copy, so the view must recompute.
+      const sentOps = (c: Change) => this._pendingChanges.find(p => p.id === c.id)?.ops ?? this._unstored.get(c.id);
+      const isPureEcho = serverChanges.length > 0 && serverChanges.every(c => isOwn(c) && deepEqual(sentOps(c), c.ops));
 
       // Must run against the OLD pending queue (the frame the optimistic ops live in),
       // so before _pendingChanges is replaced below. Pure echoes need no rebase — the

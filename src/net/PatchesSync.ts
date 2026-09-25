@@ -881,65 +881,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       // so resume passes run it too: reconnects resume by default now (DAB-941), and a
       // delete deferred while offline would otherwise wait for a cold pass that may never
       // come — leaving the doc alive on the server and every other device.
-      const deletePromises = deletedDocs.map(async ({ docId, committedRev }) => {
-        // A delete the server already rejected with an authoritative verdict fails
-        // identically on every pass, and this loop runs on every reconnect now — skip
-        // re-issuing it until a cold connect clears the latch (see
-        // `_handleConnectionChange`) or a re-track releases it (`_handleDocsTracked`).
-        // Logged: this is otherwise the only drain outcome with no console line, and a
-        // permanently-skipped tombstone would be indistinguishable from no tombstone.
-        if (this._terminalDeleteFailures.has(docId)) {
-          console.info(`Skipping server delete for tombstoned doc ${docId}: latched after an authoritative rejection`);
-          return;
-        }
-        try {
-          // Inside the try: an unregistered algorithm for a tombstoned doc (e.g. an LWW
-          // tombstone in a build that only registers OT) must fail that one doc, not
-          // reject the Promise.all and fail the whole pass on every resume.
-          const algorithm = this._getAlgorithm(docId);
-          console.info(`Attempting server delete for tombstoned doc: ${docId}`);
-          try {
-            await this.connection.deleteDoc(docId);
-          } catch (err) {
-            // Already gone server-side. DOC_DELETED (410) is authoritative for any doc:
-            // another device's delete won the race. DOC_NOT_FOUND (404) counts only for
-            // a doc created and deleted entirely offline (`committedRev` 0) that never
-            // reached the server — for a doc the server HAS committed, a 404 is
-            // indistinguishable from routing/gateway/deploy noise (a stale base URL, a
-            // moved route, an auth layer masking docs as 404), and clearing the
-            // tombstone on it would permanently abandon the delete while the doc lives
-            // on the server and every other device. Duck-typed (`isStatusError`): an
-            // `instanceof` check misses errors rehydrated across a worker boundary
-            // (dw3 runs sync behind a SharedWorker).
-            const alreadyGone = this._isDocDeletedError(err) || (committedRev === 0 && this._isDocNotFoundError(err));
-            if (!alreadyGone) throw err;
-          }
-          // Still inside the outer try so a local-store failure (an IndexedDB abort under
-          // storage pressure) keeps the tombstone and stays contained — one doc's failed
-          // cleanup must not reject the Promise.all and fail the whole pass.
-          await algorithm.confirmDeleteDoc(docId);
-          // Replayed committed batches for this doc may still be streaming (or land
-          // after this pass ends); the gate in `_receiveCommittedChanges` drops them.
-          this._confirmedDeletedDocs.add(docId);
-          this._surfacedDeleteErrors.delete(docId);
-          console.info(`Successfully deleted and untracked doc: ${docId}`);
-        } catch (err) {
-          // Keep the tombstone for retry, but surface the failure only once per latched
-          // period: this loop runs on every resume pass now. A cold connect clears both
-          // latches and lets a still-failing delete re-issue and surface again.
-          console.warn(`Server delete failed for ${docId}, keeping tombstone:`, err);
-          // An authoritative rejection won't heal by retrying this session. 404 is
-          // excluded: for a committed doc it reads as routing noise (see above), so it
-          // stays retryable rather than latching.
-          if (isRejectionError(err) && !this._isDocNotFoundError(err)) {
-            this._terminalDeleteFailures.add(docId);
-          }
-          if (!this._surfacedDeleteErrors.has(docId)) {
-            this._surfacedDeleteErrors.add(docId);
-            this.onError.emit(err as Error, { docId });
-          }
-        }
-      });
+      const deletePromises = deletedDocs.map(doc => this._drainTombstone(doc));
 
       // Wait for all sync and delete operations
       await Promise.all([...activeSyncPromises, ...deletePromises]);
@@ -961,6 +903,73 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
       this.onError.emit(syncError);
     } finally {
       this._untrackedDuringResync = null;
+    }
+  }
+
+  /**
+   * Issue the server delete for one tombstoned doc and, once the server confirms it is gone,
+   * drop its local rows. Never throws: a failure keeps the tombstone for the next pass and is
+   * surfaced once per latched period. Shared by `syncAllKnownDocs` and the degraded pass,
+   * since `deleteDoc` is a plain request that needs no open stream on a send-independent
+   * transport (DAB-1214).
+   */
+  protected async _drainTombstone({ docId, committedRev }: TrackedDoc): Promise<void> {
+    // A delete the server already rejected with an authoritative verdict fails
+    // identically on every pass, and this loop runs on every reconnect now — skip
+    // re-issuing it until a cold connect clears the latch (see
+    // `_handleConnectionChange`) or a re-track releases it (`_handleDocsTracked`).
+    // Logged: this is otherwise the only drain outcome with no console line, and a
+    // permanently-skipped tombstone would be indistinguishable from no tombstone.
+    if (this._terminalDeleteFailures.has(docId)) {
+      console.info(`Skipping server delete for tombstoned doc ${docId}: latched after an authoritative rejection`);
+      return;
+    }
+    try {
+      // Inside the try: an unregistered algorithm for a tombstoned doc (e.g. an LWW
+      // tombstone in a build that only registers OT) must fail that one doc, not
+      // reject the Promise.all and fail the whole pass on every resume.
+      const algorithm = this._getAlgorithm(docId);
+      console.info(`Attempting server delete for tombstoned doc: ${docId}`);
+      try {
+        await this.connection.deleteDoc(docId);
+      } catch (err) {
+        // Already gone server-side. DOC_DELETED (410) is authoritative for any doc:
+        // another device's delete won the race. DOC_NOT_FOUND (404) counts only for
+        // a doc created and deleted entirely offline (`committedRev` 0) that never
+        // reached the server — for a doc the server HAS committed, a 404 is
+        // indistinguishable from routing/gateway/deploy noise (a stale base URL, a
+        // moved route, an auth layer masking docs as 404), and clearing the
+        // tombstone on it would permanently abandon the delete while the doc lives
+        // on the server and every other device. Duck-typed (`isStatusError`): an
+        // `instanceof` check misses errors rehydrated across a worker boundary
+        // (dw3 runs sync behind a SharedWorker).
+        const alreadyGone = this._isDocDeletedError(err) || (committedRev === 0 && this._isDocNotFoundError(err));
+        if (!alreadyGone) throw err;
+      }
+      // Still inside the outer try so a local-store failure (an IndexedDB abort under
+      // storage pressure) keeps the tombstone and stays contained — one doc's failed
+      // cleanup must not reject the Promise.all and fail the whole pass.
+      await algorithm.confirmDeleteDoc(docId);
+      // Replayed committed batches for this doc may still be streaming (or land
+      // after this pass ends); the gate in `_receiveCommittedChanges` drops them.
+      this._confirmedDeletedDocs.add(docId);
+      this._surfacedDeleteErrors.delete(docId);
+      console.info(`Successfully deleted and untracked doc: ${docId}`);
+    } catch (err) {
+      // Keep the tombstone for retry, but surface the failure only once per latched
+      // period: this loop runs on every resume pass now. A cold connect clears both
+      // latches and lets a still-failing delete re-issue and surface again.
+      console.warn(`Server delete failed for ${docId}, keeping tombstone:`, err);
+      // An authoritative rejection won't heal by retrying this session. 404 is
+      // excluded: for a committed doc it reads as routing noise (see above), so it
+      // stays retryable rather than latching.
+      if (isRejectionError(err) && !this._isDocNotFoundError(err)) {
+        this._terminalDeleteFailures.add(docId);
+      }
+      if (!this._surfacedDeleteErrors.has(docId)) {
+        this._surfacedDeleteErrors.add(docId);
+        this.onError.emit(err as Error, { docId });
+      }
     }
   }
 
@@ -995,6 +1004,18 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         // or disconnect()/offline may land mid-pass (stop sending immediately).
         if (this.state.connected || !this._canSend()) return;
         await this.syncDoc(docId);
+      }
+      // Drain delete tombstones too. They live only in the store (never in trackedDocs), and
+      // this pass may be the only one a client behind an SSE-buffering middlebox ever runs,
+      // so without it a doc deleted offline stays alive on the server and every other device.
+      for (const algorithm of Object.values(this.patches.algorithms)) {
+        if (!algorithm) continue;
+        for (const doc of await algorithm.listDocs(true)) {
+          if (!doc.deleted) continue;
+          if (this.state.connected || !this._canSend()) return;
+          if (doc.algorithm) this.docAlgorithms.set(doc.docId, doc.algorithm);
+          await this._drainTombstone(doc);
+        }
       }
       // Report an honest global posture after a full pass: 'synced' only when every
       // tracked doc came through clean (per-doc failures latch their own docStates and

@@ -4233,6 +4233,41 @@ describe('PatchesSync', () => {
       expect(restSync.state.syncStatus).toBe('synced');
     });
 
+    it('degraded pass drains delete tombstones while the stream is down (REST, DAB-1214)', async () => {
+      const { restConnection, restSync } = makeRestSync();
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      // A doc deleted while offline: its tombstone is only in the store, never in trackedDocs.
+      mockAlgorithm.listDocs.mockResolvedValue([
+        { docId: 'doc1', committedRev: 5 },
+        { docId: 'gone', committedRev: 3, deleted: true },
+      ] as TrackedDoc[]);
+
+      await (restSync as any)._syncAllDegraded();
+
+      // deleteDoc is a plain request on a send-independent transport, so a stream that
+      // never connects must not keep the doc alive on the server and every other device.
+      expect(restConnection.deleteDoc).toHaveBeenCalledWith('gone');
+      expect(mockAlgorithm.confirmDeleteDoc).toHaveBeenCalledWith('gone');
+      expect(restConnection.deleteDoc).not.toHaveBeenCalledWith('doc1');
+      // A replayed push for it after the confirm is dropped, as on a connected pass.
+      expect((restSync as any)._confirmedDeletedDocs.has('gone')).toBe(true);
+    });
+
+    it('degraded pass keeps a tombstone whose server delete fails, for the next pass (REST)', async () => {
+      const { restConnection, restSync } = makeRestSync();
+      mockAlgorithm.getCommittedRev.mockResolvedValue(5);
+      mockAlgorithm.listDocs.mockResolvedValue([{ docId: 'gone', committedRev: 3, deleted: true }] as TrackedDoc[]);
+      restConnection.deleteDoc.mockRejectedValueOnce(new Error('network down'));
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await (restSync as any)._syncAllDegraded();
+
+      expect(restConnection.deleteDoc).toHaveBeenCalledWith('gone');
+      expect(mockAlgorithm.confirmDeleteDoc).not.toHaveBeenCalledWith('gone');
+      // The next degraded pass is still armed to retry it.
+      expect((restSync as any)._degradedSyncTimer).not.toBeNull();
+    });
+
     it('degraded pass declines while offline, and never engages on a stream-bound transport', async () => {
       const { restConnection, restSync } = makeRestSync();
       setOffline(true);

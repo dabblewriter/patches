@@ -350,26 +350,31 @@ export type EditableVersionMetadata = Disallowed<
 >;
 
 /**
- * Options for committing changes.
- */
-/**
  * One out-of-range array index corrected before commit. Emitted for every correction: a silent
  * normalization would hide the client-side divergence that minted the bad index, and these
  * records are the only measurement of how often that happens (DAB-1557).
+ *
+ * `change`, `op` and `index` are as the change stood just before normalization — which is not
+ * always what the client sent: a change committed against a newer tip has already been
+ * transformed, so its paths are the server's re-expression of the client's. `index` and `length`
+ * are always measured against the same tip, so the overshoot they describe is real.
  */
 export interface ArrayIndexNormalization {
-  /** The change as the client sent it (pre-normalization ops, rev as committed, metadata intact). */
+  /** The change as committed before normalization (rev as committed, metadata intact). */
   change: Change;
-  /** The op as the client sent it. */
+  /** The op as committed before normalization. */
   op: JSONPatchOp;
   /** `clamped` — an insert position past the end, moved to append. `dropped` — an op naming an element that does not exist, removed. */
   action: 'clamped' | 'dropped';
-  /** The array index the op asked for. */
+  /** The array index the op asked for, as committed before normalization. */
   index: number;
   /** The length of the array the index was checked against. */
   length: number;
 }
 
+/**
+ * Options for committing changes.
+ */
 export interface CommitChangesOptions {
   /**
    * If true, save changes even if they result in no state modification.

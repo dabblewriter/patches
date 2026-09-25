@@ -102,6 +102,19 @@ describe('normalizeArrayIndices', () => {
     expect(applyChanges(state, changes).docs.CaKt.children).toEqual(['c0', 'c1', 'c2', 'c3', 'c0']);
   });
 
+  it('drops a copy whose source names a missing element', () => {
+    const state = { a: ['x', 'y'], b: 'keep' };
+    const { changes, normalizations } = normalizeArrayIndices(state, [
+      change('c', 3, [
+        { op: 'copy', from: '/a/5', path: '/b' },
+        { op: 'add', path: '/a/2', value: 'z' },
+      ]),
+    ]);
+    expect(changes[0].ops).toEqual([{ op: 'add', path: '/a/2', value: 'z' }]);
+    expect(normalizations[0]).toMatchObject({ op: { op: 'copy' }, action: 'dropped', index: 5, length: 2 });
+    expect(applyChanges(state, changes)).toEqual({ a: ['x', 'y', 'z'], b: 'keep' });
+  });
+
   it('checks each change in the frame the earlier changes of the batch produce', () => {
     const state = book();
     const { changes } = normalizeArrayIndices(state, [
@@ -159,5 +172,6 @@ describe('hasIndexedOps', () => {
     expect(hasIndexedOps([change('a', 1, [{ op: 'add', path: '/docs/CaKt/children/-', value: 'x' }])])).toBe(false);
     expect(hasIndexedOps([change('a', 1, [{ op: 'add', path: '/docs/CaKt/children/3', value: 'x' }])])).toBe(true);
     expect(hasIndexedOps([change('a', 1, [{ op: 'move', from: '/a/2', path: '/b/x' }])])).toBe(true);
+    expect(hasIndexedOps([change('a', 1, [{ op: 'copy', from: '/a/5', path: '/b' }])])).toBe(true);
   });
 });

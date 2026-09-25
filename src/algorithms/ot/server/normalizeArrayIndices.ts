@@ -18,7 +18,7 @@ export function hasIndexedOps(changes: Change[]): boolean {
       op =>
         INDEXED_OPS.has(op.op) &&
         (TRAILING_INDEX.test(op.path) ||
-          (op.op === 'move' && typeof op.from === 'string' && TRAILING_INDEX.test(op.from)))
+          ((op.op === 'move' || op.op === 'copy') && typeof op.from === 'string' && TRAILING_INDEX.test(op.from)))
     )
   );
 }
@@ -32,7 +32,7 @@ export function hasIndexedOps(changes: Change[]): boolean {
  *
  * - `add` (and the destination of `move` and `copy`) name an insert POSITION. Past the end → clamp to append.
  *   The value is the payload and survives intact; only its position shifts.
- * - `remove`, `replace` and `move`'s source name an EXISTING element. Past the end → drop the
+ * - `remove`, `replace` and the source of `move` and `copy` name an EXISTING element. Past the end → drop the
  *   op. Clamping would splice a different, real element; dropping loses nothing, because the
  *   element the op meant is already absent.
  *
@@ -93,6 +93,15 @@ type Outcome =
 function applyNormalized(state: any, op: JSONPatchOp): Outcome {
   const error = tryApply(state, op);
   if (typeof error !== 'string') return { state: error.state };
+
+  // A copy's source names an existing element too, but copy reports a missing one as a missing
+  // value (`[op:add] require value…`), not as an index error — so check the source directly.
+  if (op.op === 'copy' && typeof op.from === 'string') {
+    const [array, index] = resolveIndex(state, op.from);
+    if (array && index >= array.length) {
+      return { state, normalization: { action: 'dropped', index, length: array.length } };
+    }
+  }
 
   const kind = invalidIndexKind(error);
   if (!kind) return { failed: true };

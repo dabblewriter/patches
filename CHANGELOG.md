@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.32.3](https://github.com/dabblewriter/patches/compare/v0.32.2...v0.32.3) (2026-09-28)
+
+
+### Bug Fixes
+
+* **sync:** answer "which docs have pending work" in one query per store, not one per doc ([15c3b81](https://github.com/dabblewriter/patches/commit/15c3b81e4b1eea830aee0dbeafbbe24a9618af77))
+* **sync:** answer "which docs have pending work" in one query per store, not one per doc ([9de4723](https://github.com/dabblewriter/patches/commit/9de472308bdaceb3b233b949e2ea8a6786b139e3))
+
 ## [0.32.2](https://github.com/dabblewriter/patches/compare/v0.32.1...v0.32.2) (2026-09-25)
 
 

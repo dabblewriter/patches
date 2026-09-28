@@ -74,6 +74,7 @@ export type {
   BranchPrecondition,
   CommittedChangeIds,
   ListFieldsOptions,
+  ListRelatedOpsOptions,
   LWWStoreBackend,
   OTStoreBackend,
   ServerStoreBackend,

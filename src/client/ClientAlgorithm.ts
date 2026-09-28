@@ -168,6 +168,24 @@ export interface ClientAlgorithm {
   hasPending(docId: string): Promise<boolean>;
 
   /**
+   * Every doc id holding pending local data, as one read rather than one read per doc.
+   *
+   * The bulk form of {@link hasPending}, and the one to reach for whenever the question is
+   * asked about a whole account: `listDocs()` + `hasPending` per doc costs one or two
+   * IndexedDB transactions for EVERY tracked doc and answers "no" for nearly all of them —
+   * ~955 transactions on a 586-doc account, on every cold boot and again on every idle
+   * sweep (DAB-1616). This answers the same question in a single transaction per store, so
+   * the cost tracks pending work instead of account size.
+   *
+   * Same semantics as `hasPending`, membership for membership, in-memory tiers included.
+   *
+   * Optional — it needs a store that can enumerate its pending keys. Without it the caller
+   * falls back to `listDocs()` + {@link hasPending} per doc, which is correct and slow; see
+   * `PatchesSync`'s `hasPendingBeyond` detect for the same shape.
+   */
+  listDocIdsWithPending?(): Promise<Set<string>>;
+
+  /**
    * Whether the durable pending queue holds a change outside `excludeIds`. A plain read like
    * {@link hasPending}; the reload path uses it to tell "the batch the server just confirmed is
    * all that is queued" from "newer work has to be reconciled against the committed tail".

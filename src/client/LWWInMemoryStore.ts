@@ -218,6 +218,15 @@ export class LWWInMemoryStore implements LWWClientStore {
     }
   }
 
+  /** See {@link LWWClientStore.listDocIdsWithPending}. */
+  async listDocIdsWithPending(): Promise<Set<string>> {
+    const docIds = new Set<string>();
+    for (const [docId, buf] of this.docs) {
+      if (buf.pendingOps.size > 0 || buf.sendingChange) docIds.add(docId);
+    }
+    return docIds;
+  }
+
   /**
    * Get the in-flight change for retry/reconnect scenarios.
    */

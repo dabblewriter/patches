@@ -390,6 +390,29 @@ export class LWWIndexedDBStore implements LWWClientStore {
     await tx.complete();
   }
 
+  /** See {@link LWWClientStore.listDocIdsWithPending} — one transaction, keys only, no values read. */
+  async listDocIdsWithPending(): Promise<Set<string>> {
+    const [tx, pendingOpsStore, sendingChanges] = await this.db.transaction(
+      ['pendingOps', 'sendingChanges'],
+      'readonly'
+    );
+    // Both reads ride the same transaction, so the pair is a consistent snapshot: a change
+    // moving from pendingOps to sendingChanges (saveSendingChange does both atomically)
+    // cannot slip between them and leave its doc out of the set.
+    const [opKeys, sendingKeys] = await Promise.all([
+      // pendingOps is keyed [docId, path] — many rows per doc, one entry in the set.
+      pendingOpsStore.getAllKeys<[string, string]>(),
+      // sendingChanges is keyed by docId alone.
+      sendingChanges.getAllKeys<string>(),
+    ]);
+    await tx.complete();
+
+    const docIds = new Set<string>();
+    for (const [docId] of opKeys) docIds.add(docId);
+    for (const docId of sendingKeys) docIds.add(docId);
+    return docIds;
+  }
+
   /**
    * Get the in-flight change for retry/reconnect scenarios.
    */

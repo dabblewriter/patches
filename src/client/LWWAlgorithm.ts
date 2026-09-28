@@ -123,6 +123,35 @@ export class LWWAlgorithm implements ClientAlgorithm {
     return pendingOps.length > 0;
   }
 
+  /**
+   * See {@link ClientAlgorithm.listDocIdsWithPending}. LWW keeps no in-memory tier, so the
+   * store's answer is the whole answer.
+   *
+   * A store that cannot enumerate its pending keys falls back to the per-doc reads this
+   * exists to avoid — correct, just back to one transaction per doc.
+   */
+  async listDocIdsWithPending(): Promise<Set<string>> {
+    // `typeof`, not `?.` — optional means "may be absent", and a store carrying a
+    // non-function under the name must fall back, not throw into the caller.
+    const bulk =
+      typeof this.store.listDocIdsWithPending === 'function'
+        ? this.store.listDocIdsWithPending.bind(this.store)
+        : undefined;
+    // Copied for the same reason OT copies: the interface does not promise a freshly
+    // allocated Set, so handing a store's own out invites a caller to mutate it.
+    if (bulk) return new Set(await bulk());
+
+    // `listDocs(true)` — the bulk path scans pending keys and knows nothing about tombstones,
+    // so excluding deleted docs here would make the fallback disagree with it (and with the
+    // documented "tombstones included"). Unreachable today, since deleting a doc wipes its
+    // pending rows, but the two paths must not differ on it.
+    const docIds = new Set<string>();
+    for (const { docId } of await this.store.listDocs(true)) {
+      if (await this.hasPending(docId)) docIds.add(docId);
+    }
+    return docIds;
+  }
+
   async getPendingToSend(docId: string, _doc?: PatchesDoc<any>): Promise<Change[] | null> {
     // Under the doc lock: saveSendingChange clears ALL pending ops, so an op minted by a
     // concurrent handleDocChange between the read and the clear would be silently lost.

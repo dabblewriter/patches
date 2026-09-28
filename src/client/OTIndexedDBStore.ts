@@ -245,6 +245,18 @@ export class OTIndexedDBStore implements OTClientStore {
     await tx.complete();
   }
 
+  /** See {@link OTClientStore.listDocIdsWithPending} — one transaction, keys only, no values read. */
+  async listDocIdsWithPending(): Promise<Set<string>> {
+    const [tx, pendingChanges] = await this.db.transaction(['pendingChanges'], 'readonly');
+    // Keyed [docId, rev] — many queued changes per doc collapse to one entry in the set.
+    const keys = await pendingChanges.getAllKeys<[string, number]>();
+    await tx.complete();
+
+    const docIds = new Set<string>();
+    for (const [docId] of keys) docIds.add(docId);
+    return docIds;
+  }
+
   /**
    * Read back all pending changes for this docId (in order).
    * @param docId - The ID of the document to get the pending changes for.

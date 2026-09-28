@@ -2936,6 +2936,93 @@ describe('PatchesSync', () => {
         expect(sync.docStates.state.doc1.hasPending).toBe(true);
       });
 
+      // DAB-1616. The bulk query replaced a per-doc `hasPending` fan at both boot call sites.
+      // The pre-existing tests in this file all take the FALLBACK, because `mockAlgorithm` has
+      // no `listDocIdsWithPending` — so without these the bulk branch was executed on every run
+      // and asserted by nothing.
+      describe('listDocIdsWithPending at the boot call sites (DAB-1616)', () => {
+        it('syncAllKnownDocs reads the bulk set and does not fan out per doc', async () => {
+          mockAlgorithm.listDocs.mockResolvedValue([
+            { docId: 'clean', committedRev: 3 },
+            { docId: 'dirty', committedRev: 4 },
+          ] as TrackedDoc[]);
+          mockAlgorithm.listDocIdsWithPending = vi.fn().mockResolvedValue(new Set(['dirty']));
+          vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+          await sync['syncAllKnownDocs']();
+
+          expect(sync.docStates.state.dirty.hasPending).toBe(true);
+          expect(sync.docStates.state.clean.hasPending).toBe(false);
+          expect(mockAlgorithm.listDocIdsWithPending).toHaveBeenCalledTimes(1);
+          expect(mockAlgorithm.hasPending).not.toHaveBeenCalled();
+        });
+
+        it('_handleDocsTracked reads the bulk set and does not fan out per doc', async () => {
+          mockAlgorithm.listDocIdsWithPending = vi.fn().mockResolvedValue(new Set(['dirty']));
+          mockAlgorithm.getCommittedRev.mockResolvedValue(2);
+          vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+          await sync['_handleDocsTracked'](['clean', 'dirty']);
+
+          expect(sync.docStates.state.dirty.hasPending).toBe(true);
+          expect(sync.docStates.state.clean.hasPending).toBe(false);
+          expect(mockAlgorithm.listDocIdsWithPending).toHaveBeenCalledTimes(1);
+          expect(mockAlgorithm.hasPending).not.toHaveBeenCalled();
+        });
+
+        // The bug this guards: the bulk sets were unioned and the union treated as
+        // authoritative for EVERY doc, so as soon as one algorithm implemented the optional
+        // method, docs belonging to an algorithm that did NOT were answered from a set that
+        // could never contain them — silently reported clean. Offline there is no compensating
+        // `syncDoc`, so an unsent doc would sit `hasPending:false` indefinitely.
+        it('answers per algorithm: a doc whose algorithm lacks the bulk query still reports pending', async () => {
+          // Assigned BEFORE the spread, so the `delete` below actually removes something —
+          // the whole point of this algorithm is that it lacks the optional method.
+          mockAlgorithm.listDocIdsWithPending = vi.fn().mockResolvedValue(new Set(['otDirty']));
+
+          const lwwAlgorithm: any = {
+            ...mockAlgorithm,
+            name: 'lww',
+            hasPending: vi.fn().mockResolvedValue(true),
+            getCommittedRev: vi.fn().mockResolvedValue(0),
+            listDocs: vi.fn().mockResolvedValue([]),
+          };
+          delete lwwAlgorithm.listDocIdsWithPending;
+          expect(lwwAlgorithm.listDocIdsWithPending).toBeUndefined();
+
+          mockAlgorithm.getCommittedRev.mockResolvedValue(2);
+          mockPatches.algorithms = { ot: mockAlgorithm, lww: lwwAlgorithm };
+          mockPatches.getDocAlgorithm.mockImplementation((docId: string) =>
+            docId.startsWith('lww') ? lwwAlgorithm : mockAlgorithm
+          );
+          vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+          await sync['_handleDocsTracked'](['otDirty', 'lwwDirty']);
+
+          expect(sync.docStates.state.otDirty.hasPending).toBe(true);
+          // The one that matters: answered by its OWN algorithm's per-doc read, not by the
+          // other algorithm's set.
+          expect(sync.docStates.state.lwwDirty.hasPending).toBe(true);
+          expect(lwwAlgorithm.hasPending).toHaveBeenCalledWith('lwwDirty');
+        });
+
+        it('falls back per doc when the bulk read throws', async () => {
+          mockAlgorithm.listDocIdsWithPending = vi.fn().mockRejectedValue(new Error('store stalled'));
+          mockAlgorithm.hasPending.mockResolvedValue(true);
+          mockAlgorithm.getCommittedRev.mockResolvedValue(1);
+          vi.spyOn(sync as any, 'syncDoc').mockResolvedValue(undefined);
+
+          await sync['_handleDocsTracked'](['freshDoc', 'freshDoc2']);
+
+          expect(sync.docStates.state.freshDoc.hasPending).toBe(true);
+          expect(sync.docStates.state.freshDoc2.hasPending).toBe(true);
+          expect(mockAlgorithm.hasPending).toHaveBeenCalledWith('freshDoc');
+          // Cached as null rather than re-attempted per doc — otherwise the degraded path
+          // re-reads a failing store, and re-warns, once for every doc in the batch.
+          expect(mockAlgorithm.listDocIdsWithPending).toHaveBeenCalledTimes(1);
+        });
+      });
+
       it('should not include deleted docs in synced map', async () => {
         const docs: TrackedDoc[] = [
           { docId: 'doc1', committedRev: 5 },

@@ -45,6 +45,15 @@ export class OTInMemoryStore implements OTClientStore {
     };
   }
 
+  /** See {@link OTClientStore.listDocIdsWithPending}. */
+  async listDocIdsWithPending(): Promise<Set<string>> {
+    const docIds = new Set<string>();
+    for (const [docId, buf] of this.docs) {
+      if (buf.pending.length > 0) docIds.add(docId);
+    }
+    return docIds;
+  }
+
   async getPendingChanges(docId: string, options?: { startAfterRev?: number; limit?: number }): Promise<Change[]> {
     const pending = this.docs.get(docId)?.pending ?? [];
     const startAfter = options?.startAfterRev ?? -1;

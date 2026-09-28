@@ -118,6 +118,11 @@ export interface OTStoreBackend extends ServerStoreBackend, VersioningStoreBacke
 export type ListFieldsOptions = { sinceRev: number } | { paths: string[] };
 
 /**
+ * Options for {@link LWWStoreBackend.listRelatedOps}. `paths` are never the root path `''`.
+ */
+export type ListRelatedOpsOptions = { paths: string[]; sinceRev?: number };
+
+/**
  * Change ids to record atomically with a saveOps call, for retry idempotency.
  * `expireAt` is a unix-ms timestamp after which the ids may be discarded —
  * provided so implementations can TTL-index rather than track age themselves.
@@ -178,6 +183,16 @@ export interface LWWStoreBackend extends ServerStoreBackend {
    * @returns Array of field metadata matching the criteria.
    */
   listOps(docId: string, options?: ListFieldsOptions): Promise<JSONPatchOp[]>;
+
+  /**
+   * List the ops a commit to `paths` can read: every op at, above or below any of `paths`
+   * (`/a/b` relates to `/a`, `/a/b` and `/a/b/c`), plus every op with rev > `sinceRev` when
+   * given. Returning extra ops is allowed; leaving one out is not.
+   *
+   * Optional — when absent, `commitChanges` reads every op with `listOps(docId)`, which costs
+   * one row per stored path on every commit. Implement it when docs accumulate many paths.
+   */
+  listRelatedOps?(docId: string, options: ListRelatedOpsOptions): Promise<JSONPatchOp[]>;
 
   /**
    * Save field metadata and atomically increment the revision.

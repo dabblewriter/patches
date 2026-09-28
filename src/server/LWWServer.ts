@@ -210,8 +210,18 @@ export class LWWServer implements PatchesServer {
         c.ops.map(op => ({ ...op, ts: Math.min(op.ts ?? c.createdAt ?? serverNow, serverNow) }))
       );
 
-      // Load all existing ops for this doc
-      const existingOps = await this.store.listOps(docId);
+      // Deduped paths count as sent: a deduped change was committed by a prior attempt whose
+      // ack was lost, so the retrying client still needs the stored resolution of those paths
+      // (and their surviving children) to confirm its sending layer and converge.
+      const sentPaths = new Set([...newOps.map(o => o.path), ...dedupedPaths]);
+
+      // Consolidation and the response read only the sent paths' own rows, ancestors and
+      // descendants, plus rows past the client's rev. Reading every row costs one per stored
+      // path on each commit, and append-only docs (hourly counters) grow without bound.
+      const existingOps =
+        this.store.listRelatedOps && !sentPaths.has('')
+          ? await this.store.listRelatedOps(docId, { paths: [...sentPaths], sinceRev: clientRev })
+          : await this.store.listOps(docId);
 
       // Use the consolidateOps algorithm
       const { opsToSave, pathsToDelete, opsToReturn } = consolidateOps(existingOps, newOps);
@@ -253,11 +263,6 @@ export class LWWServer implements PatchesServer {
       //   later catch-up redelivers them (their revs are already behind the client's).
       // Catchup (everything committed after the client's rev) is no longer filtered by sent
       // paths either: a sent path's row in that window is the resolution, not an echo.
-      //
-      // Deduped paths count as sent: a deduped change was committed by a prior attempt whose
-      // ack was lost, so the retrying client still needs the stored resolution of those paths
-      // (and their surviving children) to confirm its sending layer and converge.
-      const sentPaths = new Set([...newOps.map(o => o.path), ...dedupedPaths]);
       // Post-commit op table, derived from the pre-save read (exact under the doc lock):
       // existing rows survive unless deleted or overwritten (same path or child) by this commit.
       const pathsToDeleteSet = new Set(pathsToDelete);

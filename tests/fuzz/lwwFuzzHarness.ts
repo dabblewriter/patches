@@ -117,7 +117,7 @@ export class LWWFuzzHarness {
     this.faults.active = false;
     const serverBackend = withInjectedFaults(
       this.backend,
-      ['saveOps', 'listOps', 'getCurrentRev', 'seenChangeIds'],
+      ['saveOps', 'listOps', 'listRelatedOps', 'getCurrentRev', 'seenChangeIds'],
       this.faults,
       cfg.serverBackendFailP,
       method => this.tr(`FAULT server backend ${method} (injected)`)

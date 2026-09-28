@@ -130,7 +130,8 @@ const change: ChangeInput = {
    - Every timestamp is clamped to at most server time. A client with a fast clock can't stamp a value ten minutes into the future and wedge that field against every other writer
 
 3. **Load Existing Ops**
-   - Fetches all current field values from storage via `listOps()`
+   - Fetches the rows the commit can touch via `listRelatedOps()`: each sent path's own row, its ancestors and descendants, plus rows past the client's rev
+   - Falls back to every row via `listOps()` when the store lacks `listRelatedOps()` or a change writes the root
 
 4. **Consolidate Using LWW Rules**
    - Uses the [`consolidateOps`](algorithms.md#consolidateops) algorithm
@@ -393,6 +394,10 @@ interface LWWStoreBackend extends ServerStoreBackend {
   // List ops, optionally filtered
   listOps(docId: string, options?: ListFieldsOptions): Promise<JSONPatchOp[]>;
 
+  // Optional: ops at, above or below any of `paths`, plus ops with rev > sinceRev.
+  // Without it, every commit reads every stored op
+  listRelatedOps?(docId: string, options: { paths: string[]; sinceRev?: number }): Promise<JSONPatchOp[]>;
+
   // Save ops and atomically increment revision; changeIds (when given) must
   // persist in the same transaction as the ops
   saveOps(docId: string, ops: JSONPatchOp[], pathsToDelete?: string[], changeIds?: CommittedChangeIds): Promise<number>;
@@ -424,6 +429,12 @@ Two mutually exclusive filtering modes - use one or the other, not both:
 ```
 
 If you pass no options, `listOps()` returns all ops for the document.
+
+### `listRelatedOps()` (Optional)
+
+`commitChanges` only needs the rows a commit can touch. For `paths: ['/a/b']` that is `/a`, `/a/b` and every `/a/b/...` row, plus every row with `rev > sinceRev` when `sinceRev` is given. Returning extra rows is allowed; leaving one out is not. `paths` never contains the root path `''`.
+
+Implement it when docs accumulate many paths (hourly counters, per-item maps). Without it, each commit reads one row per stored path, so a doc that only grows costs more to write every day.
 
 ### Implementation Requirements for `saveOps()`
 

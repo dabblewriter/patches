@@ -732,6 +732,10 @@ interface LWWStoreBackend extends ServerStoreBackend {
   // List ops, optionally filtered
   listOps(docId: string, options?: ListFieldsOptions): Promise<JSONPatchOp[]>;
 
+  // Optional: ops at, above or below any of `paths`, plus ops with rev > sinceRev.
+  // Without it, every commit reads every stored op
+  listRelatedOps?(docId: string, options: { paths: string[]; sinceRev?: number }): Promise<JSONPatchOp[]>;
+
   // Save ops atomically, increment revision; changeIds (when given) must
   // persist in the same transaction as the ops
   saveOps(docId: string, ops: JSONPatchOp[], pathsToDelete?: string[], changeIds?: CommittedChangeIds): Promise<number>;

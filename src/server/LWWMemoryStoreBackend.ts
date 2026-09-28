@@ -12,6 +12,7 @@ import type {
   BranchingStoreBackend,
   CommittedChangeIds,
   ListFieldsOptions,
+  ListRelatedOpsOptions,
   LWWStoreBackend,
   SnapshotResult,
   TombstoneStoreBackend,
@@ -156,6 +157,16 @@ export class LWWMemoryStoreBackend
     }
 
     return [];
+  }
+
+  async listRelatedOps(docId: string, { paths, sinceRev }: ListRelatedOpsOptions): Promise<JSONPatchOp[]> {
+    const doc = this.docs.get(docId);
+    if (!doc) return [];
+    return doc.ops.filter(
+      op =>
+        (sinceRev !== undefined && (op.rev ?? 0) > sinceRev) ||
+        paths.some(path => op.path === path || op.path.startsWith(path + '/') || path.startsWith(op.path + '/'))
+    );
   }
 
   // === Deletion ===

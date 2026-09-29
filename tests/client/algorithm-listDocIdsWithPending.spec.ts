@@ -116,6 +116,35 @@ describe('OTAlgorithm.listDocIdsWithPending', () => {
     expect(await algorithm.listDocIdsWithPending()).toEqual(new Set(['withUnstored']));
   });
 
+  it('still reports a doc whose unstored row is stored and dropped from the outbox mid-read', async () => {
+    // A latched doc's retry runs `savePendingChanges` then drops the row from the outbox. If
+    // that lands between the store read and the outbox read, a store snapshot taken before
+    // the save and an outbox read taken after the drop both miss the doc — pending work
+    // reported as clean. `hasPending` reads the outbox first; the bulk form must not be
+    // weaker.
+    await store.saveDoc('withUnstored', { state: { items: ['a'] }, rev: 5 });
+    const doc = algorithm.createDoc('withUnstored', {
+      state: { items: ['a'] },
+      rev: 5,
+      changes: [],
+    }) as unknown as OTDoc<any>;
+    let emitted: any[] = [];
+    const off = doc.onChange(ops => (emitted = ops));
+    doc.change(patch => patch.add('/items/-', 'u'));
+    off();
+    algorithm.queueUnstoredChange('withUnstored', emitted, doc, {}, 'refused');
+
+    const storeRead = store.listDocIdsWithPending.bind(store);
+    store.listDocIdsWithPending = async () => {
+      const snapshot = await storeRead(); // taken before the retry's save
+      await store.savePendingChanges('withUnstored', [createChange(5, 6, emitted)]);
+      (algorithm as unknown as { _outbox: Map<string, unknown> })._outbox.delete('withUnstored');
+      return snapshot;
+    };
+
+    expect(await algorithm.listDocIdsWithPending()).toEqual(new Set(['withUnstored']));
+  });
+
   it('agrees with hasPending for every tracked doc', async () => {
     await store.savePendingChanges('withPending', [
       createChange(0, 1, [{ op: 'replace', path: '/title', value: 'x' }]),

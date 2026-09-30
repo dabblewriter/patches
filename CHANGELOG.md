@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.33.0](https://github.com/dabblewriter/patches/compare/v0.32.3...v0.33.0) (2026-09-30)
+
+
+### Features
+
+* **lww:** read only the ops a commit can touch (DAB-1672) ([3b33226](https://github.com/dabblewriter/patches/commit/3b33226e3cb716f883f4cd2ac015b254edc73104))
+* **lww:** read only the ops a commit can touch (DAB-1672) ([69938b2](https://github.com/dabblewriter/patches/commit/69938b24f79b5305562b05d85fadf8bc76d2fc08))
+
+
+### Bug Fixes
+
+* **ot:** read the outbox on both sides of the bulk pending store read ([794fb18](https://github.com/dabblewriter/patches/commit/794fb186210c592cf43d575f71c9bf46dae42170))
+* **ot:** read the outbox on both sides of the bulk pending store read ([689900f](https://github.com/dabblewriter/patches/commit/689900f0e7477e07c061e5828d3967c84e3aa4d5))
+
 ## [0.32.3](https://github.com/dabblewriter/patches/compare/v0.32.2...v0.32.3) (2026-09-28)
 
 

@@ -400,13 +400,22 @@ export class OTAlgorithm implements ClientAlgorithm {
       typeof this.store.listDocIdsWithPending === 'function'
         ? this.store.listDocIdsWithPending.bind(this.store)
         : undefined;
+    // The outbox is read on BOTH sides of the store await. A retry that stores a row and then
+    // drops it from the outbox can land between the two reads; read only after, and a store
+    // read taken before the save misses the doc on both tiers. `hasPending` reads the outbox
+    // first for the same reason. Reading after as well catches a row that enters the outbox
+    // during the await.
+    const unstoredBefore = this._docIdsWithUnstoredChanges();
     // Copied, never mutated in place: the interface does not promise a freshly allocated Set,
     // and an external store memoizing one would have it corrupted by the outbox union below.
     const docIds = new Set(bulk ? await bulk() : await this._pendingDocIdsPerDoc());
-    for (const docId of this._outbox.keys()) {
-      if (this.hasUnstoredChanges(docId)) docIds.add(docId);
-    }
+    for (const docId of unstoredBefore) docIds.add(docId);
+    for (const docId of this._docIdsWithUnstoredChanges()) docIds.add(docId);
     return docIds;
+  }
+
+  private _docIdsWithUnstoredChanges(): string[] {
+    return [...this._outbox.keys()].filter(docId => this.hasUnstoredChanges(docId));
   }
 
   /**

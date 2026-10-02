@@ -115,18 +115,17 @@ costs nothing but tidiness.
 The likeliest cause is `NPM_TOKEN`. The job tells three failures apart, because
 npm's own errors do not:
 
-| Symptom                                               | Cause                                                             |
-| ----------------------------------------------------- | ----------------------------------------------------------------- |
-| `npm whoami` fails                                    | token expired or rotated                                          |
-| `whoami` prints a name, publish gives `E403` on `PUT` | token authenticates but is **read-only**                          |
-| publish gives `EOTP`                                  | token is a classic **Publish** token — those still prompt for 2FA |
+| Symptom                                               | Cause                                    |
+| ----------------------------------------------------- | ---------------------------------------- |
+| `npm whoami` fails                                    | token expired or rotated                 |
+| `whoami` prints a name, publish gives `E403` on `PUT` | token authenticates but is **read-only** |
+| publish gives `EOTP`                                  | token was created without **Bypass 2FA** |
 
-**Token type matters more than the permission checkbox.** A classic _Publish_
-token cannot work unattended on a 2FA account: npm asks it for a one-time
-password, which no CI job can answer. Use a classic **Automation** token or a
-**Granular Access Token** with read+write on `@dabble/patches` — both are designed to
-bypass 2FA. Update the `NPM_TOKEN` repo secret, then republish the tag with Run
-workflow.
+The token must be a **granular access token** with read+write on
+`@dabble/patches` and **Bypass 2FA enabled**. Bypass 2FA is off by default when a
+granular token is created, and without it npm asks for a one-time password that
+no CI job can answer. Update the `NPM_TOKEN` repo secret, then republish the tag
+with Run workflow.
 
 ## Consumers
 

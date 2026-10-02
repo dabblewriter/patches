@@ -79,7 +79,7 @@ jobs:
         run: |
           if ! npm whoami; then
             echo "::error::NPM_TOKEN cannot authenticate to npm at all — it is expired or rotated." \
-                 "Mint a granular token with read+write access to @dabble/patches, update the NPM_TOKEN repo secret," \
+                 "Mint a granular token with read+write access to @dabble/patches and Bypass 2FA enabled, update the NPM_TOKEN repo secret," \
                  "then re-run: Actions → Release → Run workflow → tag = $TAG."
             exit 1
           fi
@@ -118,9 +118,9 @@ jobs:
           if [ $code -ne 0 ]; then
             retry="Then re-run: Actions → Release → Run workflow → tag = $TAG. The tag and GitHub release already exist, so nothing is lost."
             if grep -q "EOTP" /tmp/publish.log; then
-              echo "::error::NPM_TOKEN needs a one-time password, so it is a classic *Publish* token — those still prompt for 2FA and cannot work unattended. Replace it with a classic **Automation** token or a **Granular Access Token**; both bypass 2FA. $retry"
+              echo "::error::npm asked NPM_TOKEN for a one-time password, which no CI job can answer. The token was created without 'Bypass 2FA' (it is off by default on a granular token). Mint a granular token with read+write on $name and Bypass 2FA enabled, and update the repo secret. $retry"
             elif grep -qE "E403|403 Forbidden" /tmp/publish.log; then
-              echo "::error::NPM_TOKEN authenticated (see whoami above) but has no write access to $name — a read-only token. Mint one with read+write on $name and update the repo secret. $retry"
+              echo "::error::NPM_TOKEN authenticated (see whoami above) but has no write access to $name — a read-only token. Mint one with read+write on $name and Bypass 2FA enabled, and update the repo secret. $retry"
             else
               echo "::error::Failed to publish $name@$version — see the npm output above. $retry"
             fi

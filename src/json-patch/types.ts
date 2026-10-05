@@ -85,6 +85,20 @@ export type State = {
    * historical reconstruction may ask for.
    */
   legacyTextOverrunPadding?: boolean;
+  /**
+   * Set by `applyPatch` whenever `ApplyJSONPatchOptions.legacyTextOverrunPadding` was supplied at
+   * all — `false` as much as `true`. Read by the `@txt` handler to stay quiet about an overrun it
+   * dropped.
+   *
+   * In practice this means **every reconstruction is silent**, not only one whose caller chose a
+   * rule: `applyChangesForReconstruction` resolves the option per change and always hands
+   * `applyPatch` an explicit boolean, so the flag is set even when the caller passed nothing. That
+   * is the intent — replaying a settled log is not news. A LIVE apply never passes the option, so
+   * it still warns, and that is the signal worth keeping: a client is minting overruns right now.
+   * Warning on replays too would bury it under every blob build, every history scrub, and every
+   * frame of a client-side scrub drag.
+   */
+  textOverrunRuleSupplied?: boolean;
 };
 
 export type Runner = (state: State) => any;

@@ -48,7 +48,7 @@ export const text: JSONPatchOpHandler = {
 
     doc = doc.compose(delta);
 
-    doc = fixBadDeltaDoc(doc, state.legacyTextOverrunPadding === true);
+    doc = fixBadDeltaDoc(doc, state.legacyTextOverrunPadding === true, state.textOverrunRuleSupplied === true);
 
     return replace.apply(state, path, doc);
   },
@@ -127,7 +127,7 @@ export const text: JSONPatchOpHandler = {
  * lands on real prose instead. Same log, same code, silently different document. Hence two
  * modes rather than one: new applies stop the corruption, settled history stays readable.
  */
-function fixBadDeltaDoc(delta: Delta, legacyPadding: boolean): Delta {
+function fixBadDeltaDoc(delta: Delta, legacyPadding: boolean, ruleSupplied: boolean): Delta {
   // Find where trailing non-inserts start (these can be dropped)
   let overrun = 0;
   while (delta.ops.length && delta.ops[delta.ops.length - 1].insert === undefined) {
@@ -161,12 +161,16 @@ function fixBadDeltaDoc(delta: Delta, legacyPadding: boolean): Delta {
     delta = newDelta;
   }
 
-  if (overrun > 0 && !legacyPadding) {
+  if (overrun > 0 && !legacyPadding && !ruleSupplied) {
     // A change should never reference content past the end of the document. Until the client
     // bug that mints these is fixed, this is the only signal that it happened — `log` is a
     // no-op unless someone calls `verbose(true)`, which no consumer does, so warn instead.
-    // Silent under reconstruction: replaying a log with a known historical overrun is expected,
-    // and warning per replay would drown the live signal we actually want to count.
+    //
+    // Keyed on `ruleSupplied`, NOT on "did we pad". A caller replaying settled history passes a
+    // rule (per change since DAB-1427, so it drops some and pads others) and already knows the
+    // log contains an overrun. Warning there fires on every blob build, every history scrub and
+    // every frame of a client-side scrub drag — drowning the live signal this exists to count,
+    // which is the one telling us a client is STILL minting overruns.
     console.warn(`@txt change overran the document by ${overrun}; dropped the overrun (DAB-1064)`);
   }
   return delta;

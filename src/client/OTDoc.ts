@@ -453,11 +453,16 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // are its pieces, which never byte-match the whole entry, so it would re-apply on top of
       // them. What is left of the entry is the pieces still to come (DAB-1409).
       const snapshotIds = new Set(snapshot.changes.map(c => c.id));
+      const idMatched = new Set<string>();
       for (const [entry, pieces] of [...this._minted]) {
         const remaining = pieces.filter(piece => !snapshotIds.has(piece.id));
-        if (remaining.length !== pieces.length) this._setMintedPieces(entry, remaining);
+        if (remaining.length === pieces.length) continue;
+        for (const piece of pieces) if (snapshotIds.has(piece.id)) idMatched.add(piece.id);
+        this._setMintedPieces(entry, remaining);
       }
-      const pendingOpKeys = snapshot.changes.map(c => JSON.stringify(c.ops));
+      // A row consumed by id is spent: left in the byte match, it would let a second, identical
+      // entry match it and be emptied — that edit then never shows and never sends.
+      const pendingOpKeys = snapshot.changes.filter(c => !idMatched.has(c.id)).map(c => JSON.stringify(c.ops));
       // Outbox entries a writer has reported committed at a rev this snapshot covers: the
       // snapshot state already holds them, so re-applying the entry would duplicate it.
       const committedUnstored = new Set<JSONPatchOp[]>();

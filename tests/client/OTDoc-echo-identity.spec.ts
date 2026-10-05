@@ -168,6 +168,43 @@ describe('OTDoc — own echoes are matched by minted id, not by bytes (DAB-1409)
     expect((doc as any)._optimisticOps).toEqual([]);
   });
 
+  it('import: a row matched by id is not reused by the byte match — a second identical edit survives', () => {
+    // Ryan's repro on #199: u1 retires e1 by id; e2 (same ops, not minted yet) must not then
+    // byte-match u1's row and be emptied.
+    const doc = new OTDoc<ListDoc>('doc-10', { state: { items: ['a'] }, rev: 1, changes: [] });
+    doc.change(patch => patch.add('/items/-', 'X'));
+    const e1 = (doc as any)._optimisticOps[0];
+    const u1 = makeChange('u1', 1, 2, [{ op: 'add', path: '/items/-', value: 'X' }], false);
+    doc._noteMinted([u1], e1);
+    doc.change(patch => patch.add('/items/-', 'X'));
+    const e2 = (doc as any)._optimisticOps[1];
+
+    doc.import({ state: { items: ['a'] }, rev: 1, changes: [u1] });
+
+    expect(doc.state.items).toEqual(['a', 'X', 'X']);
+    expect((doc as any)._optimisticOps).toEqual([e2]);
+    expect(e2).toEqual([{ op: 'add', path: '/items/-', value: 'X' }]);
+  });
+
+  it('import: split pieces matched by id are not reused by the byte match either', () => {
+    const doc = new OTDoc<ListDoc>('doc-11', { state: { items: ['a'] }, rev: 1, changes: [] });
+    doc.change(patch => {
+      patch.add('/items/-', 'A');
+      patch.add('/items/-', 'B');
+    });
+    const e1 = (doc as any)._optimisticOps[0];
+    const p0 = makeChange('p0', 1, 2, [{ op: 'add', path: '/items/-', value: 'A' }], false);
+    const p1 = makeChange('p1', 1, 3, [{ op: 'add', path: '/items/-', value: 'B' }], false);
+    doc._noteMinted([p0, p1], e1);
+    doc.change(patch => patch.add('/items/-', 'B')); // same ops as piece p1
+    const e2 = (doc as any)._optimisticOps[1];
+
+    doc.import({ state: { items: ['a'] }, rev: 1, changes: [p0, p1] });
+
+    expect(doc.state.items).toEqual(['a', 'A', 'B', 'B']);
+    expect((doc as any)._optimisticOps).toEqual([e2]);
+  });
+
   it('a foreign change with byte-identical ops is NOT adopted — the local edit survives', () => {
     const doc = new OTDoc<ListDoc>('doc-4', { state: { items: ['a'] }, rev: 1, changes: [] });
     doc.change(patch => patch.add('/items/-', 'X'));

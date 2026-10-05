@@ -1,4 +1,4 @@
-import { applyChangesForReconstruction } from '../algorithms/ot/shared/applyChanges.js';
+import { applyChangesForReconstruction, type TextOverrunPaddingPolicy } from '../algorithms/ot/shared/applyChanges.js';
 import { store, type Store } from 'easy-signal';
 import type { PatchesAPI } from '../net/protocol/types.js';
 import type { Change, EditableVersionMetadata, ListVersionsOptions, VersionMetadata } from '../types.js';
@@ -36,6 +36,16 @@ class LRUCache<K, V> {
   }
 }
 
+/** Options for {@link PatchesHistoryClient}. */
+export interface PatchesHistoryClientOptions {
+  /**
+   * How `scrubTo` replays a `@txt` retain that overran the document. Defaults to `true` (always
+   * pad). Pass the same policy the server builds version blobs with, or a scrub disagrees with the
+   * blob it scrubs toward. See `ReconstructionOptions.legacyTextOverrunPadding` (DAB-1427).
+   */
+  legacyTextOverrunPadding?: boolean | TextOverrunPaddingPolicy;
+}
+
 /**
  * Client-side history/scrubbing interface for a document.
  * Read-only: allows listing versions, loading states/changes, and scrubbing.
@@ -52,7 +62,8 @@ export class PatchesHistoryClient<T = any> {
 
   constructor(
     id: string,
-    private readonly api: PatchesAPI
+    private readonly api: PatchesAPI,
+    private readonly options: PatchesHistoryClientOptions = {}
   ) {
     this.id = id;
     this.versions = store<VersionMetadata[]>([]);
@@ -117,9 +128,10 @@ export class PatchesHistoryClient<T = any> {
     // of the timeline permanently unviewable.
     if (changeIndex > 0) {
       // Renders this log rather than seeding a new document, so it opts into the padding the
-      // log's later entries were authored against (DAB-1064).
+      // log's later entries were authored against (DAB-1064) — per the configured policy, since
+      // only changes from padding clients were authored against it (DAB-1427).
       this.historyState.state = applyChangesForReconstruction(state, changes.slice(0, changeIndex), {
-        legacyTextOverrunPadding: true,
+        legacyTextOverrunPadding: this.options.legacyTextOverrunPadding ?? true,
       });
     }
   }

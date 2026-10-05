@@ -483,6 +483,74 @@ describe('PatchesHistoryManager', () => {
       expect(skipped).toEqual([{ docId: 'doc1', changeId: 'c2' }]);
       warn.mockRestore();
     });
+
+    describe('@txt overrun padding policy (DAB-1427)', () => {
+      const DOC = 'abc\n';
+      // Retains 3 past the end of the document, then inserts.
+      const overrun = (createdAt: number) => ({
+        id: `o${createdAt}`,
+        rev: 1,
+        baseRev: 0,
+        ops: [{ op: '@txt', path: '/text', value: [{ retain: DOC.length + 3 }, { insert: 'Z' }] }],
+        createdAt,
+        committedAt: createdAt,
+      });
+
+      const readBaseline = async (manager: PatchesHistoryManager) => {
+        const reader = (await manager.getStateBeforeVersion('doc1', 'v1')).getReader();
+        let text = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          text += value;
+        }
+        const value = JSON.parse(text).text;
+        return ((value.ops ?? value) as { insert: string }[]).map(op => op.insert).join('');
+      };
+
+      const storeWithGap = (gapChange: Change) =>
+        ({
+          ...mockStore,
+          getCurrentRev: vi.fn().mockResolvedValue(2),
+          listChanges: vi.fn().mockResolvedValue([gapChange]),
+          loadVersion: vi
+            .fn()
+            .mockImplementation((_: string, id: string) =>
+              Promise.resolve(id === 'v1' ? { id: 'v1', startRev: 2, endRev: 2, origin: 'main' } : undefined)
+            ),
+          // No parent: the base is rebuilt from an empty doc plus the gap changes.
+          loadVersionState: vi.fn().mockResolvedValue(undefined),
+          listVersions: vi.fn().mockResolvedValue([]),
+        }) as any;
+
+      const seeded = (gapChange: Change): Change => ({
+        ...gapChange,
+        ops: [{ op: 'replace', path: '/text', value: [{ insert: DOC }] }, ...gapChange.ops],
+      });
+
+      it('pads by default, as before', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const manager = new PatchesHistoryManager(mockServer, storeWithGap(seeded(overrun(5))));
+        expect(await readBaseline(manager)).toBe('abc\n   Z\n');
+        warn.mockRestore();
+      });
+
+      it('applies a per-change policy: an overrun from a dropping client is dropped', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const policy = (change: Change) => change.createdAt < 10;
+
+        const before = new PatchesHistoryManager(mockServer, storeWithGap(seeded(overrun(5))), {
+          legacyTextOverrunPadding: policy,
+        });
+        const after = new PatchesHistoryManager(mockServer, storeWithGap(seeded(overrun(10))), {
+          legacyTextOverrunPadding: policy,
+        });
+
+        expect(await readBaseline(before)).toBe('abc\n   Z\n');
+        expect(await readBaseline(after)).toBe('abc\nZ\n');
+        warn.mockRestore();
+      });
+    });
   });
 
   describe('integration scenarios', () => {

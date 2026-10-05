@@ -40,6 +40,10 @@ export function applyPatch(
 
   const types = getTypes(custom);
   return runWithObject(object, types, patches.length > 1, state => {
+    // Two flags, deliberately: one says HOW to replay an overrun, the other that the caller
+    // decided at all. The `@txt` handler keys its warning on the second, so a replay that
+    // legitimately drops an overrun stays quiet while a LIVE apply still reports one.
+    if (opts.legacyTextOverrunPadding !== undefined) state.textOverrunRuleSupplied = true;
     if (opts.legacyTextOverrunPadding) state.legacyTextOverrunPadding = true;
     for (let i = 0, imax = patches.length; i < imax; i++) {
       const patch = patches[i];

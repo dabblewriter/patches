@@ -21,7 +21,15 @@ export type * from './LWWClientStore.js';
 export type * from './ClientAlgorithm.js';
 // Sync-recovery errors, exported so consumers can `instanceof` instead of matching by name
 export { MissingChangesError } from '../algorithms/ot/client/applyCommittedChanges.js';
-export { ApplyChangesError } from '../algorithms/ot/shared/applyChanges.js';
+export {
+  ApplyChangesError,
+  padTextOverrunsCreatedBefore,
+  padTextOverrunsFromClients,
+  type TextOverrunPaddingPolicy,
+} from '../algorithms/ot/shared/applyChanges.js';
+// Stamps every change this client mints with the app's own build, so replay can tell what that
+// build did (DAB-1427). Call once at startup.
+export { getChangeClientVersion, setChangeClientVersion } from '../data/change.js';
 // (isLossyEjectionError deliberately checks by name, not instanceof — it must survive
 // an RPC/worker boundary that rehydrates errors.)
 export { LossyEjectionError, isLossyEjectionError } from '../algorithms/ot/shared/ejectPendingChange.js';

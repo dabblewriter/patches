@@ -301,6 +301,21 @@ describe('PatchesHistoryClient', () => {
       expect(stateSpy).toHaveBeenCalledWith(expectedState);
     });
 
+    it('passes a configured overrun padding policy through to the replay (DAB-1427)', async () => {
+      const policy = (change: { createdAt: number }) => change.createdAt < 2;
+      const configured = new PatchesHistoryClient('doc1', mockAPI, { legacyTextOverrunPadding: policy });
+      vi.mocked(mockAPI.listVersions).mockResolvedValue([createVersion('v1', 1)]);
+      await configured.listVersions();
+      const changes = [createChange('c1', 1)];
+      vi.mocked(mockAPI.getVersionChanges).mockResolvedValue(changes);
+
+      await configured.scrubTo('v1', 1);
+
+      expect(applyChangesForReconstruction).toHaveBeenCalledWith(undefined, changes, {
+        legacyTextOverrunPadding: policy,
+      });
+    });
+
     it('should handle scrubbing to index 0 (parent version)', async () => {
       const parentState = { title: 'Parent' };
       const changes = [createChange('c1', 1)];

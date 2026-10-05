@@ -85,6 +85,14 @@ export type State = {
    * historical reconstruction may ask for.
    */
   legacyTextOverrunPadding?: boolean;
+  /**
+   * Set by `applyPatch` whenever `ApplyJSONPatchOptions.legacyTextOverrunPadding` was supplied at
+   * all — `false` as much as `true`. Read by the `@txt` handler to stay quiet about an overrun it
+   * dropped: a caller that passed a rule is replaying settled history and already knows its log
+   * contains one, so warning per replay would drown the live signal (a client still minting
+   * overruns) under every blob build and every history scrub.
+   */
+  textOverrunRuleSupplied?: boolean;
 };
 
 export type Runner = (state: State) => any;

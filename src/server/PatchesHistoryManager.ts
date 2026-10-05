@@ -1,5 +1,5 @@
 import { getStateBeforeVersionAsStream } from '../algorithms/ot/server/buildVersionState.js';
-import type { SkippedChange } from '../algorithms/ot/shared/applyChanges.js';
+import type { SkippedChange, TextOverrunPaddingPolicy } from '../algorithms/ot/shared/applyChanges.js';
 import { isStatusError, StatusError } from '../net/error.js';
 import type { ApiDefinition } from '../net/protocol/JSONRPCServer.js';
 import type { Change, EditableVersionMetadata, ListVersionsOptions, VersionMetadata } from '../types.js';
@@ -19,6 +19,14 @@ export interface PatchesHistoryManagerOptions {
    * `console.error` logging inside `applyChangesForReconstruction`.
    */
   onSkippedChange?: (docId: string, skipped: SkippedChange) => void;
+
+  /**
+   * How `getStateBeforeVersion` replays a `@txt` retain that overran the document. Defaults to
+   * `true` (always pad). A server that also builds version blobs must pass the SAME policy it
+   * builds them with, or the scrubbing baseline and the blob it scrubs toward disagree about the
+   * text. See `ReconstructionOptions.legacyTextOverrunPadding` (DAB-1427).
+   */
+  legacyTextOverrunPadding?: boolean | TextOverrunPaddingPolicy;
 }
 
 /**
@@ -162,10 +170,10 @@ export class PatchesHistoryManager {
     // the onSkippedChange telemetry hook (or console.error by default).
     // It also RENDERS this log rather than seeding a new document, so it keeps the `@txt`
     // overrun padding the log's later entries were authored against (DAB-1064).
-    const { onSkippedChange } = this.options;
+    const { onSkippedChange, legacyTextOverrunPadding = true } = this.options;
     return getStateBeforeVersionAsStream(otStore, docId, version, {
       reconstruction: {
-        legacyTextOverrunPadding: true,
+        legacyTextOverrunPadding,
         ...(onSkippedChange ? { onSkippedChange: skipped => onSkippedChange(docId, skipped) } : {}),
       },
     });

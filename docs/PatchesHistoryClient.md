@@ -39,11 +39,17 @@ const state = await history.getVersionState(versions[0].id);
 ### Constructor
 
 ```typescript
-new PatchesHistoryClient<T>(id: string, api: PatchesAPI)
+new PatchesHistoryClient<T>(id: string, api: PatchesAPI, options?: PatchesHistoryClientOptions)
 ```
 
 - `id` - Document ID to browse history for
 - `api` - Any object implementing `PatchesAPI` (like [PatchesWebSocket](websocket.md))
+- `options.legacyTextOverrunPadding` - How `scrubTo` replays a `@txt` retain that overran the
+  document: `true` (the default) always pads, `false` never does, or a `TextOverrunPaddingPolicy`
+  decides per change. **Pass the same policy the server builds its version blobs with** — a scrub
+  that disagrees with the blob it scrubs toward shows text nobody wrote. Padding is only right for
+  a change whose authoring client padded, which stopped being all of them in patches 0.28.1; see
+  `padTextOverrunsFromClients` and `padTextOverrunsCreatedBefore`.
 - Generic type `T` provides type safety for the document state
 
 ### Properties

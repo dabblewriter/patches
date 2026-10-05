@@ -67,6 +67,32 @@ describe('IndexedDB store-error wrapping', () => {
     await expect(wrapper.complete()).rejects.toBeInstanceOf(StorageError);
   });
 
+  // `tx.error` is null for a transaction that aborts with no error — a script `abort()`, or
+  // the browser killing it, as WebKit does to a backgrounded or closing connection. Rejecting
+  // with that raw null left every caller unable to classify the failure: the doc latched as
+  // `unknown` and boot sync failed with "Error: null" (DABBLE-WRITER-3-1C3).
+  it('rejects with a StorageError, never a bare null, when a transaction aborts with no error', async () => {
+    const fakeTx = {
+      oncomplete: null,
+      onerror: null,
+      onabort: null,
+      error: null,
+      objectStoreNames: ['docs', 'changes'],
+    } as unknown as IDBTransaction;
+    const wrapper = new IDBTransactionWrapper(fakeTx);
+    void Promise.resolve().then(() => (fakeTx as unknown as { onabort: () => void }).onabort());
+    const err = await wrapper.complete().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StorageError);
+    expect((err as StorageError).message).toContain('docs, changes');
+  });
+
+  it('rejects with a StorageError when a transaction errors with no error set', async () => {
+    const fakeTx = { oncomplete: null, onerror: null, onabort: null, error: null } as unknown as IDBTransaction;
+    const wrapper = new IDBTransactionWrapper(fakeTx);
+    void Promise.resolve().then(() => (fakeTx as unknown as { onerror: () => void }).onerror());
+    await expect(wrapper.complete()).rejects.toBeInstanceOf(StorageError);
+  });
+
   it('leaves a non-storage request error unchanged (e.g. AbortError)', async () => {
     const raw = new DOMException('The transaction was aborted.', 'AbortError');
     const wrapper = new IDBStoreWrapper(storeThatErrorsWith(raw));

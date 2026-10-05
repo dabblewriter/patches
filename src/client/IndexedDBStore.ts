@@ -9,7 +9,7 @@ import type {
   QuarantinedChange,
 } from '../types.js';
 import { deferred, type Deferred } from '../utils/deferred.js';
-import { StorageTimeoutError, storageOpLabel, toStorageError } from '../net/error.js';
+import { StorageError, StorageTimeoutError, storageOpLabel, toStorageError } from '../net/error.js';
 import { signal } from 'easy-signal';
 import type { BranchClientStore } from './BranchClientStore.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
@@ -1021,10 +1021,19 @@ export class IDBTransactionWrapper {
         guard.clear();
         resolve();
       };
+      // `tx.error` is null for a transaction that aborts with no error: a script `abort()`, or
+      // the browser killing it, as WebKit does to a backgrounded or closing connection. Never
+      // reject with that raw null (the same rule `deleteDatabase` follows above): nothing
+      // downstream can classify a bare null, so the doc latched as `unknown` and boot sync
+      // failed with "Error: null" (DABBLE-WRITER-3-1C3). Losing the transaction is a storage
+      // fault, so say so.
+      const txError = (event: 'failed' | 'aborted') =>
+        toStorageError(tx.error) ??
+        new StorageError(`${storageOpLabel('transaction', storeNames())} ${event} without an error`);
       tx.onerror = () => {
         beaconRef.lastSettleAt = Date.now();
         guard.clear();
-        reject(toStorageError(tx.error));
+        reject(txError('failed'));
       };
       // A transaction that aborts at commit — notably under quota pressure — can fire ONLY
       // `onabort` (with `tx.error` set) and no `onerror`, which would otherwise leave this
@@ -1034,7 +1043,7 @@ export class IDBTransactionWrapper {
       tx.onabort = () => {
         beaconRef.lastSettleAt = Date.now();
         guard.clear();
-        reject(toStorageError(tx.error));
+        reject(txError('aborted'));
       };
     });
     // Each request settle both bumps the connection-wide beacon and extends this transaction's

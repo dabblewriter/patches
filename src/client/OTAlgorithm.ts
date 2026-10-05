@@ -281,6 +281,11 @@ export class OTAlgorithm implements ClientAlgorithm {
 
       const changes = this._createChangesFromOps(committedRev, pendingRev, ops, metadata, id, docId);
       if (changes.length === 0) return [];
+      // Tell the doc which ids this entry went out under BEFORE the store write: under a slow
+      // store the change can be sent and echoed before this mint confirms, and the doc must know
+      // that echo by id — its ops may come back transformed or split (DAB-1409).
+      const otDoc = doc as OTDoc<T> | undefined;
+      if (typeof otDoc?._noteMinted === 'function') otDoc._noteMinted(changes, ops);
 
       // Re-stamps each change's rev in place from the persisted tail; the objects below carry it.
       await this.store.savePendingChanges(docId, changes);

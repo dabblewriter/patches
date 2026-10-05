@@ -57,8 +57,11 @@ describe('OTDoc @txt — own in-flight insert must not be counted twice (DAB-106
       const doc = seed();
 
       // The author's insert is applied optimistically and parked. The store's mint write is slow,
-      // so `applyChanges([local])` has NOT happened: the doc holds no pending entry for it.
-      doc._applyOptimistic(first() as any);
+      // so `applyChanges([local])` has NOT happened: the doc holds no pending entry for it. The
+      // algorithm did tell it, before the store write, which id the change went out under.
+      const firstOps = first();
+      doc._applyOptimistic(firstOps as any);
+      doc._noteMinted([makeChange('c1', 1, 2, firstOps, false)], firstOps as any);
       expect(textOf(doc.state)).toBe(`${BASE}ABCDE\n`);
 
       // Author keeps typing at the correct offset while the insert is un-acked.
@@ -66,8 +69,8 @@ describe('OTDoc @txt — own in-flight insert must not be counted twice (DAB-106
       doc._applyOptimistic(second as any);
       expect(textOf(doc.state)).toBe(`${BASE}ABCDEFG\n`);
 
-      // The committed echo lands first. With no pending entry to match by id it would read as
-      // foreign, and `_rebaseOptimisticOps` would transform our parked copy against its own echo.
+      // The committed echo lands first. With no pending entry it is recognised by its minted id;
+      // read as foreign, `_rebaseOptimisticOps` would transform our parked copy against its echo.
       doc.applyChanges([makeChange('c1', 1, 2, first(), true)]);
 
       // 25, not 30: the queued op's retain must not grow by len('ABCDE'). Asserted before the text
@@ -81,20 +84,21 @@ describe('OTDoc @txt — own in-flight insert must not be counted twice (DAB-106
 
     it('the insert itself appears once, not twice, when nothing is queued behind it', () => {
       const doc = seed();
-      doc._applyOptimistic(first() as any);
+      const firstOps = first();
+      doc._applyOptimistic(firstOps as any);
+      doc._noteMinted([makeChange('c1', 1, 2, firstOps, false)], firstOps as any);
       doc.applyChanges([makeChange('c1', 1, 2, first(), true)]);
 
       expect(textOf(doc.state)).toBe(`${BASE}ABCDE\n`); // not ...ABCDEABCDE
       expect((doc as any)._optimisticOps).toEqual([]);
     });
 
-    it('control: with adoption disabled, the echo reads as foreign and the retain grows by the insert length', () => {
-      // Mutation pin. Rather than editing `OTDoc.ts` to prove the test bites, neutralise the
-      // adoption step on one instance and assert the bug's exact shape — the same hazard the
-      // array spec flipped from "control" to "closed". Retain 30 = 25 + len('ABCDE'), and the
-      // prose carries the insert twice. This is what a DAB-1064 user saw.
+    it('control: with no minted id recorded, the echo reads as foreign and the retain grows by the insert length', () => {
+      // Mutation pin: skip `_noteMinted` — what a mint path that forgot to record its ids would
+      // do — and assert the bug's exact shape. Retain 30 = 25 + len('ABCDE'), and the prose
+      // carries the insert twice. This is what a DAB-1064 user saw. Bytes alone never adopt an
+      // echo any more: a foreign change can share them (DAB-1409).
       const doc = seed();
-      (doc as any)._adoptEchoedOptimisticOps = () => {};
 
       doc._applyOptimistic(first() as any);
       const second = txt([{ retain: 25 }, { insert: 'FG' }]);

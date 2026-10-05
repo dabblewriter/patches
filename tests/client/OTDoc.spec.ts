@@ -612,17 +612,20 @@ describe('OTDoc — outbox entries confirmed by their committed echo', () => {
     expect(laterOps).toEqual([{ op: 'add', path: '/items/2', value: 'Y' }]);
   });
 
-  it('without the outbox mark the same echo is still recognised as ours by its ops, not double-applied', () => {
+  it('without the outbox mark the same echo is still recognised as ours by its minted id, not double-applied', () => {
     // This was the control for the hazard the mark exists to prevent: an own echo the doc could
     // not recognise was treated as foreign and applied twice (['a','b','c','X','X']). It is the
     // DAB-1366 `+1` — a mint whose store write settles after its echo has no row and no mark —
-    // so the echo is now matched structurally against the parked optimistic op and adopted as
-    // an outbox entry. The mark remains the primary path; this is the backstop.
+    // so the echo is recognised by the id the algorithm recorded before that write
+    // (`_noteMinted`, DAB-1409). The mark remains the outbox's path.
     doc.change(patch => patch.add('/items/-', 'X'));
+    const calls = (doc.onChange.emit as any).mock.calls;
+    const ops = calls[calls.length - 1][0];
+    doc._noteMinted([makeChange('u1', 1, 2, ops, false)], ops);
     doc.applyChanges([makeChange('u1', 1, 2, [{ op: 'add', path: '/items/-', value: 'X' }], true)]);
     expect(doc.state.items).toEqual(['a', 'b', 'c', 'X']);
     expect((doc as any)._optimisticOps).toEqual([]);
-    expect(doc.unstoredChangeIds).toEqual([]); // adopted and confirmed in the same call
+    expect(doc.unstoredChangeIds).toEqual([]); // never an outbox entry
   });
 
   it('a foreign change arriving before the echo rebases the entry in place, so the outbox sends the rebased ops', () => {

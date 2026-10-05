@@ -319,6 +319,24 @@ describe('applyPendingForView', () => {
 
     expect(view(early, later).docs.group.children).toEqual(['a', 'b']);
   });
+
+  it('replays a held-out current-frame row for the rows after it', () => {
+    // The frame-debt row adds /docs/timeline and fails. `held` writes beneath it, so it is held
+    // out whole, but its insert at the head of the list is what `later` needs: it removes the
+    // index that insert shifted the last element to.
+    const early = stale({ op: 'add', path: '/docs/timeline', value: { id: 'timeline', children: [] } }, FAILS);
+    const held = change(
+      { op: 'add', path: '/docs/group/children/0', value: 'x' },
+      { op: 'add', path: '/docs/timeline/children/0', value: 'e' }
+    );
+    const later = change({ op: 'remove', path: '/docs/group/children/2' });
+
+    expect(view(early, held, later).docs.group.children).toEqual(['a', 'b']);
+
+    const result = salvagePendingForView(committed(), REV, [early, held, later]);
+    expect(result.dropped).toEqual([]);
+    expect(result.kept).toEqual([early, held, later]);
+  });
 });
 
 describe('a malformed pending row', () => {

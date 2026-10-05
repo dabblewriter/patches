@@ -41,11 +41,14 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
   protected _optimisticOps: JSONPatchOp[][] = [];
 
   /**
-   * Pending changes discarded during hydration because they failed strict apply against
-   * the snapshot's committed state (see OTDoc's constructor recovery). Empty for a clean
-   * hydration. Populated by subclasses BEFORE the constructor returns, so `Patches.openDoc`
-   * can surface the loss (`onPendingDropped`) instead of it vanishing silently — dropped
-   * changes are permanent once the next pending write persists the truncated queue.
+   * Pending changes left out of this doc's view during hydration because they failed strict
+   * apply against the snapshot's committed state (see OTDoc's constructor recovery). Empty
+   * for a clean hydration. Populated by subclasses BEFORE the constructor returns, so
+   * `Patches.openDoc` can report them (`onPendingDropped`).
+   *
+   * The name is historical: nothing is removed from the store. These rows stay queued there
+   * and are sent with the rest of the queue; only this instance's view and in-memory queue
+   * omit them, until a receive rebuilds that queue from the store.
    */
   readonly droppedPendingChanges: Change[] = [];
 

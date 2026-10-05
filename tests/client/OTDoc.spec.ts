@@ -237,10 +237,9 @@ describe('OTDoc — hydration with corrupt pending', () => {
     // c-bad is a text op against a target that is not a Delta — the realistic corrupt
     // shape (a @txt op pending against a body whose structure changed under it), and one
     // of the few op classes strict apply actually rejects (plain replace/remove on
-    // missing paths do NOT throw). c-good applies cleanly. The drop keeps the queue
-    // flushable (a change the local state rejects would also be rejected server-side
-    // and wedge every commit behind it), but the payload must survive for
-    // Patches.openDoc to surface — silent drops are user work destroyed with zero signal.
+    // missing paths do NOT throw). c-good applies cleanly. c-bad is left out of the view
+    // and of this doc's queue, and captured for Patches.openDoc to report. The store
+    // still holds it and it is still sent (see OTAlgorithm-hydrationDrop.spec).
     const bad = makeChange('c-bad', 5, 6, [{ op: '@txt', path: '/title', value: 'typed words' }], false);
     const good = makeChange('c-good', 5, 7, [{ op: 'replace', path: '/title', value: 'kept' }], false);
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});

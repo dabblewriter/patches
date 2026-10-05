@@ -85,16 +85,25 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         this.state = applyPendingForView(this._committedState, this._committedRev, this._pendingChanges);
       } catch {
         // Pending changes are corrupt (conflicting ops from accumulated sessions).
-        // Apply one-by-one, dropping changes that fail. Later changes created on
-        // committed state may still apply even when earlier ones conflict.
+        // Apply one-by-one, leaving the changes that fail out of this doc's view. Later
+        // changes created on committed state may still apply even when earlier ones
+        // conflict.
         //
-        // Dropping (not keeping) is deliberate for liveness: a change that fails strict
-        // apply here would also fail server-side at flush, and a rejected change at the
-        // head of the queue wedges every commit behind it. But the drop must never be
-        // SILENT — the next pending persist makes the truncation permanent, which is
-        // user work destroyed with zero signal. Each dropped change is captured on
-        // `droppedPendingChanges` so `Patches.openDoc` surfaces it via
-        // `onPendingDropped` and the app can preserve the content.
+        // This shortens the VIEW and this instance's in-memory queue, nothing else. The
+        // store keeps every row: nothing writes the shortened queue back, the send path
+        // reads the store (OTAlgorithm._collectPending), and the first receive hands the
+        // store's rows back to this doc. So a change left out here is still sent, in its
+        // place in the queue, and leaving it out does not unblock anything behind it.
+        // Nor does failing strict apply here mean the server refuses it: commitChanges
+        // does not strict-apply what it is sent. It corrects an out-of-range array index
+        // (DAB-1557) and commits any other change without checking that it applies. A
+        // change the server refuses by name leaves the queue through ejection
+        // (docs/quarantine.md).
+        //
+        // Each change left out is captured on `droppedPendingChanges` (a historical name,
+        // see BaseDoc) so `Patches.openDoc` reports it via `onPendingDropped`: the doc
+        // opens without work that is still queued, and the app may want its own copy
+        // before the server has ruled on it.
         let state = this._committedState;
         const valid: Change[] = [];
         for (const c of this._pendingChanges) {
@@ -120,12 +129,14 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         // plumb-through, and no consumer can have subscribed to anything yet. The
         // structured channel is Patches.onPendingDropped, emitted from openDoc right
         // after construction — this log is the fallback signal for non-Patches hosts
-        // and for drops that occur before any subscriber exists. Ids and revs only,
+        // and for opens that happen before any subscriber exists. Ids and revs only,
         // never content.
         console.error(
-          `OTDoc(${id}): dropped ${this.droppedPendingChanges.length} of ${
+          `OTDoc(${id}): left ${this.droppedPendingChanges.length} of ${
             this.droppedPendingChanges.length + valid.length
-          } pending changes at hydration (failed strict apply against rev ${this._committedRev}):`,
+          } pending changes out of the view at hydration (failed strict apply against rev ${
+            this._committedRev
+          }; still queued in the store and will be sent):`,
           this.droppedPendingChanges.map(c => `${c.id}@${c.rev}`).join(', ')
         );
       }

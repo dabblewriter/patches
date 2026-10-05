@@ -247,6 +247,24 @@ export function toStorageError(err: unknown): unknown {
 }
 
 /**
+ * The error to reject an IndexedDB request or transaction with: never a bare null.
+ *
+ * `request.error` / `tx.error` is null whenever the browser has no error to report: a
+ * transaction aborted by script `abort()`, or by the browser tearing its connection down (WebKit
+ * does this to a backgrounded tab). A null rejection classifies as nothing downstream, so a doc
+ * latched as `unknown` and the app's boot sync failed with "Error: null" (DABBLE-WRITER-3-1C3).
+ *
+ * No error means the work was cancelled, not that storage failed: an `AbortError`, which
+ * {@link isAbortError} and sync already treat as an interruption to recover from. A real error
+ * goes through {@link toStorageError} as before.
+ *
+ * @param label What was cancelled, e.g. `IndexedDB transaction [docs]`.
+ */
+export function toIndexedDBError(err: unknown, label: string): unknown {
+  return err == null ? new DOMException(`${label} aborted without an error`, 'AbortError') : toStorageError(err);
+}
+
+/**
  * The DOMException names a browser puts on a change whose OWN DATA can never be persisted —
  * no environment, and no number of retries, will ever make the write succeed:
  * - `DataCloneError` — IndexedDB's structured-clone step rejected a non-cloneable value inside

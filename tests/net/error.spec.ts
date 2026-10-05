@@ -11,6 +11,7 @@ import {
   StatusError,
   StorageError,
   StorageTimeoutError,
+  toIndexedDBError,
   toStorageError,
 } from '../../src/net/error';
 
@@ -470,5 +471,29 @@ describe('StatusError', () => {
       expect(handleError(new StatusError(500, 'Server Error'))).toBe('Server Error');
       expect(handleError(new StatusError(200, 'OK'))).toBe('Unknown');
     });
+  });
+});
+
+// `request.error` / `tx.error` is null when there is no error to report: a transaction
+// aborted by script or torn down by the browser (WebKit, on a backgrounded tab). A bare null
+// rejection classifies as nothing (DABBLE-WRITER-3-1C3).
+describe('toIndexedDBError', () => {
+  it('turns a missing error into an AbortError, the interruption class sync recovers from', () => {
+    for (const missing of [null, undefined]) {
+      const err = toIndexedDBError(missing, 'IndexedDB transaction [docs]');
+      expect(isAbortError(err)).toBe(true);
+      expect(isStorageError(err)).toBe(false);
+      expect((err as Error).message).toBe('IndexedDB transaction [docs] aborted without an error');
+    }
+  });
+
+  it('wraps a real storage fault exactly as toStorageError does', () => {
+    const raw = new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    expect(toIndexedDBError(raw, 'x')).toBeInstanceOf(StorageError);
+  });
+
+  it('passes any other real error through untouched', () => {
+    const raw = new DOMException('Key already exists in the object store.', 'ConstraintError');
+    expect(toIndexedDBError(raw, 'x')).toBe(raw);
   });
 });

@@ -46,9 +46,15 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
    * for a clean hydration. Populated by subclasses BEFORE the constructor returns, so
    * `Patches.openDoc` can report them (`onPendingDropped`).
    *
-   * The name is historical: nothing is removed from the store. These rows stay queued there
-   * and are sent with the rest of the queue; only this instance's view and in-memory queue
-   * omit them, until a receive rebuilds that queue from the store.
+   * The name is historical: this doc removes nothing from any store. A host that sends from
+   * its store (Patches does) still holds these rows and sends them with the rest of the queue;
+   * only this instance's view and in-memory queue omit them, until a receive rebuilds that
+   * queue from the store. Ejection, quarantine or `dropResolvedPending` can still remove them
+   * first.
+   *
+   * Not renamed or aliased: the name is the public surface dabble-writer-3.0 probes for, and an
+   * alias would need a second field kept in step on a plain property (this is not a getter),
+   * for a rename that buys nothing at runtime. The meaning is documented here instead.
    */
   readonly droppedPendingChanges: Change[] = [];
 

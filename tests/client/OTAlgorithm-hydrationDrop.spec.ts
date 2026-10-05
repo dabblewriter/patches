@@ -115,8 +115,8 @@ describe.each(STORES)('a pending change left out of the view at hydration — %s
     expect(doc.state.docs.group.children).toEqual([]);
 
     expect(ids(await store.getPendingChanges(DOC_ID))).toEqual([create.id, addChild.id]);
-    // The console line says the same thing the store does.
-    expect(String(consoleError.mock.calls[0][0])).toContain('still queued in the store and will be sent');
+    // The console line makes the same claim, scoped to hosts that send from a store.
+    expect(String(consoleError.mock.calls[0][0])).toContain('a host that sends from its store will still send them');
   });
 
   it('sends the change it reported, and the server commits it whole', async () => {
@@ -154,7 +154,14 @@ describe.each(STORES)('a pending change left out of the view at hydration — %s
     // the doc again and its view is rebuilt under strict apply, which it still fails. The store
     // has already taken the batch by then. PatchesSync answers an ApplyChangesError from a
     // receive with a syncDoc, which is the flush below.
+    //
+    // This leaves the doc half-updated, and the test pins that rather than endorsing it: the doc
+    // has taken the committed rev and state from the batch but its `state` was not rebuilt, so
+    // the view still shows rev 1's world. Every later receive throws the same way until the
+    // hidden row commits.
     await expect(algorithm.applyServerChanges(DOC_ID, newChanges, doc)).rejects.toBeInstanceOf(ApplyChangesError);
+    expect(doc.committedRev).toBe(2);
+    expect(doc.state.docs.note).toBeUndefined();
 
     expect(ids(doc.getPendingChanges())).toEqual([create.id, addChild.id]);
     expect(ids(await store.getPendingChanges(DOC_ID))).toEqual([create.id, addChild.id]);
@@ -185,5 +192,20 @@ describe.each(STORES)('a pending change left out of the view at hydration — %s
     const log = backend.log(DOC_ID);
     expect(ids(log)).toEqual(['seed', unappliable.id, independent.id]);
     expect(log[1].ops).toEqual(unappliable.ops);
+  });
+
+  it('wedges the sender on the echo of a change the server could not correct (DAB-1557)', async () => {
+    // The same uncorrectable move. The server committed it as sent, so the committed log now holds
+    // a row that strict replay rejects, and applying the echo to the sender's own doc fails. This
+    // is the poison DAB-1557 describes: it is not a harmless extra commit.
+    const unappliable = createChange(1, 2, [{ op: 'move', from: '/docs/missing', path: '/docs/moved' }]);
+    const { backend, algorithm, doc } = await open([unappliable]);
+
+    const batch = await algorithm.getPendingToSend(DOC_ID, doc);
+    await commitChanges(backend, DOC_ID, structuredClone(batch!), TIMEOUT);
+    const log = backend.log(DOC_ID);
+    expect(ids(log)).toEqual(['seed', unappliable.id]);
+
+    await expect(algorithm.applyServerChanges(DOC_ID, log.slice(1), doc)).rejects.toBeInstanceOf(ApplyChangesError);
   });
 });

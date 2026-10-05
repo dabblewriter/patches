@@ -95,15 +95,19 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         // store's rows back to this doc. So a change left out here is still sent, in its
         // place in the queue, and leaving it out does not unblock anything behind it.
         // Nor does failing strict apply here mean the server refuses it: commitChanges
-        // does not strict-apply what it is sent. It corrects an out-of-range array index
-        // (DAB-1557) and commits any other change without checking that it applies. A
-        // change the server refuses by name leaves the queue through ejection
-        // (docs/quarantine.md).
+        // does not strict-apply what it is sent. Its one correction is for array indexes, and
+        // it is conditional: skipped with `normalizeArrayIndices === false`, with
+        // `historicalImport`, or when the state read fails. Where it runs, an `add` past the
+        // end is clamped to an append, but a `remove`/`replace`/`move` on a missing element
+        // is dropped, and any other change that fails to apply is committed as sent. When the
+        // server cannot correct the row, it commits poison: every client's strict replay
+        // rejects it, this one included once the echo arrives (DAB-1557). A change the
+        // server refuses by name leaves the queue through ejection (docs/quarantine.md).
         //
         // Each change left out is captured on `droppedPendingChanges` (a historical name,
         // see BaseDoc) so `Patches.openDoc` reports it via `onPendingDropped`: the doc
-        // opens without work that is still queued, and the app may want its own copy
-        // before the server has ruled on it.
+        // opens without work the host's queue may still send, and the app may want its own
+        // copy before the server has ruled on it.
         let state = this._committedState;
         const valid: Change[] = [];
         for (const c of this._pendingChanges) {
@@ -136,7 +140,7 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
             this.droppedPendingChanges.length + valid.length
           } pending changes out of the view at hydration (failed strict apply against rev ${
             this._committedRev
-          }; still queued in the store and will be sent):`,
+          }; not removed here, so a host that sends from its store will still send them):`,
           this.droppedPendingChanges.map(c => `${c.id}@${c.rev}`).join(', ')
         );
       }

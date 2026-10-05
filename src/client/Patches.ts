@@ -204,14 +204,19 @@ export class Patches {
    * BaseDoc.droppedPendingChanges). Emitted once per open that observed any; the changes
    * carried are those ones only.
    *
-   * "Dropped" describes the view, not the queue. The store still holds these rows and the
-   * send path reads the store, so they go out on the next flush and can commit — the
-   * server does not strict-apply what it is sent; it corrects an out-of-range array index
-   * and commits any other change without checking that it applies. What this reports is
-   * that the doc opened without work that is still queued. A consumer that keeps the
-   * payload (a shelf, telemetry) is holding a copy of work that may also go live; change
-   * ids survive the commit, so a kept copy can be matched against what later commits or
-   * is quarantined (`onChangeQuarantined`).
+   * "Dropped" describes the view, not the queue. A host that sends from its store (Patches
+   * does) still holds these rows, so they go out on the next flush and can commit, unless
+   * ejection, quarantine or `dropResolvedPending` removes them first. The server does not
+   * strict-apply what it is sent. Its array-index correction is conditional (skipped with
+   * `normalizeArrayIndices === false`, with `historicalImport`, or when its state read
+   * fails); where it runs, an `add` past the end is clamped to an append, but a
+   * `remove`/`replace`/`move` on a missing element is dropped, and any other change that
+   * fails to apply is committed as sent. A row the server cannot correct is committed as
+   * poison that every client's strict replay rejects, the sender included (DAB-1557): this
+   * is not a harmless extra commit. What this reports is that the doc opened without work
+   * that may still be queued. A consumer that keeps the payload (a shelf, telemetry) is
+   * holding a copy of work that may also go live; change ids survive the commit, so a kept
+   * copy can be matched against what later commits or is quarantined (`onChangeQuarantined`).
    *
    * Handlers run BEFORE the doc is registered: the emit sits inside the open, ahead of
    * `docs.set`. Inside a handler, `getOpenDoc(docId)` returns undefined, and awaiting

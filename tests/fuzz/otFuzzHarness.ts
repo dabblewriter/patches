@@ -97,6 +97,13 @@ export interface OTFuzzConfig {
    * so a persist that later succeeds cannot double-commit the change.
    */
   mintAttemptLimit?: number;
+  /**
+   * Server commit-time array-index normalization (DAB-1557). On by default, as in production —
+   * but it clamps or drops an out-of-range index a client minted, so a client-side +1 producer
+   * converges silently under it. Off, the raw index is committed and strict replay fails, which
+   * is how DAB-1755 was found. `FUZZ_NO_NORMALIZE=1` turns it off for a soak.
+   */
+  normalizeArrayIndices?: boolean;
 }
 
 interface Packet {
@@ -198,6 +205,7 @@ export class OTFuzzHarness {
     this.server = new OTServer(serverBackend, {
       maxChangesPerVersion: cfg.maxChangesPerVersion,
       sessionTimeoutMinutes: cfg.sessionTimeoutMinutes,
+      normalizeArrayIndices: cfg.normalizeArrayIndices ?? true,
     });
     this.server.onChangesCommitted((_docId, changes) => {
       this.broadcastBuffer.push(wire(changes));

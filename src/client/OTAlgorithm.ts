@@ -1166,12 +1166,14 @@ export class OTAlgorithm implements ClientAlgorithm {
       let rebased: Change[] = [];
       let pendingSet: Change[] = [];
       let applied = false;
+      // How far the store's committed tail sits past the doc's frame, as of the last attempt.
+      let storeAheadRev = committedRev;
       // The batch's own ids never cost a quarantine read: this doc's own echo has already left
       // the store (the committing context retired it) but not yet this doc, and rebaseChanges
       // retires it as an echo below — it still has to be IN the pending set for that.
       const batchIds = new Set(serverChanges.map(c => c.id));
       for (let attempt = 0; attempt < APPLY_CONFLICT_RETRIES; attempt++) {
-        const { pending, tailRev } = await this._collectPending(docId, otDoc, committedRev, batchIds);
+        const { pending, tailRev, storeIds } = await this._collectPending(docId, otDoc, committedRev, batchIds);
         pendingSet = pending;
         // A pending copy of a change already reflected in committedRev (stale echo) must be
         // dropped before the rebase, matching applyCommittedChanges; rebaseChanges drops the new
@@ -1180,7 +1182,27 @@ export class OTAlgorithm implements ClientAlgorithm {
           const staleIds = new Set(staleServerChanges.map(c => c.id));
           pendingSet = pendingSet.filter(c => !staleIds.has(c.id));
         }
-        rebased = this._rebasePendingPreservingFrameDebt(newServerChanges, pendingSet, committedRev);
+        // The store can hold part of this batch already while the doc is a frame behind: another
+        // context sharing the store applied it first (dw3 fans a tab's commits out to its other
+        // tabs), or a torn reload installed it. The batch is contiguous for the doc, so the gap
+        // re-check above never fires — but the store's rows were ALREADY carried across that
+        // part, and walking them across it again shifts every array index in them a second time.
+        // An own echo the other context already retired is worse: it is no longer in the queue,
+        // so the walk reads it as foreign and shifts the rest of the burst past it (DAB-1755).
+        // Store rows cross only what the store has not applied; a doc-only row (a torn write,
+        // on the doc's frame) still crosses the whole batch.
+        storeAheadRev = otDoc ? await this.store.getCommittedRev(docId) : committedRev;
+        if (storeAheadRev > committedRev && pendingSet.length > 0) {
+          const storeRows = pendingSet.filter(c => storeIds.has(c.id));
+          const docOnlyRows = pendingSet.filter(c => !storeIds.has(c.id));
+          const unappliedByStore = newServerChanges.filter(c => c.rev > storeAheadRev);
+          const rebasedStore = this._rebasePendingPreservingFrameDebt(unappliedByStore, storeRows, storeAheadRev);
+          const rebasedDocOnly = this._rebasePendingPreservingFrameDebt(newServerChanges, docOnlyRows, committedRev);
+          let rev = Math.max(storeAheadRev, newServerChanges[newServerChanges.length - 1]?.rev ?? committedRev);
+          rebased = [...rebasedStore, ...rebasedDocOnly].map(c => ({ ...c, rev: ++rev }));
+        } else {
+          rebased = this._rebasePendingPreservingFrameDebt(newServerChanges, pendingSet, committedRev);
+        }
         const result = await this.store.applyServerChanges(docId, serverChanges, rebased, tailRev);
         if (result !== 'conflict') {
           applied = true;
@@ -1221,7 +1243,10 @@ export class OTAlgorithm implements ClientAlgorithm {
         // `serverChanges` array (not newC) here so either shape rebuilds from the store instead of
         // advancing the in-memory watermark past skipped content via the incremental apply.
         const contiguous = firstGapIndex(serverChanges) === -1;
-        if (contiguous && otDoc.committedRev === serverChanges[0].rev - 1) {
+        // A store tail past this batch's end means the rebased queue sits on a frame the batch
+        // alone cannot bring the doc to: rebuild from the store instead (DAB-1755).
+        const storePastBatch = storeAheadRev > serverChanges[serverChanges.length - 1].rev;
+        if (contiguous && !storePastBatch && otDoc.committedRev === serverChanges[0].rev - 1) {
           otDoc.applyChanges(changesToBroadcast);
         } else {
           // Misaligned (root-replace catchup, a stale re-delivery, or an interior-gapped batch):
@@ -1762,8 +1787,9 @@ export class OTAlgorithm implements ClientAlgorithm {
     doc: OTDoc<T> | undefined,
     committedRev: number,
     echoIds?: ReadonlySet<string>
-  ): Promise<{ pending: Change[]; tailRev: number; withheld: Change[] }> {
+  ): Promise<{ pending: Change[]; tailRev: number; withheld: Change[]; storeIds: Set<string> }> {
     const storePending = await this.store.getPendingChanges(docId);
+    const storeIds = new Set(storePending.map(c => c.id));
     let pending = storePending;
     let withheld: Change[] = [];
     if (doc) {
@@ -1773,7 +1799,7 @@ export class OTAlgorithm implements ClientAlgorithm {
     }
     let tailRev = committedRev;
     for (const c of storePending) if (c.rev > tailRev) tailRev = c.rev;
-    return { pending, tailRev, withheld };
+    return { pending, tailRev, withheld, storeIds };
   }
 
   /**

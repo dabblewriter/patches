@@ -42,10 +42,11 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
 
   /**
    * Pending changes discarded during hydration because they failed strict apply against
-   * the snapshot's committed state (see OTDoc's constructor recovery). Empty for a clean
-   * hydration. Populated by subclasses BEFORE the constructor returns, so `Patches.openDoc`
-   * can surface the loss (`onPendingDropped`) instead of it vanishing silently — dropped
-   * changes are permanent once the next pending write persists the truncated queue.
+   * the snapshot's committed state, or were built on one that did (see OTDoc's constructor
+   * recovery). In queue order; empty for a clean hydration. Populated by subclasses BEFORE
+   * the constructor returns, so `Patches.openDoc` can surface the loss (`onPendingDropped`)
+   * instead of it vanishing silently — dropped changes are permanent once the next pending
+   * write persists the truncated queue.
    */
   readonly droppedPendingChanges: Change[] = [];
 

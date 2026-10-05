@@ -204,7 +204,8 @@ export class Patches {
    * is required for liveness — a change the local state rejects would also be rejected at
    * flush and wedge the queue — but it discards real user work, so consumers should
    * preserve the payload (shelve it, surface it) rather than let it vanish. Emitted once
-   * per open that observed drops; the changes carried are the dropped ones only.
+   * per open that observed drops; the changes carried are the dropped ones only, in queue
+   * order: each change that failed, and the later changes that were built on it.
    *
    * Handlers run BEFORE the doc is registered: the emit sits inside the open, ahead of
    * `docs.set` (deliberately — it is the only moment nothing can have persisted the

@@ -248,6 +248,40 @@ describe('DAB-951 — frame debt is a store contract, and the open doc renders a
     expect(doc.droppedPendingChanges).toEqual([]);
   });
 
+  it('a current-frame row built on the deferred row stays out of the view with it, across a receive', async () => {
+    const store = new OTInMemoryStore();
+    const algorithm = new OTAlgorithm(store);
+    await store.trackDocs([DOC_ID]);
+    await store.saveDoc(DOC_ID, { state: { items: ['c'], docs: {} }, rev: 3 });
+    // The straggler creates an entry and lists it at an index only its own frame had. `built`
+    // adds to that entry — and `add` would make the missing parent rather than fail.
+    const straggler = createChange(1, 4, [
+      { op: 'add', path: '/docs/t', value: { id: 't', children: ['x'] } },
+      { op: 'add', path: '/items/3', value: 't' },
+    ]);
+    const built = createChange(3, 5, [{ op: 'add', path: '/docs/t/children/1', value: 'y' }]);
+    await store.savePendingChanges(DOC_ID, [straggler, built]);
+    const doc = algorithm.createDoc<any>(
+      DOC_ID,
+      (await algorithm.loadDoc(DOC_ID)) as PatchesSnapshot<any>
+    ) as OTDoc<any>;
+
+    // Was `docs: { t: { children: { '1': 'y' } } }` — an entry with no id.
+    expect(doc.state).toEqual({ items: ['c'], docs: {} });
+
+    // The live recompute a receive runs must hold it out the same way hydration did.
+    await algorithm.applyServerChanges(DOC_ID, [foreign(4)], doc);
+
+    expect(doc.state).toEqual({ items: [], docs: {} });
+    const queue = await store.getPendingChanges(DOC_ID);
+    expect(doc.getPendingChanges()).toEqual(queue);
+    expect(queue.map(c => [c.id, c.baseRev])).toEqual([
+      [straggler.id, 1],
+      [built.id, 4],
+    ]);
+    expect(doc.droppedPendingChanges).toEqual([]);
+  });
+
   it('end-to-end with the doc open: the deferred edit reappears when the server commits it', async () => {
     const backend = new OTFuzzBackend();
     await seedServer(backend);

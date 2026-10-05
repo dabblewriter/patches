@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
+import { createChange } from '../../src/data/change';
 import type { Change, PatchesSnapshot } from '../../src/types';
 
 vi.mock('easy-signal', async () => {
@@ -260,6 +261,190 @@ describe('OTDoc — hydration with corrupt pending', () => {
 
     expect(doc.droppedPendingChanges).toEqual([]);
     expect(doc.getPendingChanges()).toEqual([good]);
+  });
+});
+
+/**
+ * The queue is a sequential program: a change taken out of it takes the changes written on top
+ * of it with it. Hydration used to drop only the change that failed, and the next one did not
+ * fail without it — `add` creates the missing containers of its path, under `strict` too — so
+ * it applied as a parent holding nothing but the child it was adding.
+ */
+describe('OTDoc — hydration drops the changes built on a dropped one', () => {
+  const COMMITTED_REV = 31;
+  /** `group` lists nothing here. The creates below were made on a frame where it listed one doc. */
+  const committed = () => ({ docs: { group: { id: 'group', children: [] as string[] } } });
+
+  /** Fails strict apply against `committed()`: its listing index is one past the end. */
+  const createTimeline = (baseRev = COMMITTED_REV) =>
+    createChange(baseRev, 32, [
+      { op: 'add', path: '/docs/timeline', value: { id: 'timeline', type: 'timeline', children: ['track'] } },
+      { op: 'add', path: '/docs/group/children/1', value: 'timeline' },
+    ]);
+  const addEventToTimeline = () =>
+    createChange(COMMITTED_REV, 33, [
+      { op: 'add', path: '/docs/event', value: { id: 'event', type: 'event' } },
+      { op: 'add', path: '/docs/timeline/children/1', value: 'event' },
+    ]);
+  const hydrate = (changes: Change[]) => new OTDoc<any>('doc', { state: committed(), rev: COMMITTED_REV, changes });
+  const ids = (changes: Change[]) => changes.map(c => `${c.id}@${c.rev}`).join(', ');
+
+  let consoleError: MockInstance;
+
+  beforeEach(() => {
+    consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleError.mockRestore();
+  });
+
+  it('drops a failing create together with the change that adds a child to it', () => {
+    const create = createTimeline();
+    const addChild = addEventToTimeline();
+
+    const doc = hydrate([create, addChild]);
+
+    expect(doc.droppedPendingChanges).toEqual([create, addChild]);
+    expect(doc.getPendingChanges()).toEqual([]);
+    // Was `{ children: { '1': 'event' } }`: no id, no type, and `children` an object.
+    expect(doc.state.docs.timeline).toBeUndefined();
+    expect(doc.state).toEqual(committed());
+    expect(consoleError).toHaveBeenCalledExactlyOnceWith(
+      'OTDoc(doc): dropped 2 of 2 pending changes at hydration ' +
+        '(1 failed strict apply against rev 31, 1 built on a dropped change):',
+      ids([create, addChild])
+    );
+  });
+
+  it('keeps a later change that does not touch what the dropped change would have created', () => {
+    const create = createTimeline();
+    const addChild = addEventToTimeline();
+    const independent = createChange(COMMITTED_REV, 34, [
+      { op: 'add', path: '/docs/note', value: { id: 'note', type: 'note' } },
+      { op: 'add', path: '/docs/group/children/0', value: 'note' },
+    ]);
+    // Names the dropped doc in a key of its own, and writes nothing beneath it.
+    const link = createChange(COMMITTED_REV, 35, [{ op: 'add', path: '/links/timeline:note', value: {} }]);
+
+    const doc = hydrate([create, addChild, independent, link]);
+
+    expect(doc.droppedPendingChanges).toEqual([create, addChild]);
+    expect(doc.getPendingChanges()).toEqual([independent, link]);
+    expect(doc.state).toEqual({
+      docs: { group: { id: 'group', children: ['note'] }, note: { id: 'note', type: 'note' } },
+      links: { 'timeline:note': {} },
+    });
+  });
+
+  it('drops a dependent two levels down', () => {
+    const create = createTimeline();
+    const addChild = addEventToTimeline();
+    // Touches nothing the failing create made — only `/docs/event`, which the dependent made.
+    const addGrandchild = createChange(COMMITTED_REV, 34, [
+      { op: 'add', path: '/docs/note', value: { id: 'note', type: 'note' } },
+      { op: 'add', path: '/docs/event/children/0', value: 'note' },
+    ]);
+
+    const doc = hydrate([create, addChild, addGrandchild]);
+
+    expect(doc.droppedPendingChanges).toEqual([create, addChild, addGrandchild]);
+    expect(doc.getPendingChanges()).toEqual([]);
+    expect(doc.state).toEqual(committed());
+    expect(consoleError).toHaveBeenCalledExactlyOnceWith(
+      'OTDoc(doc): dropped 3 of 3 pending changes at hydration ' +
+        '(1 failed strict apply against rev 31, 2 built on a dropped change):',
+      ids([create, addChild, addGrandchild])
+    );
+  });
+
+  it('leaves a queue with no failures exactly as it was', () => {
+    const create = createChange(COMMITTED_REV, 32, [
+      { op: 'add', path: '/docs/timeline', value: { id: 'timeline', type: 'timeline', children: ['track'] } },
+      { op: 'add', path: '/docs/group/children/0', value: 'timeline' },
+    ]);
+    const addChild = addEventToTimeline();
+    const changes = [create, addChild];
+
+    const doc = hydrate(changes);
+
+    expect(doc.droppedPendingChanges).toEqual([]);
+    expect(doc.getPendingChanges()).toBe(changes);
+    expect(doc.state).toEqual({
+      docs: {
+        group: { id: 'group', children: ['timeline'] },
+        timeline: { id: 'timeline', type: 'timeline', children: ['track', 'event'] },
+        event: { id: 'event', type: 'event' },
+      },
+    });
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('keeps a later change that creates the missing entry itself, and what is then built on that', () => {
+    const create = createTimeline();
+    const recreate = createChange(COMMITTED_REV, 33, [
+      { op: 'add', path: '/docs/timeline', value: { id: 'timeline', type: 'timeline', children: [] } },
+      { op: 'add', path: '/docs/timeline/children/0', value: 'track-2' },
+    ]);
+    const addChild = addEventToTimeline();
+
+    const doc = hydrate([create, recreate, addChild]);
+
+    expect(doc.droppedPendingChanges).toEqual([create]);
+    expect(doc.getPendingChanges()).toEqual([recreate, addChild]);
+    expect(doc.state.docs.timeline).toEqual({ id: 'timeline', type: 'timeline', children: ['track-2', 'event'] });
+    // No dependents, so the line reads as it always has.
+    expect(consoleError).toHaveBeenCalledExactlyOnceWith(
+      'OTDoc(doc): dropped 1 of 3 pending changes at hydration (failed strict apply against rev 31):',
+      ids([create])
+    );
+  });
+
+  describe('when the create is frame debt instead (queued on an older baseRev)', () => {
+    it('keeps the create and the change built on it queued, and holds both out of the view', () => {
+      const create = createTimeline(COMMITTED_REV - 2);
+      const addChild = addEventToTimeline();
+      const changes = [create, addChild];
+
+      const doc = hydrate(changes);
+
+      // Nothing is lost: the create flushes at its own baseRev and the child after it.
+      expect(doc.droppedPendingChanges).toEqual([]);
+      expect(doc.getPendingChanges()).toEqual(changes);
+      // Was `{ docs: { group, event, timeline: { children: { '1': 'event' } } } }`.
+      expect(doc.state).toEqual(committed());
+      expect(consoleError).not.toHaveBeenCalled();
+    });
+
+    it('still shows the current-frame changes that are not built on it', () => {
+      const create = createTimeline(COMMITTED_REV - 2);
+      const addChild = addEventToTimeline();
+      const independent = createChange(COMMITTED_REV, 34, [
+        { op: 'add', path: '/docs/note', value: { id: 'note', type: 'note' } },
+      ]);
+
+      const doc = hydrate([create, addChild, independent]);
+
+      expect(doc.droppedPendingChanges).toEqual([]);
+      expect(doc.getPendingChanges()).toEqual([create, addChild, independent]);
+      expect(doc.state).toEqual({ docs: { ...committed().docs, note: { id: 'note', type: 'note' } } });
+    });
+
+    it('drops only a current-frame change that fails on its own', () => {
+      const create = createTimeline(COMMITTED_REV - 2);
+      const addChild = addEventToTimeline();
+      const bad = createChange(COMMITTED_REV, 34, [{ op: '@txt', path: '/docs/group/id', value: 'not a delta' }]);
+
+      const doc = hydrate([create, addChild, bad]);
+
+      expect(doc.droppedPendingChanges).toEqual([bad]);
+      expect(doc.getPendingChanges()).toEqual([create, addChild]);
+      expect(doc.state).toEqual(committed());
+      expect(consoleError).toHaveBeenCalledExactlyOnceWith(
+        'OTDoc(doc): dropped 1 of 3 pending changes at hydration (failed strict apply against rev 31):',
+        ids([bad])
+      );
+    });
   });
 });
 

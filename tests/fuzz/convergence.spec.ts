@@ -286,6 +286,21 @@ describe('convergence fuzz — OT panel', () => {
     }, 30_000);
   }
 
+  // DAB-1755: a torn reload (reconcilePending committed, saveDoc faulted) left the store a frame
+  // ahead of the doc; the next delivery of that tail was contiguous for the doc, so the receive
+  // rebased the store's already-reconciled queue across it a second time — c2's `replace /tags/0`
+  // went out as `/tags/2` on a 2-long array. Only visible with normalization off (it clamps the
+  // index away); fixed in OTAlgorithm.applyServerChanges.
+  it('DAB-1755: a torn reload does not rebase the store queue twice (seed 1001691, faults + unstored, no normalize)', async () => {
+    await runOTFuzz(1001691, {
+      richOps: false,
+      clientStoreFailP: 0.04,
+      serverBackendFailP: 0.04,
+      mintAttemptLimit: 3,
+      normalizeArrayIndices: false,
+    });
+  }, 30_000);
+
   // The mint-exhaustion path (`mintAttemptLimit`, see OTFuzzConfig) now models the FULL
   // production shape: on exhaustion the ops are kept and handed to the outbox, AND the doc's
   // write path is LATCHED (`Patches._writeLatches`) — every later edit on that client goes
@@ -503,13 +518,22 @@ describe.runIf(FUZZ_SEED !== undefined && FUZZ_ITERATIONS === 0)('convergence fu
 const FUZZ_UNSTORED = process.env.FUZZ_UNSTORED === '1' && FUZZ_ALGO !== 'lww';
 const FUZZ_FAULTS = process.env.FUZZ_FAULTS === '1';
 const FUZZ_RICH = process.env.FUZZ_RICH === '1' && FUZZ_ALGO !== 'lww';
+// FUZZ_NO_NORMALIZE=1 turns off the server's commit-time array-index normalization, which
+// otherwise clamps a client's out-of-range index and hides it (see OTFuzzConfig).
+const FUZZ_NO_NORMALIZE = process.env.FUZZ_NO_NORMALIZE === '1' && FUZZ_ALGO !== 'lww';
 const FAULT_OVERRIDES = { clientStoreFailP: 0.04, serverBackendFailP: 0.04 };
 const OT_SOAK_OVERRIDES: Partial<OTFuzzConfig> = {
   ...(FUZZ_FAULTS ? FAULT_OVERRIDES : {}),
   ...(FUZZ_RICH ? { richOps: true } : {}),
   ...(FUZZ_UNSTORED ? { mintAttemptLimit: 3 } : {}),
+  ...(FUZZ_NO_NORMALIZE ? { normalizeArrayIndices: false } : {}),
 };
-const SOAK_LABEL = [FUZZ_FAULTS && 'faults', FUZZ_RICH && 'rich', FUZZ_UNSTORED && 'unstored']
+const SOAK_LABEL = [
+  FUZZ_FAULTS && 'faults',
+  FUZZ_RICH && 'rich',
+  FUZZ_UNSTORED && 'unstored',
+  FUZZ_NO_NORMALIZE && 'no-normalize',
+]
   .filter(Boolean)
   .join(', ');
 

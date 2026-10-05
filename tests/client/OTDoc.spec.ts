@@ -299,6 +299,17 @@ describe('OTDoc — hydration drops the changes built on a dropped one', () => {
     consoleError.mockRestore();
   });
 
+  it('opens, dropping and reporting a malformed row instead of throwing', () => {
+    const bad = { ...createChange(COMMITTED_REV, 32, []), ops: undefined } as unknown as Change;
+    const good = createChange(COMMITTED_REV, 33, [{ op: 'add', path: '/docs/note', value: { id: 'note' } }]);
+
+    const doc = hydrate([bad, good]);
+
+    expect(doc.droppedPendingChanges).toEqual([bad]);
+    expect(doc.getPendingChanges()).toEqual([good]);
+    expect(doc.state.docs.note).toEqual({ id: 'note' });
+  });
+
   it('drops a failing create together with the change that adds a child to it', () => {
     const create = createTimeline();
     const addChild = addEventToTimeline();

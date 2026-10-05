@@ -306,4 +306,46 @@ describe('applyPendingForView', () => {
     expect(thrown).toBeInstanceOf(ApplyChangesError);
     expect(thrown).toMatchObject({ changeId: bad.id, rev: bad.rev, index: 1 });
   });
+
+  it('holds out a current-frame row that needs what an older-frame row would have done elsewhere', () => {
+    // The older row inserts at the head of a list that exists; the later row removes the index
+    // that insert would have shifted the last element to. Not beneath any path the older row
+    // would have created, but it does not apply without it.
+    const early = stale(
+      { op: 'add', path: '/docs/group/children/0', value: 'x' },
+      { op: 'add', path: '/docs/group/children/9', value: 'y' }
+    );
+    const later = change({ op: 'remove', path: '/docs/group/children/2' });
+
+    expect(view(early, later).docs.group.children).toEqual(['a', 'b']);
+  });
+});
+
+describe('a malformed pending row', () => {
+  const malformed = [
+    { name: 'no ops array', ops: undefined },
+    { name: 'a failing row with an op that has no path', ops: [{ op: 'add', value: 1 }, FAILS] },
+  ];
+
+  for (const { name, ops } of malformed) {
+    it(`is dropped and reported by salvage, not thrown on: ${name}`, () => {
+      const bad = { ...change(), ops } as any;
+      const good = change({ op: 'add', path: '/docs/note', value: { id: 'note' } });
+
+      const result = salvagePendingForView(committed(), REV, [bad, good]);
+
+      expect(result.dropped).toEqual([bad]);
+      expect(result.kept).toEqual([good]);
+    });
+
+    it(`is dropped alongside an older-frame row: ${name}`, () => {
+      const early = stale({ op: 'add', path: '/docs/group/children/9', value: 'y' }, FAILS);
+      const bad = { ...change(), ops } as any;
+
+      const result = salvagePendingForView(committed(), REV, [early, bad]);
+
+      expect(result.dropped).toEqual([bad]);
+      expect(result.kept).toEqual([early]);
+    });
+  }
 });

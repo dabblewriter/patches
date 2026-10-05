@@ -45,8 +45,8 @@ export abstract class BaseDoc<T extends object = object> extends ReadonlyStoreCl
    * the snapshot's committed state, or were built on one that did (see OTDoc's constructor
    * recovery). In queue order; empty for a clean hydration. Populated by subclasses BEFORE
    * the constructor returns, so `Patches.openDoc` can surface the loss (`onPendingDropped`)
-   * instead of it vanishing silently — dropped changes are permanent once the next pending
-   * write persists the truncated queue.
+   * instead of it vanishing silently. They are dropped from the doc's queue and view only: the
+   * store is not rewritten, so it still holds them and `getPendingToSend` still sends them.
    */
   readonly droppedPendingChanges: Change[] = [];
 

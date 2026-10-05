@@ -119,6 +119,13 @@ function walkPending<T>(
       state = applyPatch(state, change.ops, { strict: true });
       kept.push(change);
     } catch (cause) {
+      if (needsDeferred(state, change.ops, pending, i, committedRev)) {
+        // Not beneath anything the older-frame row would have created, but it applies only with
+        // that row's effects (an insert that shifted an index, say). Held out with it, still queued.
+        kept.push(change);
+        noteCreated(state, change.ops, deferred);
+        continue;
+      }
       if (!salvage) throw new ApplyChangesError(change.id, change.rev, i, cause);
       dropped.push(change);
       noteCreated(state, change.ops, lost);
@@ -127,34 +134,84 @@ function walkPending<T>(
   return { state, kept, dropped, dependents };
 }
 
+/**
+ * Would `ops`, which failed against `state`, apply if the older-frame rows before index `end`
+ * were in the view? Those rows are replayed best-effort on top of `state` (they address a frame
+ * it has moved past, so ops that no longer fit are skipped).
+ */
+function needsDeferred(
+  state: unknown,
+  ops: JSONPatchOp[],
+  pending: Change[],
+  end: number,
+  committedRev: number
+): boolean {
+  if (!Array.isArray(ops)) return false;
+  let shadow = state;
+  let any = false;
+  for (let i = 0; i < end; i++) {
+    const row = pending[i];
+    if (row.baseRev >= committedRev || !Array.isArray(row.ops)) continue;
+    any = true;
+    shadow = applyPatch(shadow, row.ops.filter(isOp), { silent: true });
+  }
+  if (!any) return false;
+  try {
+    applyPatch(shadow, ops, { strict: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A well-formed op: the pending queue is persisted data and a row in it can be malformed. */
+function isOp(op: JSONPatchOp): boolean {
+  return op != null && typeof op.path === 'string';
+}
+
 /** Does `op` put a value at its path, as opposed to removing or only reading what is there? */
 function writes(op: JSONPatchOp): boolean {
   const like = getTypes()[op.op]?.like;
   return like !== 'remove' && like !== 'test';
 }
 
-/** Record the paths `ops` would have created in `state`, had they been applied to it. */
+/**
+ * Record the paths `ops` would have created in `state`, had they been applied to it: for each
+ * written path, its shallowest ancestor that does not exist (the path itself when its parent does).
+ */
 function noteCreated(state: unknown, ops: JSONPatchOp[], into: Set<string>): void {
+  if (!Array.isArray(ops)) return;
   for (const op of ops) {
-    if (writes(op) && !op.path.endsWith('/-') && !pathExistsInState(state, op.path)) into.add(op.path);
+    if (!isOp(op) || !writes(op) || op.path.endsWith('/-')) continue;
+    const segments = op.path.split('/');
+    for (let n = 2; n <= segments.length; n++) {
+      const prefix = segments.slice(0, n).join('/');
+      if (!pathExistsInState(state, prefix)) {
+        into.add(prefix);
+        break;
+      }
+    }
   }
 }
 
 /** Does `op` need something to already be at `path` — to read, to remove, or to write beneath? */
 function reaches(op: JSONPatchOp, path: string): boolean {
   const beneath = `${path}/`;
-  if (op.from != null && (op.from === path || op.from.startsWith(beneath))) return true;
+  if (typeof op.from === 'string' && (op.from === path || op.from.startsWith(beneath))) return true;
   return op.path.startsWith(beneath) || (op.path === path && !writes(op));
 }
 
 /** Does any of `ops` reach one of the `missing` paths while it is still missing? */
 function buildsOn(state: unknown, ops: JSONPatchOp[], missing: Set<string>): boolean {
-  if (missing.size === 0) return false;
-  return ops.some((op, i) => {
-    const reached = [...missing].filter(path => reaches(op, path));
-    if (reached.length === 0) return false;
-    // Judged where the op runs: an earlier op of the same change may have created the path.
-    const before = i === 0 ? state : applyPatch(state, ops.slice(0, i), { silent: true });
-    return reached.some(path => !pathExistsInState(before, path));
-  });
+  if (missing.size === 0 || !Array.isArray(ops)) return false;
+  // Judged where the op runs: an earlier op of the same change may have created the path.
+  let before = state;
+  for (const op of ops) {
+    if (!isOp(op)) continue;
+    for (const path of missing) {
+      if (reaches(op, path) && !pathExistsInState(before, path)) return true;
+    }
+    before = applyPatch(before, [op], { silent: true });
+  }
+  return false;
 }

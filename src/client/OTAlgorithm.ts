@@ -1681,9 +1681,10 @@ export class OTAlgorithm implements ClientAlgorithm {
    * commit the flush seam refuses. Such rows keep their ops and true baseRev (dropped only when
    * `serverChanges` echoes their id — a true-baseRev flush coming back committed) and are
    * re-sequenced into their queue position; the server transforms them across everything past
-   * their baseRev when they flush. Later rows minted by OTHER contexts were expressed without
-   * the straggler in frame, so the walk must not advance the server ops through it either —
-   * the straggler is skipped entirely, not walked. A frame-consistent queue (the invariant
+   * their baseRev when they flush. A later row written BESIDE the straggler (its author's view
+   * did not have it) was expressed without the straggler in frame, so the walk must not advance
+   * the server ops through it either — the straggler is skipped entirely, not walked. Rows
+   * written ON TOP of it are the exception, see KNOWN GAP below. A frame-consistent queue (the invariant
    * case) takes the plain {@link rebaseChanges} path unchanged.
    *
    * KNOWN GAP: not every later row is that kind. A row written ON TOP of the straggler — by
@@ -1693,7 +1694,7 @@ export class OTAlgorithm implements ClientAlgorithm {
    * coming back: {@link rebaseChanges}' echo rule (dropped untransformed), not a concurrent
    * change. Here the straggler is not in the queue handed to {@link rebaseChanges}, so the row
    * is transformed against the echo anyway: an op beneath a path the straggler created is
-   * removed, an index behind its insert is shifted a second time. The two kinds leave the same
+   * removed, an index past its insert is shifted a second time. The two kinds leave the same
    * rows — same baseRevs, same ops — so nothing in the queue tells them apart; the mint would
    * have to record which frame-debt rows a change was written over. Both are pinned in
    * OTAlgorithm-frameDebt.spec.ts ("written beside it, or on top of it").

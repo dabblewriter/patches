@@ -42,17 +42,40 @@ async function flushOnce(
 }
 
 /**
+ * Flush until `getPendingToSend` has nothing to send (a withheld row stays in the store queue,
+ * so an empty store queue is not what ends this). Returns each batch that went on the wire.
+ */
+async function drain(
+  algorithm: OTAlgorithm,
+  backend: OTFuzzBackend,
+  doc: OTDoc<any>,
+  maxPasses = 5
+): Promise<Change[][]> {
+  const sent: Change[][] = [];
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const batch = await flushOnce(algorithm, backend, doc);
+    if (!batch) return sent;
+    sent.push(batch);
+  }
+  throw new Error(`the queue did not drain in ${maxPasses} passes`);
+}
+
+/** Commit `state` as server rev 1. */
+async function seed(backend: OTFuzzBackend, state: unknown): Promise<void> {
+  await commitChanges(
+    backend,
+    DOC_ID,
+    [{ id: 'seed', rev: 1, baseRev: 0, ops: [{ op: 'replace', path: '', value: state }], createdAt: 0 }],
+    TIMEOUT
+  );
+}
+
+/**
  * Server history: seed ['a','b','c'] at rev 1, then two foreign removes of /items/0
  * (revs 2-3) that shift every index the straggler's frame knew about.
  */
 async function seedServer(backend: OTFuzzBackend): Promise<void> {
-  const seed = { items: ['a', 'b', 'c'] };
-  await commitChanges(
-    backend,
-    DOC_ID,
-    [{ id: 'seed', rev: 1, baseRev: 0, ops: [{ op: 'replace', path: '', value: seed }], createdAt: 0 }],
-    TIMEOUT
-  );
+  await seed(backend, { items: ['a', 'b', 'c'] });
   for (const [id, rev] of [
     ['f2', 2],
     ['f3', 3],
@@ -283,12 +306,9 @@ describe('DAB-951 — frame debt is a store contract, and the open doc renders a
       (await algorithm.loadDoc(DOC_ID)) as PatchesSnapshot<any>
     ) as OTDoc<any>;
 
-    let passes = 0;
-    while ((await store.getPendingChanges(DOC_ID)).length > 0) {
-      expect(++passes).toBeLessThanOrEqual(4); // bounded: one pass per distinct frame
-      expect(await flushOnce(algorithm, backend, doc)).not.toBeNull();
-    }
-    expect(passes).toBe(2);
+    const sent = await drain(algorithm, backend, doc, 4); // bounded: one pass per distinct frame
+    expect(sent).toHaveLength(2);
+    expect(await store.getPendingChanges(DOC_ID)).toEqual([]);
 
     const log = backend.log(DOC_ID);
     expect(log.map(c => c.rev)).toEqual([1, 2, 3, 4, 5]);
@@ -312,21 +332,26 @@ describe('DAB-951 — frame debt is a store contract, and the open doc renders a
  * `_rebasePendingPreservingFrameDebt` treats every such row as the first kind. The queue cannot
  * say which kind a row is: both leave the same baseRevs and the same ops, in the same order
  * (pinned below, through the real mint path). So the second kind is a KNOWN GAP, recorded here
- * with `it.fails` — those tests run, and turn red the day the gap closes. The tests around them
+ * with `knownGap` — those tests run, and turn red the day the gap closes. The tests around them
  * pass today and must keep passing under any fix.
  */
 describe('a current-frame row behind a frame-debt row — written beside it, or on top of it', () => {
   const headOf = (backend: OTFuzzBackend) => applyChanges(null as any, backend.log(DOC_ID)) as any;
 
-  /** Flush until the queue is empty; returns each batch that went on the wire. */
-  async function drain(algorithm: OTAlgorithm, backend: OTFuzzBackend, doc: OTDoc<any>): Promise<Change[][]> {
-    const sent: Change[][] = [];
-    for (let pass = 0; pass < 5; pass++) {
-      const batch = await flushOnce(algorithm, backend, doc);
-      if (!batch) return sent;
-      sent.push(batch);
-    }
-    throw new Error('the queue did not drain');
+  /**
+   * A known gap: `body` asserts the wanted result and must fail on an ASSERTION, not on a throw
+   * from setup or `drain` (which `it.fails` would also accept). When the gap closes `body` stops
+   * throwing and this goes red: turn it into a plain `it`.
+   */
+  function knownGap(name: string, body: () => Promise<void>) {
+    it(`KNOWN GAP: ${name}`, async () => {
+      const error = await body().then(
+        () => undefined,
+        (e: unknown) => e
+      );
+      expect(error, 'the gap closed: make this a plain `it`').toBeDefined();
+      expect((error as Error).name).toBe('AssertionError');
+    });
   }
 
   describe('the reported shape: a child added to a doc whose create is still frame debt', () => {
@@ -339,14 +364,8 @@ describe('a current-frame row behind a frame-debt row — written beside it, or 
      */
     async function drainTimelineQueue() {
       const backend = new OTFuzzBackend();
-      const seed = { docs: { group: { id: 'group', children: ['a', 'b'] } } };
       const removeFirst: JSONPatchOp = { op: 'remove', path: '/docs/group/children/0' };
-      await commitChanges(
-        backend,
-        DOC_ID,
-        [{ id: 'seed', rev: 1, baseRev: 0, ops: [{ op: 'replace', path: '', value: seed }], createdAt: 0 }],
-        TIMEOUT
-      );
+      await seed(backend, { docs: { group: { id: 'group', children: ['a', 'b'] } } });
       await commitChanges(
         backend,
         DOC_ID,
@@ -366,6 +385,10 @@ describe('a current-frame row behind a frame-debt row — written beside it, or 
         { op: 'add', path: '/docs/event', value: { id: 'event', type: 'event' } },
         { op: 'add', path: '/docs/timeline/children/1', value: 'event' },
       ]);
+      // Hand-built and opened straight from the store: nothing here records which context wrote
+      // `addChild`, or over what. A fix that records that at mint leaves rows with no record on
+      // today's treatment, so this queue would stay `['track']`; the on-top result below is the
+      // report's expectation, and a fix has to reach it by some other route than this setup.
       await store.savePendingChanges(DOC_ID, [create, addChild]);
       const doc = algorithm.createDoc<any>(
         DOC_ID,
@@ -373,7 +396,7 @@ describe('a current-frame row behind a frame-debt row — written beside it, or 
       ) as OTDoc<any>;
 
       const sent = await drain(algorithm, backend, doc);
-      return { backend, create, addChild, sent };
+      return { backend, create, addChild, sent, doc };
     }
 
     it('the create flushes alone at its true baseRev and commits transformed (DAB-951 holds)', async () => {
@@ -389,10 +412,11 @@ describe('a current-frame row behind a frame-debt row — written beside it, or 
     // KNOWN GAP. Today the head has `children: ['track']`: the create's echo is rebased over
     // `addChild` as a concurrent `add /docs/timeline`, which removes the op beneath that path.
     // `docs.event` still commits, listed nowhere.
-    it.fails('the child is still listed in the timeline once both have committed', async () => {
-      const { backend } = await drainTimelineQueue();
+    knownGap('the child is still listed in the timeline once both have committed', async () => {
+      const { backend, doc } = await drainTimelineQueue();
 
       expect(headOf(backend).docs.timeline.children).toEqual(['track', 'event']);
+      expect(doc.state).toEqual(headOf(backend)); // a commit-only fix must not leave client and server apart
     });
   });
 
@@ -409,7 +433,13 @@ describe('a current-frame row behind a frame-debt row — written beside it, or 
       }
     }
 
-    /** What `doc.change()` + Patches do: apply optimistically, then mint the same ops array. */
+    /**
+     * What `doc.change()` + Patches do: apply optimistically, then mint the same ops array.
+     * Not the whole path: the real mint goes through `Patches._processDocChange` (stable id from
+     * `_removeOutboxRows` / `_forgetUnstored`, the per-doc change queue). That is where a
+     * per-row record of "written over these frame-debt rows" would be set, and this calls
+     * `handleDocChange` directly, so it does not run that branch.
+     */
     async function mint(algorithm: OTAlgorithm, doc: OTDoc<any>, ops: JSONPatchOp[]): Promise<Change[]> {
       doc._applyOptimistic(ops);
       return algorithm.handleDocChange(DOC_ID, ops, doc, {});
@@ -426,13 +456,8 @@ describe('a current-frame row behind a frame-debt row — written beside it, or 
      */
     async function twoContexts() {
       const backend = new OTFuzzBackend();
-      const seed = { items: ['a', 'b'] };
-      await commitChanges(
-        backend,
-        DOC_ID,
-        [{ id: 'seed', rev: 1, baseRev: 0, ops: [{ op: 'replace', path: '', value: seed }], createdAt: 0 }],
-        TIMEOUT
-      );
+      const seedState = { items: ['a', 'b'] };
+      await seed(backend, seedState);
       const { newChanges } = await commitChanges(
         backend,
         DOC_ID,
@@ -442,7 +467,7 @@ describe('a current-frame row behind a frame-debt row — written beside it, or 
 
       const store = new RacingStore();
       await store.trackDocs([DOC_ID]);
-      await store.saveDoc(DOC_ID, { state: seed, rev: 1 });
+      await store.saveDoc(DOC_ID, { state: seedState, rev: 1 });
       const open = async () => {
         const algorithm = new OTAlgorithm(store);
         const snapshot = (await algorithm.loadDoc(DOC_ID)) as PatchesSnapshot<any>;
@@ -485,7 +510,10 @@ describe('a current-frame row behind a frame-debt row — written beside it, or 
       expect(await onTop.store.getPendingChanges(DOC_ID)).toEqual(rows);
     });
 
-    it('written beside it: the row lands where its author put it (after "a")', async () => {
+    // Pins today's result, NOT a requirement on a fix. The same race with no frame debt (next
+    // test) commits the row on top of 'S', so a fix that keeps the straggler in the
+    // `rebaseChanges` walk would give ['S','R','a','b'] here too and may reasonably do so.
+    it('written beside it: today the row lands where its author put it (after "a")', async () => {
       const { backend, writer } = await twoContexts();
       await mint(writer.algorithm, writer.doc, [{ ...insertR }]);
 
@@ -495,15 +523,41 @@ describe('a current-frame row behind a frame-debt row — written beside it, or 
       expect(writer.doc.state).toEqual(headOf(backend));
     });
 
+    it('the same race with no frame debt commits the row on top of "S", not beside it', async () => {
+      // Both rows are minted at baseRev 1 and flush as one batch, so the server reads the second
+      // as written over the first. This is the existing same-frame behaviour, for comparison.
+      const backend = new OTFuzzBackend();
+      const seedState = { items: ['a', 'b'] };
+      await seed(backend, seedState);
+      const store = new OTInMemoryStore();
+      await store.trackDocs([DOC_ID]);
+      await store.saveDoc(DOC_ID, { state: seedState, rev: 1 });
+      const open = async () => {
+        const algorithm = new OTAlgorithm(store);
+        const snapshot = (await algorithm.loadDoc(DOC_ID)) as PatchesSnapshot<any>;
+        return { algorithm, doc: algorithm.createDoc<any>(DOC_ID, snapshot) as OTDoc<any> };
+      };
+      const writer = await open();
+      const follower = await open();
+      await mint(follower.algorithm, follower.doc, [{ op: 'add', path: '/items/0', value: 'S' }]);
+      await mint(writer.algorithm, writer.doc, [{ ...insertR }]);
+      expect((await store.getPendingChanges(DOC_ID)).map(c => c.baseRev)).toEqual([1, 1]);
+
+      await drain(writer.algorithm, backend, writer.doc);
+
+      expect(headOf(backend).items).toEqual(['S', 'R', 'a', 'b']);
+    });
+
     // KNOWN GAP. Today the head is ['S','a','R','b'] here too: the straggler's echo shifts the
     // row past an insert it was already written behind.
-    it.fails('written on top of it: the row lands where its author put it (after "S")', async () => {
+    knownGap('written on top of it: the row lands where its author put it (after "S")', async () => {
       const { backend, follower } = await twoContexts();
       await mint(follower.algorithm, follower.doc, [{ ...insertR }]);
 
       await drain(follower.algorithm, backend, follower.doc);
 
       expect(headOf(backend).items).toEqual(['S', 'R', 'a', 'b']);
+      expect(follower.doc.state).toEqual(headOf(backend));
     });
 
     /** `twoContexts`, then the writer's next receive (a foreign rev 3) brings the straggler into its doc. */
@@ -534,13 +588,14 @@ describe('a current-frame row behind a frame-debt row — written beside it, or 
 
     // KNOWN GAP, the other route to it: no catch-up involved, the writer simply typed on a view
     // that showed the straggler. Today the head is ['S','a','R','b'].
-    it.fails('written on top of it by the writer, once its view shows the straggler: lands after "S"', async () => {
+    knownGap('written on top of it by the writer, once its view shows the straggler: lands after "S"', async () => {
       const { backend, writer } = await writerHasSeenIt();
       await mint(writer.algorithm, writer.doc, [{ ...insertR }]);
 
       await drain(writer.algorithm, backend, writer.doc);
 
       expect(headOf(backend).items).toEqual(['S', 'R', 'a', 'b']);
+      expect(writer.doc.state).toEqual(headOf(backend));
     });
 
     it('written on top of it but not yet minted when the straggler echoes: lands after "S"', async () => {

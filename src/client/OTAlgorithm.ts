@@ -1685,6 +1685,18 @@ export class OTAlgorithm implements ClientAlgorithm {
    * the straggler in frame, so the walk must not advance the server ops through it either —
    * the straggler is skipped entirely, not walked. A frame-consistent queue (the invariant
    * case) takes the plain {@link rebaseChanges} path unchanged.
+   *
+   * KNOWN GAP: not every later row is that kind. A row written ON TOP of the straggler — by
+   * the context that minted it, whose next mint is walked to the store's frame behind it
+   * ({@link _catchUpDocToStore}), or by any context whose view shows it (`applyPendingForView`)
+   * — is the straggler's successor, and the straggler's echo is that row's own predecessor
+   * coming back: {@link rebaseChanges}' echo rule (dropped untransformed), not a concurrent
+   * change. Here the straggler is not in the queue handed to {@link rebaseChanges}, so the row
+   * is transformed against the echo anyway: an op beneath a path the straggler created is
+   * removed, an index behind its insert is shifted a second time. The two kinds leave the same
+   * rows — same baseRevs, same ops — so nothing in the queue tells them apart; the mint would
+   * have to record which frame-debt rows a change was written over. Both are pinned in
+   * OTAlgorithm-frameDebt.spec.ts ("written beside it, or on top of it").
    */
   private _rebasePendingPreservingFrameDebt(serverChanges: Change[], pending: Change[], frameRev: number): Change[] {
     if (serverChanges.length === 0 || pending.length === 0) return pending;

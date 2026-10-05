@@ -129,6 +129,14 @@ export interface OTBranchManagerOptions {
    * author saw), that author's own cleanup delete then removes it, and the materialised state ends
    * with no invented characters — while dropping it instead puts that delete onto real prose
    * (DAB-1427).
+   *
+   * ⚠️ **One transition exposure, for whoever turns this on.** A branch seeded while these replays
+   * still dropped, which has a `seedDelta` and an overrun in the source before its branch point,
+   * has that delta inverted against a merge base the new policy may now pad — shifting the
+   * resulting program near the overrun. The branch does not record which rule seeded it, so this
+   * cannot be detected after the fact; it is rare (it needs a seeded branch, an overrun below the
+   * branch point, and a merge after the switch) and it is worth a line in the consuming server's
+   * rollout notes rather than a guard here.
    */
   legacyTextOverrunPadding?: boolean | TextOverrunPaddingPolicy;
 }
@@ -567,13 +575,15 @@ export class OTBranchManager implements BranchManager {
       // pre-strict clients computed for the same log — rather than making the
       // source doc permanently un-branchable. Skips log via console.error.
       //
-      // Deliberately WITHOUT `legacyTextOverrunPadding`: this state is persisted as the new
-      // branch's first change, so it is authored content, not a rendering of the source log.
-      // The branch's history begins here — nothing downstream was written against the source's
-      // overrun padding — and padding it would bake invented characters into the branch as
-      // ordinary text, which a merge could then carry back into the source (DAB-1064).
       // Renders the source's own log and PERSISTS the result as the branch's rev 1 — so it
       // takes the same padding rule the server's blobs are built with (see the option).
+      //
+      // This replaces an older "deliberately never pad here" rule (DAB-1064), whose reasoning was
+      // that padding would bake invented characters into the branch as authored text. True, but
+      // it only ever answered that one direction: dropping a padding client's overrun puts that
+      // author's own later in-bounds delete onto real prose, which the branch then persists
+      // instead. A per-change policy answers both — the overrun is padded only where its author
+      // actually saw the padding, and their cleanup delete removes it again.
       const { state: stateAtRev } = await getStateAtRevision(this.store, docId, rev, {
         reconstruction: { legacyTextOverrunPadding: this.options.legacyTextOverrunPadding },
       });
@@ -1347,10 +1357,9 @@ export class OTBranchManager implements BranchManager {
     if (!triggered) return;
 
     // Only now pay for a state reconstruction — the source's current head, read once.
-    // No `legacyTextOverrunPadding`: this state is only compared against, never persisted, and
-    // comparing against what clients actually compute (live semantics) is what we want here.
-    // Compare-only, but it compares against a head the server renders WITH the policy, so a
-    // different rule here makes the guard mis-fire in both directions.
+    // Compare-only — never persisted — but it compares against a head the server renders WITH
+    // the policy, so a different rule here makes the guard mis-fire in both directions: a
+    // padding difference near an overrun reads as duplicated content, or masks real duplication.
     const { state } = await getStateAtRevision(this.store, sourceDocId, undefined, {
       reconstruction: { legacyTextOverrunPadding: this.options.legacyTextOverrunPadding },
     });

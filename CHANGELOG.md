@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.34.1](https://github.com/dabblewriter/patches/compare/v0.34.0...v0.34.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **sync:** walk doc-frame rows behind the doc's own queue when the store is ahead (DAB-1760) ([723448f](https://github.com/dabblewriter/patches/commit/723448f8b8ed3024d2143d7981456954462a9b13))
+* **sync:** walk doc-frame rows behind the doc's own queue when the store is ahead (DAB-1760) ([992f742](https://github.com/dabblewriter/patches/commit/992f74209959e0bd8a3adf044dc18893e78adcc4))
+
 ## [0.34.0](https://github.com/dabblewriter/patches/compare/v0.33.0...v0.34.0) (2026-10-06)
 
 

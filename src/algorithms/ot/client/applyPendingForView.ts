@@ -26,6 +26,11 @@ import { applyChanges, ApplyChangesError } from '../shared/applyChanges.js';
  * do not fail on a missing parent — they create it, so the row would put a container holding
  * only its own write where the whole value belongs. See {@link salvagePendingForView} for how
  * "built on" is decided.
+ *
+ * So is a current-frame row that fails strict apply on its own but applies once the rows left
+ * out before it are replayed beneath it: it needs something else one of them did (an insert
+ * that shifted an index, say). A row left out for either reason is itself one of the left-out
+ * rows for everything after it.
  */
 export function applyPendingForView<T>(committedState: T, committedRev: number, pending: Change[]): T {
   try {
@@ -71,7 +76,8 @@ export interface SalvagedPending<T> {
  * a chain of creates.
  *
  * Frame-debt rows are never dropped (see {@link applyPendingForView}): they are kept queued
- * and out of the view, and so are the current-frame rows built on them.
+ * and out of the view, and so is every current-frame row that needs a held-out row — one on
+ * an older frame, or a current-frame row that was held out before it.
  */
 export function salvagePendingForView<T>(
   committedState: T,
@@ -125,8 +131,9 @@ function walkPending<T>(
       kept.push(change);
     } catch (cause) {
       if (needsDeferred(state, change.ops, heldOut)) {
-        // Not beneath anything the older-frame row would have created, but it applies only with
-        // that row's effects (an insert that shifted an index, say). Held out with it, still queued.
+        // Not beneath anything a held-out row would have created, but it applies only with the
+        // held-out rows' effects (an insert that shifted an index, say). Held out with them, still
+        // queued. Those rows are the older-frame ones and any current-frame row held out above.
         kept.push(change);
         heldOut.push(change);
         noteCreated(state, change.ops, deferred);

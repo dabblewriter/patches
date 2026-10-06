@@ -95,12 +95,15 @@ function walkPending<T>(
   // change was dropped, `deferred` when it is still queued and only held out of the view.
   const lost = new Set<string>();
   const deferred = new Set<string>();
+  // Rows queued but held out of the view, in queue order: a later row may need their effects.
+  const held: Change[] = [];
 
   for (let i = 0; i < pending.length; i++) {
     const change = pending[i];
     if (change.baseRev < committedRev) {
       // Frame debt, not corruption: waiting to flush at its own baseRev. Queued, not shown.
       kept.push(change);
+      held.push(change);
       noteCreated(state, change.ops, deferred);
       continue;
     }
@@ -112,6 +115,7 @@ function walkPending<T>(
     }
     if (buildsOn(state, change.ops, deferred)) {
       kept.push(change);
+      held.push(change);
       noteCreated(state, change.ops, deferred);
       continue;
     }
@@ -119,10 +123,11 @@ function walkPending<T>(
       state = applyPatch(state, change.ops, { strict: true });
       kept.push(change);
     } catch (cause) {
-      if (needsDeferred(state, change.ops, pending, i, committedRev)) {
+      if (needsDeferred(state, change.ops, held)) {
         // Not beneath anything the older-frame row would have created, but it applies only with
         // that row's effects (an insert that shifted an index, say). Held out with it, still queued.
         kept.push(change);
+        held.push(change);
         noteCreated(state, change.ops, deferred);
         continue;
       }
@@ -135,27 +140,18 @@ function walkPending<T>(
 }
 
 /**
- * Would `ops`, which failed against `state`, apply if the older-frame rows before index `end`
- * were in the view? Those rows are replayed best-effort on top of `state` (they address a frame
- * it has moved past, so ops that no longer fit are skipped).
+ * Would `ops`, which failed against `state`, apply if the `held` rows (queued, but out of the
+ * view) were in it? Those rows are replayed best-effort on top of `state` in queue order: an
+ * older-frame row addresses a frame it has moved past, and a held current-frame row only partly
+ * applies, so ops that no longer fit are skipped.
  */
-function needsDeferred(
-  state: unknown,
-  ops: JSONPatchOp[],
-  pending: Change[],
-  end: number,
-  committedRev: number
-): boolean {
-  if (!Array.isArray(ops)) return false;
+function needsDeferred(state: unknown, ops: JSONPatchOp[], held: Change[]): boolean {
+  if (!Array.isArray(ops) || held.length === 0) return false;
   let shadow = state;
-  let any = false;
-  for (let i = 0; i < end; i++) {
-    const row = pending[i];
-    if (row.baseRev >= committedRev || !Array.isArray(row.ops)) continue;
-    any = true;
+  for (const row of held) {
+    if (!Array.isArray(row.ops)) continue;
     shadow = applyPatch(shadow, row.ops.filter(isOp), { silent: true });
   }
-  if (!any) return false;
   try {
     applyPatch(shadow, ops, { strict: true });
     return true;

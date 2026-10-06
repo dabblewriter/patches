@@ -321,6 +321,36 @@ describe('applyPendingForView', () => {
   });
 });
 
+describe('a held-out current-frame row', () => {
+  // list [a,b,c] at rev 10; a frame-debt row adds /docs/timeline and fails strict apply;
+  // r1 builds on that row; r2 only needs r1's other effect (the insert that shifts list/3 into range).
+  const state = () => ({ id: 'root', docs: { list: ['a', 'b', 'c'] } as Record<string, any> });
+  const rows = () => {
+    const debt = stale({ op: 'add', path: '/docs/timeline', value: { id: 'timeline', children: [] } }, FAILS);
+    const r1 = change(
+      { op: 'add', path: '/docs/list/0', value: 'x' },
+      { op: 'add', path: '/docs/timeline/children/0', value: 'e' }
+    );
+    const r2 = change({ op: 'remove', path: '/docs/list/3' });
+    return { debt, r1, r2 };
+  };
+
+  it('does not throw on a later row that needs its other effects', () => {
+    const { debt, r1, r2 } = rows();
+
+    expect(() => applyPendingForView(state(), REV, [debt, r1, r2])).not.toThrow();
+  });
+
+  it('keeps that later row queued instead of dropping it at hydration', () => {
+    const { debt, r1, r2 } = rows();
+
+    const result = salvagePendingForView(state(), REV, [debt, r1, r2]);
+
+    expect(result.dropped).toEqual([]);
+    expect(result.kept).toEqual([debt, r1, r2]);
+  });
+});
+
 describe('a malformed pending row', () => {
   const malformed = [
     { name: 'no ops array', ops: undefined },

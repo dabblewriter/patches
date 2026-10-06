@@ -319,6 +319,22 @@ describe('applyPendingForView', () => {
 
     expect(view(early, later).docs.group.children).toEqual(['a', 'b']);
   });
+
+  it('replays a held-out current-frame row for the rows after it', () => {
+    // r1 is held out because its second op writes beneath what the frame-debt row would have
+    // created; r2 removes the index r1's first op would have shifted the last element to.
+    const debt = stale({ op: 'add', path: '/docs/timeline', value: { id: 'timeline', children: [] } }, FAILS);
+    const r1 = change(
+      { op: 'add', path: '/docs/group/children/0', value: 'x' },
+      { op: 'add', path: '/docs/timeline/children/0', value: 'e' }
+    );
+    const r2 = change({ op: 'remove', path: '/docs/group/children/2' });
+
+    expect(() => view(debt, r1, r2)).not.toThrow();
+    const result = salvagePendingForView(committed(), REV, [debt, r1, r2]);
+    expect(result.dropped).toEqual([]);
+    expect(result.kept).toEqual([debt, r1, r2]);
+  });
 });
 
 describe('a malformed pending row', () => {

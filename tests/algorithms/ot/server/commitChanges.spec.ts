@@ -66,6 +66,34 @@ describe('commitChanges', () => {
     expect(mockStore.saveChanges).not.toHaveBeenCalled();
   });
 
+  // DAB-1427 — `clientVersion` is client-supplied, stored on every change row forever, and a
+  // replay policy parses it. Keep short strings, drop the rest; "unstamped" has a defined
+  // meaning (fall back to the date), an absurd value does not.
+  describe('clientVersion ingest', () => {
+    const commitWith = async (clientVersion: unknown) => {
+      const change = { ...createChange('1', 1, 0), clientVersion } as Change;
+      const result = await commitChanges(mockStore, 'doc1', [change], sessionTimeoutMillis);
+      return result.newChanges[0];
+    };
+
+    // The boundary is what this guards, so pin it exactly. Length is measured in UTF-16 units;
+    // the 64 cap is about keeping the row and the split budget sane, not about bytes.
+    it('keeps a version at or under the cap, and persists it on the stored change', async () => {
+      expect((await commitWith('dw3@3.0.90')).clientVersion).toBe('dw3@3.0.90');
+      expect((await commitWith('x')).clientVersion).toBe('x');
+      expect((await commitWith('x'.repeat(64))).clientVersion).toBe('x'.repeat(64));
+      // The cleaned value is what reaches the store, not just what is returned.
+      const saved = vi.mocked(mockStore.saveChanges).mock.calls.at(-1)?.[1] as Change[];
+      expect(saved[0].clientVersion).toBe('x'.repeat(64));
+    });
+
+    it('drops a version that is not a short string', async () => {
+      for (const bad of ['', 'x'.repeat(65), 42, null, {}, ['3.0.90'], true]) {
+        expect(await commitWith(bad), JSON.stringify(bad)).not.toHaveProperty('clientVersion');
+      }
+    });
+  });
+
   it('should fill in baseRev when missing (apply to latest)', async () => {
     vi.mocked(mockStore.getCurrentRev).mockResolvedValue(5);
 

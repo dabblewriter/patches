@@ -1,10 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   breakChanges,
   breakChangesIntoBatches,
   getJSONByteSize,
 } from '../../../../src/algorithms/ot/shared/changeBatching';
 import { compressedSizeBase64, compressedSizeUint8 } from '../../../../src/compression';
+import { setChangeClientVersion } from '../../../../src/data/change';
 import type { Change } from '../../../../src/types';
 
 describe('getJSONByteSize', () => {
@@ -303,6 +304,44 @@ describe('breakChanges', () => {
     expect(result).toHaveLength(1);
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Oversized op replace at "/data"'));
     consoleSpy.mockRestore();
+  });
+
+  // DAB-1427. A split piece is the ORIGINAL author's work. Which build authored a change decides
+  // how its `@txt` overrun is replayed, so relabelling a piece with the splitting process's
+  // version replays an old padding client's overrun short — and the author's own later deletion
+  // of that padding then lands on real prose.
+  describe('clientVersion on split pieces', () => {
+    const oversized = (clientVersion?: string): Change => ({
+      ...createChange(1, [{ op: '@txt', path: '/text', value: [{ retain: 5 }, { insert: 'x'.repeat(4000) }] }]),
+      ...(clientVersion !== undefined && { clientVersion }),
+    });
+
+    afterEach(() => setChangeClientVersion(undefined));
+
+    it('carries the original author version onto every piece, not the splitter’s', () => {
+      // The splitter's own version is deliberately DIFFERENT, so a piece carrying 3.0.90 means
+      // the metadata spread lost to the default rather than winning.
+      setChangeClientVersion('dw3@3.0.90');
+
+      const pieces = breakChanges([oversized('dw3@3.0.59')], 1000);
+
+      expect(pieces.length).toBeGreaterThan(1);
+      expect(pieces.map(p => p.clientVersion)).toEqual(pieces.map(() => 'dw3@3.0.59'));
+      expect(pieces.some(p => p.clientVersion === 'dw3@3.0.90')).toBe(false);
+    });
+
+    it('leaves an UNSTAMPED original unstamped — never relabels it with the splitting build', () => {
+      setChangeClientVersion('3.0.90');
+
+      const pieces = breakChanges([oversized()], 1000);
+
+      expect(pieces.length).toBeGreaterThan(0);
+      for (const piece of pieces) {
+        expect(piece, 'an unstamped change must not acquire a version from the splitter').not.toHaveProperty(
+          'clientVersion'
+        );
+      }
+    });
   });
 });
 

@@ -5,8 +5,15 @@ import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
 import { deepEqual } from '../json-patch/utils/deepEqual.js';
+import { signal } from 'easy-signal';
 import type { Change, PatchesSnapshot } from '../types.js';
 import { BaseDoc } from './BaseDoc.js';
+
+/** One change the algorithm minted from a parked optimistic entry (see `OTDoc._noteMinted`). */
+interface MintedPiece {
+  id: string;
+  ops: JSONPatchOp[];
+}
 
 /**
  * OT (Operational Transformation) document implementation.
@@ -53,6 +60,22 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
    */
   private _unstoredCommittedRevs = new Map<string, number>();
   /**
+   * The change ids the algorithm minted for a parked optimistic entry, keyed by the entry's own
+   * array (see `_noteMinted`). This is how an own echo that beats its mint confirmation is
+   * recognised: by the id it carries, whatever its bytes — the server may have transformed it, or
+   * `breakChanges` may have split it into pieces — and never by bytes alone, which a foreign
+   * change can share (DAB-1409). One piece shares the entry's array, so in-place rebases keep it
+   * current; several pieces hold their own arrays, rebased piece by piece.
+   */
+  private _minted = new Map<JSONPatchOp[], MintedPiece[]>();
+  /**
+   * Committed changes this doc treated as foreign although their ops byte-match a parked
+   * optimistic entry it holds no minted id for. Diagnostic only: such a change is NOT adopted (a
+   * foreign twin adopted as ours drops the local edit), but a mint path that skipped
+   * `_noteMinted` would show up here instead of as a silent double-apply.
+   */
+  readonly onSuspectedOwnEcho = signal<(changeIds: string[]) => void>();
+  /**
    * Ids of changes this doc has folded into `_committedState`, with the rev each landed at.
    * Consulted wherever a pending list is taken from outside the doc — the rebased pending an
    * echo hands back, a snapshot's `changes` on import, a local mint confirmation — so a row the
@@ -85,32 +108,43 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         this.state = applyChangesToState(this._committedState, this._pendingChanges);
       } catch {
         // Pending changes are corrupt (conflicting ops from accumulated sessions).
-        // Apply one-by-one, dropping changes that fail. Later changes created on
-        // committed state may still apply even when earlier ones conflict.
+        // Apply one-by-one, leaving the changes that fail out of this doc's view. Later
+        // changes created on committed state may still apply even when earlier ones
+        // conflict.
         //
-        // Dropping (not keeping) is deliberate for liveness: a change that fails strict
-        // apply here would also fail server-side at flush, and a rejected change at the
-        // head of the queue wedges every commit behind it. But the drop must never be
-        // SILENT — the doc's queue is shortened and the work would otherwise vanish from the
-        // view with zero signal. (The store is not rewritten here: it still holds the dropped
-        // rows and still sends them.) Each dropped change is captured on
-        // `droppedPendingChanges` so `Patches.openDoc` surfaces it via
-        // `onPendingDropped` and the app can preserve the content.
+        // This shortens the VIEW and this instance's in-memory queue, nothing else. The
+        // store keeps every row: nothing writes the shortened queue back, the send path
+        // reads the store (OTAlgorithm._collectPending), and the first receive hands the
+        // store's rows back to this doc. So a change left out here is still sent, in its
+        // place in the queue, and leaving it out does not unblock anything behind it.
+        // Nor does failing strict apply here mean the server refuses it: commitChanges
+        // does not strict-apply what it is sent. Its one correction is for array indexes, and
+        // it is conditional: skipped with `normalizeArrayIndices === false`, with
+        // `historicalImport`, or when the state read fails. Where it runs, an `add` past the
+        // end is clamped to an append, but a `remove`/`replace`/`move` on a missing element
+        // is dropped, and any other change that fails to apply is committed as sent. When the
+        // server cannot correct the row, it commits poison: every client's strict replay
+        // rejects it, this one included once the echo arrives (DAB-1557). A change the
+        // server refuses by name leaves the queue through ejection (docs/quarantine.md).
         //
-        // A later change built on a dropped one is dropped with it, into the same list, so
-        // the app is handed a set it can replay. It would not fail on its own: an `add`
-        // beneath an entry that was never created makes the missing parent as a bare
-        // container, and the view would hold that half-formed entry in place of the real
-        // one. A row waiting on an older frame is the opposite case — frame debt, not
-        // corruption — and stays queued and out of the view, as do the rows built on it.
-        // See salvagePendingForView.
+        // A later change built on one that was left out is left out with it. It would not
+        // fail on its own: an `add` beneath an entry that was never created makes the missing
+        // parent as a bare container, and the view would hold that half-formed entry in place
+        // of the real one. A row waiting on an older frame is a different case — frame debt,
+        // not corruption — and stays in this doc's queue, out of the view, as do the rows
+        // that need it; none of those are reported. See salvagePendingForView.
+        //
+        // Each change left out is captured on `droppedPendingChanges` (a historical name,
+        // see BaseDoc) so `Patches.openDoc` reports it via `onPendingDropped`: the doc
+        // opens without work the host's queue may still send, and the app may want its own
+        // copy before the server has ruled on it.
         const salvaged = salvagePendingForView(this._committedState, this._committedRev, this._pendingChanges);
         const valid = salvaged.kept;
         this.droppedPendingChanges.push(...salvaged.dropped);
         this._pendingChanges = valid;
         this.state = salvaged.state;
         // Strict apply failing only on rows waiting on an older frame is not corruption: they are
-        // held out of the view and stay queued, with nothing dropped and nothing to report.
+        // held out of the view and stay queued, with nothing left out of the queue to report.
         if (salvaged.dropped.length > 0) {
           // Hardcoded console.error rather than an onSkippedChange-style hook (the
           // convention applyChangesForReconstruction uses): the constructor is invoked
@@ -118,16 +152,16 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
           // plumb-through, and no consumer can have subscribed to anything yet. The
           // structured channel is Patches.onPendingDropped, emitted from openDoc right
           // after construction — this log is the fallback signal for non-Patches hosts
-          // and for drops that occur before any subscriber exists. Ids and revs only,
+          // and for opens that happen before any subscriber exists. Ids and revs only,
           // never content.
           const failed = salvaged.dropped.length - salvaged.dependents;
           const reason = salvaged.dependents
-            ? `${failed} failed strict apply against rev ${this._committedRev}, ${salvaged.dependents} built on a dropped change`
+            ? `${failed} failed strict apply against rev ${this._committedRev}, ${salvaged.dependents} built on one that did`
             : `failed strict apply against rev ${this._committedRev}`;
           console.error(
-            `OTDoc(${id}): dropped ${this.droppedPendingChanges.length} of ${
+            `OTDoc(${id}): left ${this.droppedPendingChanges.length} of ${
               this.droppedPendingChanges.length + valid.length
-            } pending changes at hydration (${reason}):`,
+            } pending changes out of the view at hydration (${reason}; not removed here, so a host that sends from its store will still send them):`,
             this.droppedPendingChanges.map(c => `${c.id}@${c.rev}`).join(', ')
           );
         }
@@ -171,7 +205,54 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
   _markUnstored(id: string, ops: JSONPatchOp[]): boolean {
     if (!this._optimisticOps.includes(ops)) return false;
     this._unstored.set(id, ops);
+    // The outbox sends the entry whole, under `id`; its echo is recognised by that id from here.
+    this._minted.delete(ops);
     return true;
+  }
+
+  /**
+   * Internal: the algorithm has minted `changes` from the optimistic entry `ops` — one change, or
+   * several when `breakChanges` split it. Called before the algorithm awaits the store, so the
+   * ids are known before any echo of them can exist. An echo carrying one of these ids is then
+   * this entry's own committed copy, however the server rewrote its ops; a piece's echo retires
+   * that piece, and the entry keeps only what is still in flight (DAB-1409).
+   *
+   * A re-mint (a retried persist) replaces the record: an unsplit change keeps its stable id
+   * across attempts, so nothing is lost. Split pieces get fresh ids per attempt, so the echo of
+   * an earlier attempt's pieces is not recognised — that needs deterministic piece ids.
+   */
+  _noteMinted(changes: Change[], ops: JSONPatchOp[]): void {
+    if (changes.length === 0 || !this._optimisticOps.includes(ops)) return;
+    // An outbox entry (a re-drive under its stable id) is already recognised by that id, and the
+    // outbox sends it whole — pieces recorded beside it would split one echo's bookkeeping in two.
+    if ([...this._unstored.values()].includes(ops)) return;
+    const pieces =
+      changes.length === 1 ? [{ id: changes[0].id, ops }] : changes.map(c => ({ id: c.id, ops: [...c.ops] }));
+    this._minted.set(ops, pieces);
+  }
+
+  /** The parked entry a minted change id belongs to, with its pieces. */
+  private _mintedEntryOf(id: string): { entry: JSONPatchOp[]; pieces: MintedPiece[] } | undefined {
+    for (const [entry, pieces] of this._minted) {
+      if (pieces.some(piece => piece.id === id)) return { entry, pieces };
+    }
+    return undefined;
+  }
+
+  /**
+   * Point a minted entry at the pieces still in flight, rewriting the entry in place so a queued
+   * mint holding the array follows it. No pieces left → the entry leaves the optimistic queue.
+   */
+  private _setMintedPieces(entry: JSONPatchOp[], pieces: MintedPiece[]): void {
+    const ops = pieces.flatMap(piece => piece.ops);
+    entry.length = 0;
+    entry.push(...ops);
+    if (entry.length === 0) {
+      this._minted.delete(entry);
+      this._optimisticOps = this._optimisticOps.filter(e => e !== entry);
+      return;
+    }
+    this._minted.set(entry, pieces.length === 1 ? [{ id: pieces[0].id, ops: entry }] : pieces);
   }
 
   /**
@@ -269,40 +350,53 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
   }
 
   /**
-   * Adopt, as outbox entries, any parked optimistic op whose committed echo has arrived ahead of
-   * its local mint confirmation. Under a slow store the mint's `[docs]` write can settle AFTER the
-   * change has been sent and echoed, so the doc has no pending row and no outbox mark to recognise
-   * the echo by — and would treat its own change as foreign: `_rebaseOptimisticOps` transforms the
-   * optimistic op against its own committed copy (`add /children/18` past `add /children/18` →
-   * 19) and the doc applies it twice. That is the DAB-1366 `+1`, and the very hazard the outbox
-   * mark exists to prevent (see OTDoc.spec "without the outbox mark … double-apply (control)").
-   *
-   * Match structurally, the way `import()` already does for SNAPIMP-1, consuming each optimistic
-   * op at most once so two genuinely distinct identical edits are confirmed one echo at a time.
-   * Registering the match under the echo's id hands it to the tested outbox path: `isOwn` sees
-   * it, `_rebaseOptimisticOps` walks it out untransformed, and `_confirmUnstoredEchoes` empties it
-   * in place so the mint still queued for it skips it.
+   * Report committed changes treated as foreign whose ops byte-match a parked optimistic entry
+   * this doc holds no minted id or outbox mark for. They are NOT adopted. DAB-1366 adopted them,
+   * which recognised an own echo that beat its mint — but by bytes, so a server-transformed or
+   * split echo was missed and a foreign twin was taken for ours, dropping the local edit
+   * (DAB-1409). Own echoes are now recognised by the ids `_noteMinted` records before the store
+   * write; a hit here means some mint path did not record them. Consumes each entry at most once.
    */
-  private _adoptEchoedOptimisticOps(serverChanges: Change[], pendingIds: Set<string>): void {
+  private _flagSuspectedOwnEchoes(serverChanges: Change[], isOwn: (c: Change) => boolean): void {
     if (this._optimisticOps.length === 0) return;
     const marked = new Set(this._unstored.values());
-    const candidates = this._optimisticOps.filter(ops => ops.length > 0 && !marked.has(ops));
+    const candidates = this._optimisticOps.filter(ops => ops.length > 0 && !marked.has(ops) && !this._minted.has(ops));
     if (candidates.length === 0) return;
-    const keys = candidates.map(ops => JSON.stringify(ops));
+    const keys: (string | null)[] = candidates.map(ops => JSON.stringify(ops));
+    const suspected: string[] = [];
     for (const change of serverChanges) {
-      // Already ours by id — a minted row or an outbox entry. Its echo confirms THAT change, not a
-      // parked op that merely looks the same (the user typed the same thing twice); adopting the
-      // parked op here would empty it and lose the second edit.
-      if (pendingIds.has(change.id) || this._unstored.has(change.id)) continue;
+      if (isOwn(change)) continue;
       const i = keys.indexOf(JSON.stringify(change.ops));
       if (i === -1) continue;
-      keys[i] = null as unknown as string;
-      this._unstored.set(change.id, candidates[i]);
+      keys[i] = null;
+      suspected.push(change.id);
+    }
+    if (suspected.length > 0) void this.onSuspectedOwnEcho.emit(suspected);
+  }
+
+  /**
+   * Committed echoes of minted pieces: each retires its piece, and the entry keeps only the
+   * pieces still in flight — emptied and dropped from the optimistic queue once none remain. On
+   * the rebase path `_rebaseOptimisticOps` has already done this (the echoed pieces were walked
+   * out of the queue), so a piece no longer recorded is skipped. Idempotent either way.
+   */
+  private _confirmMintedEchoes(serverChanges: Change[]): void {
+    if (this._minted.size === 0) return;
+    for (const change of serverChanges) {
+      const minted = this._mintedEntryOf(change.id);
+      if (!minted) continue;
+      this._setMintedPieces(
+        minted.entry,
+        minted.pieces.filter(piece => piece.id !== change.id)
+      );
     }
   }
 
   /** Drop bookkeeping for entries that have left the optimistic queue by any path. */
   private _pruneUnstored(): void {
+    for (const ops of this._minted.keys()) {
+      if (!this._optimisticOps.includes(ops)) this._minted.delete(ops);
+    }
     if (this._unstored.size === 0) return;
     for (const [id, ops] of this._unstored) {
       if (!this._optimisticOps.includes(ops)) {
@@ -368,7 +462,21 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // non-idempotent ops (text inserts, array appends). Match by structural op
       // equality, consuming each pending change at most once so genuinely-distinct
       // identical edits are preserved. See OTDoc.spec "SNAPIMP-1".
-      const pendingOpKeys = snapshot.changes.map(c => JSON.stringify(c.ops));
+      //
+      // Minted pieces the snapshot already carries are matched by id first: a split entry's rows
+      // are its pieces, which never byte-match the whole entry, so it would re-apply on top of
+      // them. What is left of the entry is the pieces still to come (DAB-1409).
+      const snapshotIds = new Set(snapshot.changes.map(c => c.id));
+      const idMatched = new Set<string>();
+      for (const [entry, pieces] of [...this._minted]) {
+        const remaining = pieces.filter(piece => !snapshotIds.has(piece.id));
+        if (remaining.length === pieces.length) continue;
+        for (const piece of pieces) if (snapshotIds.has(piece.id)) idMatched.add(piece.id);
+        this._setMintedPieces(entry, remaining);
+      }
+      // A row consumed by id is spent: left in the byte match, it would let a second, identical
+      // entry match it and be emptied — that edit then never shows and never sends.
+      const pendingOpKeys = snapshot.changes.filter(c => !idMatched.has(c.id)).map(c => JSON.stringify(c.ops));
       // Outbox entries a writer has reported committed at a rev this snapshot covers: the
       // snapshot state already holds them, so re-applying the entry would duplicate it.
       const committedUnstored = new Set<JSONPatchOp[]>();
@@ -450,26 +558,49 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
     // re-express the entry on top of its own committed copy and apply it twice.
     const idByOps = new Map<JSONPatchOp[], string>();
     for (const [id, ops] of this._unstored) idByOps.set(ops, id);
+    // A minted entry rides under its minted id the same way. A split one rides as its pieces, in
+    // order, under theirs: a piece's echo is then walked out on its own while a foreign change
+    // between two pieces still meets the later ones (DAB-1409).
+    for (const [ops, pieces] of this._minted) if (pieces.length === 1) idByOps.set(ops, pieces[0].id);
     const syntheticId = (ops: JSONPatchOp[], i: number) => idByOps.get(ops) ?? `${tag}-${i}`;
-    const synthetic: Change[] = this._optimisticOps.map((ops, i) => ({
-      id: syntheticId(ops, i),
+    const toSynthetic = (id: string, ops: JSONPatchOp[]): Change => ({
+      id,
       ops,
       rev: 0,
       baseRev: 0,
       createdAt: 0,
       committedAt: 0,
-    }));
+    });
+    const split = new Map<JSONPatchOp[], MintedPiece[]>();
+    const idOf = new Map<JSONPatchOp[], string>();
+    const synthetic: Change[] = this._optimisticOps.flatMap((ops, i) => {
+      const pieces = this._minted.get(ops);
+      if (pieces && pieces.length > 1) {
+        split.set(ops, pieces);
+        return pieces.map(piece => toSynthetic(piece.id, piece.ops));
+      }
+      idOf.set(ops, syntheticId(ops, i));
+      return [toSynthetic(idOf.get(ops)!, ops)];
+    });
     // Thread the optimistic queue behind the pending queue so the server ops advance
     // through both frames in order — the same walk rebaseChanges does server-side.
     const rebased = rebaseChanges(serverChanges, [...this._pendingChanges, ...synthetic]);
     const opsById = new Map(rebased.map(c => [c.id, c.ops]));
-    this._optimisticOps = this._optimisticOps.filter((ops, i) => {
+    for (const [entry, pieces] of split) {
+      // Pieces echoed or transformed away are gone from `rebased`; the rest carry their new ops.
+      const surviving = pieces
+        .filter(piece => opsById.has(piece.id))
+        .map(piece => ({ id: piece.id, ops: [...opsById.get(piece.id)!] }));
+      this._setMintedPieces(entry, surviving);
+    }
+    this._optimisticOps = this._optimisticOps.filter(ops => {
+      if (split.has(ops)) return true; // rewritten above (or already dropped from the queue)
       // transformPatch hands back its input array UNTOUCHED when no op needed
       // transforming, so `rebased` can hold this very array. Copy before clearing —
       // otherwise a no-op rebase (a foreign change on unrelated paths, the common
       // case) empties both aliases and destroys the in-flight ops instead of
       // keeping them.
-      const newOps = [...(opsById.get(syntheticId(ops, i)) ?? [])];
+      const newOps = [...(opsById.get(idOf.get(ops)!) ?? [])];
       ops.length = 0;
       ops.push(...newOps);
       return ops.length > 0;
@@ -547,14 +678,17 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       const committedState = applyChangesToState(this._committedState, serverChanges);
 
       const priorPendingIds = new Set(this._pendingChanges.map(c => c.id));
-      // An own echo that beats its mint confirmation has neither a pending row nor a mark;
-      // recognise it by its ops and adopt it as an outbox entry first (DAB-1366).
-      this._adoptEchoedOptimisticOps(serverChanges, priorPendingIds);
-      const isOwn = (c: Change) => priorPendingIds.has(c.id) || this._unstored.has(c.id);
+      // An own echo that beats its mint confirmation has neither a pending row nor an outbox mark;
+      // it is recognised by the id the algorithm minted it under (DAB-1366, DAB-1409).
+      const mintedOps = (c: Change) => this._mintedEntryOf(c.id)?.pieces.find(piece => piece.id === c.id)?.ops;
+      const isOwn = (c: Change) => priorPendingIds.has(c.id) || this._unstored.has(c.id) || mintedOps(c) !== undefined;
+      this._flagSuspectedOwnEchoes(serverChanges, isOwn);
       // An echo is only "pure" if it came back as sent. The server may rewrite an own change on
-      // commit — an out-of-range array index clamped or dropped (DAB-1557) — and then the
-      // committed state differs from the view built from our copy, so the view must recompute.
-      const sentOps = (c: Change) => this._pendingChanges.find(p => p.id === c.id)?.ops ?? this._unstored.get(c.id);
+      // commit — an out-of-range array index clamped or dropped (DAB-1557), or transformed past a
+      // foreign commit (DAB-1409) — and then the committed state differs from the view built from
+      // our copy, so the view must recompute.
+      const sentOps = (c: Change) =>
+        this._pendingChanges.find(p => p.id === c.id)?.ops ?? this._unstored.get(c.id) ?? mintedOps(c);
       const isPureEcho = serverChanges.length > 0 && serverChanges.every(c => isOwn(c) && deepEqual(sentOps(c), c.ops));
 
       // Must run against the OLD pending queue (the frame the optimistic ops live in),
@@ -567,6 +701,7 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
       // themselves must leave the optimistic queue (already gone on the rebase path; removed
       // here on the pure-echo path) or their ops apply a second time on top.
       this._confirmUnstoredEchoes(serverChanges);
+      this._confirmMintedEchoes(serverChanges);
 
       this._committedState = committedState;
       this._committedRev = serverChanges[serverChanges.length - 1].rev;

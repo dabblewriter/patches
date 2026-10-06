@@ -276,9 +276,8 @@ describe('Patches', () => {
     });
 
     it('emits onPendingDropped when hydration discarded corrupt pending changes', async () => {
-      // The doc's constructor dropped pending rows that failed strict apply (see OTDoc);
-      // openDoc must surface them — this signal is the only moment the payload is still
-      // in hand before a pending persist makes the truncation permanent.
+      // The doc's constructor left out of its view the pending rows that failed strict
+      // apply (see OTDoc); openDoc must report them. The rows stay queued in the store.
       const dropped = [createChange('corrupt', 1)];
       mockDoc.droppedPendingChanges = dropped;
       const handler = vi.fn();

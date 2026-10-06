@@ -251,10 +251,12 @@ export async function getStateBeforeVersionAsStream(
  * A version blob is a base for FURTHER replay of the same log, so it is a rendering of that
  * log rather than new authored content: consumers building blobs for a doc whose history may
  * contain a `@txt` overrun should pass
- * `{ reconstruction: { legacyTextOverrunPadding: true } }`, or the changes recorded after the
- * overrun — which were authored against its padding — will misapply on top of the blob. See
- * `ReconstructionOptions.legacyTextOverrunPadding` (DAB-1064). No caller in this repo builds
- * blobs; the decision belongs to the consuming server.
+ * `{ reconstruction: { legacyTextOverrunPadding } }` with a policy matching its clients, or the
+ * changes recorded after an overrun will misapply on top of the blob. Pad only overruns from
+ * clients that padded (`padTextOverrunsCreatedBefore(<when dropping clients reached users>)`):
+ * a client on patches 0.28.1+ authored its later edits against the dropped text, and padding its
+ * overrun shifts them all (DAB-1427). See `ReconstructionOptions.legacyTextOverrunPadding`
+ * (DAB-1064). No caller in this repo builds blobs; the decision belongs to the consuming server.
  *
  * @param store - The store backend to load previous version state from.
  * @param docId - The document ID.

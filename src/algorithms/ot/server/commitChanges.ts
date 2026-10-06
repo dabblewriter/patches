@@ -17,6 +17,16 @@ export type { CommitResult } from '../../../server/PatchesServer.js';
 const MAX_CONFLICT_RETRIES = 5;
 
 /**
+ * Longest `clientVersion` the server will persist. Generous for `<namespace>@<semver>` shapes and
+ * far short of anything that would bloat a change row or a size budget.
+ */
+const MAX_CLIENT_VERSION_LENGTH = 64;
+
+function isStorableClientVersion(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_CLIENT_VERSION_LENGTH;
+}
+
+/**
  * Commits a set of changes to a document, applying operational transformation as needed.
  *
  * ## Stateless Design
@@ -200,6 +210,10 @@ export async function commitChanges(
     }
     // Clamp createdAt to not be after committedAt
     c.createdAt = c.createdAt ? Math.min(c.createdAt, serverNow) : serverNow;
+    // `clientVersion` is client-supplied and stored forever on every change row, and a replay
+    // policy may parse it. Drop anything that isn't a short string rather than persist it: an
+    // unstamped change has a defined meaning (fall back), an absurd one does not.
+    if ('clientVersion' in c && !isStorableClientVersion(c.clientVersion)) delete c.clientVersion;
   });
 
   // Basic validation
@@ -453,7 +467,13 @@ async function normalizeBeforeSave(
     // Reconstruction, not strict: a history that already holds an unappliable row must not stop
     // new commits from being checked. It skips the same rows every client's poison floor skips,
     // and quietly — those rows are old news, and this runs on every indexed commit.
-    const reconstruction = { onSkippedChange: () => undefined };
+    // `legacyTextOverrunPadding: true` deliberately, not by default. This renders the doc's own
+    // committed log, so the rule matters in principle — but what the state is used for is deciding
+    // whether an array index is out of range, and `@txt` padding changes the length of a text
+    // field, never the length of a structural array. Padding is the explicit choice because it is
+    // what every blob this state is compared against was built with, and because the library's
+    // own default for an unknown rule is "pad" (the recoverable wrong answer).
+    const reconstruction = { onSkippedChange: () => undefined, legacyTextOverrunPadding: true };
     ({ state } = await getStateAtRevision(store, docId, currentRev, { reconstruction }));
   } catch (error) {
     console.warn(`commitChanges: could not load ${docId} at rev ${currentRev} to check array indexes:`, error);

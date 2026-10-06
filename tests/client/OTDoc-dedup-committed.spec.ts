@@ -39,6 +39,13 @@ const makeChange = (id: string, baseRev: number, rev: number, ops: any[], commit
   committedAt: committed ? Date.now() : 0,
 });
 
+/** What the algorithm does before its store write: record the id the newest entry is minted under. */
+const noteMinted = (doc: InstanceType<typeof OTDoc<ListDoc>>, id: string) => {
+  const queue = (doc as any)._optimisticOps;
+  const ops = queue[queue.length - 1];
+  doc._noteMinted([makeChange(id, 0, 0, ops, false)], ops);
+};
+
 /**
  * DAB-1366: the OT client counts its own in-flight insert twice under a slow store, so the next
  * index it mints is one past committed head. Four support tickets (DAB-1064-A, DAB-1235,
@@ -122,8 +129,10 @@ describe('OTDoc — an own echo that beats its mint is recognised, not transform
 
     // change() applies optimistically and parks the ops. The store's mint write is slow, so the
     // doc has not yet been told this is pending (no `applyChanges([local])` yet) and it never
-    // went through the outbox, so there is no `_markUnstored` either.
+    // went through the outbox, so there is no `_markUnstored` either. The algorithm recorded the
+    // id it minted before the store write (DAB-1409).
     doc.change(patch => patch.add('/items/-', 'X'));
+    noteMinted(doc, 'u1');
     expect(doc.state.items).toEqual(['a', 'b', 'c', 'X']);
     expect((doc as any)._optimisticOps.length).toBe(1);
 
@@ -139,6 +148,7 @@ describe('OTDoc — an own echo that beats its mint is recognised, not transform
     const doc = new OTDoc<ListDoc>('doc-5', { state: { items: ['a', 'b', 'c'] }, rev: 1, changes: [] });
 
     doc.change(patch => patch.add('/items/1', 'X'));
+    noteMinted(doc, 'u1');
     expect(doc.state.items).toEqual(['a', 'X', 'b', 'c']);
 
     // Treated as foreign, `_rebaseOptimisticOps` would transform `add /items/1` against the
@@ -167,6 +177,7 @@ describe('OTDoc — an own echo that beats its mint is recognised, not transform
     const doc = new OTDoc<ListDoc>('doc-7', { state: { items: ['a'] }, rev: 1, changes: [] });
 
     doc.change(patch => patch.add('/items/-', 'X'));
+    noteMinted(doc, 'u1');
     doc.change(patch => patch.add('/items/-', 'X'));
     expect(doc.state.items).toEqual(['a', 'X', 'X']);
     expect((doc as any)._optimisticOps.length).toBe(2);
@@ -203,10 +214,11 @@ describe('OTDoc — review regressions on the DAB-1366 fix', () => {
 
   it('a late mint confirmation for a server-transformed echo retires the parked op instead of stranding it', () => {
     // Optimistic add at 1; a foreign add at 0 commits first, so the server transforms ours to
-    // /items/2 and the echo no longer matches the parked ops structurally. The parked op is
-    // treated as foreign-rebased and stays in the queue (double-applying). When the local mint
-    // confirmation finally arrives for the already-committed id it must retire THAT entry by
-    // reference and rebuild — not return early and leave `optimisticBatchCount` stuck.
+    // /items/2. No minted id was recorded here — the backstop case: the echo reads as foreign and
+    // the parked op stays in the queue (double-applying). With the id recorded it is recognised
+    // at once (OTDoc-echo-identity.spec, DAB-1409). When the local mint confirmation finally
+    // arrives for the already-committed id it must retire THAT entry by reference and rebuild —
+    // not return early and leave `optimisticBatchCount` stuck.
     const doc = new OTDoc<ListDoc>('doc-9', { state: { items: ['a', 'b'] }, rev: 1, changes: [] });
     doc.change(patch => patch.add('/items/1', 'X'));
     const ops = (doc as any)._optimisticOps[0];
@@ -215,7 +227,7 @@ describe('OTDoc — review regressions on the DAB-1366 fix', () => {
       makeChange('f', 1, 2, [{ op: 'add', path: '/items/0', value: 'W' }], true),
       makeChange('u1', 1, 3, [{ op: 'add', path: '/items/2', value: 'X' }], true),
     ]);
-    expect((doc as any)._optimisticOps.length).toBe(1); // known gap: transformed echo not adopted
+    expect((doc as any)._optimisticOps.length).toBe(1); // unrecognised without a minted id
 
     doc.applyChanges([makeChange('u1', 1, 3, ops, false)]); // late local mint confirmation
 
@@ -231,6 +243,7 @@ describe('OTDoc — review regressions on the DAB-1366 fix', () => {
     const doc = new OTDoc<ListDoc>('doc-10', { state: { items: ['a'] }, rev: 1, changes: [] });
     doc.change(patch => patch.add('/items/-', 'A'));
     const opsA = (doc as any)._optimisticOps[0];
+    noteMinted(doc, 'u1');
     doc.change(patch => patch.add('/items/-', 'B'));
     const opsB = (doc as any)._optimisticOps[1];
 

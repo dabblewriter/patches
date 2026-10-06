@@ -238,10 +238,9 @@ describe('OTDoc — hydration with corrupt pending', () => {
     // c-bad is a text op against a target that is not a Delta — the realistic corrupt
     // shape (a @txt op pending against a body whose structure changed under it), and one
     // of the few op classes strict apply actually rejects (plain replace/remove on
-    // missing paths do NOT throw). c-good applies cleanly. The drop keeps the queue
-    // flushable (a change the local state rejects would also be rejected server-side
-    // and wedge every commit behind it), but the payload must survive for
-    // Patches.openDoc to surface — silent drops are user work destroyed with zero signal.
+    // missing paths do NOT throw). c-good applies cleanly. c-bad is left out of the view
+    // and of this doc's queue, and captured for Patches.openDoc to report. The store
+    // still holds it and it is still sent (see OTAlgorithm-hydrationDrop.spec).
     const bad = makeChange('c-bad', 5, 6, [{ op: '@txt', path: '/title', value: 'typed words' }], false);
     const good = makeChange('c-good', 5, 7, [{ op: 'replace', path: '/title', value: 'kept' }], false);
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -322,8 +321,9 @@ describe('OTDoc — hydration drops the changes built on a dropped one', () => {
     expect(doc.state.docs.timeline).toBeUndefined();
     expect(doc.state).toEqual(committed());
     expect(consoleError).toHaveBeenCalledExactlyOnceWith(
-      'OTDoc(doc): dropped 2 of 2 pending changes at hydration ' +
-        '(1 failed strict apply against rev 31, 1 built on a dropped change):',
+      'OTDoc(doc): left 2 of 2 pending changes out of the view at hydration ' +
+        '(1 failed strict apply against rev 31, 1 built on one that did; ' +
+        'not removed here, so a host that sends from its store will still send them):',
       ids([create, addChild])
     );
   });
@@ -363,8 +363,9 @@ describe('OTDoc — hydration drops the changes built on a dropped one', () => {
     expect(doc.getPendingChanges()).toEqual([]);
     expect(doc.state).toEqual(committed());
     expect(consoleError).toHaveBeenCalledExactlyOnceWith(
-      'OTDoc(doc): dropped 3 of 3 pending changes at hydration ' +
-        '(1 failed strict apply against rev 31, 2 built on a dropped change):',
+      'OTDoc(doc): left 3 of 3 pending changes out of the view at hydration ' +
+        '(1 failed strict apply against rev 31, 2 built on one that did; ' +
+        'not removed here, so a host that sends from its store will still send them):',
       ids([create, addChild, addGrandchild])
     );
   });
@@ -406,7 +407,8 @@ describe('OTDoc — hydration drops the changes built on a dropped one', () => {
     expect(doc.state.docs.timeline).toEqual({ id: 'timeline', type: 'timeline', children: ['track-2', 'event'] });
     // No dependents, so the line reads as it always has.
     expect(consoleError).toHaveBeenCalledExactlyOnceWith(
-      'OTDoc(doc): dropped 1 of 3 pending changes at hydration (failed strict apply against rev 31):',
+      'OTDoc(doc): left 1 of 3 pending changes out of the view at hydration ' +
+        '(failed strict apply against rev 31; not removed here, so a host that sends from its store will still send them):',
       ids([create])
     );
   });
@@ -452,7 +454,8 @@ describe('OTDoc — hydration drops the changes built on a dropped one', () => {
       expect(doc.getPendingChanges()).toEqual([create, addChild]);
       expect(doc.state).toEqual(committed());
       expect(consoleError).toHaveBeenCalledExactlyOnceWith(
-        'OTDoc(doc): dropped 1 of 3 pending changes at hydration (failed strict apply against rev 31):',
+        'OTDoc(doc): left 1 of 3 pending changes out of the view at hydration ' +
+          '(failed strict apply against rev 31; not removed here, so a host that sends from its store will still send them):',
         ids([bad])
       );
     });
@@ -808,17 +811,20 @@ describe('OTDoc — outbox entries confirmed by their committed echo', () => {
     expect(laterOps).toEqual([{ op: 'add', path: '/items/2', value: 'Y' }]);
   });
 
-  it('without the outbox mark the same echo is still recognised as ours by its ops, not double-applied', () => {
+  it('without the outbox mark the same echo is still recognised as ours by its minted id, not double-applied', () => {
     // This was the control for the hazard the mark exists to prevent: an own echo the doc could
     // not recognise was treated as foreign and applied twice (['a','b','c','X','X']). It is the
     // DAB-1366 `+1` — a mint whose store write settles after its echo has no row and no mark —
-    // so the echo is now matched structurally against the parked optimistic op and adopted as
-    // an outbox entry. The mark remains the primary path; this is the backstop.
+    // so the echo is recognised by the id the algorithm recorded before that write
+    // (`_noteMinted`, DAB-1409). The mark remains the outbox's path.
     doc.change(patch => patch.add('/items/-', 'X'));
+    const calls = (doc.onChange.emit as any).mock.calls;
+    const ops = calls[calls.length - 1][0];
+    doc._noteMinted([makeChange('u1', 1, 2, ops, false)], ops);
     doc.applyChanges([makeChange('u1', 1, 2, [{ op: 'add', path: '/items/-', value: 'X' }], true)]);
     expect(doc.state.items).toEqual(['a', 'b', 'c', 'X']);
     expect((doc as any)._optimisticOps).toEqual([]);
-    expect(doc.unstoredChangeIds).toEqual([]); // adopted and confirmed in the same call
+    expect(doc.unstoredChangeIds).toEqual([]); // never an outbox entry
   });
 
   it('a foreign change arriving before the echo rebases the entry in place, so the outbox sends the rebased ops', () => {

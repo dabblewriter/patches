@@ -20,6 +20,18 @@ export interface ChangeInput {
   createdAt?: number;
   /** Optional batch identifier for grouping changes that belong to the same client batch (for multi-batch offline/large edits). */
   batchId?: string;
+  /**
+   * Version of the client that authored this change, as the app names its own builds. Set once
+   * via {@link setChangeClientVersion} and stamped on every change minted afterwards; absent on
+   * changes minted before the app set it, and on every change written before this field existed.
+   *
+   * Patches carries the string and never parses it. It exists because a change's meaning can
+   * depend on what its author's build did: replaying a `@txt` overrun correctly requires knowing
+   * whether the authoring client padded it or dropped it, and nothing else in the log says
+   * (DAB-1427). Consumers map versions to behaviour themselves — see
+   * {@link padTextOverrunsFromClients}.
+   */
+  clientVersion?: string;
   /** Optional arbitrary metadata associated with the change. */
   [metadata: string]: any;
 }

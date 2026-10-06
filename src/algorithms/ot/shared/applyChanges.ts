@@ -99,10 +99,133 @@ export interface ReconstructionOptions {
    *   the padding — and padding it would bake invented characters into a branch as ordinary
    *   authored text, which can then merge back into the source (DAB-1064).
    *
-   * When in doubt, leave it off: the cost is a historical view that differs from what the
-   * author saw, not corruption of live content.
+   * **Getting it wrong is not confined to a historical view.** A version blob is the base every
+   * later change replays onto, so it is what a cold load serves — an error here reaches the live
+   * document, not just the scrubber. Both directions cost: padding a dropping client's overrun
+   * invents characters and shifts every later edit in that session (DAB-1427), and dropping a
+   * padding client's puts its author's later in-bounds delete onto real prose. Neither is the
+   * safe default, which is why this takes a policy rather than a flag.
+   *
+   * **Per change, not per log.** Padding is only what the author saw if the author's client
+   * padded. Clients on patches 0.28.1+ drop the overrun live, so the edits they make after it
+   * were authored against the dropped text — padding those invents characters they never had and
+   * shifts every later edit in the session by the padding length (DAB-1427). A log written across
+   * that client rollout needs both rules, so pass a {@link TextOverrunPaddingPolicy} to decide per
+   * change: {@link padTextOverrunsFromClients} when the change names its author's build, and
+   * {@link padTextOverrunsCreatedBefore} for the history written before it did.
    */
-  legacyTextOverrunPadding?: boolean;
+  legacyTextOverrunPadding?: boolean | TextOverrunPaddingPolicy;
+}
+
+/**
+ * Decides, for one committed change, whether a `@txt` retain in it that overran the document is
+ * replayed as padding spaces (`true`) or dropped (`false`). See
+ * `ReconstructionOptions.legacyTextOverrunPadding`.
+ */
+export type TextOverrunPaddingPolicy = (change: Change) => boolean;
+
+/**
+ * Pads only overruns in changes created before `clampedSinceMs` — the moment the consuming app's
+ * clients started dropping overruns live. Changes from before then were authored by clients that
+ * padded; changes from after were authored by clients that dropped.
+ *
+ * `createdAt` is the authoring client's clock, which is the right clock: the question is what the
+ * author's client computed, not when the server committed it.
+ *
+ * **This is a guess about the population, not a reading of the change.** A user still on a
+ * pre-cutoff build after the cutoff — and builds linger for weeks — is misread as dropping, and
+ * their overrun is replayed short. Prefer {@link padTextOverrunsFromClients}, which reads the
+ * authoring build off the change itself, and keep this for the history written before changes
+ * carried one. Pick the cutoff from when dropping clients actually reached users, not from when
+ * the library shipped.
+ */
+export function padTextOverrunsCreatedBefore(droppingSinceMs: number): TextOverrunPaddingPolicy {
+  // A NaN cutoff — a `Date.parse` of a malformed literal — makes `n < NaN` always false, so every
+  // overrun in all of history would be replayed short, silently and forever. Refuse at
+  // construction: the library's own helper must not be able to cause that.
+  if (!Number.isFinite(droppingSinceMs)) {
+    throw new TypeError(`padTextOverrunsCreatedBefore needs a finite timestamp; got ${droppingSinceMs}`);
+  }
+  // A change with no `createdAt` predates the server always setting one, so it is older than any
+  // cutoff worth picking — pad it. Comparing `undefined` would answer `false` and drop it.
+  return change => typeof change.createdAt !== 'number' || change.createdAt < droppingSinceMs;
+}
+
+/**
+ * Pads an overrun when the change names the build that authored it (`clientVersion`, set via
+ * `setChangeClientVersion`) and `padsOverruns` says that build padded. A change with no version
+ * falls through to `unstamped` — every change written before the app started stamping, which is
+ * all of history up to that release.
+ *
+ * This is the accurate half: the guess in {@link padTextOverrunsCreatedBefore} is only as good as
+ * the assumption that everyone upgrades at once, and they don't.
+ *
+ * `padsOverruns` receives the version string exactly as the client wrote it and is the consuming
+ * app's business — Patches never parses it. Return `true` for a build that padded, `false` for one
+ * that dropped, and anything else (`undefined` is the clear way to say it) for "I don't recognise
+ * this", which falls through to `unstamped` rather than guessing.
+ *
+ * It is called once per change on every replay, so keep it cheap and side-effect-free: a 300k
+ * change log is 300k calls, and a policy that logs an unrecognised version will flood.
+ */
+export function padTextOverrunsFromClients(
+  padsOverruns: (clientVersion: string) => boolean | undefined,
+  unstamped: TextOverrunPaddingPolicy
+): TextOverrunPaddingPolicy {
+  // Both arms are app code — a table lookup, a semver compare, a config blob typed `any` — so
+  // neither is trusted to answer or even to return. A replay aborted here does not merely render
+  // the wrong text: `shouldPadTextOverrun` is resolved OUTSIDE the apply try (so a caller bug
+  // surfaces), and a server builds versions inside `commitChanges` with no guard of its own, so a
+  // throw escaping this combinator can reject the commit itself and stop a document accepting
+  // writes at all. Whatever the app does, this falls back to the date and then to "pad".
+  //
+  // `padsOverruns` throwing is not exotic: nothing validates `clientVersion`'s content, only its
+  // length, so one change stamped `dev` by a hand build plus the obvious mapper
+  // (`v => semver.gte(v, '0.28.1')`) throws `Invalid Version: dev`.
+  return change => {
+    const version = change.clientVersion;
+    if (typeof version === 'string' && version !== '') {
+      let padded: boolean | undefined;
+      try {
+        padded = padsOverruns(version);
+      } catch {
+        padded = undefined; // Could not decide — fall through, don't abort the replay.
+      }
+      // Only a boolean is an answer; anything else means the app did not decide.
+      if (typeof padded === 'boolean') return padded;
+    }
+    try {
+      const fallback = unstamped(change);
+      if (typeof fallback === 'boolean') return fallback;
+    } catch {
+      // Fall through to the final default below.
+    }
+    // Last resort: pad. Of the two wrong answers this is the recoverable one — invented spaces
+    // and a stale suggestion mark, versus an author's later in-bounds delete landing on real
+    // prose. It is also what every blob was built with before this option existed.
+    return true;
+  };
+}
+
+/**
+ * Resolves a `legacyTextOverrunPadding` option for one change.
+ *
+ * A policy that answers with anything but a boolean throws rather than being coerced. Coercing
+ * would have to pick a direction, and both directions corrupt: `=== true` would silently choose
+ * "drop", which is the one that puts an author's later in-bounds delete onto real prose. A policy
+ * that cannot decide should say so by composing {@link padTextOverrunsFromClients}, which has an
+ * explicit fallback, not by returning `undefined` here.
+ */
+export function shouldPadTextOverrun(option: boolean | TextOverrunPaddingPolicy | undefined, change: Change): boolean {
+  if (typeof option !== 'function') return option === true;
+  const padded = option(change);
+  if (typeof padded !== 'boolean') {
+    throw new TypeError(
+      `legacyTextOverrunPadding policy returned ${typeof padded} for change ${change.id}; it must return a boolean. ` +
+        'Compose padTextOverrunsFromClients if the decision needs a fallback.'
+    );
+  }
+  return padded;
 }
 
 /**
@@ -153,14 +276,15 @@ export function applyChangesForReconstruction<T>(state: T, changes: Change[], op
   if (!changes.length) return state;
   for (let i = 0; i < changes.length; i++) {
     const change = changes[i];
+    // Resolved OUTSIDE the try: a policy that throws is a bug in the caller's own code, and
+    // letting it land in the skip path below would silently drop authored content on every
+    // change rather than failing where the bug is.
+    const legacyTextOverrunPadding = shouldPadTextOverrun(options?.legacyTextOverrunPadding, change);
     try {
       // Opt-in, not automatic: a replay that RENDERS this log needs the padding its later
       // entries were authored against, while a replay that SEEDS a new document must not
       // bake those invented characters in as authored text. See ReconstructionOptions.
-      state = applyPatch(state, change.ops, {
-        strict: true,
-        legacyTextOverrunPadding: options?.legacyTextOverrunPadding === true,
-      });
+      state = applyPatch(state, change.ops, { strict: true, legacyTextOverrunPadding });
     } catch (error) {
       if (options?.onSkippedChange) {
         options.onSkippedChange({ change, index: i, error });

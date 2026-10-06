@@ -745,5 +745,15 @@ function deriveNewChange(origChange: Change, rev: number, ops: JSONPatchOp[]) {
   // Filter out metadata that shouldn't be part of the new change object
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { id: _id, ops: _o, rev: _r, baseRev: _br, created: _c, ...metadata } = origChange;
-  return createChange(origChange.baseRev, rev, ops, metadata);
+  const derived = createChange(origChange.baseRev, rev, ops, metadata);
+  // A split piece is the ORIGINAL author's work, so it must carry the original's `clientVersion`
+  // — including the case where there wasn't one. `createChange` stamps the running process's
+  // version by default, and spreading `metadata` only overrides that when the key is present, so
+  // an unstamped change (i.e. anything written before this field existed, or by a client that
+  // never set it) would otherwise be relabelled as authored by whatever build is splitting it.
+  // That is load-bearing: a `@txt` overrun is replayed by its author's build, so mislabelling an
+  // old padding client's change as a modern dropping one replays it short, and the author's own
+  // later deletion of the padding then lands on real prose (DAB-1427).
+  if (!('clientVersion' in metadata)) delete derived.clientVersion;
+  return derived;
 }

@@ -32,9 +32,12 @@ export {
 // for when skip-and-continue replay is legitimate; strict apply is the default everywhere)
 export {
   applyChangesForReconstruction,
+  padTextOverrunsCreatedBefore,
+  padTextOverrunsFromClients,
   type ReconstructionOptions,
   type ReplayOptions,
   type SkippedChange,
+  type TextOverrunPaddingPolicy,
 } from '../algorithms/ot/shared/applyChanges.js';
 
 // Stream utilities

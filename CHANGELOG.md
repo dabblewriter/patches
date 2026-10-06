@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.34.0](https://github.com/dabblewriter/patches/compare/v0.33.0...v0.34.0) (2026-10-06)
+
+
+### Features
+
+* **json-patch:** decide [@txt](https://github.com/txt) overrun padding per change, not per replay (DAB-1427) ([98b1b13](https://github.com/dabblewriter/patches/commit/98b1b138c39a09c50af8f19b4099bcadf44b6d94))
+* **json-patch:** decide [@txt](https://github.com/txt) overrun padding per change, not per replay (DAB-1427) ([ea7e848](https://github.com/dabblewriter/patches/commit/ea7e848db9b4328ec71b9325029bc1e16686d1b0))
+
+
+### Bug Fixes
+
+* **client:** a no-error IndexedDB abort is an AbortError, not a StorageError (DAB-1741) ([a89a2ac](https://github.com/dabblewriter/patches/commit/a89a2ac1ffb2e20e4557cbab904deba63aec1bf2))
+* **client:** address review — don't reuse an id-matched snapshot row in import's byte match (DAB-1409) ([65b56b7](https://github.com/dabblewriter/patches/commit/65b56b7a9b9eaae256915beee5d95cb02ef5f20c))
+* **client:** never reject a transaction with a bare null error (DAB-1741) ([d4e80ca](https://github.com/dabblewriter/patches/commit/d4e80cafbef11e2ffd0c2bae75d5ece83b0e2939))
+* **client:** never reject an IndexedDB request or transaction with a bare null (DAB-1741) ([21b473c](https://github.com/dabblewriter/patches/commit/21b473c714be9411c096aff455a6ae96cd849b58))
+* **client:** recognise an own echo by its minted id, not its bytes (DAB-1409) ([931da5b](https://github.com/dabblewriter/patches/commit/931da5b04a06ccec172f202fcf4314b693844f5d))
+* **client:** recognise an own echo by its minted id, not its bytes (DAB-1409) ([8defd54](https://github.com/dabblewriter/patches/commit/8defd5431db1a21b2e72fe4d7360338445607e83))
+* **client:** say that a change dropped at hydration stays queued and is sent ([d00c9ac](https://github.com/dabblewriter/patches/commit/d00c9ac8117767944824705e6115194c7e0541f1))
+* **client:** say that a change dropped at hydration stays queued and is sent ([7ad1579](https://github.com/dabblewriter/patches/commit/7ad1579768f78f3297fb19095c63349f0fe34d60))
+* **ot:** drop the changes built on a pending change dropped at hydration ([7e7df1f](https://github.com/dabblewriter/patches/commit/7e7df1fb609e8d11d1a8449d8f440d5a7b11ee02))
+* **ot:** drop the changes built on a pending change dropped at hydration ([7d50105](https://github.com/dabblewriter/patches/commit/7d501050d60b4b6a0882739511005a99007089ba))
+* **ot:** hold out rows that need a deferred row, survive malformed rows in hydration salvage ([552a7a7](https://github.com/dabblewriter/patches/commit/552a7a7b0b92b841324394a401c1394a1268d37b))
+* **ot:** replay held-out current-frame rows when checking what a later row needs ([7ea5f3c](https://github.com/dabblewriter/patches/commit/7ea5f3c83f6ef06a9d97cd9a62ebce2ea866cbd0))
+* **sync:** don't rebase the shared store's pending queue across a batch the store already applied (DAB-1755) ([54f72ad](https://github.com/dabblewriter/patches/commit/54f72adab0bf241c413dae5f90811bc7ef6a7408))
+* **sync:** don't rebase the shared store's pending queue across a batch the store already applied (DAB-1755) ([5063997](https://github.com/dabblewriter/patches/commit/50639978d734e3ceba79fe54686075dff99b750c))
+
 ## [0.33.0](https://github.com/dabblewriter/patches/compare/v0.32.3...v0.33.0) (2026-09-30)
 
 

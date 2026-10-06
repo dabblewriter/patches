@@ -199,18 +199,29 @@ export class Patches {
    */
   readonly onChangeQuarantined = signal<(docId: string, quarantined: QuarantinedChange) => void>();
   /**
-   * Emitted from openDoc when hydration dropped pending changes that failed strict apply
-   * against the snapshot's committed state (see BaseDoc.droppedPendingChanges). The drop
-   * is required for liveness — a change the local state rejects would also be rejected at
-   * flush and wedge the queue — but it discards real user work, so consumers should
-   * preserve the payload (shelve it, surface it) rather than let it vanish. Emitted once
-   * per open that observed drops; the changes carried are the dropped ones only.
+   * Emitted from openDoc when hydration left pending changes out of the doc's view because
+   * they failed strict apply against the snapshot's committed state (see
+   * BaseDoc.droppedPendingChanges). Emitted once per open that observed any; the changes
+   * carried are those ones only.
+   *
+   * "Dropped" describes the view, not the queue. A host that sends from its store (Patches
+   * does) still holds these rows, so they go out on the next flush and can commit, unless
+   * ejection, quarantine or `dropResolvedPending` removes them first. The server does not
+   * strict-apply what it is sent. Its array-index correction is conditional (skipped with
+   * `normalizeArrayIndices === false`, with `historicalImport`, or when its state read
+   * fails); where it runs, an `add` past the end is clamped to an append, but a
+   * `remove`/`replace`/`move` on a missing element is dropped, and any other change that
+   * fails to apply is committed as sent. A row the server cannot correct is committed as
+   * poison that every client's strict replay rejects, the sender included (DAB-1557): this
+   * is not a harmless extra commit. What this reports is that the doc opened without work
+   * that may still be queued. A consumer that keeps the payload (a shelf, telemetry) is
+   * holding a copy of work that may also go live; change ids survive the commit, so a kept
+   * copy can be matched against what later commits or is quarantined (`onChangeQuarantined`).
    *
    * Handlers run BEFORE the doc is registered: the emit sits inside the open, ahead of
-   * `docs.set` (deliberately — it is the only moment nothing can have persisted the
-   * truncated queue yet). Inside a handler, `getOpenDoc(docId)` returns undefined, and
-   * awaiting `openDoc(docId)` re-enters an open that has not resolved. Persist the
-   * payload elsewhere (a shelf, telemetry) and return.
+   * `docs.set`. Inside a handler, `getOpenDoc(docId)` returns undefined, and awaiting
+   * `openDoc(docId)` re-enters an open that has not resolved. Keep the payload elsewhere
+   * (a shelf, telemetry) and return.
    */
   readonly onPendingDropped = signal<(docId: string, dropped: Change[]) => void>();
   /**
@@ -474,9 +485,9 @@ export class Patches {
         () => this._writeLatches.has(docId)
       );
 
-      // Hydration dropped pending changes (strict-apply failures — see the constructor
-      // recovery in OTDoc). Surface them BEFORE any consumer can persist the truncated
-      // queue: this signal is the only moment the dropped payload is still in hand.
+      // Hydration left pending changes out of the doc's view (strict-apply failures — see
+      // the constructor recovery in OTDoc). Report them: they are still queued in the
+      // store and will be sent, but the doc opens without them.
       // Probed structurally — createDoc's contract returns a PatchesDoc, which need not
       // extend BaseDoc (custom doc classes, test doubles).
       const dropped = (doc as { droppedPendingChanges?: Change[] }).droppedPendingChanges;

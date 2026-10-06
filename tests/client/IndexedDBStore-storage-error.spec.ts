@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { IDBStoreWrapper, IDBTransactionWrapper } from '../../src/client/IndexedDBStore';
-import { isStorageError, StorageError } from '../../src/net/error';
+import { isAbortError, isStorageError, StorageError } from '../../src/net/error';
 
 /**
  * The IndexedDB request/transaction wrappers must convert a raw WebKit storage-fault
@@ -65,6 +65,53 @@ describe('IndexedDB store-error wrapping', () => {
     const wrapper = new IDBTransactionWrapper(fakeTx);
     void Promise.resolve().then(() => (fakeTx as unknown as { onabort: () => void }).onabort());
     await expect(wrapper.complete()).rejects.toBeInstanceOf(StorageError);
+  });
+
+  // `tx.error` is null for a transaction that aborts with no error: a script `abort()`, or
+  // the browser killing it, as WebKit does to a backgrounded or closing connection. Rejecting
+  // with that raw null left every caller unable to classify the failure: the doc latched as
+  // `unknown` and boot sync failed with "Error: null" (DABBLE-WRITER-3-1C3). A cancelled
+  // transaction is an interruption (`isAbortError`), not a storage fault.
+  it('rejects with an AbortError, never a bare null, when a transaction aborts with no error', async () => {
+    const fakeTx = {
+      oncomplete: null,
+      onerror: null,
+      onabort: null,
+      error: null,
+      objectStoreNames: ['docs', 'changes'],
+    } as unknown as IDBTransaction;
+    const wrapper = new IDBTransactionWrapper(fakeTx);
+    void Promise.resolve().then(() => (fakeTx as unknown as { onabort: () => void }).onabort());
+    const err = await wrapper.complete().catch((e: unknown) => e);
+    expect(isAbortError(err)).toBe(true);
+    expect(isStorageError(err)).toBe(false);
+    expect((err as Error).message).toContain('docs, changes');
+  });
+
+  // A failed request's `error` event bubbles to the transaction before the abort sets
+  // `tx.error`, so on `onerror` the real error is on the event's target, not the transaction.
+  it('keeps the bubbled request error when the transaction reports none yet', async () => {
+    const raw = new DOMException('Key already exists in the object store.', 'ConstraintError');
+    const fakeTx = { oncomplete: null, onerror: null, onabort: null, error: null } as unknown as IDBTransaction;
+    const wrapper = new IDBTransactionWrapper(fakeTx);
+    void Promise.resolve().then(() =>
+      (fakeTx as unknown as { onerror: (e: unknown) => void }).onerror({ target: { error: raw } })
+    );
+    await expect(wrapper.complete()).rejects.toBe(raw);
+  });
+
+  it('rejects with an AbortError when a transaction errors with no error anywhere', async () => {
+    const fakeTx = { oncomplete: null, onerror: null, onabort: null, error: null } as unknown as IDBTransaction;
+    const wrapper = new IDBTransactionWrapper(fakeTx);
+    void Promise.resolve().then(() => (fakeTx as unknown as { onerror: (e: unknown) => void }).onerror({}));
+    const err = await wrapper.complete().catch((e: unknown) => e);
+    expect(isAbortError(err)).toBe(true);
+  });
+
+  it('rejects a request with an AbortError, never a bare null, when it errors with no error', async () => {
+    const wrapper = new IDBStoreWrapper(storeThatErrorsWith(null));
+    const err = await wrapper.put({ id: 'x' }).catch((e: unknown) => e);
+    expect(isAbortError(err)).toBe(true);
   });
 
   it('leaves a non-storage request error unchanged (e.g. AbortError)', async () => {

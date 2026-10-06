@@ -9,7 +9,7 @@ import type {
   QuarantinedChange,
 } from '../types.js';
 import { deferred, type Deferred } from '../utils/deferred.js';
-import { StorageTimeoutError, storageOpLabel, toStorageError } from '../net/error.js';
+import { StorageTimeoutError, storageOpLabel, toIndexedDBError, toStorageError } from '../net/error.js';
 import { signal } from 'easy-signal';
 import type { BranchClientStore } from './BranchClientStore.js';
 import type { PatchesStore, TrackedDoc } from './PatchesStore.js';
@@ -1021,20 +1021,26 @@ export class IDBTransactionWrapper {
         guard.clear();
         resolve();
       };
-      tx.onerror = () => {
+      // Never reject with a bare null (see `toIndexedDBError`). On `error` the transaction
+      // usually has none yet: a failed request's event bubbles here before the abort sets
+      // `tx.error`, so the real error is on the event's target.
+      const txLabel = () => storageOpLabel('transaction', storeNames());
+      tx.onerror = (event?: Event) => {
         beaconRef.lastSettleAt = Date.now();
         guard.clear();
-        reject(toStorageError(tx.error));
+        reject(toIndexedDBError(tx.error ?? (event?.target as IDBRequest | null | undefined)?.error, txLabel()));
       };
       // A transaction that aborts at commit — notably under quota pressure — can fire ONLY
       // `onabort` (with `tx.error` set) and no `onerror`, which would otherwise leave this
       // promise pending forever. Reject on abort too, routing a storage-fault abort through the
-      // same typed StorageError; a plain user/teardown AbortError passes through untouched (and
-      // whichever of onerror/onabort fires first wins — the second reject is a no-op).
+      // same typed StorageError; a plain user/teardown AbortError passes through untouched, and
+      // an abort with no error at all (WebKit tearing down a backgrounded tab's connection)
+      // becomes one (whichever of onerror/onabort fires first wins — the second reject is a
+      // no-op).
       tx.onabort = () => {
         beaconRef.lastSettleAt = Date.now();
         guard.clear();
-        reject(toStorageError(tx.error));
+        reject(toIndexedDBError(tx.error, txLabel()));
       };
     });
     // Each request settle both bumps the connection-wide beacon and extends this transaction's
@@ -1091,7 +1097,7 @@ export class IDBStoreWrapper {
       };
       req.onerror = () => {
         this.onSettle?.();
-        reject(toStorageError(req.error));
+        reject(toIndexedDBError(req.error, 'IndexedDB request'));
       };
     });
     if (!this.failure) return request;

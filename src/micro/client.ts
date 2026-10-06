@@ -1,5 +1,5 @@
 import { signal, type Signal } from 'easy-signal';
-import { StatusError } from '../net/error.js';
+import { StatusError, toIndexedDBError } from '../net/error.js';
 import { MicroDoc, type RestoredSend } from './doc.js';
 import { transformPendingTxt } from './ops.js';
 import type { CommitResult, DocState, FieldMap, SyncResult } from './types.js';
@@ -312,7 +312,7 @@ export class MicroClient {
         this._db = req.result;
         resolve(req.result);
       };
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(toIndexedDBError(req.error, 'IndexedDB open'));
     }).finally(() => (this._dbOpening = null));
     return this._dbOpening;
   }
@@ -362,14 +362,15 @@ function idbGet(store: IDBObjectStore, key: string): Promise<any> {
   return new Promise((resolve, reject) => {
     const req = store.get(key);
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => reject(toIndexedDBError(req.error, 'IndexedDB request'));
   });
 }
 
 function idbDone(tx: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.onerror = event =>
+      reject(toIndexedDBError(tx.error ?? (event.target as IDBRequest | null)?.error, 'IndexedDB transaction'));
+    tx.onabort = () => reject(toIndexedDBError(tx.error, 'IndexedDB transaction'));
   });
 }

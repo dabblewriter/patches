@@ -1164,7 +1164,9 @@ export class OTAlgorithm implements ClientAlgorithm {
       // Rebase pending and persist, retrying if a foreign mint raced the replace (R2). Each retry
       // re-reads the queue (now including the foreign rows) and recomputes.
       let rebased: Change[] = [];
-      let pendingSet: Change[] = [];
+      // The queue as it stands on the DOC's frame, for walking rows that live there (frozen outbox
+      // rows below). The collected pending set unless the store is ahead of the doc.
+      let docFramePending: Change[] = [];
       let applied = false;
       // How far the store's committed tail sits past the doc's frame, as of the last attempt.
       let storeAheadRev = committedRev;
@@ -1174,7 +1176,7 @@ export class OTAlgorithm implements ClientAlgorithm {
       const batchIds = new Set(serverChanges.map(c => c.id));
       for (let attempt = 0; attempt < APPLY_CONFLICT_RETRIES; attempt++) {
         const { pending, tailRev, storeIds } = await this._collectPending(docId, otDoc, committedRev, batchIds);
-        pendingSet = pending;
+        let pendingSet = pending;
         // A pending copy of a change already reflected in committedRev (stale echo) must be
         // dropped before the rebase, matching applyCommittedChanges; rebaseChanges drops the new
         // echoes.
@@ -1192,14 +1194,36 @@ export class OTAlgorithm implements ClientAlgorithm {
         // Store rows cross only what the store has not applied; a doc-only row (a torn write,
         // on the doc's frame) still crosses the whole batch.
         storeAheadRev = otDoc ? await this.store.getCommittedRev(docId) : committedRev;
-        if (storeAheadRev > committedRev && pendingSet.length > 0) {
-          const storeRows = pendingSet.filter(c => storeIds.has(c.id));
-          const docOnlyRows = pendingSet.filter(c => !storeIds.has(c.id));
-          const unappliedByStore = newServerChanges.filter(c => c.rev > storeAheadRev);
-          const rebasedStore = this._rebasePendingPreservingFrameDebt(unappliedByStore, storeRows, storeAheadRev);
-          const rebasedDocOnly = this._rebasePendingPreservingFrameDebt(newServerChanges, docOnlyRows, committedRev);
-          let rev = Math.max(storeAheadRev, newServerChanges[newServerChanges.length - 1]?.rev ?? committedRev);
-          rebased = [...rebasedStore, ...rebasedDocOnly].map(c => ({ ...c, rev: ++rev }));
+        docFramePending = pendingSet;
+        if (otDoc && storeAheadRev > committedRev) {
+          // Rows on the DOC's frame (a doc-only torn write, a frozen outbox row) were minted on top
+          // of everything in the doc's view — its whole pending queue, pre-rebase — so the batch
+          // has to reach them through that queue (DAB-1760). Walked alone, or behind the
+          // store-frame copies, they land an index off. The whole queue, not just the doc's copies
+          // of the store rows: an own row the other context already retired from the store (its
+          // echo is in this batch) is in neither the store nor the merged set, and without it the
+          // walk reads its echo as foreign and shifts every row minted over it. The queue is
+          // context only; the store's rows are re-written from the store's own frame below.
+          docFramePending = otDoc.getPendingChanges();
+          if (staleServerChanges.length > 0 && docFramePending.length > 0) {
+            const staleIds = new Set(staleServerChanges.map(c => c.id));
+            docFramePending = docFramePending.filter(c => !staleIds.has(c.id));
+          }
+          if (pendingSet.length > 0) {
+            const storeRows = pendingSet.filter(c => storeIds.has(c.id));
+            const docOnlyIds = new Set(pendingSet.filter(c => !storeIds.has(c.id)).map(c => c.id));
+            const unappliedByStore = newServerChanges.filter(c => c.rev > storeAheadRev);
+            const rebasedStore = this._rebasePendingPreservingFrameDebt(unappliedByStore, storeRows, storeAheadRev);
+            const rebasedDocOnly = this._rebasePendingPreservingFrameDebt(
+              newServerChanges,
+              docFramePending,
+              committedRev
+            ).filter(c => docOnlyIds.has(c.id));
+            let rev = Math.max(storeAheadRev, newServerChanges[newServerChanges.length - 1]?.rev ?? committedRev);
+            rebased = [...rebasedStore, ...rebasedDocOnly].map(c => ({ ...c, rev: ++rev }));
+          } else {
+            rebased = [];
+          }
         } else {
           rebased = this._rebasePendingPreservingFrameDebt(newServerChanges, pendingSet, committedRev);
         }
@@ -1217,8 +1241,10 @@ export class OTAlgorithm implements ClientAlgorithm {
 
       // Frozen outbox rows on this frame cross the batch the same way the store queue just did
       // (behind the pre-rebase pending set), with or without an open doc: a frozen row is not
-      // in any doc's optimistic queue, so nothing else keeps it in frame.
-      this._walkFrozenOutboxRows(docId, committedRev, newServerChanges, pendingSet);
+      // in any doc's optimistic queue, so nothing else keeps it in frame. Walked behind the queue
+      // as it stands on the doc's frame: when the store is ahead, its rows already crossed part of
+      // the batch and would mis-place the row behind them (DAB-1760).
+      this._walkFrozenOutboxRows(docId, committedRev, newServerChanges, docFramePending);
 
       // Echoes of outbox rows: the store never held them, so this — or the commit response
       // (confirmUnstoredCommitted), which normally gets there first and leaves a stub — is

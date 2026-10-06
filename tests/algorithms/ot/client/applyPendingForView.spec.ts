@@ -319,6 +319,26 @@ describe('applyPendingForView', () => {
 
     expect(view(early, later).docs.group.children).toEqual(['a', 'b']);
   });
+
+  it('replays a held-out current-frame row too when a later row needs what it would have done', () => {
+    // `mid` is built on what `early` would have created, so it is held out; `later` removes an
+    // index that only exists once both inserts at the head of the list have happened.
+    const early = stale(
+      { op: 'add', path: '/docs/group/children/0', value: 'x' },
+      { op: 'add', path: '/docs/timeline', value: { id: 'timeline' } }
+    );
+    const mid = change(
+      { op: 'add', path: '/docs/timeline/children/0', value: 'e' },
+      { op: 'add', path: '/docs/group/children/0', value: 'z' }
+    );
+    const later = change({ op: 'remove', path: '/docs/group/children/3' });
+
+    const result = salvagePendingForView(committed(), REV, [early, mid, later]);
+
+    expect(result.dropped).toEqual([]);
+    expect(result.kept).toEqual([early, mid, later]);
+    expect(result.state.docs.group.children).toEqual(['a', 'b']);
+  });
 });
 
 describe('a malformed pending row', () => {

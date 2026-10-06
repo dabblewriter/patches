@@ -200,9 +200,10 @@ export class Patches {
   readonly onChangeQuarantined = signal<(docId: string, quarantined: QuarantinedChange) => void>();
   /**
    * Emitted from openDoc when hydration left pending changes out of the doc's view because
-   * they failed strict apply against the snapshot's committed state (see
-   * BaseDoc.droppedPendingChanges). Emitted once per open that observed any; the changes
-   * carried are those ones only.
+   * they failed strict apply against the snapshot's committed state, or were built on one
+   * that did (see BaseDoc.droppedPendingChanges). Emitted once per open that observed any;
+   * the changes carried are those ones only, in queue order: each change that failed, and
+   * the later changes that were built on it.
    *
    * "Dropped" describes the view, not the queue. A host that sends from its store (Patches
    * does) still holds these rows, so they go out on the next flush and can commit, unless

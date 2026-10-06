@@ -1,4 +1,4 @@
-import { applyPendingForView } from '../algorithms/ot/client/applyPendingForView.js';
+import { applyPendingForView, salvagePendingForView } from '../algorithms/ot/client/applyPendingForView.js';
 import { createStateFromSnapshot } from '../algorithms/ot/client/createStateFromSnapshot.js';
 import { applyChanges as applyChangesToState } from '../algorithms/ot/shared/applyChanges.js';
 import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
@@ -105,7 +105,7 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
     // If pending changes provided, recompute live state
     if (this._pendingChanges.length > 0) {
       try {
-        this.state = applyPendingForView(this._committedState, this._committedRev, this._pendingChanges);
+        this.state = applyChangesToState(this._committedState, this._pendingChanges);
       } catch {
         // Pending changes are corrupt (conflicting ops from accumulated sessions).
         // Apply one-by-one, leaving the changes that fail out of this doc's view. Later
@@ -127,45 +127,44 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
         // rejects it, this one included once the echo arrives (DAB-1557). A change the
         // server refuses by name leaves the queue through ejection (docs/quarantine.md).
         //
+        // A later change built on one that was left out is left out with it. It would not
+        // fail on its own: an `add` beneath an entry that was never created makes the missing
+        // parent as a bare container, and the view would hold that half-formed entry in place
+        // of the real one. A row waiting on an older frame is a different case — frame debt,
+        // not corruption — and stays in this doc's queue, out of the view, as do the rows
+        // that need it; none of those are reported. See salvagePendingForView.
+        //
         // Each change left out is captured on `droppedPendingChanges` (a historical name,
         // see BaseDoc) so `Patches.openDoc` reports it via `onPendingDropped`: the doc
         // opens without work the host's queue may still send, and the app may want its own
         // copy before the server has ruled on it.
-        let state = this._committedState;
-        const valid: Change[] = [];
-        for (const c of this._pendingChanges) {
-          if (c.baseRev < this._committedRev) {
-            // Frame debt, not corruption (see applyPendingForView): this row is waiting to
-            // flush at its own baseRev for the server to transform. Keep it queued and out of
-            // the view — dropping it here would destroy an unsent edit.
-            valid.push(c);
-            continue;
-          }
-          try {
-            state = applyPatch(state, c.ops, { strict: true });
-            valid.push(c);
-          } catch {
-            this.droppedPendingChanges.push(c);
-          }
-        }
+        const salvaged = salvagePendingForView(this._committedState, this._committedRev, this._pendingChanges);
+        const valid = salvaged.kept;
+        this.droppedPendingChanges.push(...salvaged.dropped);
         this._pendingChanges = valid;
-        this.state = state;
-        // Hardcoded console.error rather than an onSkippedChange-style hook (the
-        // convention applyChangesForReconstruction uses): the constructor is invoked
-        // through ClientAlgorithm.createDoc(docId, snapshot), which has no options
-        // plumb-through, and no consumer can have subscribed to anything yet. The
-        // structured channel is Patches.onPendingDropped, emitted from openDoc right
-        // after construction — this log is the fallback signal for non-Patches hosts
-        // and for opens that happen before any subscriber exists. Ids and revs only,
-        // never content.
-        console.error(
-          `OTDoc(${id}): left ${this.droppedPendingChanges.length} of ${
-            this.droppedPendingChanges.length + valid.length
-          } pending changes out of the view at hydration (failed strict apply against rev ${
-            this._committedRev
-          }; not removed here, so a host that sends from its store will still send them):`,
-          this.droppedPendingChanges.map(c => `${c.id}@${c.rev}`).join(', ')
-        );
+        this.state = salvaged.state;
+        // Strict apply failing only on rows waiting on an older frame is not corruption: they are
+        // held out of the view and stay queued, with nothing left out of the queue to report.
+        if (salvaged.dropped.length > 0) {
+          // Hardcoded console.error rather than an onSkippedChange-style hook (the
+          // convention applyChangesForReconstruction uses): the constructor is invoked
+          // through ClientAlgorithm.createDoc(docId, snapshot), which has no options
+          // plumb-through, and no consumer can have subscribed to anything yet. The
+          // structured channel is Patches.onPendingDropped, emitted from openDoc right
+          // after construction — this log is the fallback signal for non-Patches hosts
+          // and for opens that happen before any subscriber exists. Ids and revs only,
+          // never content.
+          const failed = salvaged.dropped.length - salvaged.dependents;
+          const reason = salvaged.dependents
+            ? `${failed} failed strict apply against rev ${this._committedRev}, ${salvaged.dependents} built on one that did`
+            : `failed strict apply against rev ${this._committedRev}`;
+          console.error(
+            `OTDoc(${id}): left ${this.droppedPendingChanges.length} of ${
+              this.droppedPendingChanges.length + valid.length
+            } pending changes out of the view at hydration (${reason}; not removed here, so a host that sends from its store will still send them):`,
+            this.droppedPendingChanges.map(c => `${c.id}@${c.rev}`).join(', ')
+          );
+        }
       }
     }
     this._checkLoaded();

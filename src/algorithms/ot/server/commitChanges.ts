@@ -7,6 +7,7 @@ import type { ArrayIndexNormalization, Change, ChangeInput, CommitChangesOptions
 import { createVersionAtRev } from './createVersion.js';
 import { getStateAtRevision } from './getStateAtRevision.js';
 import { handleOfflineSessionsAndBatches } from './handleOfflineSessionsAndBatches.js';
+import { isValidSplitFrom, SplitRenderings, splitFamily } from '../shared/splitFamily.js';
 import { hasIndexedOps, normalizeArrayIndices } from './normalizeArrayIndices.js';
 import { transformIncomingChanges } from './transformIncomingChanges.js';
 
@@ -214,6 +215,9 @@ export async function commitChanges(
     // policy may parse it. Drop anything that isn't a short string rather than persist it: an
     // unstamped change has a defined meaning (fall back), an absurd one does not.
     if ('clientVersion' in c && !isStorableClientVersion(c.clientVersion)) delete c.clientVersion;
+    // Same for the split stamp, which the redundant-rendering check below acts on: a malformed
+    // one is dropped, leaving the change its own unsplit entry.
+    if ('splitFrom' in c && !isValidSplitFrom(c.splitFrom)) delete c.splitFrom;
   });
 
   // Basic validation
@@ -301,8 +305,16 @@ export async function commitChanges(
       // to the prefix the doc had when this request started: rows landing DURING the request
       // still arbitrate by live identity.
       const ownOrigin = (c: Change) => sameOrigin(c) || (uploadResume && c.rev <= initialRev);
+      // A committed piece of an entry this request also carries is the sender's own too, whatever
+      // its id: a sibling piece, or another rendering of the same entry (DAB-1754). The entry's
+      // later pieces and the changes queued behind it were minted with it already applied.
+      // Mirrors rebaseChanges. Not on a replay (migration, historical import), which re-commits a
+      // log as it stands: by id and batch only, as before split stamps existed.
+      const replay = options?.historicalImport || options?.forceCommit;
+      const familyIds = new Set(replay ? [] : changes.map(c => splitFamily(c).id));
       const isOwnCommitted = (c: Change) =>
-        ownOrigin(c) && ((batchId ? c.batchId === batchId : false) || changeIds.has(c.id));
+        ownOrigin(c) &&
+        ((batchId ? c.batchId === batchId : false) || changeIds.has(c.id) || familyIds.has(splitFamily(c).id));
       const committedChanges = allCommittedChanges.filter(c => !isOwnCommitted(c));
 
       // Filter changes already committed after baseRev AND duplicates within the incoming
@@ -312,19 +324,38 @@ export async function commitChanges(
       // must not swallow the sender's distinct change.
       const committedIds = new Set(allCommittedChanges.filter(ownOrigin).map(c => c.id));
       const seenIncomingIds = new Set<string>();
+      // A second copy of one entry that was split into a different number of pieces (a retried
+      // persist that landed twice, or an outbox copy sent beside the landed pieces) shares only
+      // some ids with the first. The id dedup drops those; the pieces only this copy has would
+      // commit the entry's content a second time. The first rendering committed or accepted
+      // wins, and the rest of the other one is dropped as already committed (DAB-1754).
+      // Never on a replay: a log that already holds two renderings had later changes transformed
+      // against both.
+      const renderings = new SplitRenderings();
+      if (!replay) for (const c of allCommittedChanges) if (ownOrigin(c)) renderings.note(c);
+      const redundantIds = new Set<string>();
       const incomingChanges = changes.filter(c => {
         if (committedIds.has(c.id) || storeCommittedIds.has(c.id) || seenIncomingIds.has(c.id)) return false;
         seenIncomingIds.add(c.id);
+        if (replay) return true;
+        if (renderings.isRedundant(c)) {
+          redundantIds.add(c.id);
+          return false;
+        }
+        renderings.note(c);
         return true;
       }) as Change[];
 
       // Committed copies of changes this request re-sent (a retry after a lost ack) must be echoed back so the
-      // client can confirm them, even though they are excluded from the transform set above.
-      const resentCommitted = allCommittedChanges.filter(c => ownOrigin(c) && changeIds.has(c.id));
+      // client can confirm them, even though they are excluded from the transform set above. So must a committed
+      // piece of an entry this request carries under other ids — it is excluded from the transform set the same
+      // way, and leaving it out of the response would hand the client a gap in the revs.
+      const resentCommitted = allCommittedChanges.filter(
+        c => ownOrigin(c) && (changeIds.has(c.id) || familyIds.has(splitFamily(c).id))
+      );
       // Beyond the cap the client reloads instead of applying the tail (see "Bounded Catch-up"):
       // the echoes are dropped with it, since the reload path confirms the sent batch itself.
       // Server-side replays (migrations) never apply the echo, so they are never capped.
-      const replay = options?.historicalImport || options?.forceCommit;
       const maxCatchup = replay ? 0 : (options?.maxCatchupChanges ?? 0);
       const capped = maxCatchup > 0 && committedChanges.length > maxCatchup;
       const reloadRequired = capped || docReloadRequired;
@@ -381,7 +412,11 @@ export async function commitChanges(
       // Store-reported duplicates (committed at rev <= baseRev) are excluded outright
       // rather than kept as advance-only frame entries: their effects are already part
       // of the base every later change was rebased onto, so the resent tail's frames
-      // include them without any walk-through.
+      // include them without any walk-through. A redundant rendering's pieces stay queued as
+      // advance-only entries: the client walks foreign changes through them until the winning
+      // rendering's echo retires them (rebaseChanges), so the server must too — the walk drops
+      // them at that echo, and any it never reaches (the winner is in this very batch) are cut
+      // from the result rather than committed.
       const seenQueueIds = new Set<string>();
       const queueChanges = changes.filter(c => {
         if (storeCommittedIds.has(c.id) || seenQueueIds.has(c.id)) return false;
@@ -395,6 +430,11 @@ export async function commitChanges(
         options?.forceCommit,
         isOwnCommitted
       );
+      if (redundantIds.size > 0) {
+        transformedChanges = transformedChanges
+          .filter(c => !redundantIds.has(c.id))
+          .map((c, i) => ({ ...c, rev: currentRev + 1 + i }));
+      }
 
       if (transformedChanges.length > 0) {
         // Normalized against the tip the transform just re-expressed the batch in.

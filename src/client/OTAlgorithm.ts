@@ -4,6 +4,7 @@ import { reconstructMintFrame } from '../algorithms/ot/shared/applyChanges.js';
 import { breakChanges, getJSONByteSize } from '../algorithms/ot/shared/changeBatching.js';
 import { computePendingEjection, LossyEjectionError } from '../algorithms/ot/shared/ejectPendingChange.js';
 import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
+import { isPieceOf, pieceId, splitFamily } from '../algorithms/ot/shared/splitFamily.js';
 import { createChange } from '../data/change.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
@@ -220,6 +221,18 @@ export class OTAlgorithm implements ClientAlgorithm {
   private readonly _deferrals = new Map<string, Map<string, number>>();
 
   /**
+   * Stable ids whose persist threw, per doc (DAB-1754). A failed `savePendingChanges` usually
+   * saved nothing, but a storage timeout can commit after it rejects — and a retry that re-mints
+   * then queues the entry a second time. The server and the rebase drop a second copy (by id,
+   * and by split stamp when a rebase between attempts split it differently), but only once they
+   * see both — until then the open doc counts the entry twice. So the next mint under an id
+   * listed here first checks the store for the rows the earlier attempt left, and adopts them
+   * rather than minting again (see {@link _landedRows}): the second copy never exists. An id
+   * leaves when a mint under it succeeds; lifecycle clearing bounds the rest.
+   */
+  private readonly _unsettledMints = new Map<string, Set<string>>();
+
+  /**
    * Reads a committed span from the server when the store cannot supply it (see
    * {@link _rebaseOutboxRows}). Supplied by the sync layer ({@link setCommittedSpanFetcher});
    * absent, an unreadable span under a row that depends on pending rows refuses the row.
@@ -251,12 +264,17 @@ export class OTAlgorithm implements ClientAlgorithm {
     metadata: Record<string, any>,
     id?: string
   ): Promise<Change[]> {
-    if (ops.length === 0) return [];
+    // An entry rebased away to nothing has nothing left to persist under its id, now or later.
+    const rebasedAway = (): Change[] => {
+      if (id) this._settleMint(docId, id);
+      return [];
+    };
+    if (ops.length === 0) return rebasedAway();
 
     return this._withDocLock(docId, async () => {
       // Re-check under the lock: ops arrays are shared with the doc's optimistic queue, and a
       // receive-rebase that ran while we waited may have rebased them away.
-      if (ops.length === 0) return [];
+      if (ops.length === 0) return rebasedAway();
 
       // Revision info from the open doc; else from the store (no state materialization).
       // Provisional only — savePendingChanges re-stamps rev in its own transaction from the
@@ -269,7 +287,7 @@ export class OTAlgorithm implements ClientAlgorithm {
         // there first; the walk can rebase this entry's ops in place — to nothing, when a
         // missed commit already covers them.
         await this._catchUpDocToStore(docId, otDoc);
-        if (ops.length === 0) return [];
+        if (ops.length === 0) return rebasedAway();
         const pendingChanges = otDoc.getPendingChanges();
         committedRev = otDoc.committedRev;
         pendingRev = pendingChanges[pendingChanges.length - 1]?.rev ?? committedRev;
@@ -277,6 +295,23 @@ export class OTAlgorithm implements ClientAlgorithm {
         committedRev = await this.store.getCommittedRev(docId);
         const pending = await this.store.getPendingChanges(docId);
         pendingRev = pending[pending.length - 1]?.rev ?? committedRev;
+      }
+
+      // An earlier attempt under this id threw, and may have landed anyway: its rows are the
+      // entry's persisted copy, already queued and perhaps already sent. Adopt them as this
+      // mint's result instead of queueing the entry again.
+      const landed = id && this._unsettledMints.get(docId)?.has(id) ? await this._landedRows(docId, id) : [];
+      if (landed.length > 0) {
+        this._settleMint(docId, id!);
+        const otDoc = doc as OTDoc<T> | undefined;
+        try {
+          if (typeof otDoc?._adoptLandedMint === 'function') otDoc._adoptLandedMint(ops, landed);
+        } finally {
+          // As below: the store holds the row now, so the outbox copy must not go out too.
+          this._removeOutboxRows(docId, [id!]);
+          otDoc?._forgetUnstored(id!);
+        }
+        return landed;
       }
 
       const changes = this._createChangesFromOps(committedRev, pendingRev, ops, metadata, id, docId);
@@ -288,7 +323,17 @@ export class OTAlgorithm implements ClientAlgorithm {
       if (typeof otDoc?._noteMinted === 'function') otDoc._noteMinted(changes, ops);
 
       // Re-stamps each change's rev in place from the persisted tail; the objects below carry it.
-      await this.store.savePendingChanges(docId, changes);
+      try {
+        await this.store.savePendingChanges(docId, changes);
+      } catch (err) {
+        if (id) {
+          const ids = this._unsettledMints.get(docId) ?? new Set<string>();
+          ids.add(id);
+          this._unsettledMints.set(docId, ids);
+        }
+        throw err;
+      }
+      if (id) this._settleMint(docId, id);
 
       // The store took a row the outbox was carrying (a retrySavingChanges re-drive under the
       // same stable id): the pending row is now the copy that gets sent and confirmed, so the
@@ -1634,6 +1679,7 @@ export class OTAlgorithm implements ClientAlgorithm {
     this._reportedOverflow.clear();
     this._confirmedUnstored.clear();
     this._deferrals.clear();
+    this._unsettledMints.clear();
     this.onUnstoredCommitted.clear();
     return this.store.close();
   }
@@ -1645,6 +1691,40 @@ export class OTAlgorithm implements ClientAlgorithm {
     this._reportedOverflow.delete(docId);
     this._confirmedUnstored.delete(docId);
     this._deferrals.delete(docId);
+    this._unsettledMints.delete(docId);
+  }
+
+  /** A mint under `id` has settled: it persisted, or adopted the rows an earlier attempt left. */
+  private _settleMint(docId: string, id: string): void {
+    const ids = this._unsettledMints.get(docId);
+    if (!ids?.delete(id)) return;
+    if (ids.size === 0) this._unsettledMints.delete(docId);
+  }
+
+  /**
+   * The pending rows an earlier persist under `id` left in the store: the change itself, or its
+   * pieces (`id` and `${id}_${k}`, see {@link _createChangesFromOps}). Empty when that persist
+   * saved nothing, or its rows have since committed or been rebased away.
+   *
+   * A row PatchesSync has since re-split carries a fresh id and is not found here. It is still
+   * queued and still goes out; only the open doc's pending list lacks it until the snapshot the
+   * re-split reloads reaches the doc.
+   *
+   * More than one earlier attempt can have landed — each persist that threw may have committed
+   * anyway — and each is a full copy of the entry. Only the earliest is adopted, by its split
+   * stamp and one row per id; the rest are still queued, and the server and the rebase drop
+   * them as copies of the one that commits.
+   */
+  private async _landedRows(docId: string, id: string): Promise<Change[]> {
+    const rows = (await this.store.getPendingChanges(docId)).filter(c => isPieceOf(c.id, id));
+    if (rows.length === 0) return rows;
+    const { count } = splitFamily(rows[0]);
+    const seen = new Set<string>();
+    return rows.filter(c => {
+      if (splitFamily(c).count !== count || seen.has(c.id)) return false;
+      seen.add(c.id);
+      return true;
+    });
   }
 
   // --- Private helpers ---
@@ -1921,13 +2001,37 @@ export class OTAlgorithm implements ClientAlgorithm {
   ): Change[] {
     const rev = pendingRev + 1;
 
-    let changes = [createChange(committedRev, rev, ops, metadata, id)];
+    // `splitFrom` is the library's own stamp, which the server acts on; it shares the change's
+    // free-form metadata namespace, so an app key of that name must never ride in on it.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { splitFrom: _appSplitFrom, ...changeMetadata } = metadata;
+    let changes = [createChange(committedRev, rev, ops, changeMetadata, id)];
 
     if (this._options.maxStorageBytes) {
       changes = breakChanges(changes, this._options.maxStorageBytes, this._options.sizeCalculator, {
         maxUnsplittableBytes: this._options.maxUnsplittableBytes,
         docId,
       });
+      // The first piece already carries the stable id; derive the rest from it, and stamp every
+      // piece with the split it belongs to. A retried persist re-mints the same entry, and if an
+      // earlier attempt landed (a storage timeout that committed anyway) its pieces are already
+      // queued and may already be on the wire. Fresh random ids would make every attempt's
+      // pieces past the first look new to the server's id dedup, and the split content would
+      // commit once per attempt; the stamp covers an attempt that split differently (DAB-1754).
+      //
+      // Only here, at mint: a split is a fresh family under a never-split id. A later re-split
+      // (PatchesSync's storage/payload pass) cuts a change whose siblings are already stored, so
+      // a derived id there could name a sibling and be deduped away as its duplicate. Those
+      // passes persist their pieces before sending them, so they need no derived ids, and their
+      // pieces inherit the stamp of the piece they cut.
+      //
+      // Derived ids are the stable id plus `_<k>`. Stores bound the ids their write-time duplicate
+      // guard covers (pup: 64 characters), so a caller-supplied id near that bound mints pieces
+      // the guard skips — they still dedup in the server's read-side window. `Patches` mints 12.
+      if (id && changes.length > 1) {
+        const splitFrom = { id, count: changes.length };
+        changes = changes.map((change, k) => ({ ...change, id: k === 0 ? id : pieceId(id, k), splitFrom }));
+      }
     }
 
     return changes;

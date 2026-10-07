@@ -216,8 +216,12 @@ export async function commitChanges(
     // unstamped change has a defined meaning (fall back), an absurd one does not.
     if ('clientVersion' in c && !isStorableClientVersion(c.clientVersion)) delete c.clientVersion;
     // Same for the split stamp, which the redundant-rendering check below acts on: a malformed
-    // one is dropped, leaving the change its own unsplit entry.
-    if ('splitFrom' in c && !isValidSplitFrom(c.splitFrom)) delete c.splitFrom;
+    // one is dropped, leaving the change its own unsplit entry, and a valid one is stored as just
+    // its two fields — anything else a client hung on the object would ride on the row forever.
+    if ('splitFrom' in c) {
+      if (isValidSplitFrom(c.splitFrom)) c.splitFrom = { id: c.splitFrom.id, count: c.splitFrom.count };
+      else delete c.splitFrom;
+    }
   });
 
   // Basic validation

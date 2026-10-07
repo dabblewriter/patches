@@ -17,6 +17,18 @@ export function isPieceOf(changeId: string, id: string): boolean {
   return changeId === id || changeId.startsWith(`${id}${PIECE_SEPARATOR}`);
 }
 
+/**
+ * App metadata to mint a change with, minus any `splitFrom` key. The stamp is the library's own,
+ * and the server acts on it; it shares the change's free-form metadata namespace, so an app key of
+ * that name must never ride onto a change. Every mint path goes through this.
+ */
+export function withoutSplitStamp(metadata: Record<string, any>): Record<string, any> {
+  if (!('splitFrom' in metadata)) return metadata;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { splitFrom: _app, ...rest } = metadata;
+  return rest;
+}
+
 /** The rendering a change belongs to: its split stamp, or the change itself as a 1-piece whole. */
 export function splitFamily(change: ChangeInput): SplitFrom {
   return change.splitFrom ?? { id: change.id, count: 1 };

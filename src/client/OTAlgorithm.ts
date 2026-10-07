@@ -4,7 +4,7 @@ import { reconstructMintFrame } from '../algorithms/ot/shared/applyChanges.js';
 import { breakChanges, getJSONByteSize } from '../algorithms/ot/shared/changeBatching.js';
 import { computePendingEjection, LossyEjectionError } from '../algorithms/ot/shared/ejectPendingChange.js';
 import { rebaseChanges } from '../algorithms/ot/shared/rebaseChanges.js';
-import { isPieceOf, pieceId, splitFamily } from '../algorithms/ot/shared/splitFamily.js';
+import { isPieceOf, pieceId, splitFamily, withoutSplitStamp } from '../algorithms/ot/shared/splitFamily.js';
 import { createChange } from '../data/change.js';
 import { applyPatch } from '../json-patch/applyPatch.js';
 import type { JSONPatchOp } from '../json-patch/types.js';
@@ -1023,7 +1023,7 @@ export class OTAlgorithm implements ClientAlgorithm {
   ): Change {
     const pendingChanges = otDoc.getPendingChanges();
     const tail = pendingTail ?? pendingChanges[pendingChanges.length - 1]?.rev ?? otDoc.committedRev;
-    return createChange(otDoc.committedRev, tail + 1 + offset, [...ops], metadata, id);
+    return createChange(otDoc.committedRev, tail + 1 + offset, [...ops], withoutSplitStamp(metadata), id);
   }
 
   /**
@@ -2001,11 +2001,7 @@ export class OTAlgorithm implements ClientAlgorithm {
   ): Change[] {
     const rev = pendingRev + 1;
 
-    // `splitFrom` is the library's own stamp, which the server acts on; it shares the change's
-    // free-form metadata namespace, so an app key of that name must never ride in on it.
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { splitFrom: _appSplitFrom, ...changeMetadata } = metadata;
-    let changes = [createChange(committedRev, rev, ops, changeMetadata, id)];
+    let changes = [createChange(committedRev, rev, ops, withoutSplitStamp(metadata), id)];
 
     if (this._options.maxStorageBytes) {
       changes = breakChanges(changes, this._options.maxStorageBytes, this._options.sizeCalculator, {

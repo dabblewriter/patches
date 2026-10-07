@@ -316,6 +316,12 @@ describe('commitChanges — a second copy of an entry split differently commits 
     expect(backend.log(DOC).at(-1)!.splitFrom).toBeUndefined();
   });
 
+  it('stores a valid stamp as just its id and count', async () => {
+    const padded = { ...piece('cid', 'x', 2), splitFrom: { id: 'cid', count: 2, junk: 'x'.repeat(1000) } } as Change;
+    await commitChanges(backend, DOC, [padded], sessionTimeoutMillis);
+    expect(backend.log(DOC).at(-1)!.splitFrom).toEqual({ id: 'cid', count: 2 });
+  });
+
   it('does not let a foreign connection drop the sender’s pieces', async () => {
     await commitChanges(backend, DOC, [{ ...whole(), clientId: 'someone-else' }], sessionTimeoutMillis);
     await commitChanges(
@@ -408,6 +414,16 @@ describe('OTAlgorithm — a retry adopts the rows a persist that threw left behi
       'cid'
     );
     expect(change.splitFrom).toBeUndefined();
+  });
+
+  it('never lets it reach an outbox row either', async () => {
+    const doc = new OTDoc<{ list: string[] }>(DOC, { state: { list: [] }, rev: 1, changes: [] });
+    doc.change(patch => patch.add('/list/-', 'x'));
+    const ops = (doc as any)._optimisticOps[0];
+
+    const row = algorithm.queueUnstoredChange(DOC, ops, doc, { splitFrom: { id: 'someone-elses', count: 9 } }, 'cid');
+    expect(row).not.toBeNull();
+    expect(row!.splitFrom).toBeUndefined();
   });
 
   it('mints as normal when the persist that threw saved nothing', async () => {

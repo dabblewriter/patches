@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.34.2](https://github.com/dabblewriter/patches/compare/v0.34.1...v0.34.2) (2026-10-07)
+
+
+### Bug Fixes
+
+* **sync:** address review — strip app splitFrom on outbox mints, normalise stored stamps (DAB-1754) ([d77dab2](https://github.com/dabblewriter/patches/commit/d77dab2cc25b2e2172a7ce015195777007b0d97a))
+* **sync:** commit a split change once across retried persists (DAB-1754) ([5a2ea55](https://github.com/dabblewriter/patches/commit/5a2ea55a249665cf85b43906d5acd7c38fb7362a))
+* **sync:** commit a split change once across retried persists (DAB-1754) ([984a83b](https://github.com/dabblewriter/patches/commit/984a83b961abcca6d3c299d6b51502d141485027))
+
 ## [0.34.1](https://github.com/dabblewriter/patches/compare/v0.34.0...v0.34.1) (2026-10-06)
 
 

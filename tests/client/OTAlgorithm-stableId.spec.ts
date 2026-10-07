@@ -7,9 +7,11 @@ import type { Change } from '../../src/types';
 /**
  * The caller-minted stable change id STAYS (the server dedups resubmitted commits by change id),
  * but the client-side idempotent-retry apparatus is gone: no isRetry param, no pre-scan of pending
- * or committed for the id. A retry is now safe purely by atomicity — a store write that rejected
- * did not commit, so re-issuing with the same id cannot duplicate. These cover id passthrough
- * (mint, batching, split) and that atomicity guarantee.
+ * or committed on every retry. A retry is safe by atomicity — a store write that rejected did not
+ * commit, so re-issuing with the same id cannot duplicate. The one exception is a storage timeout,
+ * which can commit after it rejects: the next mint under that id adopts what landed (DAB-1754,
+ * OTAlgorithm-splitPieceIds.spec.ts). These cover id passthrough (mint, batching, split) and the
+ * atomicity guarantee.
  */
 
 const op = (path: string, value: unknown) => [{ op: 'add' as const, path, value }];

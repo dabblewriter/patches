@@ -1,6 +1,7 @@
 import { transformPatch } from '../../../json-patch/transformPatch.js';
 import type { JSONPatchOp } from '../../../json-patch/types.js';
 import type { Change } from '../../../types.js';
+import { splitFamily } from '../shared/splitFamily.js';
 
 /**
  * Transforms incoming changes against committed changes that happened *after* the client's baseRev.
@@ -68,6 +69,14 @@ export function transformIncomingChangesWithFrame(
       // top of it). Mirrors rebaseChanges step 1.
       const index = queue.findIndex(entry => entry.change.id === committed.id);
       if (index !== -1) queue.splice(index, 1);
+      // Queued pieces of the same entry split into a different count are another copy of what
+      // just committed: they leave here, untransformed, exactly where rebaseChanges drops them on
+      // the client — until this point foreign changes walk through them on both sides (DAB-1754).
+      const family = splitFamily(committed);
+      for (let i = queue.length - 1; i >= 0; i--) {
+        const queued = splitFamily(queue[i].change);
+        if (queued.id === family.id && queued.count !== family.count) queue.splice(i, 1);
+      }
       continue;
     }
     let committedOps = committed.ops;

@@ -1,5 +1,6 @@
 import { transformPatch } from '../../../json-patch/transformPatch.js';
 import type { Change } from '../../../types.js';
+import { splitFamily } from './splitFamily.js';
 
 /**
  * Rebases local changes against server changes using operational transformation.
@@ -38,12 +39,23 @@ export function rebaseChanges(serverChanges: Change[], localChanges: Change[]): 
   }
 
   const localIds = new Set(localChanges.map(change => change.id));
+  // A piece of an entry the queue also holds is ours too, whatever its id: a sibling piece, or a
+  // copy of the same entry split differently (DAB-1754). Mirrors commitChanges' isOwnCommitted.
+  const localFamilies = new Set(localChanges.map(change => splitFamily(change).id));
   const queue = localChanges.map(change => ({ change, ops: change.ops }));
 
   for (const serverChange of serverChanges) {
-    if (localIds.has(serverChange.id)) {
+    const family = splitFamily(serverChange);
+    if (localIds.has(serverChange.id) || localFamilies.has(family.id)) {
       const index = queue.findIndex(entry => entry.change.id === serverChange.id);
       if (index !== -1) queue.splice(index, 1);
+      // The entry committed through this rendering, so the queue's pieces of any other rendering
+      // repeat content the log now holds. Dropped like an echo, untransformed — the server drops
+      // the same pieces if they arrive (commitChanges' redundant renderings).
+      for (let i = queue.length - 1; i >= 0; i--) {
+        const local = splitFamily(queue[i].change);
+        if (local.id === family.id && local.count !== family.count) queue.splice(i, 1);
+      }
       continue;
     }
 

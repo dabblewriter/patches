@@ -217,9 +217,13 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
    * this entry's own committed copy, however the server rewrote its ops; a piece's echo retires
    * that piece, and the entry keeps only what is still in flight (DAB-1409).
    *
-   * A re-mint (a retried persist) replaces the record: an unsplit change keeps its stable id
-   * across attempts, so nothing is lost. Split pieces get fresh ids per attempt, so the echo of
-   * an earlier attempt's pieces is not recognised — that needs deterministic piece ids.
+   * A re-mint (a retried persist) replaces the record. That is safe because a retry whose
+   * earlier attempt landed after all does not re-mint: the algorithm adopts the landed rows
+   * instead (`_adoptLandedMint`, DAB-1754). The record replaced is then one whose rows never
+   * reached the store. Split pieces still derive their ids from the stable id (`${id}_${k}`), so
+   * an earlier attempt's rows that escaped adoption echo under ids recorded here when both
+   * attempts split into the same number of pieces; pieces of a differently split copy are
+   * dropped by the rebase and the server instead (`splitFrom`).
    */
   _noteMinted(changes: Change[], ops: JSONPatchOp[]): void {
     if (changes.length === 0 || !this._optimisticOps.includes(ops)) return;
@@ -229,6 +233,24 @@ export class OTDoc<T extends object = object> extends BaseDoc<T> {
     const pieces =
       changes.length === 1 ? [{ id: changes[0].id, ops }] : changes.map(c => ({ id: c.id, ops: [...c.ops] }));
     this._minted.set(ops, pieces);
+  }
+
+  /**
+   * Internal: an earlier persist of the entry `ops` landed after all, and the algorithm adopted
+   * the rows it left in the store instead of minting again (DAB-1754). Those rows are the entry
+   * now: they join the pending list (less any a receive already put there from the store, or the
+   * committed tier already holds), and the entry leaves the optimistic queue by its own array —
+   * a blind shift could take a different edit. The view recomputes, because the rows may not be
+   * split where the entry's last mint record says, and a receive may have queued some already.
+   */
+  _adoptLandedMint(ops: JSONPatchOp[], rows: Change[]): void {
+    const queued = new Set(this._pendingChanges.map(c => c.id));
+    const fresh = this._withoutCommitted(rows.filter(c => !queued.has(c.id)));
+    if (fresh.length > 0) this._pendingChanges = [...this._pendingChanges, ...fresh].sort((a, b) => a.rev - b.rev);
+    this._minted.delete(ops);
+    this._optimisticOps = this._optimisticOps.filter(entry => entry !== ops);
+    this._recomputeState();
+    this._checkLoaded();
   }
 
   /** The parked entry a minted change id belongs to, with its pieces. */

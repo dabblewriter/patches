@@ -32,8 +32,37 @@ export interface ChangeInput {
    * {@link padTextOverrunsFromClients}.
    */
   clientVersion?: string;
+  /**
+   * Set on every piece of a change split at mint under a stable id: that id, and how many pieces
+   * the split produced (DAB-1754). Absent on an unsplit change, which is its own 1-piece entry.
+   * Lets the server and the client's rebase recognise a second copy of the same entry that was
+   * split differently, and drop it rather than commit its content twice. See {@link SplitFrom}.
+   *
+   * A later re-split of a stamped piece (PatchesSync's storage or payload pass) copies the stamp
+   * onto every piece it cuts, so more rows than `count` can carry it. That is deliberate: `count`
+   * names the rendering, not the rows in it, and every row of one rendering must agree on it.
+   */
+  splitFrom?: SplitFrom;
   /** Optional arbitrary metadata associated with the change. */
   [metadata: string]: any;
+}
+
+/**
+ * How a change split at mint relates to the entry it came from (DAB-1754).
+ *
+ * A retried persist can queue one optimistic entry twice — a storage timeout that committed after
+ * it rejected, or an outbox copy sent beside the rows that landed. Each copy is a *rendering* of
+ * the same entry: the whole change under its stable id, or its pieces under that id and
+ * `${id}_${k}`. Renderings that split into the same number of pieces carry the same ids, so the
+ * id dedup keeps exactly one copy of each piece. Renderings that split differently do not: the
+ * pieces only one of them has would commit beside the other's copy of the same content. The
+ * piece count tells renderings apart, so every piece carries it.
+ */
+export interface SplitFrom {
+  /** The stable id of the entry the change was split from — its first piece's id. */
+  id: string;
+  /** How many pieces the entry was split into at mint. */
+  count: number;
 }
 
 /**

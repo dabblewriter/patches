@@ -79,7 +79,7 @@
     "lint:fix": "eslint src tests --fix"
   },
   "dependencies": {
-    "@dabble/delta": "^1.2.5",
+    "@dabble/delta": "^1.2.6",
     "alphacounter": "^2.1.1",
     "crypto-id": "^0.3.2",
     "easy-signal": "^5.0.5",

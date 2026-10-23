@@ -8,7 +8,7 @@ import { applyPatch } from '../../src/json-patch/applyPatch.js';
  * dw3's split-scene emptied an op in place, so a stored scene held `{ insert: '' }`. In `@dabble/delta`
  * 1.2.5, a later delete or retain that crossed it lost the rest of its length: a 67-char delete became
  * 43, and formatting landed on a letter. The change log stayed right while every materialized copy
- * drifted.
+ * drifted. 1.2.6 also skips an op with a malformed length, which could otherwise stall compose for good.
  */
 describe('@txt with a zero-length op', () => {
   const SOURCE = Array.from({ length: 313 }, (_, i) => String.fromCharCode(97 + (i % 26))).join('');
@@ -45,6 +45,12 @@ describe('@txt with a zero-length op', () => {
 
   it('applies a change that holds zero-length ops as if they were absent', () => {
     const change = [{ retain: 5 }, { delete: 0 }, { retain: 0 }, { insert: '' }, { retain: 1 }, { delete: 5 }];
+
+    expect(applyTxt([{ insert: 'Hello world\n' }], change)).toEqual([{ insert: 'Hello \n' }]);
+  });
+
+  it('finishes a change that holds an op with a malformed length', () => {
+    const change = [{ retain: 5 }, { insert: 'x', retain: -1 }, { retain: null }, { retain: 1 }, { delete: 5 }];
 
     expect(applyTxt([{ insert: 'Hello world\n' }], change)).toEqual([{ insert: 'Hello \n' }]);
   });

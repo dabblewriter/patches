@@ -361,6 +361,23 @@ Parameters:
 - `options`: Optional commit options that were passed to `commitChanges` (e.g., `forceCommit`, `historicalImport`)
 - `originClientId`: The client that made the change (for excluding from broadcast). Comes from server context, not the change itself.
 
+### `onWritesLost`
+
+Fires when sent ops **lost** the timestamp comparison to a newer stored row at the same path. The write is dropped and the stored winner goes back to the client as a correction, so the user sees an edit save and then snap back. Without this signal it is silent — and a device clock running behind loses every write this way.
+
+```typescript
+server.onWritesLost((docId, lost, originClientId) => {
+  // lost: [{ path, ts, winnerTs }] — ts is the sent op's clamped timestamp
+  metrics.increment('lww.writes_lost', lost.length);
+});
+```
+
+It is not a pure clock-drift metric: a genuine concurrent edit (another writer stamped later) loses the same way. A steady rate of losses from one client is the clock signature. `winnerTs` is `undefined` when the stored row carries no timestamp — such a row beats every timestamped write, permanently.
+
+Emitted after the per-doc lock is released, so a slow listener does not hold up other commits on the doc and a listener may call back into the server. It is still awaited before `commitChanges` returns, so a slow listener delays this commit's response — keep listeners fast (log or count, don't do network I/O inline).
+
+Fires only when at least one op lost. Ties go to the incoming op and never fire. Delta ops (`@inc`, `@bit`, `@max`, `@min`) combine rather than lose, soft writes are skipped by design, and a correction for a primitive parent is a hierarchy fix — none of them are reported.
+
 ### `onDocDeleted`
 
 Fires when a document is deleted.

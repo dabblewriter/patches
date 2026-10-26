@@ -411,6 +411,13 @@ export interface ClientAlgorithm {
   /** Permanently removes a quarantined change. The app's decision, never automatic. */
   discardQuarantinedChange?(docId: string, changeId: string): Promise<void>;
 
+  /**
+   * Called after every successful commit round trip with raw local-clock reads taken around the
+   * request and the changes the server returned. LWW reads the response's `committedAt` to learn
+   * how far the device clock is from the server's (see {@link ServerClock}). Optional.
+   */
+  observeCommitTiming?(sentAt: number, receivedAt: number, committed: Change[]): void;
+
   // --- Store forwarding methods ---
 
   /** Registers documents for local tracking with the algorithm for this instance. */

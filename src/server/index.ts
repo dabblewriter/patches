@@ -1,5 +1,5 @@
 // Core server implementations
-export { LWWServer, type LWWServerOptions } from './LWWServer.js';
+export { LWWServer, type LWWServerOptions, type LostWrite } from './LWWServer.js';
 export { OTServer, type CommitChangesOptions, type OTServerOptions } from './OTServer.js';
 
 // Branch managers

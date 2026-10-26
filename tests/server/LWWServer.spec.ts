@@ -625,6 +625,160 @@ describe('LWWServer', () => {
     });
   });
 
+  describe('commitChanges - onWritesLost', () => {
+    it('reports a sent op that lost to a newer stored row (the silent snap-back)', async () => {
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 2000, rev: 1, value: 'Alice' });
+      mockStore.revs.set('doc1', 1);
+      const listener = vi.fn();
+      server.onWritesLost(listener);
+
+      setAuthContext({ clientId: 'slow-clock', metadata: {} });
+      try {
+        await server.commitChanges('doc1', [
+          {
+            id: 'lose1',
+            ops: [
+              { op: 'replace', path: '/name', value: 'Bob', ts: 1000 },
+              { op: 'replace', path: '/other', value: 1, ts: 1000 },
+            ],
+          },
+        ]);
+      } finally {
+        clearAuthContext();
+      }
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith('doc1', [{ path: '/name', ts: 1000, winnerTs: 2000 }], 'slow-clock');
+      expect(mockStore.ops.get('doc1:/name')?.value).toBe('Alice');
+    });
+
+    it('stays silent when every op wins, ties included', async () => {
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 1000, rev: 1, value: 'Alice' });
+      mockStore.revs.set('doc1', 1);
+      const listener = vi.fn();
+      server.onWritesLost(listener);
+
+      await server.commitChanges('doc1', [
+        { id: 'tie', ops: [{ op: 'replace', path: '/name', value: 'Bob', ts: 1000 }] },
+      ]);
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('does not count delta ops, soft writes, or a primitive-parent correction as lost', async () => {
+      mockStore.ops.set('doc1:/count', { op: 'replace', path: '/count', ts: 5000, rev: 1, value: 3 });
+      mockStore.ops.set('doc1:/obj', { op: 'replace', path: '/obj', ts: 5000, rev: 1, value: { a: 1 } });
+      mockStore.ops.set('doc1:/prim', { op: 'replace', path: '/prim', ts: 5000, rev: 1, value: 7 });
+      mockStore.revs.set('doc1', 1);
+      const listener = vi.fn();
+      server.onWritesLost(listener);
+
+      await server.commitChanges('doc1', [
+        {
+          id: 'mixed',
+          ops: [
+            { op: '@inc', path: '/count', value: 1, ts: 1000 },
+            { op: 'add', path: '/obj', value: {}, ts: 1000 },
+            { op: 'replace', path: '/prim/child', value: 1, ts: 1000 },
+          ],
+        },
+      ]);
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('reports against the clamped ts of a future-dated op', async () => {
+      const future = Date.now() + 1e12;
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: future + 1, rev: 1, value: 'Wedged' });
+      mockStore.revs.set('doc1', 1);
+      const listener = vi.fn();
+      server.onWritesLost(listener);
+
+      await server.commitChanges('doc1', [
+        { id: 'f', ops: [{ op: 'replace', path: '/name', value: 'Bob', ts: future }] },
+      ]);
+
+      const [, lost] = listener.mock.calls[0];
+      expect(lost[0].ts).toBeLessThan(future);
+      expect(lost[0].winnerTs).toBe(future + 1);
+    });
+
+    it('reports a loss to a stored row with no ts (it beats every timestamped write)', async () => {
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', rev: 1, value: 'Legacy' });
+      mockStore.revs.set('doc1', 1);
+      const listener = vi.fn();
+      server.onWritesLost(listener);
+
+      await server.commitChanges('doc1', [
+        { id: 'l', ops: [{ op: 'replace', path: '/name', value: 'Bob', ts: 1000 }] },
+      ]);
+
+      expect(listener).toHaveBeenCalledWith('doc1', [{ path: '/name', ts: 1000, winnerTs: undefined }], undefined);
+    });
+
+    it('emits after the doc lock releases, so a listener can call back into the same doc', async () => {
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 2000, rev: 1, value: 'Alice' });
+      mockStore.revs.set('doc1', 1);
+      let reentered: unknown;
+      server.onWritesLost(async docId => {
+        reentered = await server.commitChanges(docId, [
+          { id: 'inner', ops: [{ op: 'replace', path: '/seen', value: true, ts: 3000 }] },
+        ]);
+      });
+
+      await server.commitChanges('doc1', [
+        { id: 'outer', ops: [{ op: 'replace', path: '/name', value: 'Bob', ts: 1000 }] },
+      ]);
+
+      expect(reentered).toBeDefined();
+      expect(mockStore.ops.get('doc1:/seen')?.value).toBe(true);
+    });
+
+    it('reports through a backend with listRelatedOps', async () => {
+      const backend = new LWWMemoryStoreBackend();
+      const real = new LWWServer(backend);
+      await real.commitChanges('doc1', [
+        { id: 'first', ops: [{ op: 'replace', path: '/name', value: 'Alice', ts: 2000 }] },
+      ]);
+      const listener = vi.fn();
+      real.onWritesLost(listener);
+
+      await real.commitChanges('doc1', [
+        { id: 'second', baseRev: 1, ops: [{ op: 'replace', path: '/name', value: 'Bob', ts: 1000 }] },
+      ]);
+
+      expect(listener).toHaveBeenCalledWith('doc1', [{ path: '/name', ts: 1000, winnerTs: 2000 }], undefined);
+    });
+
+    it('does not report a delta op when a sibling child write drew a parent correction there', async () => {
+      const real = new LWWServer(new LWWMemoryStoreBackend());
+      await real.commitChanges('doc1', [{ id: 'a', ops: [{ op: 'replace', path: '/count', value: 3, ts: 5000 }] }]);
+      const listener = vi.fn();
+      real.onWritesLost(listener);
+
+      await real.commitChanges('doc1', [
+        { id: 'b', baseRev: 1, ops: [{ op: 'replace', path: '/count/x', value: 1, ts: 1000 }] },
+        { id: 'c', baseRev: 1, ops: [{ op: '@inc', path: '/count', value: 1, ts: 1000 }] },
+      ]);
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('swallows listener errors', async () => {
+      mockStore.ops.set('doc1:/name', { op: 'replace', path: '/name', ts: 2000, rev: 1, value: 'Alice' });
+      mockStore.revs.set('doc1', 1);
+      vi.spyOn(server.onWritesLost, 'emit').mockRejectedValue(new Error('boom'));
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const result = await server.commitChanges('doc1', [
+        { id: 'e', ops: [{ op: 'replace', path: '/name', value: 'Bob', ts: 1000 }] },
+      ]);
+
+      expect(result.changes).toHaveLength(1);
+      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('lost writes'), expect.any(Error));
+    });
+  });
+
   describe('commitChanges - signals', () => {
     it('should emit onChangesCommitted signal', async () => {
       const emitSpy = vi.spyOn(server.onChangesCommitted, 'emit').mockResolvedValue();

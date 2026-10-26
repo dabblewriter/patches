@@ -1,5 +1,5 @@
 import { createVersionMetadata } from '../data/version.js';
-import { consolidateOps, convertDeltaOps } from '../algorithms/lww/consolidateOps.js';
+import { combinableOps, consolidateOps, convertDeltaOps, isSoftOp } from '../algorithms/lww/consolidateOps.js';
 import { createChange } from '../data/change.js';
 import { signal } from 'easy-signal';
 import { createJSONPatch } from '../json-patch/createJSONPatch.js';
@@ -33,6 +33,44 @@ export interface LWWServerOptions {
 }
 
 const DEFAULT_CHANGE_ID_TTL = 30 * 24 * 60 * 60 * 1000;
+
+/** A sent op that lost to a newer stored row at the same path. See {@link LWWServer.onWritesLost}. */
+export interface LostWrite {
+  path: string;
+  /** The sent op's timestamp, after the server clamp. */
+  ts: number;
+  /**
+   * The stored winner's timestamp. Undefined for a legacy/imported row stored without one, which
+   * beats every timestamped write (see consolidateOps' isExistingNewer) — permanently.
+   */
+  winnerTs: number | undefined;
+}
+
+/**
+ * Sent ops consolidateOps rejected because the stored row at the same path is newer. A rejected
+ * op's stored row is echoed in opsToReturn; a correction for a primitive PARENT is a hierarchy
+ * fix, not a timestamp loss, so only same-path corrections with a newer ts count.
+ */
+function findLostWrites(existingOps: JSONPatchOp[], newOps: JSONPatchOp[], opsToReturn: JSONPatchOp[]): LostWrite[] {
+  if (opsToReturn.length === 0) return [];
+  const returned = new Map(opsToReturn.map(op => [op.path, op]));
+  const existing = new Map(existingOps.map(op => [op.path, op]));
+  const lost: LostWrite[] = [];
+  for (const op of newOps) {
+    // Delta ops combine and soft ops yield by design — neither loses by timestamp. Their path
+    // can still be in opsToReturn when a sibling child write drew a primitive-parent correction
+    // there, so they must be excluded here rather than matched against it.
+    if (combinableOps[op.op] || isSoftOp(op)) continue;
+    const winner = returned.get(op.path);
+    if (!winner || winner !== existing.get(op.path)) continue;
+    // Mirrors isExistingNewer: an untimestamped op always wins; an untimestamped stored row beats
+    // any timestamped one
+    if (op.ts !== undefined && (winner.ts === undefined || winner.ts > op.ts)) {
+      lost.push({ path: op.path, ts: op.ts, winnerTs: winner.ts });
+    }
+  }
+  return lost;
+}
 
 /**
  * Last-Write-Wins (LWW) server implementation.
@@ -85,6 +123,18 @@ export class LWWServer implements PatchesServer {
   /** Notifies listeners whenever a batch of changes is successfully committed. */
   public readonly onChangesCommitted =
     signal<(docId: string, changes: Change[], options?: CommitChangesOptions, originClientId?: string) => void>();
+
+  /**
+   * Notifies listeners when sent ops LOST the timestamp comparison to a newer stored row — the
+   * write is dropped and the stored winner goes back to the client as a correction, which the
+   * user sees as an edit that saves and snaps back. Silent otherwise: a device clock running
+   * behind loses every write this way. Genuine concurrent edits (another writer was later) lose
+   * the same way and are reported too — a steady rate from one client is the clock signature.
+   * Fires only when at least one op lost; delta and soft ops never lose by timestamp and are not
+   * reported. Emitted after the doc lock releases, so a listener may call back into the server;
+   * still awaited before commitChanges returns, so a slow listener delays this commit's response.
+   */
+  public readonly onWritesLost = signal<(docId: string, lost: LostWrite[], originClientId?: string) => void>();
 
   /** Notifies listeners when a document is deleted. */
   public readonly onDocDeleted = signal<(docId: string, options?: DeleteDocOptions, originClientId?: string) => void>();
@@ -176,7 +226,7 @@ export class LWWServer implements PatchesServer {
     // concurrent commits reading the same base would lose @inc increments and let older-ts
     // writes overwrite newer ones. The emit stays inside the lock so broadcasts keep commit
     // order — listeners must not call back into same-doc server methods.
-    return this._withDocLock(docId, async () => {
+    const { changes: committed, lostWrites } = await this._withDocLock(docId, async () => {
       // A batch normally carries 1 change for LWW, but flush-time batching can split an oversized
       // change into several — process every change's ops, not just the first
       const change = changes[0];
@@ -225,6 +275,7 @@ export class LWWServer implements PatchesServer {
 
       // Use the consolidateOps algorithm
       const { opsToSave, pathsToDelete, opsToReturn } = consolidateOps(existingOps, newOps);
+      const lostWrites = findLostWrites(existingOps, newOps, opsToReturn);
 
       // Convert delta ops (@inc, @bit, etc.) to replace ops with concrete values
       const opsToStore = convertDeltaOps(opsToSave);
@@ -304,8 +355,21 @@ export class LWWServer implements PatchesServer {
         }
       }
 
-      return { changes: [responseChange] };
+      return { changes: [responseChange], lostWrites };
     });
+
+    // Reported after the lock releases: this is telemetry, not commit order, so a slow listener
+    // must not hold up the next commit on the doc, and one that calls back into the same doc
+    // must not deadlock on the lock it would otherwise be emitted under.
+    if (lostWrites.length > 0) {
+      try {
+        await this.onWritesLost.emit(docId, lostWrites, clientId);
+      } catch (error) {
+        console.error(`Failed to report lost writes for doc ${docId}:`, error);
+      }
+    }
+
+    return { changes: committed };
   }
 
   /**

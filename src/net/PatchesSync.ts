@@ -1589,6 +1589,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
         }
 
         let commitResult;
+        const sentAt = Date.now();
         try {
           commitResult = await this.connection.commitChanges(docId, changeBatch);
         } catch (err) {
@@ -1606,6 +1607,7 @@ export class PatchesSync extends ReadonlyStoreClass<PatchesSyncState> {
           throw err;
         }
         const { changes: committed, docReloadRequired } = commitResult;
+        algorithm.observeCommitTiming?.(sentAt, Date.now(), committed);
 
         if (docReloadRequired) {
           // Our local state is stale (baseRev:0 on existing doc). Confirm the sent

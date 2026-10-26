@@ -258,7 +258,7 @@ function pathExistsInParentOp(path: string, existingByPath: Map<string, JSONPatc
  * Check if an op is a soft write (explicit soft flag or implicit empty container add).
  * Soft ops should not overwrite existing data.
  */
-function isSoftOp(op: JSONPatchOp): boolean {
+export function isSoftOp(op: JSONPatchOp): boolean {
   return op.soft === true || (op.op === 'add' && isEmptyContainer(op.value));
 }
 

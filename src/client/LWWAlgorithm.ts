@@ -10,6 +10,7 @@ import type { Change, PatchesSnapshot, QuarantinedChange } from '../types.js';
 import type { ClientAlgorithm } from './ClientAlgorithm.js';
 import type { LWWClientStore } from './LWWClientStore.js';
 import { LWWDoc } from './LWWDoc.js';
+import { ServerClock } from './ServerClock.js';
 import type { PatchesDoc } from './PatchesDoc.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
@@ -42,8 +43,23 @@ export class LWWAlgorithm implements ClientAlgorithm {
    */
   private readonly _expectedResponseIds = new Map<string, Set<string>>();
 
-  constructor(store: LWWClientStore) {
+  /**
+   * Stamps LWW ops with server-corrected time. Subscribe to `clock.onDrift` to report a device
+   * clock that is off by more than the threshold.
+   */
+  readonly clock: ServerClock;
+
+  constructor(store: LWWClientStore, options: { clock?: ServerClock } = {}) {
     this.store = store;
+    this.clock = options.clock ?? new ServerClock();
+  }
+
+  /** See {@link ClientAlgorithm.observeCommitTiming}. */
+  observeCommitTiming(sentAt: number, receivedAt: number, committed: Change[]): void {
+    // An LWW commit response is stamped with the server's clock at commit time — never a stored
+    // historical time — so its committedAt is a fresh read from inside the round trip.
+    const serverTime = Math.max(0, ...committed.map(c => c.committedAt ?? 0));
+    if (serverTime > 0) this.clock.observe(sentAt, receivedAt, serverTime);
   }
 
   createDoc<T extends object>(docId: string, snapshot?: PatchesSnapshot<T>): PatchesDoc<T> {
@@ -68,14 +84,33 @@ export class LWWAlgorithm implements ClientAlgorithm {
     // Serialize per-doc so getPendingToSend's read-build-clear can't interleave with this
     // read-consolidate-save and wipe an op saved between its read and its clear.
     return this._withDocLock(docId, async () => {
-      const timestamp = Date.now();
+      // Read the doc's whole pending layer (the store reads every row to filter by prefix anyway)
+      // plus the in-flight change: the stamp below must clear all of them, not just this path's.
+      const allPending = await this.store.getPendingOps(docId);
+      const sendingChange = await this.store.getSendingChange(docId);
+
+      // Get existing pending ops that may need consolidation
+      const pathPrefixes = ops.map(op => op.path);
+      const existingOps = allPending.filter(op =>
+        pathPrefixes.some(prefix => op.path === prefix || op.path.startsWith(prefix + '/'))
+      );
+
+      // A device's own later edit must supersede everything it wrote earlier, whatever the clock
+      // did in between. The clock is monotonic within a session, but a reload (or another tab)
+      // resets it while pending and sending ops stamped before persist, and a downward offset
+      // correction would then stamp below them. At the SAME path the newer edit would lose the
+      // timestamp comparison; at a PARENT or CHILD path it would be ordered wrongly — ops sent
+      // in one commit share a rev and are applied in ts order, so a child stamped below its
+      // pending parent is applied first and wiped by it. So stamp strictly above every op this
+      // device still has queued for the doc.
+      let floor: number | undefined;
+      for (const op of [...allPending, ...(sendingChange?.ops ?? [])]) {
+        if (op.ts !== undefined && (floor === undefined || op.ts > floor)) floor = op.ts;
+      }
+      const timestamp = this.clock.now(floor);
 
       // Add timestamps to ops
       const timedOps: JSONPatchOp[] = ops.map(op => ({ ...op, ts: timestamp }));
-
-      // Get existing pending ops that may need consolidation
-      const pathPrefixes = timedOps.map(op => op.path);
-      const existingOps = await this.store.getPendingOps(docId, pathPrefixes);
 
       // Consolidate new ops with existing ops
       const { opsToSave, pathsToDelete } = consolidateOps(existingOps, timedOps);

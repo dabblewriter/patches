@@ -1,4 +1,4 @@
-import { Delta, type Op } from '@dabble/delta';
+import { Delta, Op } from '@dabble/delta';
 import { replace } from '../ops/replace.js';
 import type { JSONPatchOpHandler } from '../types.js';
 import { get } from '../utils/get.js';
@@ -35,11 +35,12 @@ export const text: JSONPatchOpHandler = {
 
     let doc: Delta | undefined;
     if (Array.isArray(existingData)) {
-      if (existingData.length && existingData[0].insert) {
-        doc = new Delta(existingData);
+      const existingOps = withoutEmptyOps(existingData);
+      if (existingOps.length && existingOps[0].insert) {
+        doc = new Delta(existingOps);
       }
     } else if (existingData && existingData.ops) {
-      doc = new Delta(existingData.ops);
+      doc = new Delta(withoutEmptyOps(existingData.ops));
     }
 
     if (!doc) {
@@ -93,6 +94,14 @@ export const text: JSONPatchOpHandler = {
     return new Delta(ops1).compose(new Delta(ops2)).ops;
   },
 };
+
+/**
+ * A stored document can hold zero-length ops (DAB-1886: dw3's split-scene emptied an op in place). A
+ * leading one made the document look absent here, so the change replaced the whole field.
+ */
+function withoutEmptyOps(ops: Op[]): Op[] {
+  return ops.filter(op => Op.length(op) > 0);
+}
 
 /**
  * Drop non-insert ops (retain/delete that overran the document) and ensure the document

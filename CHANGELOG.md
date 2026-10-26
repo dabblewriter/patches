@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.0](https://github.com/dabblewriter/patches/compare/v0.34.2...v0.35.0) (2026-10-26)
+
+
+### Features
+
+* **sync:** correct lww timestamps for device clock drift and report lost writes ([9910972](https://github.com/dabblewriter/patches/commit/9910972a559c2cd648120c828047743bcb71809d))
+
 ## [0.34.2](https://github.com/dabblewriter/patches/compare/v0.34.1...v0.34.2) (2026-10-26)
 
 

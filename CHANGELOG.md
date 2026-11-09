@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.35.0](https://github.com/dabblewriter/patches/compare/v0.34.2...v0.35.0) (2026-11-09)
+
+
+### Features
+
+* **sync:** correct lww timestamps for device clock drift and report lost writes ([9910972](https://github.com/dabblewriter/patches/commit/9910972a559c2cd648120c828047743bcb71809d))
+
+
+### Bug Fixes
+
+* **sync:** name the non-cloneable path when the OT store refuses a pending change ([8ed385f](https://github.com/dabblewriter/patches/commit/8ed385fa370deb6e877830aeb226cf1ade7a3c00))
+* **sync:** name the non-cloneable path when the OT store refuses a pending change ([2d20409](https://github.com/dabblewriter/patches/commit/2d204091c538ce82cbf41ba7d48abb47fa0c2c69))
+
 ## [0.34.2](https://github.com/dabblewriter/patches/compare/v0.34.1...v0.34.2) (2026-10-26)
 
 

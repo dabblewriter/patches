@@ -637,9 +637,11 @@ export class PatchesREST implements PatchesConnection {
    * Silently no-ops when the SSE stream is not connected. Signaling is
    * inherently best-effort and the server has no live `signal` channel back
    * to this client until the stream is up, so a frame sent before connect
-   * resolves can't be relayed anyway. Throwing here would surface as an
-   * unhandled rejection through `JSONRPCClient.call`, which doesn't await
-   * `transport.send`.
+   * resolves can't be relayed anyway.
+   *
+   * A failed POST (timeout, network loss, non-OK status) rejects. Through
+   * `JSONRPCClient`, that rejects the pending `call()`; for a `notify()` it is
+   * dropped, since a notification has no caller waiting on it.
    */
   async sendSignal(raw: string): Promise<void> {
     if (this._state !== 'connected') return;

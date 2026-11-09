@@ -1,3 +1,4 @@
+import process from 'node:process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { JSONRPCError, JSONRPCParseError, NetworkError, StatusError } from '../../../src/net/error';
 import { JSONRPCClient } from '../../../src/net/protocol/JSONRPCClient';
@@ -224,6 +225,66 @@ describe('JSONRPCClient', () => {
 
       expect(message1.method).toBe('notify1');
       expect(message2.method).toBe('notify2');
+    });
+  });
+
+  // An async transport (PatchesRESTSignalingTransport → PatchesREST.sendSignal) returns a
+  // promise from send() that rejects when the POST fails. Dropping it surfaced every failed
+  // signaling frame as an unhandled rejection (DABBLE-WRITER-3-1H8, -194).
+  describe('async transport send failures', () => {
+    let unhandled: unknown[];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    const flush = () => new Promise(resolve => setTimeout(resolve, 10));
+
+    // A plain function, not vi.fn(): vitest's spy attaches handlers to returned promises to
+    // record settled results, which would mark the rejection handled and hide the bug.
+    function clientWithSend(send: ClientTransport['send']) {
+      return new JSONRPCClient({ send, onMessage: () => () => {} });
+    }
+
+    beforeEach(() => {
+      unhandled = [];
+      process.on('unhandledRejection', onUnhandled);
+    });
+
+    afterEach(() => {
+      process.off('unhandledRejection', onUnhandled);
+    });
+
+    it('rejects the call with the send error instead of leaving an unhandled rejection', async () => {
+      const sendError = new DOMException('The user aborted a request.', 'AbortError');
+      const rpc = clientWithSend(() => Promise.reject(sendError));
+
+      const outcome = await Promise.race([
+        rpc.call('peer-signal', 'peer', {}).then(
+          () => 'resolved',
+          error => error
+        ),
+        flush().then(() => 'pending'),
+      ]);
+      await flush();
+
+      expect(outcome).toBe(sendError);
+      expect(unhandled).toEqual([]);
+      expect((rpc as any).pending.size).toBe(0);
+    });
+
+    it('does not leave an unhandled rejection when a notification fails to send', async () => {
+      const rpc = clientWithSend(() => Promise.reject(new StatusError(404, '')));
+
+      rpc.notify('peer-signal', 'peer', {});
+      await flush();
+
+      expect(unhandled).toEqual([]);
+    });
+
+    it('still rejects the call and clears it when send throws synchronously', async () => {
+      const rpc = clientWithSend(() => {
+        throw new Error('not connected');
+      });
+
+      await expect(rpc.call('method')).rejects.toThrow('not connected');
+      expect((rpc as any).pending.size).toBe(0);
     });
   });
 

@@ -375,21 +375,31 @@ export function isUnsplittableChangeError(err: unknown): boolean {
  * path that works.
  */
 export class NonCloneableOpError extends Error {
+  /** Ids of the changes that carried a refused value, in batch order (OT store only; empty for LWW ops). */
+  readonly changeIds: string[];
+
   constructor(
-    /** Paths of the ops whose values could not be cloned, in the order they were written. */
+    /**
+     * Paths of the ops whose values could not be cloned, in the order they were written. A
+     * parenthesised entry such as `(metadata:source)` names a change field rather than an op.
+     */
     readonly paths: string[],
     /** The doc whose pending ops were being saved. */
     readonly docId: string,
-    /** The original `DataCloneError` the store raised. */
-    options?: { cause?: unknown }
+    /** `cause`: the original `DataCloneError` the store raised. `changeIds`: see {@link changeIds}. */
+    options?: { cause?: unknown; changeIds?: string[] }
   ) {
+    const changeIds = options?.changeIds ?? [];
+    const noun = paths.every(p => !p.startsWith('(')) ? 'op value' : 'change value';
     super(
-      `Pending op value${paths.length === 1 ? '' : 's'} at ${paths.map(p => `"${p}"`).join(', ')} in doc "${docId}" ` +
+      `Pending ${noun}${paths.length === 1 ? '' : 's'} at ${paths.map(p => `"${p}"`).join(', ')} in doc "${docId}" ` +
+        (changeIds.length ? `(change${changeIds.length === 1 ? '' : 's'} ${changeIds.join(', ')}) ` : '') +
         `cannot be stored: the structured-clone algorithm refused ${paths.length === 1 ? 'it' : 'them'}. ` +
         `A value read off a change mutator's \`root\` is a path proxy, not data.`,
-      options
+      options?.cause === undefined ? undefined : { cause: options.cause }
     );
     this.name = 'NonCloneableOpError';
+    this.changeIds = changeIds;
   }
 }
 

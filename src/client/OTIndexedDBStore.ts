@@ -1,4 +1,5 @@
 import { applyChanges } from '../algorithms/ot/shared/applyChanges.js';
+import { findNonCloneableOpPaths, NonCloneableOpError } from '../net/error.js';
 import type { Change, PatchesSnapshot, PatchesState, QuarantinedChange } from '../types.js';
 import { blockable } from '../utils/concurrency.js';
 import { IndexedDBStore, type StorageGuardOptions } from './IndexedDBStore.js';
@@ -6,6 +7,41 @@ import type { OTClientStore } from './OTClientStore.js';
 import type { TrackedDoc } from './PatchesStore.js';
 
 const SNAPSHOT_INTERVAL = 200;
+
+/**
+ * Pseudo-path for a change field (not an op) that refused to clone. Change metadata is spread
+ * onto the change itself (see `createChange`), so the field name is what identifies it.
+ */
+function nonCloneableMetadataPath(key: string): string {
+  return `(metadata:${key})`;
+}
+
+/**
+ * Paths of every op across `changes` whose value the structured-clone algorithm refuses, plus a
+ * {@link nonCloneableMetadataPath} for each other change field that refuses, and the ids of the
+ * changes they came from. Only run after a write has already failed, so the probes cost nothing on
+ * the path that works.
+ */
+function findNonCloneableChangePaths(changes: Change[]): { paths: string[]; changeIds: string[] } {
+  const paths: string[] = [];
+  const changeIds: string[] = [];
+  for (const change of changes) {
+    const found = findNonCloneableOpPaths(change.ops);
+    for (const [key, value] of Object.entries(change)) {
+      if (key === 'ops') continue;
+      try {
+        structuredClone(value);
+      } catch {
+        found.push(nonCloneableMetadataPath(key));
+      }
+    }
+    if (found.length) {
+      paths.push(...found);
+      changeIds.push(change.id);
+    }
+  }
+  return { paths, changeIds };
+}
 
 interface Snapshot {
   docId: string;
@@ -221,9 +257,32 @@ export class OTIndexedDBStore implements OTClientStore {
    * mint over the shared database each read the other's row and number past it instead of
    * clobbering at the [docId, rev] key. `rev` is only the pending-queue ordering key; `baseRev`
    * and `id` are untouched.
+   *
+   * A value the structured-clone algorithm refuses fails this write with a bare `DataCloneError`
+   * that names neither the change nor the path. That failure is CORRECT — the change is defective
+   * and the caller rolls it back (see {@link isDefectiveChangeError}) — but it is undiagnosable as
+   * raised. Re-throw it as a {@link NonCloneableOpError} naming the offending op paths (or
+   * `(metadata:<field>)` when a change field is what refused) and the ids of the changes that
+   * carried them, which classifies identically and changes no behaviour. Same contract as
+   * `LWWIndexedDBStore.savePendingOps`.
+   *
+   * The refused put does not abort the transaction, so clean changes earlier in the same batch
+   * are still stored; only the caller's in-memory state is rolled back. Unchanged by the wrap.
    */
   @blockable
   async savePendingChanges(docId: string, changes: Change[]): Promise<void> {
+    try {
+      await this._savePendingChanges(docId, changes);
+    } catch (err) {
+      if ((err as { name?: unknown } | null | undefined)?.name !== 'DataCloneError') throw err;
+      const { paths, changeIds } = findNonCloneableChangePaths(changes);
+      // Nothing in the changes owns it — keep the original rather than inventing a location.
+      if (paths.length === 0) throw err;
+      throw new NonCloneableOpError(paths, docId, { cause: err, changeIds });
+    }
+  }
+
+  private async _savePendingChanges(docId: string, changes: Change[]): Promise<void> {
     const [tx, pendingChanges, docsStore] = await this.db.transaction(['pendingChanges', 'docs'], 'readwrite');
 
     let docMeta = await docsStore.get<TrackedDoc>(docId);

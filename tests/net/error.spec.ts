@@ -376,6 +376,9 @@ describe('StatusError', () => {
     it('reads naturally for one path and for several', () => {
       expect(new NonCloneableOpError(['/a'], 'd').message).toContain('op value at "/a"');
       expect(new NonCloneableOpError(['/a', '/b'], 'd').message).toContain('op values at "/a", "/b"');
+      expect(new NonCloneableOpError(['(metadata:x)'], 'd').message).toContain('change value at "(metadata:x)"');
+      expect(new NonCloneableOpError(['/a'], 'd').changeIds).toEqual([]);
+      expect(new NonCloneableOpError(['/a'], 'd', { changeIds: ['c1'] }).message).toContain('(change c1)');
     });
 
     // It is a better message for the same refusal — not a recovery. Silently

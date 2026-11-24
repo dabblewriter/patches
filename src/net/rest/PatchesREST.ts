@@ -76,6 +76,20 @@ export interface PatchesRESTOptions {
    * Merged on top of static headers (same-name keys override).
    */
   getHeaders?: () => Record<string, string> | Promise<Record<string, string>>;
+
+  /**
+   * Authorize the event stream with a per-client token. A clientId is not a secret (presence
+   * rosters broadcast it), and an EventSource can't send an `Authorization` header, so a
+   * server can't tell who opened `/events/:clientId` from the request alone. When true,
+   * every stream open first POSTs `/events/:clientId/token` — an ordinary authenticated
+   * request with this client's headers and credentials, answered `{ token }` — and opens
+   * `/events/:clientId?token=…`. The browser's native auto-reconnect reuses that URL, so the
+   * server must keep a token valid while it is in use; when it refuses one (any non-200
+   * makes the EventSource fatal), the backoff rebuild below mints again. A failed mint
+   * fails the open the same way a failed stream does: `error`, then a backoff reconnect.
+   * A 404 from the mint (a server without stream tokens) opens the stream tokenless.
+   */
+  streamToken?: boolean;
 }
 
 /**
@@ -122,6 +136,14 @@ export class PatchesREST implements PatchesConnection {
    * next event opens a rev gap or a reconnect resync catches up.
    */
   readonly onError = signal<(error: Error) => void>();
+  /**
+   * Emits when the server refuses this clientId because it belongs to another user
+   * (403 with `data.code === 'CLIENT_ID_IN_USE'`). Retrying with the same id can never
+   * succeed, so an app that persists its clientId should drop it and use a fresh one
+   * (a new PatchesREST) — otherwise subscribes and stream opens keep failing. Emitted
+   * once per refused request; the request still rejects as usual.
+   */
+  readonly onClientIdRejected = signal<(clientId: string) => void>();
 
   private _url: string;
   private _state: ConnectionState = 'disconnected';
@@ -139,6 +161,8 @@ export class PatchesREST implements PatchesConnection {
   private _serverInfo: unknown;
   /** Interval handle for the half-open-stream watchdog; null while not connected. */
   private livenessTimer: ReturnType<typeof globalThis.setInterval> | null = null;
+  /** In-flight stream-token mint + open (see `streamToken`); null when none. */
+  private _opening: Promise<void> | null = null;
   /** Pending reconnect attempt scheduled after a fatal error / teardown; null when none. */
   private reconnectTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   /** Current exponential reconnect backoff (ms); reset on a successful open. */
@@ -224,6 +248,7 @@ export class PatchesREST implements PatchesConnection {
     if (this.eventSource) {
       return Promise.resolve(); // Already connected or connecting
     }
+    if (this._opening) return this._opening; // Minting this open's stream token
 
     this._setState('connecting');
 
@@ -238,10 +263,56 @@ export class PatchesREST implements PatchesConnection {
     // opening, so it touches neither.
     this._lastEventId = lastEventId || undefined;
     this._streamResumed = false;
-    const resumeQuery = lastEventId ? `?lastEventId=${encodeURIComponent(lastEventId)}` : '';
+    if (!this.options.streamToken) return this._openStream(lastEventId);
+
+    const opening = this._fetchStreamToken().then(
+      token => {
+        if (this._opening === opening) this._opening = null;
+        // Disconnected (or opened by another path) while the mint was in flight.
+        if (!this.shouldBeConnected || this.eventSource) return;
+        return this._openStream(lastEventId, token);
+      },
+      err => {
+        if (this._opening === opening) this._opening = null;
+        if (!this.shouldBeConnected) return;
+        this._setState('error');
+        this._scheduleReconnect();
+        throw err;
+      }
+    );
+    this._opening = opening;
+    return opening;
+  }
+
+  /**
+   * Mint this client's stream token (see `streamToken`). Undefined when the server has no
+   * mint route (404) — a server that predates stream tokens doesn't check them either, so
+   * the stream opens tokenless rather than never opening. This keeps the client safe to
+   * ship ahead of (or roll back behind) the server; a server that enforces tokens serves
+   * the route, so the fallback can't be used to skip its check.
+   */
+  private async _fetchStreamToken(): Promise<string | undefined> {
+    let result: any;
+    try {
+      result = await this._fetch(`/events/${this._encodedClientId}/token`, { method: 'POST' });
+    } catch (err) {
+      if (err instanceof StatusError && err.code === 404) return undefined;
+      throw err;
+    }
+    const token = result?.token;
+    if (typeof token !== 'string' || !token) throw new Error('Stream token response had no token');
+    return token;
+  }
+
+  /** Open the EventSource; the tail of `connect()`. */
+  private _openStream(lastEventId: string | undefined, token?: string): Promise<void> {
+    const params: string[] = [];
+    if (token) params.push(`token=${encodeURIComponent(token)}`);
+    if (lastEventId) params.push(`lastEventId=${encodeURIComponent(lastEventId)}`);
+    const query = params.length ? `?${params.join('&')}` : '';
 
     return new Promise<void>((resolve, reject) => {
-      const es = new EventSource(`${this._url}/events/${this._encodedClientId}${resumeQuery}`);
+      const es = new EventSource(`${this._url}/events/${this._encodedClientId}${query}`);
       this.eventSource = es;
       let settled = false;
 
@@ -805,6 +876,9 @@ export class PatchesREST implements PatchesConnection {
         data = json.data;
       } catch {
         // Response body wasn't JSON
+      }
+      if (response.status === 403 && data?.code === 'CLIENT_ID_IN_USE') {
+        void this.onClientIdRejected.emit(this.clientId);
       }
       throw new StatusError(response.status, message, data);
     }

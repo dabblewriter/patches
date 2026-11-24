@@ -99,6 +99,22 @@ describe('OTAlgorithm.applyServerChanges when the store write throws (DAB-1386)'
     };
     await expect(algorithm.applyServerChanges(DOC_ID, [committedX], doc)).rejects.toThrow(/did not settle/);
   });
+
+  it('keeps the original error when the store dies after confirming the batch', async () => {
+    const { store, algorithm, doc } = await setup();
+    const { committedX } = await mintTwoAndCommitFirst(algorithm, doc);
+
+    // The probe sees the batch landed, then the connection goes before the queue can be re-read.
+    const real = store.applyServerChanges.bind(store);
+    store.applyServerChanges = async (...args: Parameters<typeof real>) => {
+      await real(...args);
+      store.getPendingChanges = async () => {
+        throw new Error('database connection is closing');
+      };
+      throw timeoutError();
+    };
+    await expect(algorithm.applyServerChanges(DOC_ID, [committedX], doc)).rejects.toThrow(/did not settle/);
+  });
 });
 
 describe('OTAlgorithm.getPendingToSend with the doc a frame behind its store (DAB-1386)', () => {

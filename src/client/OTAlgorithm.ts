@@ -1319,8 +1319,13 @@ export class OTAlgorithm implements ClientAlgorithm {
           if (!(await this._storeHoldsBatch(docId, serverChanges))) throw err;
           console.warn(`[OTAlgorithm] applyServerChanges for ${docId} threw but the batch landed`, err);
           landedDespiteError = true;
-          rebased = await this.store.getPendingChanges(docId);
-          storeAheadRev = await this.store.getCommittedRev(docId);
+          try {
+            rebased = await this.store.getPendingChanges(docId);
+            storeAheadRev = await this.store.getCommittedRev(docId);
+          } catch {
+            // The connection died after the probe: surface the write's own error, not the read's.
+            throw err;
+          }
           result = undefined;
         }
         if (result !== 'conflict') {

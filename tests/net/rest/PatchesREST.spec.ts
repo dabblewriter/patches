@@ -1368,4 +1368,249 @@ describe('PatchesREST', () => {
       expect(url).toBe('https://api.example.com/docs/doc1/_branches/branch%2Fwith%2Fslashes?clientId=test-client-123');
     });
   });
+
+  describe('onClientIdRejected', () => {
+    const rejectedWith = (code: string) =>
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: 'Forbidden',
+        json: () => Promise.resolve({ error: 'This client id belongs to another user', data: { code } }),
+      });
+
+    it('emits when the server says the clientId belongs to someone else, and still rejects', async () => {
+      const seen: string[] = [];
+      rest.onClientIdRejected(id => seen.push(id));
+      globalThis.fetch = rejectedWith('CLIENT_ID_IN_USE');
+      await expect(rest.subscribe('doc1')).rejects.toThrow();
+      expect(seen).toEqual(['test-client-123']);
+    });
+
+    it('emits for a refused stream-token mint too', async () => {
+      const seen: string[] = [];
+      rest = new PatchesREST('https://api.example.com', { clientId: 'test-client-123', streamToken: true });
+      rest.onClientIdRejected(id => seen.push(id));
+      globalThis.fetch = rejectedWith('CLIENT_ID_IN_USE');
+      await expect(rest.connect()).rejects.toThrow();
+      expect(seen).toEqual(['test-client-123']);
+    });
+
+    it('stays quiet for any other 403', async () => {
+      const seen: string[] = [];
+      rest.onClientIdRejected(id => seen.push(id));
+      globalThis.fetch = rejectedWith('SOMETHING_ELSE');
+      await expect(rest.getDoc('doc1')).rejects.toThrow();
+      expect(seen).toEqual([]);
+    });
+  });
+
+  describe('streamToken: authorized stream opens', () => {
+    const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+
+    beforeEach(() => {
+      rest = new PatchesREST('https://api.example.com', { clientId: 'test-client-123', streamToken: true });
+      globalThis.fetch = mockFetchResponse({ token: 'tok-1' });
+    });
+
+    it('mints a token with an authenticated POST, then opens the stream with it', async () => {
+      const p = rest.connect();
+      await flush();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe('https://api.example.com/events/test-client-123/token?clientId=test-client-123');
+      expect(init).toMatchObject({ method: 'POST', credentials: 'include' });
+
+      MockEventSource.latest.simulateOpen();
+      await p;
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?token=tok-1');
+      expect(rest.state).toBe('connected');
+    });
+
+    it('carries the resume cursor alongside the token', async () => {
+      const p = rest.connect('42');
+      await flush();
+      MockEventSource.latest.simulateOpen();
+      await p;
+      expect(MockEventSource.latest.url).toBe(
+        'https://api.example.com/events/test-client-123?token=tok-1&lastEventId=42'
+      );
+      expect(rest.lastEventId).toBe('42');
+    });
+
+    it('sends the configured auth headers on the mint', async () => {
+      rest = new PatchesREST('https://api.example.com', {
+        clientId: 'test-client-123',
+        streamToken: true,
+        headers: { Authorization: 'Bearer abc' },
+      });
+      rest.connect().catch(() => {});
+      await flush();
+      const [, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect((init as RequestInit).headers).toMatchObject({ Authorization: 'Bearer abc' });
+    });
+
+    it('overlapping connect() calls share one mint and open one stream', async () => {
+      const a = rest.connect();
+      const b = rest.connect();
+      await flush();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(MockEventSource.instances.length).toBe(1);
+      MockEventSource.latest.simulateOpen();
+      await Promise.all([a, b]);
+    });
+
+    it('opens nothing when disconnected while the mint is in flight', async () => {
+      const p = rest.connect();
+      rest.disconnect();
+      await p;
+      expect(MockEventSource.instances.length).toBe(0);
+      expect(rest.state).toBe('disconnected');
+    });
+
+    it('a connect() after disconnect() mid-mint gets its own mint and cursor (no stale resume)', async () => {
+      let release!: (v: any) => void;
+      globalThis.fetch = vi
+        .fn()
+        .mockImplementationOnce(() => new Promise(resolve => (release = resolve)))
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: () => Promise.resolve({ token: 'tok-2' }),
+        });
+
+      const stale = rest.connect('42');
+      rest.disconnect();
+      const cold = rest.connect();
+      expect(rest.state).toBe('connecting');
+      await flush();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(MockEventSource.instances.length).toBe(1);
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?token=tok-2');
+
+      // The superseded mint resolving late opens nothing.
+      release({ ok: true, status: 200, statusText: 'OK', json: () => Promise.resolve({ token: 'tok-1' }) });
+      await stale;
+      expect(MockEventSource.instances.length).toBe(1);
+
+      MockEventSource.latest.simulateOpen();
+      await cold;
+      expect(rest.resumedStream).toBe(false);
+    });
+
+    it('going offline mid-mint opens nothing and leaves the reconnect to the online listener', async () => {
+      vi.useFakeTimers();
+      try {
+        const p = rest.connect('42');
+        (onlineState as any).isOffline = true;
+        await vi.advanceTimersByTimeAsync(0);
+        await p;
+        expect(MockEventSource.instances.length).toBe(0);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1); // no backoff retry while offline
+        expect(rest.lastEventId).toBe('42'); // the cursor the online listener resumes from
+      } finally {
+        (onlineState as any).isOffline = false;
+        vi.useRealTimers();
+      }
+    });
+
+    it('a mint refused with CLIENT_ID_IN_USE is not retried (the id can never succeed)', async () => {
+      vi.useFakeTimers();
+      try {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 403,
+          statusText: 'Forbidden',
+          json: () => Promise.resolve({ error: 'taken', data: { code: 'CLIENT_ID_IN_USE' } }),
+        });
+        const seen: string[] = [];
+        rest.onClientIdRejected(id => seen.push(id));
+        await expect(rest.connect()).rejects.toThrow();
+        expect(rest.state).toBe('error');
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(seen).toEqual(['test-client-123']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a refused mint fails the open, then the backoff reconnect mints again', async () => {
+      vi.useFakeTimers();
+      try {
+        globalThis.fetch = vi
+          .fn()
+          .mockResolvedValueOnce({
+            ok: false,
+            status: 403,
+            statusText: 'Forbidden',
+            json: () => Promise.resolve({ error: 'nope' }),
+          })
+          .mockResolvedValue({
+            ok: true,
+            status: 200,
+            statusText: 'OK',
+            json: () => Promise.resolve({ token: 'tok-2' }),
+          });
+
+        await expect(rest.connect()).rejects.toThrow();
+        expect(rest.state).toBe('error');
+        expect(MockEventSource.instances.length).toBe(0);
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+        expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?token=tok-2');
+        MockEventSource.latest.simulateOpen();
+        expect(rest.state).toBe('connected');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('opens tokenless when the server has no mint route (404: it predates stream tokens)', async () => {
+      globalThis.fetch = mockFetchResponse({ error: 'Not Found' }, 404);
+      const p = rest.connect('7');
+      await flush();
+      MockEventSource.latest.simulateOpen();
+      await p;
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?lastEventId=7');
+    });
+
+    it('a response without a token is a failed mint', async () => {
+      globalThis.fetch = mockFetchResponse({});
+      await expect(rest.connect()).rejects.toThrow('Stream token response had no token');
+      expect(MockEventSource.instances.length).toBe(0);
+    });
+
+    it('re-mints before rebuilding a stream the server refused (fatal error)', async () => {
+      vi.useFakeTimers();
+      try {
+        const p = rest.connect();
+        await vi.advanceTimersByTimeAsync(0);
+        const es = MockEventSource.latest;
+        es.simulateOpen();
+        await p;
+
+        // e.g. the server answered the browser's auto-reconnect 401 (token no longer valid).
+        es.readyState = MockEventSource.CLOSED;
+        es.simulateError();
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+        expect(MockEventSource.instances.length).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('is off by default: no mint, no token in the URL', async () => {
+      const plain = new PatchesREST('https://api.example.com', { clientId: 'plain' });
+      const p = plain.connect();
+      MockEventSource.latest.simulateOpen();
+      await p;
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/plain');
+      plain.disconnect();
+    });
+  });
 });

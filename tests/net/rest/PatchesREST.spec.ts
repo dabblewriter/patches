@@ -1467,6 +1467,75 @@ describe('PatchesREST', () => {
       expect(rest.state).toBe('disconnected');
     });
 
+    it('a connect() after disconnect() mid-mint gets its own mint and cursor (no stale resume)', async () => {
+      let release!: (v: any) => void;
+      globalThis.fetch = vi
+        .fn()
+        .mockImplementationOnce(() => new Promise(resolve => (release = resolve)))
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: () => Promise.resolve({ token: 'tok-2' }),
+        });
+
+      const stale = rest.connect('42');
+      rest.disconnect();
+      const cold = rest.connect();
+      expect(rest.state).toBe('connecting');
+      await flush();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(MockEventSource.instances.length).toBe(1);
+      expect(MockEventSource.latest.url).toBe('https://api.example.com/events/test-client-123?token=tok-2');
+
+      // The superseded mint resolving late opens nothing.
+      release({ ok: true, status: 200, statusText: 'OK', json: () => Promise.resolve({ token: 'tok-1' }) });
+      await stale;
+      expect(MockEventSource.instances.length).toBe(1);
+
+      MockEventSource.latest.simulateOpen();
+      await cold;
+      expect(rest.resumedStream).toBe(false);
+    });
+
+    it('going offline mid-mint opens nothing and leaves the reconnect to the online listener', async () => {
+      vi.useFakeTimers();
+      try {
+        const p = rest.connect('42');
+        (onlineState as any).isOffline = true;
+        await vi.advanceTimersByTimeAsync(0);
+        await p;
+        expect(MockEventSource.instances.length).toBe(0);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1); // no backoff retry while offline
+        expect(rest.lastEventId).toBe('42'); // the cursor the online listener resumes from
+      } finally {
+        (onlineState as any).isOffline = false;
+        vi.useRealTimers();
+      }
+    });
+
+    it('a mint refused with CLIENT_ID_IN_USE is not retried (the id can never succeed)', async () => {
+      vi.useFakeTimers();
+      try {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 403,
+          statusText: 'Forbidden',
+          json: () => Promise.resolve({ error: 'taken', data: { code: 'CLIENT_ID_IN_USE' } }),
+        });
+        const seen: string[] = [];
+        rest.onClientIdRejected(id => seen.push(id));
+        await expect(rest.connect()).rejects.toThrow();
+        expect(rest.state).toBe('error');
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(seen).toEqual(['test-client-123']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('a refused mint fails the open, then the backoff reconnect mints again', async () => {
       vi.useFakeTimers();
       try {

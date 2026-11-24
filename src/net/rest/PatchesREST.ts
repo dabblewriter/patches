@@ -141,7 +141,9 @@ export class PatchesREST implements PatchesConnection {
    * (403 with `data.code === 'CLIENT_ID_IN_USE'`). Retrying with the same id can never
    * succeed, so an app that persists its clientId should drop it and use a fresh one
    * (a new PatchesREST) — otherwise subscribes and stream opens keep failing. Emitted
-   * once per refused request; the request still rejects as usual.
+   * once per refused request; the request still rejects as usual. A refused stream-token
+   * mint is not retried: the stream stays down (state `error`) until the app reconnects
+   * with another id.
    */
   readonly onClientIdRejected = signal<(clientId: string) => void>();
 
@@ -265,18 +267,27 @@ export class PatchesREST implements PatchesConnection {
     this._streamResumed = false;
     if (!this.options.streamToken) return this._openStream(lastEventId);
 
+    // Each settle first checks this mint still owns the open. `disconnect()` drops
+    // `_opening`, so a mint that outlives a disconnect can't open a stream for a later
+    // `connect()` with its own (stale) cursor and headers. Going offline mid-mint opens
+    // nothing either, and schedules nothing: the online listener reconnects with the
+    // cursor seeded above, exactly as it would had the open not been minting.
     const opening = this._fetchStreamToken().then(
       token => {
-        if (this._opening === opening) this._opening = null;
-        // Disconnected (or opened by another path) while the mint was in flight.
-        if (!this.shouldBeConnected || this.eventSource) return;
+        if (this._opening !== opening) return; // Superseded: disconnected while minting.
+        this._opening = null;
+        if (!this.shouldBeConnected || this.eventSource || onlineState.isOffline) return;
         return this._openStream(lastEventId, token);
       },
       err => {
-        if (this._opening === opening) this._opening = null;
-        if (!this.shouldBeConnected) return;
+        if (this._opening !== opening) return;
+        this._opening = null;
+        if (!this.shouldBeConnected || onlineState.isOffline) return;
         this._setState('error');
-        this._scheduleReconnect();
+        // The id belongs to another user (onClientIdRejected has fired): a retry with it
+        // can never succeed, so stop here rather than re-POST every backoff step. The app
+        // recovers by swapping in a PatchesREST with a fresh clientId.
+        if (!isClientIdRejection(err)) this._scheduleReconnect();
         throw err;
       }
     );
@@ -479,6 +490,7 @@ export class PatchesREST implements PatchesConnection {
 
   disconnect(): void {
     this.shouldBeConnected = false;
+    this._opening = null; // An in-flight mint is now superseded (see connect()).
     this._removeOnlineOfflineListeners();
     this._cancelReconnect();
     this._teardownStream();
@@ -916,4 +928,9 @@ export class PatchesREST implements PatchesConnection {
       this.onlineUnsubscriber = null;
     }
   }
+}
+
+/** The server refused this clientId as another user's (see `onClientIdRejected`). */
+function isClientIdRejection(err: unknown): boolean {
+  return err instanceof StatusError && err.code === 403 && err.data?.code === 'CLIENT_ID_IN_USE';
 }

@@ -432,6 +432,21 @@ export class OTAlgorithm implements ClientAlgorithm {
     }
   }
 
+  /**
+   * Whether the store's committed history already reaches the end of `batch` — i.e. a store
+   * write for it that threw landed anyway (see {@link applyServerChanges}). A read that itself
+   * fails answers no, so the caller keeps the original error.
+   */
+  private async _storeHoldsBatch(docId: string, batch: Change[]): Promise<boolean> {
+    const end = batch[batch.length - 1]?.rev;
+    if (end === undefined) return false;
+    try {
+      return (await this.store.getCommittedRev(docId)) >= end;
+    } catch {
+      return false;
+    }
+  }
+
   async hasPending(docId: string): Promise<boolean> {
     if (this.hasUnstoredChanges(docId)) return true;
     const pending = await this.store.getPendingChanges(docId);
@@ -514,6 +529,19 @@ export class OTAlgorithm implements ClientAlgorithm {
    */
   async getPendingToSend(docId: string, doc?: PatchesDoc<any>): Promise<Change[] | null> {
     const otDoc = doc as OTDoc<any> | undefined;
+    // Put the doc on the store's committed frame first, as a mint does. The doc-only split below
+    // is only meaningful against the doc's own frame: a doc a frame behind its store (a receive
+    // whose store write landed but never reached the doc) still holds that batch's own echo as
+    // pending, and read against the store's renumbered queue it would be withheld and reported
+    // as unstored though it is committed (DAB-1386). A failed catch-up is left to the next mint
+    // (which refuses with DocFrameBehindStoreError); the store rows still go out.
+    if (otDoc) {
+      try {
+        await this._withDocLock(docId, () => this._catchUpDocToStore(docId, otDoc));
+      } catch (err) {
+        console.warn(`[OTAlgorithm] could not bring ${docId} up to its store before sending`, err);
+      }
+    }
     // Only the doc-merge floor needs it, and that branch needs a doc; without one the store read
     // it would take is discarded, so don't pay for it (the tailRev seed is unused here).
     const committedRev = otDoc?.committedRev ?? 0;
@@ -1213,6 +1241,8 @@ export class OTAlgorithm implements ClientAlgorithm {
       // rows below). The collected pending set unless the store is ahead of the doc.
       let docFramePending: Change[] = [];
       let applied = false;
+      // The store write threw but the batch is in the store anyway (DAB-1386): see below.
+      let landedDespiteError = false;
       // How far the store's committed tail sits past the doc's frame, as of the last attempt.
       let storeAheadRev = committedRev;
       // The batch's own ids never cost a quarantine read: this doc's own echo has already left
@@ -1272,7 +1302,32 @@ export class OTAlgorithm implements ClientAlgorithm {
         } else {
           rebased = this._rebasePendingPreservingFrameDebt(newServerChanges, pendingSet, committedRev);
         }
-        const result = await this.store.applyServerChanges(docId, serverChanges, rebased, tailRev);
+        let result: void | 'conflict';
+        try {
+          result = await this.store.applyServerChanges(docId, serverChanges, rebased, tailRev);
+        } catch (err) {
+          // A rejected write is not proof the write did not land. IndexedDB's transaction guard
+          // rejects on its timeout BEFORE it aborts, and an abort that arrives after the
+          // transaction began committing does nothing — so the batch can be committed in the
+          // store while this call throws. Throwing here then strands the open doc a frame behind
+          // its own store: it still holds the batch's own echo as pending, the store has
+          // renumbered the rest of the queue above it, and the next flush withholds the echo as
+          // unstored (`UnstoredPendingError`) though it is committed (DAB-1386). So ask the
+          // store, the authority: if it holds the whole batch, finish the receive from it. Which
+          // context's write put it there is unknown, so the queue and the doc both come from the
+          // store rather than from `rebased`.
+          if (!(await this._storeHoldsBatch(docId, serverChanges))) throw err;
+          console.warn(`[OTAlgorithm] applyServerChanges for ${docId} threw but the batch landed`, err);
+          landedDespiteError = true;
+          try {
+            rebased = await this.store.getPendingChanges(docId);
+            storeAheadRev = await this.store.getCommittedRev(docId);
+          } catch {
+            // The connection died after the probe: surface the write's own error, not the read's.
+            throw err;
+          }
+          result = undefined;
+        }
         if (result !== 'conflict') {
           applied = true;
           break;
@@ -1317,7 +1372,7 @@ export class OTAlgorithm implements ClientAlgorithm {
         // A store tail past this batch's end means the rebased queue sits on a frame the batch
         // alone cannot bring the doc to: rebuild from the store instead (DAB-1755).
         const storePastBatch = storeAheadRev > serverChanges[serverChanges.length - 1].rev;
-        if (contiguous && !storePastBatch && otDoc.committedRev === serverChanges[0].rev - 1) {
+        if (contiguous && !storePastBatch && !landedDespiteError && otDoc.committedRev === serverChanges[0].rev - 1) {
           otDoc.applyChanges(changesToBroadcast);
         } else {
           // Misaligned (root-replace catchup, a stale re-delivery, or an interior-gapped batch):

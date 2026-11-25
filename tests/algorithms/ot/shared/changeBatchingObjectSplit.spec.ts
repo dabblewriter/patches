@@ -94,6 +94,22 @@ describe('splitting a large object value with no text', () => {
     expect(JSON.parse(JSON.stringify(result))).toEqual(project);
   });
 
+  it('escapes a key holding text, so its @txt lands under that key and not a path it spells', () => {
+    const project: any = structureOnlyProject(400);
+    project.docs['a/b~c'].body = { content: new Delta().insert('Escaped prose.\n') };
+    const maxBytes = 5_000;
+
+    const pieces = breakChanges([createChange([{ op: 'add', path: '', value: project }])], maxBytes, undefined, {
+      maxUnsplittableBytes: maxBytes,
+    });
+
+    const txtPaths = pieces.flatMap(p => p.ops.filter(op => op.op === '@txt').map(op => op.path));
+    expect(txtPaths).toEqual(['/docs/a~1b~0c/body/content']);
+    const result = applyPieces(pieces);
+    expect(result.docs['a/b~c'].body.content.ops[0].insert).toMatch(/^Escaped prose\.\n/);
+    expect(result.docs.a).toBeUndefined();
+  });
+
   it('splits on the wire re-split too, where the 1MB payload cap applies', () => {
     const project = structureOnlyProject(9_000);
     expect(getJSONByteSize(project)).toBeGreaterThan(1_000_000);

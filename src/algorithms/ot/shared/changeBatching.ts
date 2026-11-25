@@ -691,7 +691,7 @@ function stripTextDeltas(value: any, basePath: string, textOps: JSONPatchOp[]): 
   // Recurse into object properties
   const result: Record<string, any> = {};
   for (const [key, val] of Object.entries(value)) {
-    result[key] = stripTextDeltas(val, `${basePath}/${key}`, textOps);
+    result[key] = stripTextDeltas(val, `${basePath}/${escapePathComponent(key)}`, textOps);
   }
   return result;
 }

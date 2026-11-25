@@ -1,6 +1,7 @@
 import { signal } from 'easy-signal';
 import { createChange } from '../../../data/change.js';
 import type { JSONPatchOp } from '../../../json-patch/types.js';
+import { escapePathComponent } from '../../../json-patch/utils/escapePathComponent.js';
 import { UnsplittableChangeError } from '../../../net/error.js';
 import type { Change } from '../../../types.js';
 
@@ -702,7 +703,10 @@ function stripTextDeltas(value: any, basePath: string, textOps: JSONPatchOp[]): 
  * and separate `@txt` ops are appended to the same Change. If the resulting Change still
  * exceeds maxBytes, it is split further by ops via breakSingleChange.
  *
- * Non-object values (strings, arrays) and objects with no text deltas have no seam to cut on, so
+ * An object value with no text deltas left (none to begin with, or the stubbed skeleton a split
+ * above already pulled them from) is cut on its keys instead: see {@link splitObjectByKeys}.
+ *
+ * Non-object values (strings, arrays), and objects with nothing nested to cut on, have no seam, so
  * they go through `guardUnsplittable`: reported, and refused once past `maxUnsplittableBytes`.
  */
 function breakLargeValueOp(origChange: Change, op: JSONPatchOp, startRev: number, ctx: SplitContext): Change[] {
@@ -723,7 +727,7 @@ function breakLargeValueOp(origChange: Change, op: JSONPatchOp, startRev: number
   const strippedValue = stripTextDeltas(value, op.path, textOps);
 
   if (textOps.length === 0) {
-    return asIs('value-no-text');
+    return splitObjectByKeys(origChange, op, startRev, ctx) ?? asIs('value-no-text');
   }
 
   // Build a combined Change: structural op with stubs + all @txt ops
@@ -739,6 +743,39 @@ function breakLargeValueOp(origChange: Change, op: JSONPatchOp, startRev: number
   // Still too large — split by ops (individual @txt ops broken further by breakTextOp). Hand over
   // the measurement just taken; re-deriving it means compressing the whole document a second time.
   return breakSingleChange(combinedChange, ctx, 0, combinedSize);
+}
+
+/**
+ * Cut a large `replace`/`add` of an object on its keys: the op carries the object with its nested
+ * objects left out, and each nested object follows as its own `add` at its own path, in the same
+ * change. `breakSingleChange` then groups those ops into pieces, and recurses into any nested
+ * object that is still too large on its own.
+ *
+ * A whole-document `add ""` is the case this exists for: duplicating a large project writes the
+ * whole copy as one op, and once its text is pulled out as `@txt` ops the structure that is left
+ * (thousands of docs) can still be over the budget, with nothing else to cut on.
+ *
+ * The pieces are sequential, like every other split: replaying them in order builds the same
+ * value, because each nested `add` lands in an object an earlier op already created. Any `@txt`
+ * ops the caller extracted come after the structural op in the change, so they still follow the
+ * object they write into.
+ *
+ * Returns null when there is no seam: no nested non-empty object, or a `soft` op (a soft write is
+ * skipped when the path exists, and its nested adds would then overwrite what is there).
+ */
+function splitObjectByKeys(origChange: Change, op: JSONPatchOp, startRev: number, ctx: SplitContext): Change[] | null {
+  if (op.soft) return null;
+  const skeleton: Record<string, unknown> = {};
+  const nested: JSONPatchOp[] = [];
+  for (const [key, val] of Object.entries(op.value as Record<string, unknown>)) {
+    if (val && typeof val === 'object' && !Array.isArray(val) && Object.keys(val).length > 0) {
+      nested.push({ op: 'add', path: `${op.path}/${escapePathComponent(key)}`, value: val });
+    } else {
+      skeleton[key] = val;
+    }
+  }
+  if (nested.length === 0) return null;
+  return breakSingleChange(deriveNewChange(origChange, startRev, [{ ...op, value: skeleton }, ...nested]), ctx);
 }
 
 function deriveNewChange(origChange: Change, rev: number, ops: JSONPatchOp[]) {

@@ -15,6 +15,11 @@ function rehydrateError(error: { code?: number; message?: string; data?: any }):
   return new JSONRPCError(error.code ?? -32000, message, error.data);
 }
 
+/** A notification has no caller to report a failed send to; see {@link JSONRPCClient.notify}. */
+function dropNotificationSendError(): void {
+  // Intentionally empty: notification delivery is best-effort.
+}
+
 /**
  * Implementation of a JSON-RPC 2.0 client that communicates over a provided transport layer.
  * This client handles sending requests, notifications, and processing responses from a server.
@@ -80,7 +85,15 @@ export class JSONRPCClient {
 
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.transport.send(JSON.stringify(message));
+      const fail = (error: unknown) => {
+        // A request that never left can never be answered: settle it now, with the reason.
+        if (this.pending.delete(id)) reject(error);
+      };
+      try {
+        this.observeSend(this.transport.send(JSON.stringify(message)), fail);
+      } catch (error) {
+        fail(error);
+      }
     });
   }
 
@@ -89,12 +102,27 @@ export class JSONRPCClient {
    *
    * @param method - The name of the remote procedure to call
    * @param args - The arguments to pass to the remote procedure (sent as array)
+   *
+   * A transport that throws synchronously still throws here. A notification has no response
+   * and no caller waiting on it, so an *async* send failure (a transport whose `send` returns
+   * a promise, e.g. the REST signaling POST timing out) has nowhere to go and is dropped —
+   * the delivery guarantee of a notification is best-effort by definition.
    */
   notify(method: string, ...args: any[]): void {
     while (args.length > 0 && args[args.length - 1] === undefined) args.pop();
     const params = args.length > 0 ? args : undefined;
     const message: JsonRpcNotification = { jsonrpc: '2.0', method, params };
-    this.transport.send(JSON.stringify(message));
+    this.observeSend(this.transport.send(JSON.stringify(message)), dropNotificationSendError);
+  }
+
+  /**
+   * `ClientTransport.send` may return a promise. Route its rejection to `onError` instead of
+   * dropping it, which would surface every failed send as an unhandled rejection.
+   */
+  private observeSend(sent: void | Promise<void>, onError: (error: unknown) => void): void {
+    if (sent && typeof sent.then === 'function') {
+      sent.then(undefined, onError);
+    }
   }
 
   /**
